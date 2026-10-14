@@ -1,4 +1,4 @@
-# MusicOps 0.2.0 稳定联网版
+# MusicOps 0.2.0
 
 中文 Windows 桌面音乐库管理工具。使用独立后台任务、SQLite 状态和可复核的执行计划，连接音乐目录、网易云歌单、音乐资料网站、歌词服务、PT 站点和 qBittorrent。
 

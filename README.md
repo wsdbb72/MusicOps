@@ -8,7 +8,9 @@
 
 ## 安装与启动
 
-需要 Windows 和 Python 3.12 或以上版本。
+Windows 64 位用户可下载 [EXE 安装包](https://github.com/wsdbb72/MusicOps/releases/download/v0.2.0/MusicOps-0.2.0-Setup.exe)，安装后使用桌面入口。运行依赖已随包提供，无需安装 Python。私人档案保存在 `profile`，更新和卸载均会保留它。
+
+也可下载 Release 中的 Windows ZIP，解压后运行 `MusicOps.exe`。以下命令仅用于从源码启动，需要 Python 3.12 或以上版本。
 
 ```powershell
 py -3.12 -m venv .venv
@@ -44,6 +46,8 @@ pwsh -File packaging/build_windows.ps1 -Python .\.venv\Scripts\python.exe
 ```
 
 FFmpeg／ffprobe 可由使用者自行安装并在设置中指定。该仓库不分发媒体工具二进制；自行分发含第三方工具的包时，应满足对应许可证和源码义务。
+
+EXE 安装包使用 Inno Setup 7 构建，脚本为 `packaging/MusicOps.iss`。将 `BundleDir` 指向已验证的 Windows 运行目录，并先复制 `packaging/启动说明.txt` 到该目录；安装脚本仅包含明确列出的程序和依赖，不打包运行档案。
 
 基本联网和标签索引不需要 FFmpeg。完整解码与合成媒体测试需要使用者提供工具路径。Roon 预检可核验 Core 连接与历史日志；当前曲目浏览保持 `AUTH_REQUIRED`，没有完成曲目可见性验收。应用没有注册浏览扩展，不要求用户启用不存在的扩展；连接成功或日志记录不能证明曲目已被收录或播放。
 

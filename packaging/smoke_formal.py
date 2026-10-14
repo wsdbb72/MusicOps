@@ -5,6 +5,7 @@ from musicops.worker.client import WorkerClient
 
 def main():
     parser=argparse.ArgumentParser();parser.add_argument('--bundle',required=True);parser.add_argument('--profile',required=True);parser.add_argument('--report',required=True);parser.add_argument('--screenshot',required=True);args=parser.parse_args()
+    args.screenshot=str(Path(args.screenshot).resolve())
     bundle=Path(args.bundle).resolve();base=Path(args.profile).resolve();base.mkdir(parents=True,exist_ok=True);Path(args.screenshot).parent.mkdir(parents=True,exist_ok=True)
     env=os.environ.copy();env['PATH']=str(Path(os.environ['SystemRoot'])/'System32');env['QT_QPA_PLATFORM']='offscreen'
     for key in ('PYTHONPATH','PYTHONHOME','VIRTUAL_ENV'):env.pop(key,None)

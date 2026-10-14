@@ -1,0 +1,16 @@
+MusicOps 0.2.0 正式联网版
+
+安装后使用桌面“MusicOps 正式版”，或双击 MusicOps.exe。
+运行依赖已随包提供，无需安装 Python。
+
+首次使用请在“配置”页填写音乐目录、服务地址和凭据。
+凭据使用当前 Windows 账户加密，保存在私人 profile 中。
+更新程序不会覆盖 profile，卸载也会保留它。
+
+MusicBrainz、Discogs 支持结构化查询，另四站提供官网人工查询入口。
+真实下载、令牌消费和音乐文件发布流程当前尚未开放。
+
+公开安装包不含 FFmpeg/ffprobe。完整音频验证需要自行安装，
+并在“配置”页填写两个工具的路径。基本联网与标签索引可直接使用。
+
+程序发布与源码：https://github.com/wsdbb72/MusicOps

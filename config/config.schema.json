@@ -1,0 +1,1054 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "musicops.config.v1",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "offline",
+    "paths",
+    "playlist_ids",
+    "providers",
+    "token_budget",
+    "qbt",
+    "lyrics",
+    "ai",
+    "catalog",
+    "quality",
+    "metadata",
+    "repair",
+    "dedup",
+    "scheduler",
+    "worker",
+    "netease",
+    "music_servers"
+  ],
+  "properties": {
+    "schema_version": {
+      "type": "integer",
+      "default": 1,
+      "minimum": 0
+    },
+    "offline": {
+      "type": "boolean",
+      "default": false,
+      "readOnly": false
+    },
+    "paths": {
+      "type": "object",
+      "required": [
+        "library",
+        "source",
+        "work",
+        "backup",
+        "quarantine",
+        "reports",
+        "tools"
+      ],
+      "properties": {
+        "library": {
+          "type": "string",
+          "default": "C:/MusicOpsExample/library"
+        },
+        "source": {
+          "type": "string",
+          "default": "C:/MusicOpsExample/source"
+        },
+        "work": {
+          "type": "string",
+          "default": "C:/MusicOpsExample/work"
+        },
+        "backup": {
+          "type": "string",
+          "default": "C:/MusicOpsExample/backup"
+        },
+        "quarantine": {
+          "type": "string",
+          "default": "C:/MusicOpsExample/quarantine"
+        },
+        "reports": {
+          "type": "string",
+          "default": "C:/MusicOpsExample/reports"
+        },
+        "tools": {
+          "type": "object",
+          "required": [
+            "ffmpeg",
+            "ffprobe"
+          ],
+          "properties": {
+            "ffmpeg": {
+              "type": "string",
+              "default": ""
+            },
+            "ffprobe": {
+              "type": "string",
+              "default": ""
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    "playlist_ids": {
+      "type": "array",
+      "items": {},
+      "default": []
+    },
+    "providers": {
+      "type": "object",
+      "required": [
+        "netease",
+        "dicmusic",
+        "open.cd",
+        "orpheus"
+      ],
+      "properties": {
+        "netease": {
+          "type": "object",
+          "required": [
+            "enabled",
+            "base_url",
+            "credential_ref",
+            "search_language",
+            "concurrency",
+            "timeout",
+            "rules_verified"
+          ],
+          "properties": {
+            "enabled": {
+              "type": "boolean",
+              "default": true,
+              "readOnly": false
+            },
+            "base_url": {
+              "type": "string",
+              "default": "https://music.163.com"
+            },
+            "credential_ref": {
+              "type": "string",
+              "default": ""
+            },
+            "search_language": {
+              "type": "string",
+              "default": "auto"
+            },
+            "concurrency": {
+              "type": "integer",
+              "default": 1,
+              "minimum": 0
+            },
+            "timeout": {
+              "type": "integer",
+              "default": 15,
+              "minimum": 0
+            },
+            "rules_verified": {
+              "type": "boolean",
+              "default": false,
+              "readOnly": true
+            }
+          },
+          "additionalProperties": false
+        },
+        "dicmusic": {
+          "type": "object",
+          "required": [
+            "enabled",
+            "base_url",
+            "credential_ref",
+            "search_language",
+            "concurrency",
+            "timeout",
+            "rules_verified"
+          ],
+          "properties": {
+            "enabled": {
+              "type": "boolean",
+              "default": false,
+              "readOnly": false
+            },
+            "base_url": {
+              "type": "string",
+              "default": "https://dicmusic.com"
+            },
+            "credential_ref": {
+              "type": "string",
+              "default": ""
+            },
+            "search_language": {
+              "type": "string",
+              "default": "auto"
+            },
+            "concurrency": {
+              "type": "integer",
+              "default": 1,
+              "minimum": 0
+            },
+            "timeout": {
+              "type": "integer",
+              "default": 15,
+              "minimum": 0
+            },
+            "rules_verified": {
+              "type": "boolean",
+              "default": false,
+              "readOnly": true
+            }
+          },
+          "additionalProperties": false
+        },
+        "open.cd": {
+          "type": "object",
+          "required": [
+            "enabled",
+            "base_url",
+            "credential_ref",
+            "search_language",
+            "concurrency",
+            "timeout",
+            "rules_verified"
+          ],
+          "properties": {
+            "enabled": {
+              "type": "boolean",
+              "default": false,
+              "readOnly": false
+            },
+            "base_url": {
+              "type": "string",
+              "default": "https://www.open.cd"
+            },
+            "credential_ref": {
+              "type": "string",
+              "default": ""
+            },
+            "search_language": {
+              "type": "string",
+              "default": "auto"
+            },
+            "concurrency": {
+              "type": "integer",
+              "default": 1,
+              "minimum": 0
+            },
+            "timeout": {
+              "type": "integer",
+              "default": 15,
+              "minimum": 0
+            },
+            "rules_verified": {
+              "type": "boolean",
+              "default": false,
+              "readOnly": true
+            }
+          },
+          "additionalProperties": false
+        },
+        "orpheus": {
+          "type": "object",
+          "required": [
+            "enabled",
+            "base_url",
+            "credential_ref",
+            "search_language",
+            "concurrency",
+            "timeout",
+            "rules_verified"
+          ],
+          "properties": {
+            "enabled": {
+              "type": "boolean",
+              "default": false,
+              "readOnly": false
+            },
+            "base_url": {
+              "type": "string",
+              "default": "https://orpheus.network"
+            },
+            "credential_ref": {
+              "type": "string",
+              "default": ""
+            },
+            "search_language": {
+              "type": "string",
+              "default": "auto"
+            },
+            "concurrency": {
+              "type": "integer",
+              "default": 1,
+              "minimum": 0
+            },
+            "timeout": {
+              "type": "integer",
+              "default": 15,
+              "minimum": 0
+            },
+            "rules_verified": {
+              "type": "boolean",
+              "default": false,
+              "readOnly": true
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    "token_budget": {
+      "type": "object",
+      "required": [
+        "dicmusic",
+        "orpheus",
+        "safety_margin",
+        "balance_ttl"
+      ],
+      "properties": {
+        "dicmusic": {
+          "type": "integer",
+          "default": 3,
+          "minimum": 0
+        },
+        "orpheus": {
+          "type": "integer",
+          "default": 3,
+          "minimum": 0
+        },
+        "safety_margin": {
+          "type": "integer",
+          "default": 1,
+          "minimum": 0
+        },
+        "balance_ttl": {
+          "type": "integer",
+          "default": 300,
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false
+    },
+    "qbt": {
+      "type": "object",
+      "required": [
+        "base_url",
+        "credential_ref",
+        "category",
+        "tag_prefix",
+        "poll_seconds",
+        "auto_tmm"
+      ],
+      "properties": {
+        "base_url": {
+          "type": "string",
+          "default": "http://127.0.0.1:8085"
+        },
+        "credential_ref": {
+          "type": "string",
+          "default": "vault://qbt/local/credentials"
+        },
+        "category": {
+          "type": "string",
+          "default": "MusicOps"
+        },
+        "tag_prefix": {
+          "type": "string",
+          "default": "musicops-"
+        },
+        "poll_seconds": {
+          "type": "integer",
+          "default": 5,
+          "minimum": 0
+        },
+        "auto_tmm": {
+          "type": "boolean",
+          "default": false,
+          "readOnly": false
+        }
+      },
+      "additionalProperties": false
+    },
+    "lyrics": {
+      "type": "object",
+      "required": [
+        "primary",
+        "direct_backup",
+        "public_fallback",
+        "fallback_on_auth_error",
+        "write_mode",
+        "overwrite_existing",
+        "connect_timeout",
+        "read_timeout",
+        "max_attempts",
+        "total_budget",
+        "concurrency",
+        "min_cover_side",
+        "max_response_bytes",
+        "cache_ttl",
+        "negative_ttl"
+      ],
+      "properties": {
+        "primary": {
+          "type": "object",
+          "required": [
+            "base_url",
+            "lyrics_path",
+            "candidates_path",
+            "cover_path",
+            "auth_mode",
+            "auth_header",
+            "auth_secret_ref"
+          ],
+          "properties": {
+            "base_url": {
+              "type": "string",
+              "default": "https://lyrics.example.invalid"
+            },
+            "lyrics_path": {
+              "type": "string",
+              "default": "/lyrics"
+            },
+            "candidates_path": {
+              "type": "string",
+              "default": "/jsonapi"
+            },
+            "cover_path": {
+              "type": "string",
+              "default": "/cover"
+            },
+            "auth_mode": {
+              "type": "string",
+              "default": "raw"
+            },
+            "auth_header": {
+              "type": "string",
+              "default": "Authorization"
+            },
+            "auth_secret_ref": {
+              "type": "string",
+              "default": "vault://lyrics/default/authorization"
+            }
+          },
+          "additionalProperties": false
+        },
+        "direct_backup": {
+          "type": "object",
+          "required": [
+            "base_url",
+            "enabled",
+            "auth_secret_ref"
+          ],
+          "properties": {
+            "base_url": {
+              "type": "string",
+              "default": "http://backup.example.invalid"
+            },
+            "enabled": {
+              "type": "boolean",
+              "default": false,
+              "readOnly": false
+            },
+            "auth_secret_ref": {
+              "type": "string",
+              "default": "vault://lyrics/default/authorization"
+            }
+          },
+          "additionalProperties": false
+        },
+        "public_fallback": {
+          "type": "object",
+          "required": [
+            "enabled",
+            "lyrics_url",
+            "cover_url",
+            "auth_mode"
+          ],
+          "properties": {
+            "enabled": {
+              "type": "boolean",
+              "default": false,
+              "readOnly": false
+            },
+            "lyrics_url": {
+              "type": "string",
+              "default": "https://api.lrc.cx/lyrics"
+            },
+            "cover_url": {
+              "type": "string",
+              "default": "https://api.lrc.cx/cover"
+            },
+            "auth_mode": {
+              "type": "string",
+              "default": "none"
+            }
+          },
+          "additionalProperties": false
+        },
+        "fallback_on_auth_error": {
+          "type": "boolean",
+          "default": false,
+          "readOnly": false
+        },
+        "write_mode": {
+          "type": "string",
+          "default": "sidecar"
+        },
+        "overwrite_existing": {
+          "type": "string",
+          "default": "review"
+        },
+        "connect_timeout": {
+          "type": "integer",
+          "default": 3,
+          "minimum": 0
+        },
+        "read_timeout": {
+          "type": "integer",
+          "default": 12,
+          "minimum": 0
+        },
+        "max_attempts": {
+          "type": "integer",
+          "default": 2,
+          "minimum": 0
+        },
+        "total_budget": {
+          "type": "integer",
+          "default": 60,
+          "minimum": 0
+        },
+        "concurrency": {
+          "type": "integer",
+          "default": 1,
+          "minimum": 0
+        },
+        "min_cover_side": {
+          "type": "integer",
+          "default": 300,
+          "minimum": 0
+        },
+        "max_response_bytes": {
+          "type": "integer",
+          "default": 10000000,
+          "minimum": 0
+        },
+        "cache_ttl": {
+          "type": "integer",
+          "default": 86400,
+          "minimum": 0
+        },
+        "negative_ttl": {
+          "type": "integer",
+          "default": 86400,
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false
+    },
+    "ai": {
+      "type": "object",
+      "required": [
+        "enabled",
+        "protocol",
+        "base_url",
+        "model",
+        "auth_secret_ref",
+        "timeout",
+        "max_output_tokens",
+        "temperature",
+        "structured_outputs",
+        "allow_plan_only"
+      ],
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "default": false,
+          "readOnly": false
+        },
+        "protocol": {
+          "type": "string",
+          "default": "responses"
+        },
+        "base_url": {
+          "type": "string",
+          "default": "https://ai.example.invalid/v1"
+        },
+        "model": {
+          "type": "string",
+          "default": ""
+        },
+        "auth_secret_ref": {
+          "type": "string",
+          "default": "vault://ai/default/key"
+        },
+        "timeout": {
+          "type": "integer",
+          "default": 60,
+          "minimum": 0
+        },
+        "max_output_tokens": {
+          "type": "integer",
+          "default": 2048,
+          "minimum": 0
+        },
+        "temperature": {
+          "type": "number",
+          "default": 0.2
+        },
+        "structured_outputs": {
+          "type": "boolean",
+          "default": true,
+          "readOnly": false
+        },
+        "allow_plan_only": {
+          "type": "boolean",
+          "default": true,
+          "readOnly": false
+        }
+      },
+      "additionalProperties": false
+    },
+    "catalog": {
+      "type": "object",
+      "required": [
+        "enabled",
+        "timeout",
+        "candidate_limit",
+        "cache_ttl",
+        "cache_entries",
+        "musicbrainz",
+        "discogs"
+      ],
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "default": true,
+          "readOnly": false
+        },
+        "timeout": {
+          "type": "integer",
+          "default": 15,
+          "minimum": 0
+        },
+        "candidate_limit": {
+          "type": "integer",
+          "default": 20,
+          "minimum": 0
+        },
+        "cache_ttl": {
+          "type": "integer",
+          "default": 86400,
+          "minimum": 0
+        },
+        "cache_entries": {
+          "type": "integer",
+          "default": 128,
+          "minimum": 0
+        },
+        "musicbrainz": {
+          "type": "object",
+          "required": [
+            "enabled"
+          ],
+          "properties": {
+            "enabled": {
+              "type": "boolean",
+              "default": true,
+              "readOnly": false
+            }
+          },
+          "additionalProperties": false
+        },
+        "discogs": {
+          "type": "object",
+          "required": [
+            "enabled",
+            "credential_ref"
+          ],
+          "properties": {
+            "enabled": {
+              "type": "boolean",
+              "default": true,
+              "readOnly": false
+            },
+            "credential_ref": {
+              "type": "string",
+              "default": "vault://catalog/discogs/token"
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    "quality": {
+      "type": "object",
+      "required": [
+        "lossless_first",
+        "format_order",
+        "prefer_24bit",
+        "dsd_policy",
+        "multichannel",
+        "upgrade_suggestions"
+      ],
+      "properties": {
+        "lossless_first": {
+          "type": "boolean",
+          "default": true,
+          "readOnly": false
+        },
+        "format_order": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "default": "flac"
+          },
+          "default": [
+            "flac",
+            "alac",
+            "wav",
+            "aiff",
+            "mp3",
+            "aac"
+          ]
+        },
+        "prefer_24bit": {
+          "type": "boolean",
+          "default": false,
+          "readOnly": false
+        },
+        "dsd_policy": {
+          "type": "string",
+          "default": "preserve"
+        },
+        "multichannel": {
+          "type": "string",
+          "default": "separate"
+        },
+        "upgrade_suggestions": {
+          "type": "boolean",
+          "default": true,
+          "readOnly": false
+        }
+      },
+      "additionalProperties": false
+    },
+    "metadata": {
+      "type": "object",
+      "required": [
+        "preserve_multivalue",
+        "directory_template",
+        "track_padding",
+        "preserve_unknown",
+        "overwrite",
+        "locked_fields"
+      ],
+      "properties": {
+        "preserve_multivalue": {
+          "type": "boolean",
+          "default": true,
+          "readOnly": false
+        },
+        "directory_template": {
+          "type": "string",
+          "default": "{albumartist}/{album} [{edition}]/CD{disc}/{track} {title}"
+        },
+        "track_padding": {
+          "type": "integer",
+          "default": 2,
+          "minimum": 0
+        },
+        "preserve_unknown": {
+          "type": "boolean",
+          "default": true,
+          "readOnly": false
+        },
+        "overwrite": {
+          "type": "string",
+          "default": "review"
+        },
+        "locked_fields": {
+          "type": "array",
+          "items": {},
+          "default": []
+        }
+      },
+      "additionalProperties": false
+    },
+    "repair": {
+      "type": "object",
+      "required": [
+        "mode",
+        "fields",
+        "backup_retention_days"
+      ],
+      "properties": {
+        "mode": {
+          "type": "string",
+          "default": "report"
+        },
+        "fields": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "default": "album"
+          },
+          "default": [
+            "album",
+            "albumartist",
+            "artist",
+            "title",
+            "date",
+            "tracknumber",
+            "discnumber"
+          ]
+        },
+        "backup_retention_days": {
+          "type": "integer",
+          "default": 90,
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false
+    },
+    "dedup": {
+      "type": "object",
+      "required": [
+        "mode",
+        "same_release_required",
+        "permanent_delete"
+      ],
+      "properties": {
+        "mode": {
+          "type": "string",
+          "default": "report"
+        },
+        "same_release_required": {
+          "type": "boolean",
+          "default": true,
+          "readOnly": false
+        },
+        "permanent_delete": {
+          "type": "boolean",
+          "default": false,
+          "readOnly": false
+        }
+      },
+      "additionalProperties": false
+    },
+    "scheduler": {
+      "type": "object",
+      "required": [
+        "enabled",
+        "mode",
+        "timezone",
+        "playlist_time",
+        "health_weekday",
+        "health_time",
+        "missed",
+        "notify"
+      ],
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "default": false,
+          "readOnly": false
+        },
+        "mode": {
+          "type": "string",
+          "default": "report"
+        },
+        "timezone": {
+          "type": "string",
+          "default": "Asia/Shanghai"
+        },
+        "playlist_time": {
+          "type": "string",
+          "default": "06:30"
+        },
+        "health_weekday": {
+          "type": "integer",
+          "default": 6,
+          "minimum": 0
+        },
+        "health_time": {
+          "type": "string",
+          "default": "07:00"
+        },
+        "missed": {
+          "type": "string",
+          "default": "report_once"
+        },
+        "notify": {
+          "type": "string",
+          "default": "meaningful_changes"
+        }
+      },
+      "additionalProperties": false
+    },
+    "worker": {
+      "type": "object",
+      "required": [
+        "concurrency",
+        "keep_background",
+        "decode_timeout"
+      ],
+      "properties": {
+        "concurrency": {
+          "type": "integer",
+          "default": 1,
+          "minimum": 0
+        },
+        "keep_background": {
+          "type": "boolean",
+          "default": true,
+          "readOnly": false
+        },
+        "decode_timeout": {
+          "type": "integer",
+          "default": 60,
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false
+    },
+    "netease": {
+      "type": "object",
+      "required": [
+        "batch_size",
+        "timeout",
+        "max_attempts",
+        "credential_ref",
+        "strip_layers"
+      ],
+      "properties": {
+        "batch_size": {
+          "type": "integer",
+          "default": 150,
+          "minimum": 0
+        },
+        "timeout": {
+          "type": "integer",
+          "default": 15,
+          "minimum": 0
+        },
+        "max_attempts": {
+          "type": "integer",
+          "default": 2,
+          "minimum": 0
+        },
+        "credential_ref": {
+          "type": "string",
+          "default": ""
+        },
+        "strip_layers": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "default": "VipSongsDownload"
+          },
+          "default": [
+            "VipSongsDownload"
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "music_servers": {
+      "type": "object",
+      "required": [
+        "roon",
+        "navidrome"
+      ],
+      "properties": {
+        "roon": {
+          "type": "object",
+          "required": [
+            "enabled",
+            "library",
+            "watched_folders",
+            "credential_ref",
+            "client",
+            "host",
+            "port",
+            "timeout"
+          ],
+          "properties": {
+            "enabled": {
+              "type": "boolean",
+              "default": false,
+              "readOnly": false
+            },
+            "library": {
+              "type": "string",
+              "default": ""
+            },
+            "watched_folders": {
+              "type": "array",
+              "items": {},
+              "default": []
+            },
+            "credential_ref": {
+              "type": "string",
+              "default": ""
+            },
+            "client": {
+              "type": "string",
+              "default": "Roon"
+            },
+            "host": {
+              "type": "string",
+              "default": "127.0.0.1"
+            },
+            "port": {
+              "type": "integer",
+              "default": 9330,
+              "minimum": 0
+            },
+            "timeout": {
+              "type": "integer",
+              "default": 8,
+              "minimum": 0
+            }
+          },
+          "additionalProperties": false
+        },
+        "navidrome": {
+          "type": "object",
+          "required": [
+            "enabled",
+            "url",
+            "username",
+            "password_ref",
+            "library"
+          ],
+          "properties": {
+            "enabled": {
+              "type": "boolean",
+              "default": false,
+              "readOnly": false
+            },
+            "url": {
+              "type": "string",
+              "default": ""
+            },
+            "username": {
+              "type": "string",
+              "default": ""
+            },
+            "password_ref": {
+              "type": "string",
+              "default": ""
+            },
+            "library": {
+              "type": "string",
+              "default": ""
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": false
+}

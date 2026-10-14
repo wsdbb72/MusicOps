@@ -1,0 +1,12 @@
+{
+  "contract": "musicops.fixture.v1",
+  "results": [{
+    "id": "101", "title": "Synthetic Album", "artists": ["Fixture Artist", "Fixture Guest"],
+    "release": {"release_id": "fixture-release-1", "edition": "original", "complete_tracklist": true},
+    "media": {"codec": "flac", "declaration_only": true},
+    "file_list": [{"path": "01 Synthetic.flac", "length": 100}], "seeders": 1,
+    "eligibility": {"state": "ELIGIBLE", "traffic_policy": "FREE_CONFIRMED"},
+    "estimated_cost": 1,
+    "evidence": [{"kind": "synthetic_fixture", "production_verified": false}]
+  }]
+}

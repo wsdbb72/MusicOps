@@ -1,0 +1,7 @@
+{
+  "schema_version": 1,
+  "evidence_level": "synthetic_only",
+  "description": "Generated 0.1-second mono silence; no real music or credentials",
+  "audio_sha256": "c726d333dd159a31423f3480dbb1c5c4a9dfcd30efe1f7e12ade390dc92e8908",
+  "ncm_sha256": "caa6cacdac33aa5c48a294f920fd5eeb3b0555a5531917d18a391fec29140b53"
+}

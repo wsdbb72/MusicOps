@@ -1,0 +1,213 @@
+{
+  "schema_version": 1,
+  "offline": false,
+  "paths": {
+    "library": "C:/MusicOpsExample/library",
+    "source": "C:/MusicOpsExample/source",
+    "work": "C:/MusicOpsExample/work",
+    "backup": "C:/MusicOpsExample/backup",
+    "quarantine": "C:/MusicOpsExample/quarantine",
+    "reports": "C:/MusicOpsExample/reports",
+    "tools": {
+      "ffmpeg": "",
+      "ffprobe": ""
+    }
+  },
+  "playlist_ids": [],
+  "providers": {
+    "netease": {
+      "enabled": true,
+      "base_url": "https://music.163.com",
+      "credential_ref": "",
+      "search_language": "auto",
+      "concurrency": 1,
+      "timeout": 15,
+      "rules_verified": false
+    },
+    "dicmusic": {
+      "enabled": false,
+      "base_url": "https://dicmusic.com",
+      "credential_ref": "",
+      "search_language": "auto",
+      "concurrency": 1,
+      "timeout": 15,
+      "rules_verified": false
+    },
+    "open.cd": {
+      "enabled": false,
+      "base_url": "https://www.open.cd",
+      "credential_ref": "",
+      "search_language": "auto",
+      "concurrency": 1,
+      "timeout": 15,
+      "rules_verified": false
+    },
+    "orpheus": {
+      "enabled": false,
+      "base_url": "https://orpheus.network",
+      "credential_ref": "",
+      "search_language": "auto",
+      "concurrency": 1,
+      "timeout": 15,
+      "rules_verified": false
+    }
+  },
+  "token_budget": {
+    "dicmusic": 3,
+    "orpheus": 3,
+    "safety_margin": 1,
+    "balance_ttl": 300
+  },
+  "qbt": {
+    "base_url": "http://127.0.0.1:8085",
+    "credential_ref": "vault://qbt/local/credentials",
+    "category": "MusicOps",
+    "tag_prefix": "musicops-",
+    "poll_seconds": 5,
+    "auto_tmm": false
+  },
+  "lyrics": {
+    "primary": {
+      "base_url": "https://lyrics.example.invalid",
+      "lyrics_path": "/lyrics",
+      "candidates_path": "/jsonapi",
+      "cover_path": "/cover",
+      "auth_mode": "raw",
+      "auth_header": "Authorization",
+      "auth_secret_ref": "vault://lyrics/default/authorization"
+    },
+    "direct_backup": {
+      "base_url": "http://backup.example.invalid",
+      "enabled": false,
+      "auth_secret_ref": "vault://lyrics/default/authorization"
+    },
+    "public_fallback": {
+      "enabled": false,
+      "lyrics_url": "https://api.lrc.cx/lyrics",
+      "cover_url": "https://api.lrc.cx/cover",
+      "auth_mode": "none"
+    },
+    "fallback_on_auth_error": false,
+    "write_mode": "sidecar",
+    "overwrite_existing": "review",
+    "connect_timeout": 3,
+    "read_timeout": 12,
+    "max_attempts": 2,
+    "total_budget": 60,
+    "concurrency": 1,
+    "min_cover_side": 300,
+    "max_response_bytes": 10000000,
+    "cache_ttl": 86400,
+    "negative_ttl": 86400
+  },
+  "ai": {
+    "enabled": false,
+    "protocol": "responses",
+    "base_url": "https://ai.example.invalid/v1",
+    "model": "",
+    "auth_secret_ref": "vault://ai/default/key",
+    "timeout": 60,
+    "max_output_tokens": 2048,
+    "temperature": 0.2,
+    "structured_outputs": true,
+    "allow_plan_only": true
+  },
+  "catalog": {
+    "enabled": true,
+    "timeout": 15,
+    "candidate_limit": 20,
+    "cache_ttl": 86400,
+    "cache_entries": 128,
+    "musicbrainz": {
+      "enabled": true
+    },
+    "discogs": {
+      "enabled": true,
+      "credential_ref": "vault://catalog/discogs/token"
+    }
+  },
+  "quality": {
+    "lossless_first": true,
+    "format_order": [
+      "flac",
+      "alac",
+      "wav",
+      "aiff",
+      "mp3",
+      "aac"
+    ],
+    "prefer_24bit": false,
+    "dsd_policy": "preserve",
+    "multichannel": "separate",
+    "upgrade_suggestions": true
+  },
+  "metadata": {
+    "preserve_multivalue": true,
+    "directory_template": "{albumartist}/{album} [{edition}]/CD{disc}/{track} {title}",
+    "track_padding": 2,
+    "preserve_unknown": true,
+    "overwrite": "review",
+    "locked_fields": []
+  },
+  "repair": {
+    "mode": "report",
+    "fields": [
+      "album",
+      "albumartist",
+      "artist",
+      "title",
+      "date",
+      "tracknumber",
+      "discnumber"
+    ],
+    "backup_retention_days": 90
+  },
+  "dedup": {
+    "mode": "report",
+    "same_release_required": true,
+    "permanent_delete": false
+  },
+  "scheduler": {
+    "enabled": false,
+    "mode": "report",
+    "timezone": "Asia/Shanghai",
+    "playlist_time": "06:30",
+    "health_weekday": 6,
+    "health_time": "07:00",
+    "missed": "report_once",
+    "notify": "meaningful_changes"
+  },
+  "worker": {
+    "concurrency": 1,
+    "keep_background": true,
+    "decode_timeout": 60
+  },
+  "netease": {
+    "batch_size": 150,
+    "timeout": 15,
+    "max_attempts": 2,
+    "credential_ref": "",
+    "strip_layers": [
+      "VipSongsDownload"
+    ]
+  },
+  "music_servers": {
+    "roon": {
+      "enabled": false,
+      "library": "",
+      "watched_folders": [],
+      "credential_ref": "",
+      "client": "Roon",
+      "host": "127.0.0.1",
+      "port": 9330,
+      "timeout": 8
+    },
+    "navidrome": {
+      "enabled": false,
+      "url": "",
+      "username": "",
+      "password_ref": "",
+      "library": ""
+    }
+  }
+}

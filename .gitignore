@@ -1,0 +1,53 @@
+# Local Python and build output
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+build/
+dist/
+work/
+reports/
+outputs/
+
+# Run profiles, state and protected credentials
+profile/
+profiles/
+vault/
+*.dpapi
+*.sqlite
+*.sqlite3
+*.sqlite-*
+*.db
+*.db-*
+*.lock
+!requirements.lock
+.env
+.env.*
+!.env.example
+*cookie*.txt
+*cookie*.json
+*credentials*.json
+*secret*.json
+*auth*.txt
+
+# Private implementation records and user snapshots
+docs/specifications/
+docs/trace-*.jsonl
+docs/legacy_inventory.*
+docs/packaging-*.json
+*.lnk
+*.log
+*.zip
+*.torrent
+*.ncm
+!tests/fixtures/providers/synthetic.ncm
+*.lrc
+
+# Local OS / editor files
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/

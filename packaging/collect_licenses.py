@@ -4,6 +4,9 @@ import shutil
 import sys
 from pathlib import Path
 out=Path(sys.argv[1])/'licenses';out.mkdir(parents=True,exist_ok=True)
+playlist_license=Path(__file__).resolve().parents[1]/'docs/references/PlaylistOut-LICENSE.txt'
+if playlist_license.is_file():
+    (out/'PlaylistOut').mkdir(exist_ok=True);shutil.copy2(playlist_license,out/'PlaylistOut/LICENSE.txt')
 python_license=Path(sys.base_prefix)/'LICENSE.txt'
 if python_license.is_file():
     python_target=out/'Python';python_target.mkdir(exist_ok=True)

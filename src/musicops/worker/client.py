@@ -4,6 +4,7 @@ from pathlib import Path
 from multiprocessing.connection import Client
 from musicops.clients.vault import protect
 from musicops.worker.lock import WriterLock
+from musicops.platforms import ipc_address,ipc_family,is_windows,is_macos,private_directory
 
 MAX_REQUEST_BYTES=1_000_000
 MAX_RESPONSE_BYTES=64_000_000
@@ -16,9 +17,9 @@ class WorkerRequestError(RuntimeError):
 class WorkerConnectionError(RuntimeError):
     error_class='IPC_CONNECTION_ERROR'
 
-def pipe_address(base): return r'\\.\pipe\MusicOps-'+hashlib.sha256((str(Path(base).resolve()).lower()+os.environ.get('USERNAME','')).encode()).hexdigest()[:24]
+def pipe_address(base):return ipc_address(base)
 def auth_key(base):
-    path=Path(base)/'vault'/'ipc.dpapi'; path.parent.mkdir(parents=True,exist_ok=True)
+    path=Path(base)/'vault'/('ipc.keychain' if is_macos() else 'ipc.dpapi');private_directory(path.parent)
     if path.exists(): return protect(path.read_bytes(),True)
     deadline=time.monotonic()+5;lock=WriterLock(Path(base)/'ipc-init')
     while True:
@@ -39,7 +40,7 @@ class WorkerClient:
         req=dict(schema_version=1,request_id=request_id or str(uuid.uuid4()),profile_id='default',config_version=self.config_version,command=command,payload=payload or {})
         encoded=json.dumps(req,ensure_ascii=False,allow_nan=False).encode('utf-8')
         if len(encoded)>MAX_REQUEST_BYTES:raise ValueError('IPC_REQUEST_TOO_LARGE：请减少请求内容后重试')
-        with Client(pipe_address(self.base),family='AF_PIPE',authkey=auth_key(self.base)) as conn:
+        with Client(pipe_address(self.base),family=ipc_family(),authkey=auth_key(self.base)) as conn:
             conn.send_bytes(encoded)
             if not conn.poll(self.timeout):raise WorkerConnectionError('后台响应超时；请先读取任务/配置状态，勿盲重发执行请求')
             data=json.loads(conn.recv_bytes(MAX_RESPONSE_BYTES))
@@ -52,11 +53,11 @@ class WorkerClient:
         try: return self.call('attach',{'compact':True})
         except (OSError,EOFError): pass
         if getattr(sys,'frozen',False):
-            executable=Path(sys.executable).parent/'MusicOps-worker.exe'; cmd=[str(executable),'--base',str(self.base)]
+            executable=Path(sys.executable).parent/('MusicOps-worker.exe' if is_windows() else 'MusicOps-worker'); cmd=[str(executable),'--base',str(self.base)]
         else: cmd=[sys.executable,'-m','musicops.worker.server','--base',str(self.base)]
-        self.base.mkdir(parents=True,exist_ok=True)
+        private_directory(self.base)
         env=os.environ.copy(); env['PYTHONPATH']=str(Path(__file__).resolve().parents[2])
-        subprocess.Popen(cmd,env=env,creationflags=0x08000000 if os.name=='nt' else 0,stdin=subprocess.DEVNULL,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,cwd=self.base)
+        subprocess.Popen(cmd,env=env,creationflags=0x08000000 if is_windows() else 0,stdin=subprocess.DEVNULL,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,cwd=self.base)
         for _ in range(100):
             time.sleep(.1)
             try: return self.call('attach',{'compact':True})

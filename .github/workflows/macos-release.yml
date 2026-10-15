@@ -1,0 +1,190 @@
+name: macOS app and release assets
+
+on:
+  push:
+    branches: ['codex/**']
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: 'Branch, tag or commit to build (manual runs save artifacts only)'
+        type: string
+        required: false
+        default: main
+
+permissions:
+  contents: read
+
+concurrency:
+  group: macos-release-${{ github.event_name }}-${{ inputs.ref || github.ref }}
+  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
+
+jobs:
+  build:
+    name: macOS ${{ matrix.arch }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 50
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-15
+            arch: arm64
+          - runner: macos-15-intel
+            arch: x86_64
+    env:
+      PYTHONIOENCODING: utf-8
+      MACOSX_DEPLOYMENT_TARGET: '15.0'
+      MUSICOPS_KEYCHAIN_PATH: ${{ runner.temp }}/musicops-ci.keychain-db
+    steps:
+      - name: Check out the exact candidate
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.ref || github.ref }}
+          persist-credentials: false
+      - name: Set up native Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+          architecture: ${{ matrix.arch == 'arm64' && 'arm64' || 'x64' }}
+          cache: pip
+          cache-dependency-path: packaging/requirements-macos.txt
+      - name: Install reviewed build dependencies
+        run: |
+          python -m pip install -r packaging/requirements-macos.txt
+          python -m pip install --no-deps -e .
+      - name: Create an isolated unlocked test keychain
+        shell: bash
+        run: |
+          TASK_KEYCHAIN_PASSWORD="$(python -c 'import secrets; print(secrets.token_urlsafe(32))')"
+          echo "::add-mask::$TASK_KEYCHAIN_PASSWORD"
+          security create-keychain -p "$TASK_KEYCHAIN_PASSWORD" "$MUSICOPS_KEYCHAIN_PATH"
+          security set-keychain-settings -lut 21600 "$MUSICOPS_KEYCHAIN_PATH"
+          security unlock-keychain -p "$TASK_KEYCHAIN_PASSWORD" "$MUSICOPS_KEYCHAIN_PATH"
+      - name: Run real macOS Keychain, Unix IPC and file-lock regression tests
+        shell: bash
+        env:
+          BUILD_ARCH: ${{ matrix.arch }}
+        run: |
+          mkdir -p dist/macos/reports
+          python -m pytest tests/test_platform_runtime.py -q \
+            --basetemp "$RUNNER_TEMP/musicops-platform-pytest" \
+            --junitxml "dist/macos/reports/platform-runtime-$BUILD_ARCH.xml"
+          python - <<'PY'
+          import os, pathlib, xml.etree.ElementTree as ET
+          report = pathlib.Path('dist/macos/reports') / ('platform-runtime-' + os.environ['BUILD_ARCH'] + '.xml')
+          cases = {case.attrib['name']: case for case in ET.parse(report).iter('testcase')}
+          required = {
+              'test_macos_real_keychain_ciphertext_decrypts_in_fresh_process',
+              'test_macos_real_unix_worker_authentication_and_private_permissions',
+              'test_macos_stale_socket_cleanup_refuses_regular_files',
+              'test_macos_writer_lock_excludes_a_second_process',
+          }
+          for name in required:
+              if name not in cases or any(child.tag in {'skipped', 'failure', 'error'} for child in cases[name]):
+                  raise SystemExit('A required native macOS runtime test did not execute successfully: ' + name)
+          PY
+      - name: Build app, verify ad-hoc signatures, run packaged acceptance and archive
+        env:
+          BUILD_ARCH: ${{ matrix.arch }}
+        run: python packaging/build_macos.py --arch "$BUILD_ARCH" --output dist/macos
+      - name: Save tested release files
+        uses: actions/upload-artifact@v7
+        with:
+          name: MusicOps-macOS-${{ matrix.arch }}
+          path: |
+            dist/macos/MusicOps-*-macOS-*.zip
+            dist/macos/MusicOps-*-macOS-*.sha256
+            dist/macos/MusicOps-*-macOS-*.sha512
+            dist/macos/MusicOps-*-macOS-*-build.json
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 30
+      - name: Save native acceptance report and screenshots
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: MusicOps-macOS-${{ matrix.arch }}-acceptance
+          path: |
+            dist/macos/reports/*.json
+            dist/macos/reports/*.xml
+            dist/macos/smoke/*window.png
+          if-no-files-found: ignore
+          retention-days: 14
+      - name: Delete only the temporary test keychain
+        if: always()
+        shell: bash
+        run: |
+          if [[ -f "$MUSICOPS_KEYCHAIN_PATH" ]]; then
+            security delete-keychain "$MUSICOPS_KEYCHAIN_PATH"
+          fi
+
+  publish:
+    name: Attach verified Mac assets to the existing release
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      RELEASE_TAG: ${{ github.ref_name }}
+      RELEASE_COMMIT: ${{ github.sha }}
+    steps:
+      - name: Download tested Apple Silicon artifact
+        uses: actions/download-artifact@v8
+        with:
+          name: MusicOps-macOS-arm64
+          path: release-assets
+      - name: Download tested Intel artifact
+        uses: actions/download-artifact@v8
+        with:
+          name: MusicOps-macOS-x86_64
+          path: release-assets
+      - name: Verify version, commit, architecture and archive checksums
+        shell: python
+        run: |
+          import hashlib, json, os, pathlib, re
+          root = pathlib.Path('release-assets')
+          tag = os.environ['RELEASE_TAG']
+          if not re.fullmatch(r'v\d+\.\d+\.\d+(?:[a-z0-9.-]+)?', tag):
+              raise SystemExit('Invalid release tag')
+          manifests = list(root.glob('MusicOps-*-macOS-*-build.json'))
+          if len(manifests) != 2:
+              raise SystemExit('Both native architecture build manifests are required')
+          architectures = set()
+          for path in manifests:
+              data = json.loads(path.read_text('utf-8'))
+              if data['version'] != tag[1:] or data['commit'] != os.environ['RELEASE_COMMIT'] or not data['smoke_passed']:
+                  raise SystemExit('Release source/version/acceptance mismatch')
+              architectures.add(data['architecture'])
+              archive = root / data['archive']
+              for algorithm in ('sha256', 'sha512'):
+                  with archive.open('rb') as stream:
+                      digest = hashlib.file_digest(stream, algorithm).hexdigest()
+                  if digest != data['digests'][algorithm]:
+                      raise SystemExit('Archive digest mismatch')
+          if architectures != {'arm64', 'x86_64'}:
+              raise SystemExit('Missing native architecture')
+      - name: Wait for the matching release without creating an empty release
+        shell: bash
+        run: |
+          for attempt in {1..20}; do
+            if gh release view "$RELEASE_TAG" --json tagName --jq '.tagName' >/dev/null 2>&1; then
+              exit 0
+            fi
+            sleep 30
+          done
+          echo 'The release does not exist yet. Tested files remain in the workflow artifacts; create the matching release and rerun this job.'
+          exit 1
+      - name: Upload only matching Mac release assets
+        shell: bash
+        run: |
+          gh release upload "$RELEASE_TAG" \
+            release-assets/MusicOps-*-macOS-*.zip \
+            release-assets/MusicOps-*-macOS-*.sha256 \
+            release-assets/MusicOps-*-macOS-*.sha512 \
+            release-assets/MusicOps-*-macOS-*-build.json \
+            --clobber

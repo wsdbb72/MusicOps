@@ -88,6 +88,14 @@ class PTDownloadProvider(PTReadOnlyProvider):
                 balances={int(m.replace(',','')) for m in re.findall(r'(?:FL\s*令牌|令牌|Tokens?)\s*[:：]\s*([\d,]+)',visible,re.I)}
                 if len(balances)==1:balance=next(iter(balances))
             if type(balance) is not int:raise PolicyBlocked('无法确认可用 FL 数量，请刷新登录信息或稍后核对')
+            if budget is None:
+                # Unlimited means no batch cap; the live balance and unresolved
+                # reservation guards still apply inside reserve_token.
+                with store.connection() as connection:
+                    spent=sum(r['cost'] for r in connection.execute(
+                        "SELECT cost,payload FROM token_reservations WHERE site=? AND state NOT IN ('RELEASED','REJECTED')",(self.site,)
+                    ) if json.loads(r['payload']).get('budget_ref','default')==batch_id)
+                budget=spent+balance
             reservation=store.reserve_token(self.site,candidate['resource_id'],cost,balance,budget,utcnow(),budget_ref=batch_id)
         intent={'kind':'pt_request','state':'requesting','site':self.site,'resource_id':candidate['resource_id'],'batch_id':batch_id,'requested_at':utcnow()}
         store.put('evidence',key,intent)

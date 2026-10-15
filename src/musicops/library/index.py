@@ -1,4 +1,5 @@
 import base64
+import copy
 import hashlib
 import json
 import math
@@ -13,6 +14,7 @@ from .paths import reparse, reject_reparse_chain, within
 from .resources import companion_relations
 
 AUDIO_EXTENSIONS = {'.flac', '.mp3', '.m4a', '.mp4', '.ogg', '.opus', '.wav', '.aif', '.aiff', '.dsf', '.dff', '.ape', '.wma', '.ncm'}
+METADATA_INDEX_VERSION = 2
 
 
 def sha256_file(path):
@@ -137,8 +139,24 @@ def _metadata_companions(directory):
     return companions
 
 
-def _index_metadata(root, excluded, checkpoint):
+def _metadata_relations(path, sidecars):
+    companions = []
+    for item in sidecars:
+        sidecar = Path(item['path'])
+        suffix = sidecar.suffix.casefold()
+        if suffix == '.lrc' and sidecar.stem.casefold() == path.stem.casefold():
+            companions.append(dict(item, type='lyrics', scope='track', shared=False))
+        elif suffix in {'.jpg', '.jpeg', '.png', '.webp', '.bmp'} and sidecar.stem.casefold() in {'cover', 'folder', 'front', path.stem.casefold()}:
+            companions.append(dict(item, type='cover', scope='release', shared=True))
+        elif suffix == '.cue':
+            companions.append(dict(item, type='cue', scope='release', shared=True, relation_verified=False))
+    return companions
+
+
+def _index_metadata(root, excluded, checkpoint, cached=None, progress=None):
     records = []
+    reused = 0
+    cached = cached or {}
     if checkpoint:
         checkpoint()
     for directory, dirs, names in os.walk(root, followlinks=False):
@@ -146,11 +164,36 @@ def _index_metadata(root, excluded, checkpoint):
         # Recheck the directory: it can have been replaced since os.walk listed it.
         reject_reparse_chain(directory, root)
         dirs[:] = [d for d in dirs if not reparse(directory / d) and not any(within(directory / d, e) for e in excluded)]
+        if progress:
+            progress({'scanned_count': len(records), 'cached_count': reused, 'current_directory': str(directory.relative_to(root)), 'phase': 'scanning'})
         sidecars = None
         for name in sorted(names):
             path = directory / name
             if path.suffix.casefold() not in AUDIO_EXTENSIONS or reparse(path) or any(within(path, e) for e in excluded):
                 continue
+            file_id = str(uuid.uuid5(uuid.NAMESPACE_URL, str(path).casefold()))
+            previous = cached.get(file_id)
+            # Only reuse our bounded metadata format. A same-size file with a
+            # changed timestamp/inode, prior read error, or older schema is read again.
+            if previous and str(previous.get('path','')).casefold()==str(path).casefold() and previous.get('metadata_index_version') == METADATA_INDEX_VERSION and not previous.get('read_error'):
+                try:
+                    reject_reparse_chain(path, root)
+                    before = file_version(path)
+                    if list(before) == previous.get('metadata_source_version'):
+                        if sidecars is None:
+                            sidecars = _metadata_companions(directory)
+                        row = copy.deepcopy(previous)
+                        row['companions'] = _metadata_relations(path, sidecars)
+                        if file_version(path) == before:
+                            records.append(row)
+                            reused += 1
+                            if progress:
+                                progress({'scanned_count': len(records), 'cached_count': reused, 'current_directory': str(directory.relative_to(root)), 'phase': 'scanning'})
+                            if checkpoint and len(records) % 50 == 0:
+                                checkpoint()
+                            continue
+                except (OSError, PathBlocked):
+                    pass
             template = {'schema_version': 1, 'file_id': str(uuid.uuid5(uuid.NAMESPACE_URL, str(path).casefold())),
                         'volume': path.drive, 'path': str(path), 'relative_path': str(path.relative_to(root)), 'location_state': 'library',
                         'size': None, 'mtime_ns': None, 'sha256': None, 'media_info': {}, 'raw_tags': {}, 'read_error': None,
@@ -215,7 +258,7 @@ def _index_metadata(root, excluded, checkpoint):
                     row['artists'] = row.get('artists', [])
                     reject_reparse_chain(path, root)
                     after = file_version(path)
-                    row.update(size=after[0], mtime_ns=after[1])
+                    row.update(size=after[0], mtime_ns=after[1], metadata_index_version=METADATA_INDEX_VERSION, metadata_source_version=list(after))
                     if before != after:
                         row['read_error'] = 'BUSY_CHANGED_DURING_INDEX'
                         if attempt == 0:
@@ -223,16 +266,7 @@ def _index_metadata(root, excluded, checkpoint):
                     row['normalized_search'] = {'title': search_text(row.get('raw_title')), 'artists': [search_text(a) for a in row['artists']], 'album': search_text(row.get('album'))}
                     if sidecars is None:
                         sidecars = _metadata_companions(directory)
-                    row['companions'] = []
-                    for item in sidecars:
-                        sidecar = Path(item['path'])
-                        suffix = sidecar.suffix.casefold()
-                        if suffix == '.lrc' and sidecar.stem.casefold() == path.stem.casefold():
-                            row['companions'].append(dict(item, type='lyrics', scope='track', shared=False))
-                        elif suffix in {'.jpg', '.jpeg', '.png', '.webp', '.bmp'} and sidecar.stem.casefold() in {'cover', 'folder', 'front', path.stem.casefold()}:
-                            row['companions'].append(dict(item, type='cover', scope='release', shared=True))
-                        elif suffix == '.cue':
-                            row['companions'].append(dict(item, type='cue', scope='release', shared=True, relation_verified=False))
+                    row['companions'] = _metadata_relations(path, sidecars)
                     break
                 except (OSError, PathBlocked) as exc:
                     row['read_error'] = 'PATH_BLOCKED' if isinstance(exc, PathBlocked) else 'FILE_READ_ERROR:' + type(exc).__name__
@@ -240,21 +274,25 @@ def _index_metadata(root, excluded, checkpoint):
                     row['artists'] = []
                     break
             records.append(row)
+            if progress:
+                progress({'scanned_count': len(records), 'cached_count': reused, 'current_directory': str(directory.relative_to(root)), 'phase': 'scanning'})
             if checkpoint and len(records) % 50 == 0:
                 checkpoint()
     if checkpoint:
         checkpoint()
+    if progress:
+        progress({'scanned_count': len(records), 'cached_count': reused, 'current_directory': '', 'phase': 'scanned'})
     return sorted(records, key=lambda x: x['path'].casefold())
 
 
-def index_library(root, validator=None, exclusions=None, metadata_only=False, checkpoint=None):
+def index_library(root, validator=None, exclusions=None, metadata_only=False, checkpoint=None, cached=None, progress=None):
     root = Path(root).absolute()
     reject_reparse_chain(root)
     if not root.is_dir():
         raise FileNotFoundError('扫描根不存在')
     excluded = [Path(p).resolve() for p in (exclusions or [])]
     if metadata_only:
-        return _index_metadata(root, excluded, checkpoint)
+        return _index_metadata(root, excluded, checkpoint, cached=cached, progress=progress)
     records = []
     if checkpoint:
         checkpoint()

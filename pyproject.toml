@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "musicops"
-version = "0.3.1"
-description = "MusicOps Windows music library manager"
+version = "0.4.0"
+description = "MusicOps desktop music library manager for Windows and macOS"
 requires-python = ">=3.12"
 dependencies = ["PySide6", "mutagen", "httpx", "Pillow", "cryptography"]
 
@@ -18,6 +18,9 @@ musicops-gui = "musicops.gui.main:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.package-data]
+musicops = ["assets/*.png", "assets/*.ico"]
 
 [tool.pytest.ini_options]
 pythonpath = ["src"]

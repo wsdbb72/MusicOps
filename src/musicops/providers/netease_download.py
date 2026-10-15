@@ -8,6 +8,10 @@ from musicops.clients.vault import cookie_header
 from musicops.library.paths import reject_reparse_chain
 
 def download_track(target,config,destination,secret_getter,checkpoint=lambda _:None):
+    from musicops.providers.netease_match import netease_reference
+    reference=netease_reference(target)
+    if reference is None:raise PolicyBlocked('下载需要已核实的网易云歌曲 ID，不能使用其他平台的 ID')
+    target=reference
     destination=Path(destination);reject_reparse_chain(destination);destination.mkdir(parents=True,exist_ok=True)
     song_id=str(target['source_song_id']);api=config['workflow']['netease_api_url'].rstrip('/')
     origin=urlsplit(api) if api else urlsplit('https://music.163.com')

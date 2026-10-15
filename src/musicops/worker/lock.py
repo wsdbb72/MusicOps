@@ -1,16 +1,15 @@
 import os
 from pathlib import Path
+from musicops.platforms import lock_file,private_directory,is_windows
 
 class WriterLock:
     def __init__(self,base): self.path=Path(base)/'state'/'writer.lock'; self.file=None
     def acquire(self):
         if self.file is not None:raise RuntimeError('WRITER_LOCK_ALREADY_ACQUIRED')
-        self.path.parent.mkdir(parents=True,exist_ok=True); self.file=open(self.path,'a+b'); self.file.seek(0)
+        private_directory(self.path.parent); self.file=open(self.path,'a+b'); self.file.seek(0)
+        if not is_windows():os.chmod(self.path,0o600)
         try:
-            if os.name=='nt':
-                import msvcrt; msvcrt.locking(self.file.fileno(),msvcrt.LK_NBLCK,1)
-            else:
-                import fcntl; fcntl.flock(self.file,fcntl.LOCK_EX|fcntl.LOCK_NB)
+            lock_file(self.file)
             # Lock the first byte (including an empty file) before initializing it.
             # A competing initializer must never write into an already locked byte.
             self.file.seek(0,os.SEEK_END)
@@ -22,8 +21,7 @@ class WriterLock:
     def release(self):
         if self.file:
             self.file.seek(0)
-            if os.name=='nt':
-                import msvcrt; msvcrt.locking(self.file.fileno(),msvcrt.LK_UNLCK,1)
+            lock_file(self.file,unlock=True)
             self.file.close(); self.file=None
     def __enter__(self): return self.acquire()
     def __exit__(self,*args): self.release()

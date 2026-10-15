@@ -20,7 +20,7 @@ def main():
     env=os.environ.copy();env['PATH']=str(Path(os.environ['SystemRoot'])/'System32');env['QT_QPA_PLATFORM']='offscreen'
     for key in ('PYTHONPATH','PYTHONHOME','VIRTUAL_ENV'):env.pop(key,None)
     screenshot=Path(args.screenshot).resolve();screenshot.parent.mkdir(parents=True,exist_ok=True)
-    process=subprocess.Popen([str(bundle/'MusicOps.exe'),'--base',str(base),'--screenshot',str(screenshot),'--quit-after','25000'],cwd=bundle,env=env,creationflags=getattr(subprocess,'CREATE_NO_WINDOW',0));client=WorkerClient(base);report={'version':'0.3.1','external_requests':0,'evidence':'packaged_exe_named_pipe_synthetic_media','checks':{}}
+    process=subprocess.Popen([str(bundle/'MusicOps.exe'),'--base',str(base),'--screenshot',str(screenshot),'--quit-after','25000'],cwd=bundle,env=env,creationflags=getattr(subprocess,'CREATE_NO_WINDOW',0));client=WorkerClient(base);report={'version':'0.4.0','external_requests':0,'evidence':'packaged_exe_named_pipe_synthetic_media','checks':{}}
     try:
         deadline=time.monotonic()+20
         while True:
@@ -30,6 +30,8 @@ def main():
                 time.sleep(.1)
         report['checks']['configured_profile_attached']=Path(status['base'])==base
         reply=client.call('start_workflow',{'scene':'complete'});deadline=time.monotonic()+20
+        initial=client.call('list_workflows')['jobs']
+        report['checks']['preparation_visible_immediately']=any(j['job_id']==reply['job_id'] and j.get('job_kind')=='batch' for j in initial)
         while time.monotonic()<deadline:
             task=client.call('get_task',{'task_id':reply['task_id']})['task']
             if task['state']=='completed':break
@@ -38,7 +40,7 @@ def main():
         report['checks']['one_album_not_two_discs']=task['result']['album_count']==1
         deadline=time.monotonic()+60
         while time.monotonic()<deadline:
-            jobs=client.call('list_workflows')['jobs']
+            all_jobs=client.call('list_workflows')['jobs'];jobs=[j for j in all_jobs if j.get('job_kind')!='batch']
             if jobs and jobs[0]['stage'] in ('completed','failed','needs_review'):break
             time.sleep(.2)
         report['checks']['native_workflow_completed']=len(jobs)==1 and jobs[0]['stage']=='completed'
@@ -47,7 +49,8 @@ def main():
         transactions=client.call('get_status',{'compact':True})['transactions'];report['checks']['native_transaction_committed']=any(t['state']=='COMMITTED' for t in transactions)
         report['checks']['original_backups_verified']=all(hashlib.sha256(Path(b['backup']).read_bytes()).hexdigest()==original[b['path']] for t in transactions for b in t['backup_manifest'] if b['path'] in original)
         process.wait(35);report['checks']['gui_exit_zero']=process.returncode==0;report['checks']['gui_screenshot_created']=screenshot.is_file()
-        report['checks']['no_demo_cli_entry']='--demo' not in subprocess.run([str(bundle/'MusicOps.exe'),'--demo','--base',str(base)],capture_output=True,timeout=10).stdout.decode('utf-8','ignore')
+        report['checks']['no_demo_cli_entry']=subprocess.run([str(bundle/'MusicOps.exe'),'--demo','--base',str(base)],capture_output=True,timeout=10).returncode==2
+        report['checks']['brand_assets_shipped']=(bundle/'_internal/musicops/assets/musicops.ico').is_file()
         report['passed']=all(report['checks'].values())
     except Exception as exc:report.update(passed=False,error_class=type(exc).__name__,error=str(exc))
     finally:

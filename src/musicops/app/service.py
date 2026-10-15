@@ -51,8 +51,8 @@ class AppService:
         if command=='get_workflow':
             job=self.store.get('evidence','workflow:'+payload['job_id'])
             if not job:raise ValueError('任务不存在')
-            public={k:job.get(k) for k in ('job_id','scene','stage','message','detail','review_kind','choices','lookup_links','catalog_choices')}
-            public['prepared']=[{**{k:r.get(k) for k in ('raw_title','artists','album')},'track':(r.get('tags',{}).get('tracknumber') or [r.get('track','')])[0],'disc':(r.get('tags',{}).get('discnumber') or [r.get('disc','1')])[0]} for r in job.get('prepared',[]) or job.get('targets',[]) or job.get('old_files',[])]
+            public={k:job.get(k) for k in ('job_id','job_kind','scene','stage','message','detail','review_kind','choices','lookup_links','catalog_choices')}
+            public['prepared']=[{**{k:r.get(k) for k in ('raw_title','artists','album','duration')},'track':(r.get('tags',{}).get('tracknumber') or [r.get('track','')])[0],'disc':(r.get('tags',{}).get('discnumber') or [r.get('disc','1')])[0]} for r in job.get('prepared',[]) or job.get('targets',[]) or job.get('old_files',[])]
             return {'job':public}
         if command=='cancel_workflow':return self.workflows.cancel(payload['job_id'])
         if command=='review_workflow':return self.workflows.review(payload['job_id'],payload.get('choice'),payload.get('metadata'),payload.get('cover_path'))
@@ -155,15 +155,18 @@ class AppService:
         if command=='shutdown_worker':
             if self.active: raise RuntimeError('当前任务尚未到安全退出点，请先暂停流水线')
             self.stop.set(); return {'stopped':True,'seeding_unchanged':True}
-        if command in ('restore_workflow','start_workflow','advance_workflows','demo','index_library','compare','search','resources','prepare_fill','prepare_resource','prepare_repair','prepare_dedup','submit_plan','request_rollback','export_report','refresh_playlist','submit_download','recover','pt_preflight','qbt_preflight','ai_analyze','ai_plan','ai_test','lyrics_preflight','identify_metadata','resolve_metadata','accept_metadata','validate_selected_file','roon_preflight'):
+        if command in ('manual_album_search','restore_workflow','start_workflow','advance_workflows','demo','index_library','compare','search','resources','prepare_fill','prepare_resource','prepare_repair','prepare_dedup','submit_plan','request_rollback','export_report','refresh_playlist','submit_download','recover','pt_preflight','qbt_preflight','ai_analyze','ai_plan','ai_test','lyrics_preflight','identify_metadata','resolve_metadata','accept_metadata','validate_selected_file','roon_preflight'):
             return self.enqueue(command,payload,request_id=request_id)
         raise ValueError('UNKNOWN_COMMAND:'+command)
     def enqueue(self,command,args,request_id=None):
         task_id=str(uuid.uuid5(uuid.NAMESPACE_URL,'ipc:'+request_id)) if request_id else str(uuid.uuid4()); cfg=copy.deepcopy(self.config.current())
         if self.store.get('tasks',task_id): return {'accepted':True,'task_id':task_id,'state':self.store.get('tasks',task_id)['state'],'idempotent':True}
+        args=copy.deepcopy(args);batch=None
+        if command=='start_workflow':
+            batch=self.workflows.queue(args,cfg['values'],task_id);args['_batch_job_id']=batch['job_id']
         task=dict(schema_version=1,task_id=task_id,command=command,args=copy.deepcopy(args),state='queued',created_at=utcnow(),config_version=cfg['version'],config_snapshot=cfg,progress=0,result=None)
         self.store.put('tasks',task_id,task); self.store.event('task_queued',{'command':command,'config_version':cfg['version']},task_id)
-        return {'accepted':True,'task_id':task_id,'state':'queued'}
+        return {'accepted':True,'task_id':task_id,'state':'queued',**({'job_id':batch['job_id'],'batch_id':batch['batch_id']} if batch else {})}
     def _loop(self):
         while not self.stop.wait(.1):
             with self.mutex:
@@ -189,6 +192,8 @@ class AppService:
                 task.update(state=state,error=redact(str(e)),error_class=error_class,finished_at=utcnow())
             saved=self.store.get('tasks',task['task_id'])
             if saved and saved.get('cancel_requested'): task['cancel_requested']=True; task['cancel_result']='任务已到安全点，未自动回滚或停种'
+            if task['command']=='start_workflow' and task['state']!='completed' and task.get('args',{}).get('_batch_job_id'):
+                self.workflows.start_failed(task['args']['_batch_job_id'],task.get('error_class',task['state']),task.get('error',''))
             self.store.put('tasks',task['task_id'],task); self.store.event('task_'+task['state'],{'command':task['command'],'error':task.get('error'),'result':task.get('result')},task['task_id']); self.active=None
     @staticmethod
     def _task_state(state):
@@ -217,6 +222,9 @@ class AppService:
         for key in ('library','source','work','backup','quarantine'): self._safe_path(cfg['paths'][key])
         return TransactionEngine(self.store,cfg['paths'],validator=self._validator(cfg))
     def _execute(self,command,args,cfg):
+        if command=='manual_album_search':
+            from musicops.app.album_search import manual_album_search
+            return manual_album_search(self,args,cfg)
         if command=='start_workflow':return self.workflows.start(args,cfg)
         if command=='advance_workflows':return self.workflows.advance()
         if command=='restore_workflow':return self.workflows.restore(args['job_id'])
@@ -539,27 +547,29 @@ class AppService:
             result={'target':target,'proposal':proposal,'music_writes':0,'source_snapshot_complete':target.get('snapshot_complete',False),'reason':'目标专辑采用人工确认外部证据；原始来源快照完整性保持独立'}
         self.store.event('catalog_manual_accept',{'target_id':target_id,'candidate_id':candidate_id,'source':candidate['source'],'music_writes':0})
         return result
-    def _index_real_library(self,args,cfg):
+    def _index_real_library(self,args,cfg,progress=None):
         from musicops.library.index import index_library
         from musicops.library.paths import reject_reparse_chain
         root=Path(args.get('root') or cfg['paths']['library']).absolute();reject_reparse_chain(root)
         if not args.get('lightweight',True):raise PolicyBlocked('请选择轻量索引；完整解码仅针对明确选中的文件')
         exclusions=[cfg['paths'][key] for key in ('source','work','backup','quarantine') if Path(cfg['paths'][key]).resolve().is_relative_to(root.resolve())]
         self._checkpoint('before_metadata_index')
-        files=index_library(root,metadata_only=True,exclusions=exclusions,checkpoint=lambda:self._checkpoint('metadata_index'))
+        with self.store.connection() as c:previous=[json.loads(r[0]) for r in c.execute('SELECT payload FROM library_files')]
+        root_resolved=root.resolve();cached={f['file_id']:f for f in previous if f.get('file_id') and Path(f.get('path','')).is_relative_to(root)}
+        files=index_library(root,metadata_only=True,exclusions=exclusions,checkpoint=lambda:self._checkpoint('metadata_index'),cached=cached,progress=progress)
         self._checkpoint('metadata_index_read_finished')
         with self.store.connection() as c:
             c.execute('BEGIN IMMEDIATE')
             for item in files:
                 item['library_root']=str(root)
-                row=c.execute('SELECT payload FROM library_files WHERE id=?',(item['file_id'],)).fetchone();old=json.loads(row[0]) if row else None
+                old=cached.get(item['file_id'])
                 if old and old.get('size')==item.get('size') and old.get('mtime_ns')==item.get('mtime_ns') and old.get('validation',{}).get('decode_state')=='passed':
                     item['validation']=old['validation'];item['validation_id']=old.get('validation_id');item['sha256']=old.get('sha256')
                 item.setdefault('id',item['file_id']);c.execute('INSERT INTO library_files VALUES(?,?,?) ON CONFLICT(id) DO UPDATE SET payload=excluded.payload,updated_at=excluded.updated_at',(item['file_id'],json.dumps(item,ensure_ascii=False),utcnow()))
             live={item['file_id'] for item in files}
             for row in c.execute('SELECT id,payload FROM library_files').fetchall():
                 old=json.loads(row['payload'])
-                if row['id'] not in live and Path(old.get('path','')).resolve().is_relative_to(root.resolve()) and not Path(old['path']).exists():
+                if row['id'] not in live and Path(old.get('path','')).resolve().is_relative_to(root_resolved) and not Path(old['path']).exists():
                     old.update(location_state='externally_missing',read_error='文件已移出索引目录');c.execute('UPDATE library_files SET payload=?,updated_at=? WHERE id=?',(json.dumps(old,ensure_ascii=False),utcnow(),row['id']))
         return {'files':files[:200],'count':len(files),'truncated':len(files)>200,'root':str(root),'metadata_only':True,'format_counts':dict(collections.Counter(f.get('media_info',{}).get('codec','unknown') for f in files)),'music_writes':0}
     def _compare_targets(self,args):
@@ -586,6 +596,8 @@ class AppService:
         from musicops.clients.http import SafeHttpTransport
         return PTReadOnlyProvider(site,cfg['providers'][site],SafeHttpTransport([HOSTS[site]],offline=False),self.vault.get)
     def _refresh_real_playlists(self,args,cfg):
+        from musicops.app.playlists import use_platform_reader,refresh_platform_playlists
+        if use_platform_reader(args):return refresh_platform_playlists(self,args,cfg)
         if not cfg['providers']['netease']['enabled']:raise PolicyBlocked('网易云来源已停用；启用并保存配置后再刷新')
         from musicops.providers.netease_readonly import NetEaseReadOnlyProvider
         from musicops.clients.http import SafeHttpTransport

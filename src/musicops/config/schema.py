@@ -9,7 +9,9 @@ def default_config(base,offline=True):
     base=Path(base).resolve()
     paths={key:str((base/'demo' if offline else base)/key) for key in ('library','source','work','backup','quarantine','reports')}
     tool_roots=[Path(getattr(sys,'_MEIPASS',Path(__file__).resolve().parents[3]))/'tools',Path(sys.executable).parent/'tools']
-    paths['tools']={key:next((str(p/(key+'.exe')) for p in tool_roots if (p/(key+'.exe')).is_file()),shutil.which(key) or '') for key in ('ffmpeg','ffprobe')}
+    if sys.platform=='darwin':tool_roots.extend([Path(sys.executable).parent.parent/'Resources/tools',Path.home()/'.local/bin',Path('/opt/homebrew/bin'),Path('/usr/local/bin')])
+    suffix='.exe' if os.name=='nt' else ''
+    paths['tools']={key:next((str(p/(key+suffix)) for p in tool_roots if (p/(key+suffix)).is_file()),shutil.which(key) or '') for key in ('ffmpeg','ffprobe')}
     return dict(schema_version=1,offline=offline,paths=paths,playlist_ids=[],
       providers={name:dict(enabled=bool(offline and name!='redacted' or name=='netease'),base_url=url,credential_ref='',search_language='auto',concurrency=1,timeout=15,rules_verified=False) for name,url in [('netease','https://music.163.com'),('dicmusic','https://dicmusic.com'),('open.cd','https://www.open.cd'),('orpheus','https://orpheus.network'),('redacted','https://redacted.sh')]},
       token_budget={'dicmusic':3,'orpheus':3,'redacted':3,'safety_margin':1,'balance_ttl':300},
@@ -24,8 +26,9 @@ def default_config(base,offline=True):
       scheduler=dict(enabled=False,mode='report',timezone='Asia/Shanghai',playlist_time='06:30',health_weekday=6,health_time='07:00',missed='report_once',notify='meaningful_changes'),
       worker=dict(concurrency=1,keep_background=True,decode_timeout=60),
       netease=dict(batch_size=150,timeout=15,max_attempts=2,credential_ref='',strip_layers=['VipSongsDownload']),
-      workflow=dict(setup_done=False,source_order=['open.cd','dicmusic','orpheus','redacted'],free_only=True,fl_per_batch=3,max_albums=50,netease_fallback=True,netease_api_url='',netease_downloader='',netease_download_args=[],netease_import_dir='',backup_days=7,prefer_24bit=True),
-      music_servers=dict(roon=dict(enabled=False,library='',watched_folders=[],credential_ref='',client='Roon',host='127.0.0.1',port=9330,timeout=8),navidrome=dict(enabled=False,url='',username='',password_ref='',library='')))
+      workflow=dict(setup_done=False,source_order=['open.cd','dicmusic','orpheus','redacted'],free_only=True,fl_per_batch=3,fl_unlimited=False,max_albums=50,netease_fallback=True,netease_api_url='',netease_downloader='',netease_download_args=[],netease_import_dir='',backup_days=7,prefer_24bit=True),
+      music_servers=dict(roon=dict(enabled=False,library='',watched_folders=[],credential_ref='',client='Roon',host='127.0.0.1',port=9330,timeout=8),navidrome=dict(enabled=False,url='',username='',password_ref='',library='')),
+      playlist_sources={key:dict(credential_ref='',timeout=15) for key in ('qqmusic','qishui','kugou','kuwo','migu','bilibili','applemusic','spotify','youtube')})
 
 def upgrade_config(values,base):
     """Add new settings without overwriting an existing user's endpoint or secret ref."""
@@ -112,6 +115,7 @@ def validate_config(values):
     for key,low,high in [('connect_timeout',1,120),('read_timeout',1,120),('max_attempts',1,2),('total_budget',1,300),('concurrency',1,1),('min_cover_side',1,4096),('max_response_bytes',1024,20_000_000),('cache_ttl',0,604800),('negative_ttl',0,604800)]:bounded(l,key,low,high,'歌词 '+key)
     for key,low,high in [('batch_size',1,500),('timeout',1,120),('max_attempts',1,2)]:bounded(values['netease'],key,low,high,'网易云 '+key)
     for provider in values['providers'].values():bounded(provider,'concurrency',1,1,'来源并发')
+    for source in values['playlist_sources'].values():bounded(source,'timeout',1,120,'歌单请求超时')
     bounded(values['qbt'],'poll_seconds',1,300,'qBittorrent轮询间隔')
     bounded(values['worker'],'concurrency',1,1,'后台并发')
     bounded(values['worker'],'decode_timeout',1,3600,'解码超时')

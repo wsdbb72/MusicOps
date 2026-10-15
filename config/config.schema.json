@@ -20,7 +20,9 @@
     "scheduler",
     "worker",
     "netease",
-    "music_servers"
+    "workflow",
+    "music_servers",
+    "playlist_sources"
   ],
   "properties": {
     "schema_version": {
@@ -101,7 +103,8 @@
         "netease",
         "dicmusic",
         "open.cd",
-        "orpheus"
+        "orpheus",
+        "redacted"
       ],
       "properties": {
         "netease": {
@@ -291,6 +294,53 @@
             }
           },
           "additionalProperties": false
+        },
+        "redacted": {
+          "type": "object",
+          "required": [
+            "enabled",
+            "base_url",
+            "credential_ref",
+            "search_language",
+            "concurrency",
+            "timeout",
+            "rules_verified"
+          ],
+          "properties": {
+            "enabled": {
+              "type": "boolean",
+              "default": false,
+              "readOnly": false
+            },
+            "base_url": {
+              "type": "string",
+              "default": "https://redacted.sh"
+            },
+            "credential_ref": {
+              "type": "string",
+              "default": ""
+            },
+            "search_language": {
+              "type": "string",
+              "default": "auto"
+            },
+            "concurrency": {
+              "type": "integer",
+              "default": 1,
+              "minimum": 0
+            },
+            "timeout": {
+              "type": "integer",
+              "default": 15,
+              "minimum": 0
+            },
+            "rules_verified": {
+              "type": "boolean",
+              "default": false,
+              "readOnly": true
+            }
+          },
+          "additionalProperties": false
         }
       },
       "additionalProperties": false
@@ -300,6 +350,7 @@
       "required": [
         "dicmusic",
         "orpheus",
+        "redacted",
         "safety_margin",
         "balance_ttl"
       ],
@@ -310,6 +361,11 @@
           "minimum": 0
         },
         "orpheus": {
+          "type": "integer",
+          "default": 3,
+          "minimum": 0
+        },
+        "redacted": {
           "type": "integer",
           "default": 3,
           "minimum": 0
@@ -953,6 +1009,97 @@
       },
       "additionalProperties": false
     },
+    "workflow": {
+      "type": "object",
+      "required": [
+        "setup_done",
+        "source_order",
+        "free_only",
+        "fl_per_batch",
+        "fl_unlimited",
+        "max_albums",
+        "netease_fallback",
+        "netease_api_url",
+        "netease_downloader",
+        "netease_download_args",
+        "netease_import_dir",
+        "backup_days",
+        "prefer_24bit"
+      ],
+      "properties": {
+        "setup_done": {
+          "type": "boolean",
+          "default": false,
+          "readOnly": false
+        },
+        "source_order": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "default": "open.cd"
+          },
+          "default": [
+            "open.cd",
+            "dicmusic",
+            "orpheus",
+            "redacted"
+          ]
+        },
+        "free_only": {
+          "type": "boolean",
+          "default": true,
+          "readOnly": false
+        },
+        "fl_per_batch": {
+          "type": "integer",
+          "default": 3,
+          "minimum": 0
+        },
+        "fl_unlimited": {
+          "type": "boolean",
+          "default": false,
+          "readOnly": false
+        },
+        "max_albums": {
+          "type": "integer",
+          "default": 50,
+          "minimum": 0
+        },
+        "netease_fallback": {
+          "type": "boolean",
+          "default": true,
+          "readOnly": false
+        },
+        "netease_api_url": {
+          "type": "string",
+          "default": ""
+        },
+        "netease_downloader": {
+          "type": "string",
+          "default": ""
+        },
+        "netease_download_args": {
+          "type": "array",
+          "items": {},
+          "default": []
+        },
+        "netease_import_dir": {
+          "type": "string",
+          "default": ""
+        },
+        "backup_days": {
+          "type": "integer",
+          "default": 7,
+          "minimum": 0
+        },
+        "prefer_24bit": {
+          "type": "boolean",
+          "default": true,
+          "readOnly": false
+        }
+      },
+      "additionalProperties": false
+    },
     "music_servers": {
       "type": "object",
       "required": [
@@ -1042,6 +1189,194 @@
             "library": {
               "type": "string",
               "default": ""
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    "playlist_sources": {
+      "type": "object",
+      "required": [
+        "qqmusic",
+        "qishui",
+        "kugou",
+        "kuwo",
+        "migu",
+        "bilibili",
+        "applemusic",
+        "spotify",
+        "youtube"
+      ],
+      "properties": {
+        "qqmusic": {
+          "type": "object",
+          "required": [
+            "credential_ref",
+            "timeout"
+          ],
+          "properties": {
+            "credential_ref": {
+              "type": "string",
+              "default": ""
+            },
+            "timeout": {
+              "type": "integer",
+              "default": 15,
+              "minimum": 0
+            }
+          },
+          "additionalProperties": false
+        },
+        "qishui": {
+          "type": "object",
+          "required": [
+            "credential_ref",
+            "timeout"
+          ],
+          "properties": {
+            "credential_ref": {
+              "type": "string",
+              "default": ""
+            },
+            "timeout": {
+              "type": "integer",
+              "default": 15,
+              "minimum": 0
+            }
+          },
+          "additionalProperties": false
+        },
+        "kugou": {
+          "type": "object",
+          "required": [
+            "credential_ref",
+            "timeout"
+          ],
+          "properties": {
+            "credential_ref": {
+              "type": "string",
+              "default": ""
+            },
+            "timeout": {
+              "type": "integer",
+              "default": 15,
+              "minimum": 0
+            }
+          },
+          "additionalProperties": false
+        },
+        "kuwo": {
+          "type": "object",
+          "required": [
+            "credential_ref",
+            "timeout"
+          ],
+          "properties": {
+            "credential_ref": {
+              "type": "string",
+              "default": ""
+            },
+            "timeout": {
+              "type": "integer",
+              "default": 15,
+              "minimum": 0
+            }
+          },
+          "additionalProperties": false
+        },
+        "migu": {
+          "type": "object",
+          "required": [
+            "credential_ref",
+            "timeout"
+          ],
+          "properties": {
+            "credential_ref": {
+              "type": "string",
+              "default": ""
+            },
+            "timeout": {
+              "type": "integer",
+              "default": 15,
+              "minimum": 0
+            }
+          },
+          "additionalProperties": false
+        },
+        "bilibili": {
+          "type": "object",
+          "required": [
+            "credential_ref",
+            "timeout"
+          ],
+          "properties": {
+            "credential_ref": {
+              "type": "string",
+              "default": ""
+            },
+            "timeout": {
+              "type": "integer",
+              "default": 15,
+              "minimum": 0
+            }
+          },
+          "additionalProperties": false
+        },
+        "applemusic": {
+          "type": "object",
+          "required": [
+            "credential_ref",
+            "timeout"
+          ],
+          "properties": {
+            "credential_ref": {
+              "type": "string",
+              "default": ""
+            },
+            "timeout": {
+              "type": "integer",
+              "default": 15,
+              "minimum": 0
+            }
+          },
+          "additionalProperties": false
+        },
+        "spotify": {
+          "type": "object",
+          "required": [
+            "credential_ref",
+            "timeout"
+          ],
+          "properties": {
+            "credential_ref": {
+              "type": "string",
+              "default": ""
+            },
+            "timeout": {
+              "type": "integer",
+              "default": 15,
+              "minimum": 0
+            }
+          },
+          "additionalProperties": false
+        },
+        "youtube": {
+          "type": "object",
+          "required": [
+            "credential_ref",
+            "timeout"
+          ],
+          "properties": {
+            "credential_ref": {
+              "type": "string",
+              "default": ""
+            },
+            "timeout": {
+              "type": "integer",
+              "default": 15,
+              "minimum": 0
             }
           },
           "additionalProperties": false

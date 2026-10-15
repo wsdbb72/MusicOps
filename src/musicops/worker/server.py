@@ -12,10 +12,11 @@ from musicops.worker.client import auth_key, pipe_address, MAX_REQUEST_BYTES
 from musicops.worker.lock import WriterLock
 from musicops.app.service import AppService
 from musicops.clients.http import redact
+from musicops.platforms import ipc_family,prepare_ipc_socket,secure_ipc_socket,private_directory
 
 READ_COMMANDS = {'attach', 'get_status', 'get_task', 'list_tasks', 'get_playlist_targets', 'list_library_files', 'events', 'parse_playlist','list_workflows','get_workflow'}
 QUEUED_COMMANDS = {'demo', 'index_library', 'compare', 'search', 'resources', 'prepare_fill', 'prepare_resource', 'prepare_repair', 'prepare_dedup', 'submit_plan', 'request_rollback', 'export_report', 'refresh_playlist', 'submit_download', 'recover', 'pt_preflight', 'qbt_preflight', 'ai_analyze', 'ai_plan', 'ai_test', 'lyrics_preflight','identify_metadata','resolve_metadata','accept_metadata','validate_selected_file','roon_preflight'}
-QUEUED_COMMANDS.update({'start_workflow','advance_workflows','restore_workflow'})
+QUEUED_COMMANDS.update({'start_workflow','advance_workflows','restore_workflow','manual_album_search'})
 
 
 def request_signature(command, payload, key):
@@ -95,7 +96,7 @@ def main(argv=None):
     parser.add_argument('--base', required=True)
     args = parser.parse_args(argv)
     base = Path(args.base).resolve()
-    base.mkdir(parents=True, exist_ok=True)
+    private_directory(base)
     try:
         lock = WriterLock(base).acquire()
     except RuntimeError:
@@ -104,7 +105,10 @@ def main(argv=None):
     try:
         service = AppService(base,offline=False)
         key = auth_key(base)
-        with Listener(pipe_address(base), family='AF_PIPE', authkey=key) as listener:
+        prepare_ipc_socket(base)
+        address=pipe_address(base)
+        with Listener(address, family=ipc_family(), authkey=key) as listener:
+            secure_ipc_socket(address)
             while not service.stop.is_set():
                 try:
                     with listener.accept() as conn:

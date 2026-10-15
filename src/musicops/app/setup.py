@@ -27,6 +27,14 @@ def save_setup(service,payload):
         cookies=import_cookies(payload['netease_cookie_json'],'music.163.com');ref='vault://netease/user/cookies'
         pending.append((ref,json.dumps(cookies),'music.163.com',('netease','credential_ref')))
         pending.append((ref,json.dumps(cookies),'music.163.com',('providers','netease','credential_ref')))
+    for platform,text in payload.get('playlist_credentials',{}).items():
+        if platform not in values['playlist_sources']:raise ValueError('未知歌单平台')
+        if not isinstance(text,str):raise ValueError('歌单平台登录信息须为文本')
+        text=text.strip()
+        if not text:continue
+        from musicops.providers.playlist_access import credential_hosts,validate_credential
+        hosts=credential_hosts(platform);text=validate_credential(platform,text)
+        pending.append(('vault://playlist/'+platform,text,hosts,('playlist_sources',platform,'credential_ref')))
     def secret(kind,url,value,path):
         host=urlsplit(url).hostname
         if not host:raise ValueError('服务地址需要包含主机名')
@@ -58,7 +66,7 @@ def save_setup(service,payload):
         if nav.get('username'):target['username']=nav['username']
         if nav.get('password'):secret('navidrome',target['url'],nav['password'],('music_servers','navidrome','password_ref'))
     workflow=payload.get('workflow',{})
-    for key in ('netease_fallback','netease_api_url','netease_downloader','netease_download_args','netease_import_dir','prefer_24bit','fl_per_batch'):
+    for key in ('netease_fallback','netease_api_url','netease_downloader','netease_download_args','netease_import_dir','prefer_24bit','fl_per_batch','fl_unlimited'):
         if key in workflow:values['workflow'][key]=workflow[key]
     values['workflow']['setup_done']=True
     # Save URLs first: a changed domain intentionally unbinds its previous key.

@@ -50,11 +50,21 @@
       "concurrency": 1,
       "timeout": 15,
       "rules_verified": false
+    },
+    "redacted": {
+      "enabled": false,
+      "base_url": "https://redacted.sh",
+      "credential_ref": "",
+      "search_language": "auto",
+      "concurrency": 1,
+      "timeout": 15,
+      "rules_verified": false
     }
   },
   "token_budget": {
     "dicmusic": 3,
     "orpheus": 3,
+    "redacted": 3,
     "safety_margin": 1,
     "balance_ttl": 300
   },
@@ -191,6 +201,26 @@
       "VipSongsDownload"
     ]
   },
+  "workflow": {
+    "setup_done": false,
+    "source_order": [
+      "open.cd",
+      "dicmusic",
+      "orpheus",
+      "redacted"
+    ],
+    "free_only": true,
+    "fl_per_batch": 3,
+    "fl_unlimited": false,
+    "max_albums": 50,
+    "netease_fallback": true,
+    "netease_api_url": "",
+    "netease_downloader": "",
+    "netease_download_args": [],
+    "netease_import_dir": "",
+    "backup_days": 7,
+    "prefer_24bit": true
+  },
   "music_servers": {
     "roon": {
       "enabled": false,
@@ -208,6 +238,44 @@
       "username": "",
       "password_ref": "",
       "library": ""
+    }
+  },
+  "playlist_sources": {
+    "qqmusic": {
+      "credential_ref": "",
+      "timeout": 15
+    },
+    "qishui": {
+      "credential_ref": "",
+      "timeout": 15
+    },
+    "kugou": {
+      "credential_ref": "",
+      "timeout": 15
+    },
+    "kuwo": {
+      "credential_ref": "",
+      "timeout": 15
+    },
+    "migu": {
+      "credential_ref": "",
+      "timeout": 15
+    },
+    "bilibili": {
+      "credential_ref": "",
+      "timeout": 15
+    },
+    "applemusic": {
+      "credential_ref": "",
+      "timeout": 15
+    },
+    "spotify": {
+      "credential_ref": "",
+      "timeout": 15
+    },
+    "youtube": {
+      "credential_ref": "",
+      "timeout": 15
     }
   }
 }

@@ -133,6 +133,7 @@ class PTReadOnlyProvider:
                 candidates=[]
                 for group in data['results']:candidates.extend(self._group(group))
                 page=data.get('currentPage',1);pages=data.get('pages')
+                if not data['results'] and page in (None,1) and pages in (None,0):page,pages=1,1
                 if type(page) is not int or page!=1 or pages is not None and (type(pages) is not int or pages<1):raise ValueError('分页结构改变')
             return {'status':'OK' if candidates else 'NO_RESOURCE','source':self.site,'candidates':candidates,
                     'page':page,'pages':pages,'search_complete':pages==1,'read_only':True,'download_status':'POLICY_BLOCKED'}

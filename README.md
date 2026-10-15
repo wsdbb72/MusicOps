@@ -1,10 +1,10 @@
-# MusicOps 0.3.0
+# MusicOps 0.3.1
 
 中文 Windows 音乐库管理工具，围绕歌单入库、资料补全和音质升级组织操作。独立后台保存任务进度，关闭窗口后可以继续下载和整理。
 
 ## 安装与启动
 
-下载 [Windows EXE 安装包](https://github.com/wsdbb72/MusicOps/releases/download/v0.3.0/MusicOps-0.3.0-Setup.exe)，安装后打开 MusicOps。也可以解压 Release 中的 Windows ZIP，直接运行 MusicOps.exe；无需安装 Python。
+下载 [Windows EXE 安装包](https://github.com/wsdbb72/MusicOps/releases/download/v0.3.1/MusicOps-0.3.1-Setup.exe)，安装后打开 MusicOps。也可以解压 Release 中的 Windows ZIP，直接运行 MusicOps.exe；无需安装 Python。
 
 首次启动会打开可跳过的设置向导。选择音乐库，然后填写已开通的站点或服务。没有账号的服务保持关闭即可；之后通过“连接与设置”重新打开向导。旧凭据留空会保留，保存后无需重新填写。
 

@@ -185,3 +185,9 @@ def test_cover_at_album_root_is_inherited_by_all_discs(service):
     (source/'cover.jpg').write_bytes(image());job(service,sources=source)
     finished=until_terminal(service);assert finished['stage']=='completed',finished
     outputs=list(Path(cfg['paths']['library']).rglob('*.flac'));assert len(outputs)==2 and all(FLAC(p).pictures for p in outputs)
+
+def test_real_gazelle_empty_shape_confirms_no_resource_without_pagination():
+    from musicops.providers.pt_readonly import PTReadOnlyProvider
+    for site in ('dicmusic','orpheus','redacted'):
+        host=HOSTS[site];p=PTReadOnlyProvider(site,{'base_url':'https://'+host,'credential_ref':'vault://test'},FakeTransport([Response(200,b'{"status":"success","response":{"results":[]}}')]),lambda *a:json.dumps([{'domain':host,'path':'/','name':'session','value':'virtual'}]))
+        result=p.search('no matching album');assert result['status']=='NO_RESOURCE' and result['search_complete'] and not result['candidates']

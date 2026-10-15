@@ -72,6 +72,12 @@ def apply_tag_changes(copy_path, changes) -> dict:
         else:
             if values: obj.tags[field]=values
             elif field in obj.tags: del obj.tags[field]
+            if field in ('discnumber','tracknumber') and values and '/' in values[0]:
+                total=values[0].split('/',1)[1]
+                # Roon also reads these legacy Vorbis total fields. Keep both
+                # aliases consistent when normalizing a complete multi-disc set.
+                if total.isdigit():
+                    for alias in (('totaldiscs','disctotal') if field=='discnumber' else ('totaltracks','tracktotal')):obj.tags[alias]=[total]
     obj.save()
     readback = read_tag_fields(path)
     for field,value in changes.items():

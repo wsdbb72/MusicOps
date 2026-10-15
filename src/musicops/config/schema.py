@@ -11,8 +11,8 @@ def default_config(base,offline=True):
     tool_roots=[Path(getattr(sys,'_MEIPASS',Path(__file__).resolve().parents[3]))/'tools',Path(sys.executable).parent/'tools']
     paths['tools']={key:next((str(p/(key+'.exe')) for p in tool_roots if (p/(key+'.exe')).is_file()),shutil.which(key) or '') for key in ('ffmpeg','ffprobe')}
     return dict(schema_version=1,offline=offline,paths=paths,playlist_ids=[],
-      providers={name:dict(enabled=bool(offline or name=='netease'),base_url=url,credential_ref='',search_language='auto',concurrency=1,timeout=15,rules_verified=False) for name,url in [('netease','https://music.163.com'),('dicmusic','https://dicmusic.com'),('open.cd','https://www.open.cd'),('orpheus','https://orpheus.network')]},
-      token_budget={'dicmusic':3,'orpheus':3,'safety_margin':1,'balance_ttl':300},
+      providers={name:dict(enabled=bool(offline and name!='redacted' or name=='netease'),base_url=url,credential_ref='',search_language='auto',concurrency=1,timeout=15,rules_verified=False) for name,url in [('netease','https://music.163.com'),('dicmusic','https://dicmusic.com'),('open.cd','https://www.open.cd'),('orpheus','https://orpheus.network'),('redacted','https://redacted.sh')]},
+      token_budget={'dicmusic':3,'orpheus':3,'redacted':3,'safety_margin':1,'balance_ttl':300},
       qbt=dict(base_url='http://127.0.0.1:8085',credential_ref='vault://qbt/local/credentials',category='MusicOps',tag_prefix='musicops-',poll_seconds=5,auto_tmm=False),
       lyrics=dict(primary=dict(base_url='https://lyrics.example.invalid',lyrics_path='/lyrics',candidates_path='/jsonapi',cover_path='/cover',auth_mode='raw',auth_header='Authorization',auth_secret_ref='vault://lyrics/default/authorization'),direct_backup=dict(base_url='http://backup.example.invalid',enabled=False,auth_secret_ref='vault://lyrics/default/authorization'),public_fallback=dict(enabled=False,lyrics_url='https://api.lrc.cx/lyrics',cover_url='https://api.lrc.cx/cover',auth_mode='none'),fallback_on_auth_error=False,write_mode='sidecar',overwrite_existing='review',connect_timeout=3,read_timeout=12,max_attempts=2,total_budget=60,concurrency=1,min_cover_side=300,max_response_bytes=10_000_000,cache_ttl=86400,negative_ttl=86400),
       ai=dict(enabled=False,protocol='responses',base_url='https://ai.example.invalid/v1',model='',auth_secret_ref='vault://ai/default/key',timeout=60,max_output_tokens=2048,temperature=0.2,structured_outputs=True,allow_plan_only=True),
@@ -24,6 +24,7 @@ def default_config(base,offline=True):
       scheduler=dict(enabled=False,mode='report',timezone='Asia/Shanghai',playlist_time='06:30',health_weekday=6,health_time='07:00',missed='report_once',notify='meaningful_changes'),
       worker=dict(concurrency=1,keep_background=True,decode_timeout=60),
       netease=dict(batch_size=150,timeout=15,max_attempts=2,credential_ref='',strip_layers=['VipSongsDownload']),
+      workflow=dict(setup_done=False,source_order=['open.cd','dicmusic','orpheus','redacted'],free_only=True,fl_per_batch=3,max_albums=50,netease_fallback=True,netease_api_url='',netease_downloader='',netease_download_args=[],netease_import_dir='',backup_days=7,prefer_24bit=True),
       music_servers=dict(roon=dict(enabled=False,library='',watched_folders=[],credential_ref='',client='Roon',host='127.0.0.1',port=9330,timeout=8),navidrome=dict(enabled=False,url='',username='',password_ref='',library='')))
 
 def upgrade_config(values,base):
@@ -114,6 +115,15 @@ def validate_config(values):
     bounded(values['qbt'],'poll_seconds',1,300,'qBittorrent轮询间隔')
     bounded(values['worker'],'concurrency',1,1,'后台并发')
     bounded(values['worker'],'decode_timeout',1,3600,'解码超时')
+    flow=values['workflow']
+    for key,low,high in [('fl_per_batch',0,100),('max_albums',1,500),('backup_days',1,365)]:bounded(flow,key,low,high,'工作流 '+key)
+    if set(flow['source_order'])!={'open.cd','dicmusic','orpheus','redacted'} or len(flow['source_order'])!=4:raise ValueError('资源站顺序必须包含四个不同站点')
+    if flow['netease_api_url']:
+        u=clean_url(flow['netease_api_url'],'网易云 API',https=False)
+        if u.scheme=='http' and u.hostname not in ('localhost','127.0.0.1','::1'):raise ValueError('远程网易云 API 请使用 HTTPS')
+    for key in ('netease_import_dir','netease_downloader'):
+        if flow[key] and not Path(flow[key]).is_absolute():raise ValueError('网易云下载目录和程序需要完整路径')
+    if not flow['free_only']:raise ValueError('仅支持明确免费的站点下载')
     for server in values['music_servers'].values():
         if server.get('library') and not Path(server['library']).is_absolute():raise ValueError('音乐服务器目录须为绝对路径')
         if server.get('enabled') and not server.get('library'):raise ValueError('已启用音乐服务器须填写音乐目录')
@@ -156,11 +166,13 @@ class ConfigManager:
             fresh=copy.deepcopy(values)
             if old:
                 for name,provider in fresh['providers'].items():
-                    if provider['base_url']!=old['values']['providers'][name]['base_url']: provider['credential_ref']=''; provider['rules_verified']=False
+                    previous=old['values']['providers'].get(name)
+                    if previous and provider['base_url']!=previous['base_url']: provider['credential_ref']=''; provider['rules_verified']=False
                 if fresh['lyrics']['primary']['base_url']!=old['values']['lyrics']['primary']['base_url']: fresh['lyrics']['primary']['auth_secret_ref']=''
                 if fresh['lyrics']['direct_backup']['base_url']!=old['values']['lyrics']['direct_backup']['base_url']: fresh['lyrics']['direct_backup']['auth_secret_ref']=''
                 if fresh['qbt']['base_url']!=old['values']['qbt']['base_url']:fresh['qbt']['credential_ref']=''
                 if fresh.get('ai') and old['values'].get('ai') and fresh['ai']['base_url']!=old['values']['ai']['base_url']:fresh['ai']['auth_secret_ref']=''
+                if fresh['music_servers']['navidrome']['url']!=old['values']['music_servers']['navidrome']['url']:fresh['music_servers']['navidrome']['password_ref']=''
             validate_config(fresh)
             refs=[]
             def walk(x):

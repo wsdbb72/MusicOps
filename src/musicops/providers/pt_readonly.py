@@ -7,7 +7,7 @@ from urllib.parse import urlsplit,parse_qs
 from musicops.clients.http import HttpError,PolicyBlocked
 from musicops.clients.vault import cookie_header
 
-HOSTS={'dicmusic':'dicmusic.com','orpheus':'orpheus.network','open.cd':'www.open.cd'}
+HOSTS={'dicmusic':'dicmusic.com','orpheus':'orpheus.network','open.cd':'www.open.cd','redacted':'redacted.sh'}
 
 def positive_id(value):
     if not re.fullmatch(r'[1-9][0-9]*',str(value)): raise ValueError('资源ID无效')
@@ -57,6 +57,7 @@ class PTReadOnlyProvider:
     def _get(self,path,params=None):
         # Explicit endpoint and action allowlist: a GET alone does not prove safety.
         allowed=(path=='/torrents.php' and self.site=='open.cd' and set(params or {})<= {'search','search_area','search_mode'}) or (path=='/ajax.php' and self.site!='open.cd' and (params or {}).get('action') in ('index','browse') and set(params or {})<= {'action','searchstr','page'})
+        if getattr(self,'_download_contract',False):allowed=allowed or self._contract_allows(path,params or {})
         if not allowed:raise PolicyBlocked('端点不在只读白名单')
         if self._blocked_until.get(self.site,0)>time.monotonic():raise HttpError('RATE_LIMITED','站点仍在Retry-After等待期')
         ref=self.config.get('credential_ref','')
@@ -82,6 +83,8 @@ class PTReadOnlyProvider:
             if actual.scheme!='https' or actual.hostname!=self.host or actual.port not in (None,443) or actual.path!=path:raise HttpError('ACCESS_BLOCKED','响应来源或路径改变')
         if 300<=r.status_code<400:
             location=urlsplit(next((v for k,v in r.headers.items() if k.lower()=='location'),''))
+            if getattr(self,'_download_contract',False) and self.site=='open.cd' and path=='/details.php' and location.hostname in (None,self.host) and location.scheme in ('','https') and location.path.lstrip('/')=='plugin_details.php' and parse_qs(location.query)=={'id':[str((params or {}).get('id'))]}:
+                return self._get('/plugin_details.php',{'id':str(params['id'])})
             login=location.path=='/login.php' and location.hostname in (None,self.host)
             raise HttpError('AUTH_FAILED' if login else 'ACCESS_BLOCKED','重定向未转发Cookie；请确认登录态')
         if r.status_code in (401,403):raise HttpError('AUTH_FAILED','站点拒绝鉴权')
@@ -123,7 +126,7 @@ class PTReadOnlyProvider:
                 if not parser.rows and not re.search(r'(没有种子|没有找到|沒有種子|没有匹配|no torrents|no results|nothing found)',text,re.I):raise ValueError('无法确认空结果结构')
                 candidates=[self._nexus(row) for row in parser.rows]
                 unique={c['candidate_id']:c for c in candidates};candidates=list(unique.values())
-                page=1;pages=None
+                page=1;pages=1 if not candidates else None
             else:
                 data=self._gazelle(self._get('/ajax.php',{'action':'browse','searchstr':query.strip(),'page':'1'}))
                 if not isinstance(data.get('results'),list):raise ValueError('缺少results数组')
@@ -170,6 +173,10 @@ class PTReadOnlyProvider:
         c=self._base_candidate(row['identity']['id'],row['identity']['title'],[])
         visible=row['text'];size=re.search(r'([0-9.]+)\s*(TiB|GiB|MiB|KiB|TB|GB|MB|KB)',visible,re.I)
         c.update(release={'complete_tracklist':False,'edition':'unknown'},media={'size_display':size.group(0) if size else None},seeders=None)
+        fmt=re.search(r'\b(FLAC|ALAC|MP3|AAC|WAV|DSD)\b',c['title'],re.I)
+        if fmt:c['media']['format']=fmt.group(1).upper()
+        bits=re.search(r'\b(16|24)\s*[- ]?\s*bit\b',c['title'],re.I)
+        if bits:c['media']['encoding']=bits.group(1)+'bit Lossless'
         return c
     def _failure(self,exc):
         error=getattr(exc,'error_class','PARSE_ERROR' if isinstance(exc,(ValueError,TypeError,KeyError)) else 'NETWORK_ERROR')

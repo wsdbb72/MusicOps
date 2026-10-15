@@ -6,7 +6,7 @@
 [Setup]
 AppId=MusicOps.Desktop
 AppName=MusicOps
-AppVersion=0.2.0
+AppVersion=0.3.0
 AppPublisher=wsdbb72
 AppPublisherURL=https://github.com/wsdbb72/MusicOps
 AppSupportURL=https://github.com/wsdbb72/MusicOps/issues
@@ -18,13 +18,13 @@ ArchitecturesInstallIn64BitMode=x64compatible
 MinVersion=10.0
 WizardStyle=modern
 DisableProgramGroupPage=yes
-OutputBaseFilename=MusicOps-0.2.0-Setup
+OutputBaseFilename=MusicOps-0.3.0-Setup
 Compression=lzma2
 SolidCompression=yes
 CloseApplications=no
 RestartApplications=no
 UninstallDisplayIcon={app}\MusicOps.exe
-VersionInfoVersion=0.2.0.0
+VersionInfoVersion=0.3.0.0
 VersionInfoDescription=MusicOps Windows Installer
 
 [Languages]
@@ -48,7 +48,7 @@ Source: "{#BundleDir}\启动说明.txt"; DestDir: "{app}"; Flags: ignoreversion
 
 [Icons]
 Name: "{group}\MusicOps"; Filename: "{app}\MusicOps.exe"; Parameters: "--base ""{app}\profile"""; WorkingDir: "{app}"
-Name: "{autodesktop}\MusicOps 正式版"; Filename: "{app}\MusicOps.exe"; Parameters: "--base ""{app}\profile"""; WorkingDir: "{app}"; Tasks: desktopicon
+Name: "{autodesktop}\MusicOps"; Filename: "{app}\MusicOps.exe"; Parameters: "--base ""{app}\profile"""; WorkingDir: "{app}"; Tasks: desktopicon
 
 [Run]
 Filename: "{app}\MusicOps.exe"; Parameters: "--base ""{app}\profile"""; Description: "{cm:LaunchProgram,MusicOps}"; Flags: nowait postinstall skipifsilent

@@ -13,8 +13,9 @@ from musicops.worker.lock import WriterLock
 from musicops.app.service import AppService
 from musicops.clients.http import redact
 
-READ_COMMANDS = {'attach', 'get_status', 'get_task', 'list_tasks', 'get_playlist_targets', 'list_library_files', 'events', 'parse_playlist'}
+READ_COMMANDS = {'attach', 'get_status', 'get_task', 'list_tasks', 'get_playlist_targets', 'list_library_files', 'events', 'parse_playlist','list_workflows','get_workflow'}
 QUEUED_COMMANDS = {'demo', 'index_library', 'compare', 'search', 'resources', 'prepare_fill', 'prepare_resource', 'prepare_repair', 'prepare_dedup', 'submit_plan', 'request_rollback', 'export_report', 'refresh_playlist', 'submit_download', 'recover', 'pt_preflight', 'qbt_preflight', 'ai_analyze', 'ai_plan', 'ai_test', 'lyrics_preflight','identify_metadata','resolve_metadata','accept_metadata','validate_selected_file','roon_preflight'}
+QUEUED_COMMANDS.update({'start_workflow','advance_workflows','restore_workflow'})
 
 
 def request_signature(command, payload, key):

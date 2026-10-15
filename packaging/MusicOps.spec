@@ -8,6 +8,7 @@ pyside_binaries=[]
 pyside_hidden=[]
 common_hidden=['musicops.gui.main','musicops.worker.server','musicops.app.service','musicops.providers.lrcapi','musicops.providers.netease','musicops.providers.pt','musicops.providers.workflow','musicops.media.ncm','musicops.media.tags','musicops.media.resources','musicops.media.validation','musicops.library.index','musicops.library.transactions','mutagen.flac','mutagen.wave','mutagen.mp3','mutagen.mp4','mutagen.oggvorbis','mutagen.oggopus','PIL.Image','PIL.JpegImagePlugin','PIL.PngImagePlugin','PIL.WebPImagePlugin']
 common_hidden+=['musicops.providers.ai','musicops.providers.pt_readonly','musicops.providers.netease_readonly']
+common_hidden+=['musicops.gui.workbench','musicops.app.setup','musicops.app.pipeline','musicops.providers.pt_download','musicops.providers.netease_download','musicops.providers.cover_download','musicops.clients.qbt_live','musicops.clients.navidrome']
 common_hidden+=['musicops.providers.catalog','musicops.clients.roon','musicops.startup']
 gui=Analysis([str(root/'packaging'/'gui_entry.py')],pathex=[str(root/'src')],binaries=pyside_binaries,datas=pyside_data,hiddenimports=pyside_hidden+common_hidden,hookspath=[],runtime_hooks=[],excludes=[],noarchive=False)
 worker=Analysis([str(root/'packaging'/'worker_entry.py')],pathex=[str(root/'src')],binaries=[],datas=[],hiddenimports=common_hidden,hookspath=[],runtime_hooks=[],excludes=[],noarchive=False)

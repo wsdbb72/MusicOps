@@ -9,7 +9,7 @@ from PySide6.QtWidgets import QApplication, QPushButton
 
 from musicops import __version__
 from musicops.config.schema import default_config
-from musicops.gui.main import MainWindow, PAGE_NAMES
+from legacy_gui import MainWindow, PAGE_NAMES
 
 
 @pytest.fixture(scope='module')
@@ -118,7 +118,7 @@ def test_selected_playlist_query_keeps_target_identity_and_requires_detail_befor
 
 def test_catalog_links_allow_only_official_https_sources_and_do_not_open_automatically(app, tmp_path, monkeypatch):
     window, client = window_for(app, tmp_path)
-    import musicops.gui.main as gui
+    import legacy_gui as gui
     opened = []
     monkeypatch.setattr(gui.QDesktopServices, 'openUrl', lambda url: opened.append(url.toString()))
     window.catalog_title.setText('Song');window.findChild(QPushButton, 'identify_metadata').click();drain(app, window)
@@ -136,7 +136,7 @@ def test_catalog_links_allow_only_official_https_sources_and_do_not_open_automat
 def test_independent_query_cannot_change_target_playlist_and_demo_uses_separate_profile(app, tmp_path, monkeypatch):
     window, client = window_for(app, tmp_path)
     client.config['values']['offline'] = False;window._status(client.call('get_status', {}))
-    import musicops.gui.main as gui
+    import legacy_gui as gui
     processes = []
     monkeypatch.setattr(gui.subprocess, 'Popen', lambda command, **kwargs: processes.append((command, kwargs)))
     window.findChild(QPushButton, 'demo').click()

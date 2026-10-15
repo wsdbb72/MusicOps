@@ -25,13 +25,17 @@ class AppService:
         self.active=None; self.thread=threading.Thread(target=self._loop,daemon=True,name='MusicOpsQueue')
         for task in self.store.list('tasks'):
             if task['state'] in ('running','paused'): task.update(state='recovery_required',error='上次进程中断；先核对事务/请求，不能盲重试'); self.store.put('tasks',task['task_id'],task)
+        from musicops.app.pipeline import Workflows
+        self.workflows=Workflows(self);self.workflows.recover();self._last_workflow_tick=0
         self.thread.start()
     def _safe_path(self,value):
         raw=Path(value).absolute()
         for parent in [raw,*raw.parents]:
             if parent.exists() and (parent.is_symlink() or getattr(parent,'is_junction',lambda:False)()):raise PolicyBlocked('拒绝重解析路径')
         p=raw.resolve()
-        if not p.is_relative_to(self.base): raise PolicyBlocked('离线版只操作当前档案内合成样本；现场音乐路径尚待授权与验收')
+        cfg=self.config.current()['values']
+        roots=[self.base] if cfg['offline'] else [self.base,*[Path(cfg['paths'][key]).resolve() for key in ('library','source','work','backup','quarantine','reports')]]
+        if not any(p.is_relative_to(root) for root in roots): raise PolicyBlocked('文件不属于设置中的音乐库或工作目录')
         for parent in [p,*p.parents]:
             if parent==self.base.parent: break
             if parent.exists() and (parent.is_symlink() or getattr(parent,'is_junction',lambda:False)()): raise PolicyBlocked('拒绝重解析路径')
@@ -40,6 +44,18 @@ class AppService:
         with self.mutex:return self._dispatch(command,payload,request_id)
     def _dispatch(self,command,payload=None,request_id=None):
         payload=payload or {}
+        if command=='save_setup':
+            from musicops.app.setup import save_setup
+            return save_setup(self,payload)
+        if command=='list_workflows':return self.workflows.list(payload.get('offset',0))
+        if command=='get_workflow':
+            job=self.store.get('evidence','workflow:'+payload['job_id'])
+            if not job:raise ValueError('任务不存在')
+            public={k:job.get(k) for k in ('job_id','scene','stage','message','detail','review_kind','choices','lookup_links','catalog_choices')}
+            public['prepared']=[{**{k:r.get(k) for k in ('raw_title','artists','album')},'track':(r.get('tags',{}).get('tracknumber') or [r.get('track','')])[0],'disc':(r.get('tags',{}).get('discnumber') or [r.get('disc','1')])[0]} for r in job.get('prepared',[]) or job.get('targets',[]) or job.get('old_files',[])]
+            return {'job':public}
+        if command=='cancel_workflow':return self.workflows.cancel(payload['job_id'])
+        if command=='review_workflow':return self.workflows.review(payload['job_id'],payload.get('choice'),payload.get('metadata'),payload.get('cover_path'))
         if command in ('enable_online','enable_demo'):
             current=self.config.current();values=copy.deepcopy(current['values'])
             if command=='enable_demo' and not values['offline'] and self.base.name!='demo-profile':raise PolicyBlocked('演示使用独立demo-profile档案，不切换现有正式档案')
@@ -53,10 +69,11 @@ class AppService:
             return {'config':current,'mode':'demo' if desired else 'online','network_used':False}
         if command in ('attach','get_status'):
             if payload.get('compact'):
-                with self.store.connection() as c:rows=c.execute("SELECT json_remove(payload,'$.args','$.config_snapshot','$.result') FROM tasks ORDER BY updated_at,id").fetchall()
+                with self.store.connection() as c:rows=c.execute("SELECT json_remove(payload,'$.args','$.config_snapshot','$.result') FROM tasks ORDER BY updated_at DESC,id LIMIT 200").fetchall()
                 tasks=[json.loads(r[0]) for r in rows]
             else:tasks=self.store.list('tasks')
-            counts=dict(collections.Counter(x['state'] for x in tasks));config=self.config.current();offline=config['values']['offline']
+            with self.store.connection() as c:counts={r[0]:r[1] for r in c.execute("SELECT json_extract(payload,'$.state'),COUNT(*) FROM tasks GROUP BY json_extract(payload,'$.state')")}
+            config=self.config.current();offline=config['values']['offline']
             with self.store.connection() as c:
                 file_count=c.execute('SELECT COUNT(*) FROM library_files').fetchone()[0]
                 file_rows=c.execute('SELECT payload FROM library_files ORDER BY id LIMIT ?',(500 if payload.get('compact') else 2000,)).fetchall()
@@ -138,7 +155,7 @@ class AppService:
         if command=='shutdown_worker':
             if self.active: raise RuntimeError('当前任务尚未到安全退出点，请先暂停流水线')
             self.stop.set(); return {'stopped':True,'seeding_unchanged':True}
-        if command in ('demo','index_library','compare','search','resources','prepare_fill','prepare_resource','prepare_repair','prepare_dedup','submit_plan','request_rollback','export_report','refresh_playlist','submit_download','recover','pt_preflight','qbt_preflight','ai_analyze','ai_plan','ai_test','lyrics_preflight','identify_metadata','resolve_metadata','accept_metadata','validate_selected_file','roon_preflight'):
+        if command in ('restore_workflow','start_workflow','advance_workflows','demo','index_library','compare','search','resources','prepare_fill','prepare_resource','prepare_repair','prepare_dedup','submit_plan','request_rollback','export_report','refresh_playlist','submit_download','recover','pt_preflight','qbt_preflight','ai_analyze','ai_plan','ai_test','lyrics_preflight','identify_metadata','resolve_metadata','accept_metadata','validate_selected_file','roon_preflight'):
             return self.enqueue(command,payload,request_id=request_id)
         raise ValueError('UNKNOWN_COMMAND:'+command)
     def enqueue(self,command,args,request_id=None):
@@ -152,7 +169,11 @@ class AppService:
             with self.mutex:
                 if self.paused: continue
                 with self.store.connection() as c:row=c.execute("SELECT payload FROM tasks WHERE json_extract(payload,'$.state')='queued' ORDER BY updated_at,id LIMIT 1").fetchone()
-                if row is None: continue
+                if row is None:
+                    if time.monotonic()-self._last_workflow_tick<3:continue
+                    self._last_workflow_tick=time.monotonic()
+                    if self.workflows.next_job():self.enqueue('advance_workflows',{})
+                    continue
                 task=json.loads(row[0]); self.active=task['task_id']; task.update(state='running',started_at=utcnow()); self.store.put('tasks',self.active,task)
             try:
                 self._checkpoint('before_execute')
@@ -196,6 +217,9 @@ class AppService:
         for key in ('library','source','work','backup','quarantine'): self._safe_path(cfg['paths'][key])
         return TransactionEngine(self.store,cfg['paths'],validator=self._validator(cfg))
     def _execute(self,command,args,cfg):
+        if command=='start_workflow':return self.workflows.start(args,cfg)
+        if command=='advance_workflows':return self.workflows.advance()
+        if command=='restore_workflow':return self.workflows.restore(args['job_id'])
         if command in ('identify_metadata','resolve_metadata','accept_metadata'):
             if cfg['offline']:raise PolicyBlocked('请启用正式联网模式后进行在线识别')
             return self._catalog_command(command,args,cfg)
@@ -441,7 +465,7 @@ class AppService:
     def _search(self,args,cfg):
         if not cfg['offline']:
             outcomes={};candidates=[]
-            for site in ('dicmusic','orpheus','open.cd'):
+            for site in ('dicmusic','orpheus','open.cd','redacted'):
                 if not cfg['providers'][site]['enabled']:outcomes[site]={'status':'DISABLED'};continue
                 self._checkpoint('search_'+site)
                 outcome=self._real_pt(site,cfg).search(args.get('query',''));outcomes[site]={k:v for k,v in outcome.items() if k!='candidates'};outcomes[site]['candidate_count']=len(outcome.get('candidates',[]))
@@ -566,6 +590,11 @@ class AppService:
         from musicops.providers.netease_readonly import NetEaseReadOnlyProvider
         from musicops.clients.http import SafeHttpTransport
         ids=([args['playlist_id']] if args.get('playlist_id') else args.get('playlist_ids') or cfg['playlist_ids'])
+        if args.get('playlist_input'):
+            from musicops.providers.netease import parse_playlist_input
+            parsed=parse_playlist_input(args['playlist_input'])
+            if parsed['status']!='OK':raise ValueError('请输入有效的网易云歌单 ID 或链接')
+            ids=parsed['playlist_ids']
         if not ids:raise PolicyBlocked('请先保存真实歌单ID或链接')
         provider=NetEaseReadOnlyProvider(SafeHttpTransport(['music.163.com'],offline=False),cfg['providers']['netease'],self.vault.get,self._checkpoint)
         summaries=[];targets={};all_complete=True;complete_ids=set()

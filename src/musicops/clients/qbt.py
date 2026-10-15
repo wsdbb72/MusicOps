@@ -70,7 +70,8 @@ class QbtClient:
     def capabilities(self):
         supported = self.version_tuple is not None and ((4, 6, 0) <= self.version_tuple < (5, 0, 0) or (5, 0, 0) <= self.version_tuple <= (5, 2, 2))
         fake = getattr(self.transport, "is_fake", False)
-        return _result("OK" if fake and supported and self.auto_tmm is False else "POLICY_BLOCKED", production_verified=False,
+        verified = getattr(self.transport, "authenticated_qbt", False)
+        return _result("OK" if (fake or verified) and supported and self.auto_tmm is False else "POLICY_BLOCKED", production_verified=verified,
                        initial_stop_parameter="stopped" if self.version_tuple and self.version_tuple >= (5, 0, 0) else "paused",
                        reason="实际应用/WebAPI版本、自动管理与路径待授权预检")
 

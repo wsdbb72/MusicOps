@@ -7,7 +7,7 @@ import pytest
 from PySide6.QtCore import QTimer
 from PySide6.QtWidgets import QApplication,QPushButton
 from musicops.config.schema import default_config
-from musicops.gui.main import MainWindow,PAGE_NAMES
+from legacy_gui import MainWindow,PAGE_NAMES
 
 @pytest.fixture(scope='module')
 def app():return QApplication.instance() or QApplication([])

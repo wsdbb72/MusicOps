@@ -63,6 +63,28 @@ def _keybox(key):
         box[i], box[j] = box[j], box[i]
     return box
 
+def ncm_metadata(path):
+    """Read only the bounded encrypted metadata header for import identity."""
+    path=Path(path);reject_reparse_chain(path)
+    with path.open('rb') as stream:
+        def take(size):
+            data=stream.read(size)
+            if len(data)!=size:raise ValueError('NCM header is truncated')
+            return data
+        def sized(limit):
+            size=struct.unpack('<I',take(4))[0]
+            if size>limit:raise ValueError('NCM header is too large')
+            return take(size)
+        if take(8)!=b'CTENFDAM':raise ValueError('Invalid NCM header')
+        take(2);sized(1024*1024);raw=sized(16*1024*1024)
+        decoded=bytes(x^0x63 for x in raw);prefix=b"163 key(Don't modify):"
+        if not decoded.startswith(prefix):raise ValueError('Invalid NCM metadata')
+        plain=_aes_decrypt(base64.b64decode(decoded[len(prefix):],validate=True),META_KEY)
+        if not plain.startswith(b'music:'):raise ValueError('Invalid NCM metadata')
+        result=json.loads(plain[6:])
+        if not isinstance(result,dict):raise ValueError('Invalid NCM metadata')
+        return result
+
 
 def _crypt_payload(data, box, offset=0):
     output = bytearray(len(data))

@@ -1,9 +1,11 @@
-"""Stable production profile selection; demonstrations use a separate profile."""
+"""Stable profile selection for the installed or portable desktop application."""
 from pathlib import Path
 import os,sys,json,tempfile
 
 def default_profile(executable=None,local_appdata=None):
     root=Path(executable or sys.executable).resolve().parent
+    if (root/'profile').is_dir() and (executable or getattr(sys,'frozen',False)):
+        return root/'profile'
     for parent in (root,*list(root.parents)[:3]):
         profile=parent/'profile'
         if (parent/'pyproject.toml').is_file() and (profile/'state/musicops.sqlite').is_file():return profile

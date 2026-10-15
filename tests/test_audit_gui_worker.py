@@ -10,7 +10,7 @@ import pytest
 from PySide6.QtWidgets import QApplication, QPushButton
 
 from musicops.config.schema import default_config
-from musicops.gui.main import MainWindow
+from legacy_gui import MainWindow
 from musicops.state.store import StateStore
 from musicops.worker.client import WorkerClient, WorkerRequestError, auth_key, pipe_address, MAX_REQUEST_BYTES
 from musicops.worker.lock import WriterLock

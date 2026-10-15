@@ -1,54 +1,50 @@
-# MusicOps 0.2.0
+# MusicOps 0.3.0
 
-中文 Windows 桌面音乐库管理工具。使用独立后台任务、SQLite 状态和可复核的执行计划，连接音乐目录、网易云歌单、音乐资料网站、歌词服务、PT 站点和 qBittorrent。
-
-在线工作台支持真实服务预检、歌单详情、音乐目录的只读标签索引、资源检索和歌曲／专辑身份候选。MusicBrainz、Discogs 提供两条结构化 API 查询适配器；Discogs 需要使用者自行配置 Token。AllMusic、Rate Your Music、Album of the Year、VGMdb 提供四个官网人工查证入口。服务限流、鉴权或网络异常会保留相应失败状态。名称、艺人、发行版本和时长仍需交叉核对；网站候选不会直接改写文件或代替完整音频验证。
-
-在线模式是新档案的默认工作方式。离线演示使用合成音频，供开发和流程验证。真实下载、免费令牌操作、音乐文件发布／隔离以及 Roon 客户端验收应在完成相应预检和确认具体计划后执行；当前在线界面只开放已实现的服务能力。
+中文 Windows 音乐库管理工具，围绕歌单入库、资料补全和音质升级组织操作。独立后台保存任务进度，关闭窗口后可以继续下载和整理。
 
 ## 安装与启动
 
-Windows 64 位用户可下载 [EXE 安装包](https://github.com/wsdbb72/MusicOps/releases/download/v0.2.0/MusicOps-0.2.0-Setup.exe)，安装后使用桌面入口。运行依赖已随包提供，无需安装 Python。私人档案保存在 `profile`，更新和卸载均会保留它。
+下载 [Windows EXE 安装包](https://github.com/wsdbb72/MusicOps/releases/download/v0.3.0/MusicOps-0.3.0-Setup.exe)，安装后打开 MusicOps。也可以解压 Release 中的 Windows ZIP，直接运行 MusicOps.exe；无需安装 Python。
 
-也可下载 Release 中的 Windows ZIP，解压后运行 `MusicOps.exe`。以下命令仅用于从源码启动，需要 Python 3.12 或以上版本。
+首次启动会打开可跳过的设置向导。选择音乐库，然后填写已开通的站点或服务。没有账号的服务保持关闭即可；之后通过“连接与设置”重新打开向导。旧凭据留空会保留，保存后无需重新填写。
+
+## 三个工作流
+
+- **歌单入库**：解析网易云歌单，选择曲目，检查音乐库，按专辑去重；搜索 OpenCD、DicMusic、Orpheus、Redacted，交给 qBittorrent 下载。已启用站点均没有匹配资源时，回退内置网易云下载器或接入客户端下载目录；NCM 在工作副本中解密。整理标签、封面、同名同步歌词后，完整解码验证并入库。
+- **资料补全**：检查歌曲、艺人、专辑艺人、封面和同名 .lrc，修正完整多碟专辑的碟号及总碟数。可靠证据自动补齐，缺失或冲突的身份资料在任务中心核对。近期暂无资料的结果会缓存；可以点击“重新查询暂无资料”。
+- **音质升级**：先比较站点公布的格式、位深、采样率和有效码率，再验证实际下载音频。新版曲目、完整时长、音质和发行身份通过后，旧库副本移到音乐库外的恢复目录，只保留新版供音乐服务器读取。做种源保持原样。
+
+OpenCD 使用登录 Cookie 直接获取种子；Gazelle 站点解析实际 FL 按钮，受每批 FL 预算限制。请求前保存意图，请求后核对免费状态与种子身份。免费状态未知、余额不明或请求超时都不会自动重复消费令牌或启动收费下载。Redacted 使用相同 Gazelle 适配层，未配置账号时不访问。
+
+歌词接口和网易云官方歌曲 ID 可提供同步 .lrc。封面来自已有专辑资源、确定的网易云专辑 ID 或 MusicBrainz 发行 ID；无法确定时允许用户选择已核对封面或明确跳过。歌曲不可完整下载、只有试听或缺少权限时会保留具体状态。
+
+MusicBrainz、Discogs 提供结构化资料查询；Discogs Token 可在向导中填写。AllMusic、Rate Your Music、Album of the Year、VGMdb 提供官网查证入口。相同标题不代表相同录音或发行，无损文件压缩后码率更高也不代表音质更高。
+
+## 连接与凭据
+
+PT 站点导入 Cookie-Editor 导出的 JSON 文件或粘贴 JSON；qBittorrent 填 WebUI 地址、用户名和密码。歌词鉴权填写服务提供的完整 Authorization 原文。可选的 AI 服务填写地址、模型和 API Key；AI 仅帮助解释问题，不决定删除或发行身份。Navidrome 填服务地址及有扫描权限的账号；Roon 在设置 → 存储中监听同一个音乐库目录。
+
+凭据通过当前 Windows 账户的 DPAPI 加密，并绑定到对应域名。仓库、发行包和可导出配置不包含密码、Cookie、个人数据库或私有服务地址。更新和卸载保留私人 profile。
+
+下载及整理均位于监听目录外。整张新发行在同卷工作区完成验证后一次移入音乐库；旧版替换保留日志和恢复副本。Roon 通过监听目录自动发现新文件；Navidrome 可在发布后触发扫描。连接成功或扫描请求成功不能代替客户端曲目可见性验收。
+
+完整音频验证需要 FFmpeg 和 ffprobe；公开发行包不携带这两个工具，可在向导中指定已安装程序。已有本机工具在更新时保留。
+
+## 开发
+
+需要 Python 3.12 或以上：
 
 ```powershell
 py -3.12 -m venv .venv
 .\.venv\Scripts\python.exe -m pip install -r requirements.lock
 .\.venv\Scripts\python.exe -m pip install -e .
-.\.venv\Scripts\musicops-gui.exe
-```
-
-也可以通过 `--base` 指定独立的本地运行档案。首次启动后，在设置中选择自己的音乐目录和服务地址，再导入或填写对应凭据。应用不会自动下载曲目或修改音乐文件。
-
-设置页支持填写自己的服务地址、音乐目录和媒体工具路径，并管理 PT／网易云 Cookie、qBittorrent 用户名和密码、AI 密钥、歌词鉴权及 Discogs Token。公开示例不会包含使用者的秘密值。
-
-PT Cookie 使用站点导入按钮；可选的网易云登录态使用“自定义凭据”保存 Cookie-Editor JSON，再在网易云来源设置中填写对应引用。公开歌单元数据通常可以直接查询。
-
-```powershell
 .\.venv\Scripts\musicops-gui.exe --base .\profile
-```
-
-凭据由当前 Windows 账户的 DPAPI 加密，并与目标域名绑定。公开仓库不包含凭据、Cookie、个人歌单快照、运行数据库或私有服务地址。运行档案不能直接复制给另一台机器或另一位 Windows 用户作为共享凭据。
-
-## 开发与验证
-
-```powershell
 .\.venv\Scripts\python.exe -m pytest -q
-```
-
-测试默认使用临时目录、虚拟服务和合成媒体。在线音乐目录索引读取文件属性和有限标签，不计算完整音频哈希或执行整库解码；这类结果保持未完成完整验证的状态。
-
-构建 Windows 文件夹包：
-
-```powershell
 pwsh -File packaging/build_windows.ps1 -Python .\.venv\Scripts\python.exe
 ```
 
-FFmpeg／ffprobe 可由使用者自行安装并在设置中指定。该仓库不分发媒体工具二进制；自行分发含第三方工具的包时，应满足对应许可证和源码义务。
+测试使用临时目录、合成音频和虚拟服务；GUI 中不提供演示档案入口。测试保留旧界面快照仅用于历史回归，不进入运行包。
 
-EXE 安装包使用 Inno Setup 7 构建，脚本为 `packaging/MusicOps.iss`。将 `BundleDir` 指向已验证的 Windows 运行目录，并先复制 `packaging/启动说明.txt` 到该目录；安装脚本仅包含明确列出的程序和依赖，不打包运行档案。
+Inno Setup 7 安装脚本为 packaging/MusicOps.iss，仅打包明确列出的运行文件。构建不包含 profile、音乐、种子缓存或凭据。媒体工具如需自行分发，应满足对应许可与源码义务。
 
-基本联网和标签索引不需要 FFmpeg。完整解码与合成媒体测试需要使用者提供工具路径。Roon 预检可核验 Core 连接与历史日志；当前曲目浏览保持 `AUTH_REQUIRED`，没有完成曲目可见性验收。应用没有注册浏览扩展，不要求用户启用不存在的扩展；连接成功或日志记录不能证明曲目已被收录或播放。
-
-更多说明见 [操作说明](docs/用户操作说明.md)、[运行档案与恢复](docs/运维与恢复说明.md) 和 [开发说明](docs/开发与验证.md)。源码采用 [MIT 许可证](LICENSE)。
+详见 [用户操作说明](docs/用户操作说明.md) 与 [恢复说明](docs/运维与恢复说明.md)。源码采用 [MIT 许可证](LICENSE)。

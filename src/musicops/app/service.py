@@ -77,7 +77,7 @@ class AppService:
             with self.store.connection() as c:
                 file_count=c.execute('SELECT COUNT(*) FROM library_files').fetchone()[0]
                 file_rows=c.execute('SELECT payload FROM library_files ORDER BY id LIMIT ?',(500 if payload.get('compact') else 2000,)).fetchall()
-            return dict(schema_version=1,base=str(self.base),offline=offline,paused=self.paused,active=self.active,config=config,tasks=tasks,counts=counts,provider_status={p:('演示数据' if offline else '已启用联网' if config['values']['providers'][p]['enabled'] else '来源已停用') for p in config['values']['providers']},roon=self.store.get('evidence','roon-preflight') or 'pending',next_schedule=self.next_schedule(),secret_refs=self.vault.list_refs(),files=[json.loads(r[0]) for r in file_rows],library_file_count=file_count,library_files_truncated=file_count>len(file_rows),candidates=self.store.list('candidates')[-200:],transactions=self.store.list('transactions'),reviews=self.store.list('match_decisions'))
+            return dict(schema_version=1,base=str(self.base),offline=offline,paused=self.paused,active=self.active,config=config,tasks=tasks,counts=counts,provider_status={p:('连接未配置' if offline else '已启用' if config['values']['providers'][p]['enabled'] else '来源已停用') for p in config['values']['providers']},roon=self.store.get('evidence','roon-preflight') or 'pending',next_schedule=self.next_schedule(),secret_refs=self.vault.list_refs(),files=[json.loads(r[0]) for r in file_rows],library_file_count=file_count,library_files_truncated=file_count>len(file_rows),candidates=self.store.list('candidates')[-200:],transactions=self.store.list('transactions'),reviews=self.store.list('match_decisions'))
         if command=='list_library_files':
             offset=payload.get('offset',0);limit=payload.get('limit',200);query=payload.get('query','')
             if type(offset) is not int or offset<0 or type(limit) is not int or not 1<=limit<=500 or not isinstance(query,str) or len(query)>300:raise ValueError('索引分页参数无效')
@@ -229,10 +229,10 @@ class AppService:
         if command=='advance_workflows':return self.workflows.advance()
         if command=='restore_workflow':return self.workflows.restore(args['job_id'])
         if command in ('identify_metadata','resolve_metadata','accept_metadata'):
-            if cfg['offline']:raise PolicyBlocked('请启用正式联网模式后进行在线识别')
+            if cfg['offline']:raise PolicyBlocked('请完成连接设置后进行在线识别')
             return self._catalog_command(command,args,cfg)
         if command=='roon_preflight':
-            if cfg['offline']:raise PolicyBlocked('请启用正式联网模式后检查Roon')
+            if cfg['offline']:raise PolicyBlocked('请完成连接设置后检查 Roon')
             from musicops.clients.roon import RoonReadOnlyClient,inspect_local_logs
             result=RoonReadOnlyClient(cfg['music_servers']['roon'],checkpoint=self._checkpoint).preflight()
             result['storage_diagnostics']=inspect_local_logs(expected_root=cfg['music_servers']['roon']['library'] or cfg['paths']['library'])
@@ -278,7 +278,7 @@ class AppService:
         if command=='search' and not cfg['offline']:return self._search(args,cfg)
         if command=='refresh_playlist' and not cfg['offline']:return self._refresh_real_playlists(args,cfg)
         if command in ('resources','lyrics_preflight') and not cfg['offline']:return self._real_resources(args,cfg,private_only=command=='lyrics_preflight')
-        if not cfg['offline']:raise PolicyBlocked('正式联网版提供在线识别、只读索引与比对、歌单/PT/歌词封面查询及AI；此操作尚未开放生产文件写入或下载')
+        if not cfg['offline']:raise PolicyBlocked('此旧版命令不支持当前资料目录；请从歌单入库、资料补全或音质升级入口创建任务')
         paths=cfg['paths']
         # Configuration can describe future production paths, but offline execution
         # validates every IO root before any glob, mkdir, media read or copy.

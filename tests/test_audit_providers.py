@@ -171,7 +171,12 @@ def test_audit_pt_retry_after_blocks_next_query_and_unknown_pages_are_partial():
     assert len(transport.requests) == 1
     provider,_ = pt_provider([response({'status':'success','response':{'results':[]}})])
     result = provider.search('Fixture')
-    assert result['status'] == 'NO_RESOURCE' and not result['search_complete']
+    assert result['status'] == 'NO_RESOURCE' and result['search_complete']
+    provider,_ = pt_provider([response({'status':'success','response':{'results':[
+        {'groupId':1,'groupName':'Fixture','artist':'Artist','torrents':[{'torrentId':2}]}
+    ]}})])
+    result = provider.search('Fixture')
+    assert result['status'] == 'OK' and not result['search_complete']
 
 
 def test_audit_pt_bad_torrent_shape_and_nested_html_are_bounded():

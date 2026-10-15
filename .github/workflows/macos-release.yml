@@ -35,7 +35,6 @@ jobs:
     env:
       PYTHONIOENCODING: utf-8
       MACOSX_DEPLOYMENT_TARGET: '15.0'
-      MUSICOPS_KEYCHAIN_PATH: ${{ runner.temp }}/musicops-ci.keychain-db
     steps:
       - name: Check out the exact candidate
         uses: actions/checkout@v7
@@ -56,6 +55,8 @@ jobs:
       - name: Create an isolated unlocked test keychain
         shell: bash
         run: |
+          MUSICOPS_KEYCHAIN_PATH="$RUNNER_TEMP/musicops-ci.keychain-db"
+          printf 'MUSICOPS_KEYCHAIN_PATH=%s\n' "$MUSICOPS_KEYCHAIN_PATH" >> "$GITHUB_ENV"
           TASK_KEYCHAIN_PASSWORD="$(python -c 'import secrets; print(secrets.token_urlsafe(32))')"
           echo "::add-mask::$TASK_KEYCHAIN_PASSWORD"
           security create-keychain -p "$TASK_KEYCHAIN_PASSWORD" "$MUSICOPS_KEYCHAIN_PATH"

@@ -15,6 +15,7 @@ if architecture not in ('arm64','x86_64'):raise ValueError('Unsupported macOS ar
 shared=collect_submodules('musicops')
 data=collect_data_files('PySide6',includes=['Qt/plugins/imageformats/*','Qt/translations/qtbase_zh_CN.qm'])
 data += [(str(root/'src/musicops/assets'),'musicops/assets')]
+data += [(os.environ['MUSICOPS_MAC_LEGAL'],'musicops/legal')]
 
 gui=Analysis([str(root/'packaging/gui_entry.py')],pathex=[str(root/'src')],binaries=[],datas=data,hiddenimports=shared,hookspath=[],runtime_hooks=[],excludes=[],noarchive=False)
 worker=Analysis([str(root/'packaging/worker_entry.py')],pathex=[str(root/'src')],binaries=[],datas=[],hiddenimports=shared,hookspath=[],runtime_hooks=[],excludes=[],noarchive=False)

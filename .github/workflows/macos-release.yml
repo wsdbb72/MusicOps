@@ -105,6 +105,7 @@ jobs:
           name: MusicOps-macOS-${{ matrix.arch }}
           path: |
             dist/macos/MusicOps-*-macOS-*.zip
+            dist/macos/MusicOps-*-macOS-*.pkg
             dist/macos/MusicOps-*-macOS-*.sha256
             dist/macos/MusicOps-*-macOS-*.sha512
             dist/macos/MusicOps-*-macOS-*-build.json
@@ -120,6 +121,7 @@ jobs:
             dist/macos/reports/*.json
             dist/macos/reports/*.xml
             dist/macos/smoke/*window.png
+            dist/macos/installer-smoke/installed-app/*window.png
           if-no-files-found: ignore
           retention-days: 14
       - name: Delete only the temporary test keychain
@@ -168,15 +170,20 @@ jobs:
           architectures = set()
           for path in manifests:
               data = json.loads(path.read_text('utf-8'))
-              if data['version'] != tag[1:] or data['commit'] != os.environ['RELEASE_COMMIT'] or not data['smoke_passed']:
+              if data['version'] != tag[1:] or data['commit'] != os.environ['RELEASE_COMMIT'] or not data['smoke_passed'] or not data['installer_smoke_passed']:
                   raise SystemExit('Release source/version/acceptance mismatch')
               architectures.add(data['architecture'])
-              archive = root / data['archive']
-              for algorithm in ('sha256', 'sha512'):
-                  with archive.open('rb') as stream:
-                      digest = hashlib.file_digest(stream, algorithm).hexdigest()
-                  if digest != data['digests'][algorithm]:
-                      raise SystemExit('Archive digest mismatch')
+              expected = {data['archive'], data['installer']}
+              if set(data['artifacts']) != expected or not data['installer'].endswith('.pkg'):
+                  raise SystemExit('Both ZIP and native installer are required')
+              for name, hashes in data['artifacts'].items():
+                  if pathlib.Path(name).name != name:
+                      raise SystemExit('Invalid artifact path')
+                  for algorithm in ('sha256', 'sha512'):
+                      with (root / name).open('rb') as stream:
+                          digest = hashlib.file_digest(stream, algorithm).hexdigest()
+                      if digest != hashes[algorithm]:
+                          raise SystemExit('Artifact digest mismatch')
           if architectures != {'arm64', 'x86_64'}:
               raise SystemExit('Missing native architecture')
       - name: Wait for the matching release without creating an empty release
@@ -195,6 +202,7 @@ jobs:
         run: |
           gh release upload "$RELEASE_TAG" \
             release-assets/MusicOps-*-macOS-*.zip \
+            release-assets/MusicOps-*-macOS-*.pkg \
             release-assets/MusicOps-*-macOS-*.sha256 \
             release-assets/MusicOps-*-macOS-*.sha512 \
             release-assets/MusicOps-*-macOS-*-build.json \

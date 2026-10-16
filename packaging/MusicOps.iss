@@ -6,7 +6,7 @@
 [Setup]
 AppId=MusicOps.Desktop
 AppName=MusicOps
-AppVersion=0.4.0
+AppVersion=0.4.1
 AppPublisher=wsdbb72
 AppPublisherURL=https://github.com/wsdbb72/MusicOps
 AppSupportURL=https://github.com/wsdbb72/MusicOps/issues
@@ -18,14 +18,14 @@ ArchitecturesInstallIn64BitMode=x64compatible
 MinVersion=10.0
 WizardStyle=modern
 DisableProgramGroupPage=yes
-OutputBaseFilename=MusicOps-0.4.0-Setup
+OutputBaseFilename=MusicOps-0.4.1-Setup
 SetupIconFile={#BundleDir}\_internal\musicops\assets\musicops.ico
 Compression=lzma2
 SolidCompression=yes
 CloseApplications=no
 RestartApplications=no
 UninstallDisplayIcon={app}\MusicOps.exe
-VersionInfoVersion=0.4.0.0
+VersionInfoVersion=0.4.1.0
 VersionInfoDescription=MusicOps Windows Installer
 
 [Languages]

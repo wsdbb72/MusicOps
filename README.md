@@ -48,14 +48,17 @@ MusicOps 把日常音乐库维护收敛为三个入口：把歌单中缺少的�
 | --- | --- | --- |
 | `MusicOps-版本号-Setup.exe` | 推荐，常规安装 | 运行安装包，按提示安装，再打开 MusicOps |
 | `MusicOps-版本号-Windows.zip` | 绿色文件夹版 | 完整解压到可写目录，双击 `MusicOps.exe` |
-| `MusicOps-版本号-macOS-arm64.zip` | Apple Silicon Mac | 解压后打开 `MusicOps.app` |
-| `MusicOps-版本号-macOS-x86_64.zip` | Intel Mac | 解压后打开 `MusicOps.app` |
+| `MusicOps-版本号-macOS-arm64.pkg` | Apple Silicon Mac，推荐 | 双击运行安装向导，安装到“应用程序” |
+| `MusicOps-版本号-macOS-x86_64.pkg` | Intel Mac，推荐 | 双击运行安装向导，安装到“应用程序” |
+| `MusicOps-版本号-macOS-芯片.zip` | Mac 手动安装版 | 解压，将 `MusicOps.app` 拖入“应用程序” |
 | `MusicOps-版本号-source.zip` | 开发用源码 | 普通使用无需下载 |
 | `SHA256SUMS.txt` | 下载完整性核对 | 对照同一 Release 中对应文件的 SHA256 |
 
 Windows 运行环境为 **Windows 10 / 11 64 位**；macOS 构建目标为 **macOS 15 及以上**，分 Apple Silicon `arm64` 与 Intel `x86_64`，不承诺兼容旧系统。桌面发行包无需安装 Python。Windows 绿色版需要保留整个文件夹，尤其是 `_internal`，不能只取出一个 EXE。
 
-macOS ZIP 附带对应 `.sha256`、`.sha512` 和 `-build.json`，由 GitHub Actions 在对应架构机器构建。当前未使用 Developer ID 签名或 Apple 公证，仅有 ad-hoc 完整性签名，Gatekeeper 可能拦截。确认下载来源与校验值后，可按系统提示在 **系统设置 → 隐私与安全** 中选择“仍要打开”；不要关闭系统安全功能。[Apple 官方说明](https://support.apple.com/en-us/102445)。CI 构建、包内自检和真实音乐服务验收分别记录，不将构建成功等同于所有场景实测。
+macOS 的 `.pkg` 是原生安装向导，安装到 `/Applications/MusicOps.app`，无需手动拖放。升级前在“任务中心”点击 **退出应用及后台**；运行中的任务会阻止退出和安装替换。旧版没有此按钮时，确认任务已停止后，在“活动监视器”退出 MusicOps 和 MusicOps-worker 再安装。个人资料和钥匙串凭据保留；安装器不会以管理员身份启动应用。
+
+Mac 安装包和 ZIP 附带对应 `.sha256`、`.sha512` 和 `-build.json`，由 GitHub Actions 在对应架构机器构建并实际安装、重复安装及运行验收。当前 `.app` 仅有 ad-hoc 完整性签名，`.pkg` 未使用 Developer ID Installer 签名，也没有 Apple 公证，Gatekeeper 可能拦截。确认下载来源与校验值后，可按系统提示在 **系统设置 → 隐私与安全** 中选择“仍要打开”；不要关闭系统安全功能。[Apple 官方说明](https://support.apple.com/en-us/102445)。CI 验收不代表所有私人音乐服务均已现场实测。
 
 完整音频验证需要 **FFmpeg 和 ffprobe**。公开包不附带这两个程序，可从 [FFmpeg 官方下载页](https://ffmpeg.org/download.html) 获取适合自己系统的构建，解压后在向导中分别选择 `ffmpeg`、`ffprobe` 可执行程序（Windows 对应 `.exe`）。已有工具可以继续使用。
 
@@ -333,7 +336,7 @@ MusicOps/
 
 Windows 使用当前账户 DPAPI 保护秘密值；macOS 将主密钥保存在登录钥匙串，本地秘密文件使用 AES-GCM 加密，没有明文存储回退。macOS 默认档案为 `~/Library/Application Support/MusicOps/profile`，不放在 `MusicOps.app` 内部。
 
-更新前先暂停任务，保留完整私人档案与原版本；关闭窗口不代表后台已经退出，替换运行包前需确认该档案后台停止。Windows 安装器保留私人 `profile`，卸载也不会主动删除它；macOS 更新替换 `.app`，保留用户目录中的档案。更换系统账户或机器时，原凭据可能无法解密，应重新填写。
+更新前保留完整私人档案与原版本，在“任务中心”选择“退出应用及后台”；正在执行的任务需等待完成，或取消后再退出。关闭窗口不代表后台已经退出。Windows 安装器保留私人 `profile`，卸载也不会主动删除它；macOS 安装器整体替换应用，保留用户目录中的档案，卸载时将“应用程序”中的 MusicOps 移到废纸篓即可。更换系统账户或机器时，原凭据可能无法解密，应重新填写。
 
 凭据与目标域名绑定；服务主机名改变后，原凭据不会自动转发到新域名，需要重新配置。公开仓库和发行包不携带私人 Cookie、密钥、数据库或音乐。提交反馈时请只提供**脱敏的错误文本、版本和复现步骤**，不要附整个 `profile`、原始鉴权文件或含下载密钥的链接。
 

@@ -244,11 +244,18 @@ class Workbench(QMainWindow):
         for column in (0,2,3):header.setSectionResizeMode(column,QHeaderView.ResizeToContents)
         header.setSectionResizeMode(1,QHeaderView.Interactive);self.job_table.setColumnWidth(1,220);header.setSectionResizeMode(4,QHeaderView.Stretch)
         box.addWidget(self.job_table);self.job_detail=label('选择一项查看结果或需要补充的信息。','hint');self.job_detail.setMinimumHeight(42);box.addWidget(self.job_detail);self.job_table.itemSelectionChanged.connect(self.show_detail)
-        actions=QHBoxLayout();actions.addWidget(button('AI 解释选中问题',self.explain));actions.addWidget(button('恢复选中任务的原版',self.restore));actions.addStretch();box.addLayout(actions)
+        actions=QHBoxLayout();actions.addWidget(button('AI 解释选中问题',self.explain));actions.addWidget(button('恢复选中任务的原版',self.restore));actions.addStretch();actions.addWidget(button('退出应用及后台',self.exit_background));box.addLayout(actions)
         pages=QHBoxLayout();self.job_counts=label('');self.job_counts.setWordWrap(False);pages.addWidget(self.job_counts);pages.addStretch();pages.addWidget(button('上一页',lambda:self.job_page(-200)));pages.addWidget(button('下一页',lambda:self.job_page(200)));box.addLayout(pages)
     def setup(self):
         if not self.config:return
         self.wizard=SetupWizard(self);self.wizard.open()
+    def exit_background(self):
+        self.timer.stop();self.notice.setText('正在安全退出后台…')
+        def stopped(_):self.close()
+        def failed(message):
+            self.notice.setText('后台仍在处理任务；请等待完成，或在任务中心取消对应任务后再退出。' if '当前任务' in message else '退出未完成：'+message)
+            self.timer.start();self.update_activity()
+        self.call('shutdown_worker',{},stopped,failed)
     def _album_search(self):
         box=self.page('手动寻找一张专辑','同时检索 OpenCD、DicMusic、Orpheus 和 RED。已配置并启用的站点会参与检索。')
         modes=QHBoxLayout();self.album_literal=QRadioButton('原样搜索输入内容');self.album_precise=QRadioButton('识别专辑后精准搜索');self.album_literal.setChecked(True);modes.addWidget(self.album_literal);modes.addWidget(self.album_precise);modes.addStretch();box.addLayout(modes)

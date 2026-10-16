@@ -189,3 +189,20 @@ def test_recovered_connection_clears_only_its_transient_notice(app,tmp_path):
     window.call('get_status',{'compact':True},window.status);wait(app,lambda:not window.requests)
     assert window.notice.text()=='任务未完成：请核对发行'
     window.close()
+
+def test_exit_background_closes_window_only_after_worker_acknowledgement(app,tmp_path):
+    client=Client(tmp_path);window=Workbench(tmp_path,client,autostart=False);window.show()
+    window.exit_background();wait(app,lambda:not window.requests)
+    assert ('shutdown_worker',{}) in client.calls and not window.isVisible() and not window.timer.isActive()
+
+def test_busy_background_prevents_exit_and_does_not_cancel_tasks(app,tmp_path):
+    class BusyClient(Client):
+        def call(self,command,payload):
+            self.calls.append((command,copy.deepcopy(payload)))
+            if command=='shutdown_worker':raise RuntimeError('当前任务尚未到安全退出点')
+            return super().call(command,payload)
+    client=BusyClient(tmp_path);window=Workbench(tmp_path,client,autostart=False);window.show()
+    window.exit_background();wait(app,lambda:not window.requests)
+    assert window.isVisible() and window.timer.isActive() and '取消对应任务' in window.notice.text()
+    assert not any(command in ('cancel_task','cancel_workflow') for command,payload in client.calls)
+    window.close()

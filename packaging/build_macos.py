@@ -55,7 +55,10 @@ def package(args):
     verify_crypto_static(Path(_rust.__file__))
     output=Path(args.output).resolve();output.mkdir(parents=True,exist_ok=True);app_version=version();stem=f'MusicOps-{app_version}-macOS-{args.arch}'
     icon=output/'build-assets/musicops.icns';make_icon(icon)
-    env=os.environ.copy();env.update(MUSICOPS_MAC_ARCH=args.arch,MUSICOPS_MAC_ICON=str(icon),MACOSX_DEPLOYMENT_TARGET='15.0',PYINSTALLER_STRICT_BUNDLE_CODESIGN_ERROR='1')
+    legal=output/'build-assets/legal';legal.mkdir(parents=True,exist_ok=True)
+    run(sys.executable,ROOT/'packaging/collect_licenses.py',legal,cwd=ROOT)
+    shutil.copy2(ROOT/'LICENSE',legal/'LICENSE');shutil.copy2(ROOT/'packaging/THIRD-PARTY-NOTICES.md',legal/'THIRD-PARTY-NOTICES.md')
+    env=os.environ.copy();env.update(MUSICOPS_MAC_ARCH=args.arch,MUSICOPS_MAC_ICON=str(icon),MUSICOPS_MAC_LEGAL=str(legal),MACOSX_DEPLOYMENT_TARGET='15.0',PYINSTALLER_STRICT_BUNDLE_CODESIGN_ERROR='1')
     dist=output/'dist';run(sys.executable,'-m','PyInstaller','--noconfirm','--clean','--workpath',output/'build','--distpath',dist,ROOT/'packaging/MusicOps-mac.spec',cwd=ROOT,env=env)
     app=dist/'MusicOps.app';info=plistlib.loads((app/'Contents/Info.plist').read_bytes())
     if info.get('CFBundleIdentifier')!='com.wsdbb72.MusicOps' or info.get('CFBundleShortVersionString')!=app_version or info.get('CFBundleExecutable')!='MusicOps' or info.get('LSBackgroundOnly') is not False:raise RuntimeError('App identity/version/GUI mode mismatch')
@@ -80,7 +83,7 @@ def package(args):
     run(sys.executable,ROOT/'packaging/collect_licenses.py',stage,cwd=ROOT)
     (stage/'macOS 使用说明.txt').write_text(
         'MusicOps '+app_version+' · macOS 15 或更新版本\n\n'
-        '将 MusicOps.app 拖入“应用程序”后打开；无需安装 Python。\n'
+        '推荐使用同版本 .pkg 安装向导；ZIP 用户可将 MusicOps.app 拖入“应用程序”后打开。\n'
         '此包仅作 ad-hoc 完整性签名，没有 Apple Developer ID 签名和公证。\n'
         '首次打开时如被 Gatekeeper 阻止，请核对 GitHub Release 的 SHA-256，\n'
         '确认来源后使用“系统设置 → 隐私与安全性 → 仍要打开”，依系统提示确认。\n'
@@ -91,12 +94,20 @@ def package(args):
         'FFmpeg / ffprobe 未包含，可在设置中选择已安装的 macOS 可执行程序。\n'
         'Windows 路径和 .exe 媒体工具不能在 Mac 上使用。\n',encoding='utf-8')
     archive=output/(stem+'.zip');run('/usr/bin/ditto','-c','-k','--sequesterRsrc','--keepParent',stage,archive)
-    digests={}
-    for algorithm in ('sha256','sha512'):
-        with archive.open('rb') as stream:digests[algorithm]=hashlib.file_digest(stream,algorithm).hexdigest()
-    for algorithm,digest in digests.items():(output/(stem+'.'+algorithm)).write_text(digest+'  '+archive.name+'\n','utf-8')
+    from macos_installer import build as build_installer
+    installer=build_installer(app,output,app_version,args.arch)
+    installer_report=reports/(stem+'-installer.json')
+    run(sys.executable,ROOT/'packaging/smoke_macos_installer.py','--pkg',installer,'--app',app,'--work',output/'installer-smoke','--report',installer_report,'--arch',args.arch,cwd=ROOT,env=env)
+    artifacts={}
+    for artifact in (archive,installer):
+        hashes={}
+        for algorithm in ('sha256','sha512'):
+            with artifact.open('rb') as stream:hashes[algorithm]=hashlib.file_digest(stream,algorithm).hexdigest()
+        artifacts[artifact.name]=hashes
+    digests=artifacts[archive.name]
+    for algorithm in ('sha256','sha512'):(output/(stem+'.'+algorithm)).write_text(''.join(values[algorithm]+'  '+name+'\n' for name,values in artifacts.items()),'utf-8')
     commit=subprocess.run(['git','rev-parse','HEAD'],cwd=ROOT,capture_output=True,text=True,check=True).stdout.strip()
-    metadata={'version':app_version,'architecture':args.arch,'minimum_macos':'15.0','commit':commit,'archive':archive.name,'digests':digests,'signing':'ad-hoc','developer_id_signed':False,'notarized':False,'cryptography_openssl_static':True,'smoke_passed':True,'runner_macos':platform.mac_ver()[0]}
+    metadata={'version':app_version,'architecture':args.arch,'minimum_macos':'15.0','commit':commit,'archive':archive.name,'digests':digests,'artifacts':artifacts,'installer':installer.name,'installer_smoke_passed':True,'installer_signed':False,'signing':'ad-hoc','developer_id_signed':False,'notarized':False,'cryptography_openssl_static':True,'smoke_passed':True,'runner_macos':platform.mac_ver()[0]}
     (output/(stem+'-build.json')).write_text(json.dumps(metadata,ensure_ascii=False,indent=2)+'\n','utf-8')
     print(json.dumps(metadata,ensure_ascii=True))
 

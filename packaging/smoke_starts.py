@@ -23,7 +23,7 @@ def main():
     env=os.environ.copy();env['QT_QPA_PLATFORM']='offscreen'
     for key in ('PYTHONPATH','PYTHONHOME','VIRTUAL_ENV'):env.pop(key,None)
     process=subprocess.Popen([str(bundle/'MusicOps.exe'),'--base',str(base),'--quit-after','20000'],cwd=bundle,env=env,creationflags=0x08000000)
-    client=WorkerClient(base);report={'version':'0.4.0','evidence':'packaged_worker_three_entry_points','external_requests':0,'checks':{}}
+    client=WorkerClient(base);report={'version':'0.4.1','evidence':'packaged_worker_three_entry_points','external_requests':0,'checks':{}}
     try:
         deadline=time.monotonic()+25
         while True:

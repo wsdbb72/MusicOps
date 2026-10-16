@@ -81,6 +81,18 @@ Name: "{autodesktop}\MusicOps"; Filename: "{app}\MusicOps.exe"; Parameters: "--b
 Filename: "{app}\MusicOps.exe"; Parameters: "--base ""{app}\profile"""; Description: "{cm:LaunchProgram,MusicOps}"; Flags: nowait postinstall skipifsilent
 
 [Code]
+{ Inno Setup 6 only builds 32-bit installers and has no NativeInt type.
+  Inno Setup 7 supplies the correctly sized built-in type for either architecture.
+  https://jrsoftware.org/ishelp/topic_64bit.htm }
+type
+#if Ver < EncodeVer(7, 0, 0)
+  TMusicOpsNativeInt = LongInt;
+  TMusicOpsRootKey = LongInt;
+#else
+  TMusicOpsNativeInt = NativeInt;
+  TMusicOpsRootKey = HKEY;
+#endif
+
 const
   UninstallKey = 'Software\Microsoft\Windows\CurrentVersion\Uninstall\{#AppIdentity}_is1';
 var
@@ -88,10 +100,10 @@ var
   DetectionComplete, UpgradeDetected: Boolean;
 
 function CreateFileForUpdate(const FileName: String; DesiredAccess, ShareMode: Cardinal;
-  SecurityAttributes: NativeInt; CreationDisposition, Flags: Cardinal;
-  TemplateFile: NativeInt): NativeInt;
+  SecurityAttributes: TMusicOpsNativeInt; CreationDisposition, Flags: Cardinal;
+  TemplateFile: TMusicOpsNativeInt): TMusicOpsNativeInt;
   external 'CreateFileW@kernel32.dll stdcall';
-function CloseFileHandle(Handle: NativeInt): Boolean;
+function CloseFileHandle(Handle: TMusicOpsNativeInt): Boolean;
   external 'CloseHandle@kernel32.dll stdcall';
 
 function NormalizeDirectory(Value: String): String;
@@ -106,7 +118,7 @@ begin
     DirExists(AddBackslash(Directory) + '_internal');
 end;
 
-function ReadRegisteredInstallation(Root: HKEY): Boolean;
+function ReadRegisteredInstallation(Root: TMusicOpsRootKey): Boolean;
 var
   Directory: String;
 begin
@@ -242,7 +254,7 @@ end;
 
 function ExecutableAvailableForUpdate(const FileName: String): Boolean;
 var
-  Handle: NativeInt;
+  Handle: TMusicOpsNativeInt;
 begin
   Result := True;
   if not FileExists(FileName) then Exit;

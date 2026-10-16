@@ -1,6 +1,7 @@
 """The installer language and its redistribution grant are source dependencies."""
 import hashlib
 from pathlib import Path
+import re
 import subprocess
 import sys
 
@@ -39,3 +40,16 @@ def test_source_release_requires_the_vendored_language_license():
     assert "'/packaging/Languages/LICENSE'" in workflow
     notices=(ROOT/'packaging/THIRD-PARTY-NOTICES.md').read_text('utf-8')
     assert 'licenses/Inno-Setup-Translation/' in notices
+
+
+def test_legacy_inno_pointer_alias_is_scoped_before_api_declarations():
+    script=(ROOT/'packaging/MusicOps.iss').read_text('utf-8-sig')
+    guard=re.search(r'#if Ver < EncodeVer\(7, 0, 0\)(.*?)#endif',script,re.S)
+    assert guard and 'TMusicOpsNativeInt = LongInt;' in guard.group(1)
+    assert '#else\n  TMusicOpsNativeInt = NativeInt;' in guard.group(1)
+    legacy,modern=guard.group(1).split('#else')
+    assert 'TMusicOpsRootKey = LongInt;' in legacy and 'TMusicOpsRootKey = HKEY;' in modern
+    assert 'ReadRegisteredInstallation(Root: TMusicOpsRootKey)' in script
+    assert guard.end()<script.index('function CreateFileForUpdate')
+    # An unconditional alias would truncate handles in a future 64-bit installer.
+    assert 'TMusicOpsNativeInt = LongInt;' not in script[:guard.start()]+script[guard.end():]

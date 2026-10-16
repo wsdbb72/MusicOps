@@ -63,10 +63,14 @@ jobs:
           "INNO_ISCC=$compilerPath" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           ffmpeg -version
           ffprobe -version
-      - name: Run all tests including actual install and upgrade checks
+      - name: Compile and test the native installer before the longer regression suite
         run: |
           New-Item -ItemType Directory -Force -Path dist/windows/reports | Out-Null
-          python -m pytest -q --junitxml=dist/windows/reports/unit-tests.xml
+          python -m pytest tests/test_windows_installer.py -q --junitxml=dist/windows/reports/native-installer-tests.xml
+          if ($LASTEXITCODE -ne 0) { throw 'Native installer regression tests failed' }
+      - name: Run the remaining complete regression suite
+        run: |
+          python -m pytest -q --ignore=tests/test_windows_installer.py --junitxml=dist/windows/reports/unit-tests.xml
           if ($LASTEXITCODE -ne 0) { throw 'Regression tests failed' }
       - name: Require all six native installer scenarios to execute
         shell: python
@@ -80,7 +84,7 @@ jobs:
               'test_portable_directory_is_detected_as_update',
               'test_stale_install_registration_does_not_prevent_fresh_install',
           }
-          cases = {case.attrib['name']: case for case in ET.parse('dist/windows/reports/unit-tests.xml').iter('testcase')}
+          cases = {case.attrib['name']: case for case in ET.parse('dist/windows/reports/native-installer-tests.xml').iter('testcase')}
           for name in required:
               if name not in cases or any(child.tag in {'skipped', 'failure', 'error'} for child in cases[name]):
                   raise SystemExit('A required native installer test did not pass: ' + name)

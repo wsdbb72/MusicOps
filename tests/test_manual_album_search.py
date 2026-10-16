@@ -87,7 +87,7 @@ def test_query_limit_matches_provider_limit_before_contacting_sites(service,monk
         manual_album_search(service,{'mode':'literal','query':'x'*301},service.config.current()['values'])
 
 
-def test_unread_result_pages_are_partial_even_if_first_page_has_no_precise_match(service,monkeypatch):
+def test_unread_result_pages_are_a_scope_warning_not_a_failed_search(service,monkeypatch):
     service.store.put('evidence','catalog:chosen',{'candidate':{'entity_kind':'release'}})
     monkeypatch.setattr(service,'_catalog_command',lambda *a:{'candidate':{'title':'Album','artists':['Artist']}})
     class Provider:
@@ -95,7 +95,8 @@ def test_unread_result_pages_are_partial_even_if_first_page_has_no_precise_match
         def search(self,_):return {'status':'OK','search_complete':False,'page':1,'pages':3,'candidates':[candidate(self.site,'Other Album')]}
     monkeypatch.setattr(service,'_real_pt',lambda site,cfg:Provider(site))
     result=manual_album_search(service,{'mode':'precise','query':'Album','candidate_id':'chosen'},service.config.current()['values'])
-    assert result['status']=='PARTIAL' and result['candidates']==[] and result['excluded_count']==4
+    assert result['status']=='NO_MATCH' and result['candidates']==[] and result['excluded_count']==4
+    assert len(result['limited_sites'])==4 and result['unavailable_sites']==[]
     assert '不能用于断言' in result['message']
 
 

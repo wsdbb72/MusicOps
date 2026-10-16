@@ -1,11 +1,11 @@
 """Three user workflows and a skippable connection wizard."""
 from __future__ import annotations
-import copy,json,os
+import copy,json,os,re
 from pathlib import Path
 from PySide6.QtCore import QObject,QRunnable,QThreadPool,QTimer,Qt,Signal,QPropertyAnimation,QEasingCurve,QSize
 from PySide6.QtGui import QFont,QDesktopServices,QIcon,QPixmap,QPainter,QPen,QColor,QPalette
 from PySide6.QtCore import QUrl
-from PySide6.QtWidgets import (QApplication,QMainWindow,QWidget,QVBoxLayout,QHBoxLayout,QLabel,QPushButton,QLineEdit,QPlainTextEdit,QFileDialog,QCheckBox,QGroupBox,QFormLayout,QWizard,QWizardPage,QListWidget,QStackedWidget,QTableWidget,QTableWidgetItem,QHeaderView,QMessageBox,QSpinBox,QScrollArea,QInputDialog,QDialog,QDialogButtonBox,QGraphicsOpacityEffect,QProgressBar,QAbstractItemView,QComboBox,QRadioButton)
+from PySide6.QtWidgets import (QApplication,QMainWindow,QWidget,QVBoxLayout,QHBoxLayout,QLabel,QPushButton,QLineEdit,QPlainTextEdit,QFileDialog,QCheckBox,QGroupBox,QFormLayout,QWizard,QWizardPage,QListWidget,QStackedWidget,QTableWidget,QTableWidgetItem,QTreeWidget,QTreeWidgetItem,QHeaderView,QMessageBox,QSpinBox,QScrollArea,QInputDialog,QDialog,QDialogButtonBox,QGraphicsOpacityEffect,QProgressBar,QAbstractItemView,QComboBox,QRadioButton)
 from musicops.worker.client import WorkerClient
 from musicops.clients.http import redact
 from musicops.gui.branding import app_icon,apply_native_titlebar
@@ -14,7 +14,8 @@ from musicops.providers.playlist_access import HELP as PLAYLIST_AUTH_HELP
 
 SITES=[('open.cd','OpenCD','www.open.cd'),('dicmusic','DicMusic','dicmusic.com'),('orpheus','Orpheus','orpheus.network'),('redacted','RED','redacted.sh')]
 SCENES={'playlist':'歌单入库','complete':'资料补全','upgrade':'音质升级'}
-STAGES={'preparing':'准备专辑任务','snapshotting':'核对原音源','queued':'已排队','restored':'已恢复原版','enrich':'补全资料','planning':'分析曲目','searching':'寻找音源','requesting':'获取下载资源','downloading':'下载中','fallback':'网易云下载','metadata':'整理专辑资料','validating':'检查完整音频','publishing':'写入音乐库','retiring':'移出旧版','notifying':'通知音乐服务器','running':'正在处理','completed':'已完成','needs_review':'需要核对','failed':'未完成','cancelled':'已取消','skipped':'已跳过','waiting':'等待处理'}
+STAGES={'preparing':'检查本地库并准备任务','identifying':'识别歌曲与专辑','snapshotting':'核对原音源','queued':'已排队','restored':'已恢复原版','enrich':'补全资料','planning':'分析曲目','searching':'寻找音源','requesting':'获取下载资源','downloading':'下载中','fallback':'网易云下载','metadata':'整理专辑资料','validating':'检查完整音频','publishing':'写入音乐库','retiring':'移出旧版','notifying':'通知音乐服务器','running':'正在处理','completed':'已完成','needs_review':'需要核对','failed':'未完成','cancelled':'已取消','skipped':'已跳过','waiting':'等待处理'}
+TASK_GROUPS=(('identify','识别任务'),('search','搜索任务'),('process','下载与入库'))
 
 def eye_icon():
     image=QPixmap(20,20);image.fill(Qt.transparent);painter=QPainter(image);painter.setRenderHint(QPainter.Antialiasing);painter.setPen(QPen(QColor('#91a7c2'),1.6));painter.drawEllipse(2,5,16,10);painter.drawEllipse(8,8,4,4);painter.end();return QIcon(image)
@@ -155,9 +156,11 @@ class SetupWizard(QWizard):
         lyrics=self.values.get('lyrics',{}).get('primary',{});self.lyric_url=line('' if '.example.invalid' in lyrics.get('base_url','') else lyrics.get('base_url',''),'歌词与封面接口地址');self.lyric_key=CredentialField('填写服务提供的完整 Authorization 值',lyrics.get('auth_secret_ref') in self.saved_refs)
         p.addRow('歌词接口地址',self.lyric_url);p.addRow('接口鉴权值',self.lyric_key);p.addRow(label('这里填服务给你的鉴权原文，无需填写“凭据引用”。没有服务可留空。','hint'))
         self.discogs=CredentialField('Discogs 设置中生成的个人 Token；可跳过',self.values.get('catalog',{}).get('discogs',{}).get('credential_ref') in self.saved_refs);p.addRow('Discogs Token',self.discogs)
-        ai=self.values.get('ai',{});self.ai_enabled=QCheckBox('使用 AI 辅助解释待核对项目');self.ai_enabled.setChecked(ai.get('enabled',False));p.addRow(self.ai_enabled)
+        ai=self.values.get('ai',{});self.ai_enabled=QCheckBox('启用 AI：常规识别无法匹配时自动兜底，并辅助解释问题');self.ai_enabled.setChecked(ai.get('enabled',False));p.addRow(self.ai_enabled)
         self.ai_url=line('' if '.example.invalid' in ai.get('base_url','') else ai.get('base_url',''),'兼容 Responses 的 API 地址');self.ai_model=line(ai.get('model',''),'服务提供的模型名称');self.ai_key=CredentialField('API Key',ai.get('auth_secret_ref') in self.saved_refs)
+        self.ai_key.textChanged.connect(lambda value:self.ai_enabled.setChecked(True) if value.strip() else None)
         p.addRow('AI 地址',self.ai_url);p.addRow('模型名称',self.ai_model);p.addRow('API Key',self.ai_key)
+        p.addRow(label('填写有效 API 后默认启用兜底识别。AI 可结合识别接口和在线资料提出匹配；无法可靠确认的发行仍会等待核对。','hint'))
         p=self._add_page('连接 Navidrome（可选）','程序完成入库后会触发 Navidrome 扫描。若只使用 Roon，可直接保存。')
         nav=self.values.get('music_servers',{}).get('navidrome',{});self.nav_enabled=QCheckBox('启用 Navidrome');self.nav_enabled.setChecked(nav.get('enabled',False));p.addRow(self.nav_enabled)
         self.nav_url=line(nav.get('url',''),'例如 http://127.0.0.1:4533');self.nav_user=line(nav.get('username',''),'具有扫描权限的账号');self.nav_pass=CredentialField('Navidrome 账号密码',nav.get('password_ref') in self.saved_refs)
@@ -211,7 +214,9 @@ class Workbench(QMainWindow):
         if effect is None:effect=QGraphicsOpacityEffect(page);page.setGraphicsEffect(effect)
         effect.setOpacity(.35);self._page_animation=QPropertyAnimation(effect,b'opacity',self);self._page_animation.setDuration(180);self._page_animation.setStartValue(.35);self._page_animation.setEndValue(1);self._page_animation.setEasingCurve(QEasingCurve.OutCubic);self._page_animation.start()
     def update_activity(self):
-        busy=bool(self.requests or self.tasks or getattr(self,'active_jobs',0));self.activity.setText('●  正在处理' if busy else '●  后台就绪');self.busy_bar.setRange(0,0) if busy else self.busy_bar.setRange(0,100);self.busy_bar.setValue(0 if busy else 100);self.notice.setVisible(bool(self.notice.text()))
+        paused=getattr(self,'paused_jobs',0);globally_paused=getattr(self,'pipeline_paused',False);foreground=any(request.command not in ('get_status','list_workflows','get_task') for request in self.requests)
+        busy=bool(foreground or (self.tasks or getattr(self,'active_jobs',0)) and not globally_paused and not (paused and not getattr(self,'active_jobs',0)))
+        self.activity.setText('●  后台已暂停' if globally_paused else '●  正在处理' if busy else f'●  已暂停 {paused} 项' if paused else '●  后台就绪');self.busy_bar.setRange(0,0) if busy else self.busy_bar.setRange(0,100);self.busy_bar.setValue(0 if busy else 100);self.notice.setVisible(bool(self.notice.text()))
     def page(self,title,subtitle):
         w=QWidget();box=QVBoxLayout(w);box.setContentsMargins(0,0,0,0);box.setSpacing(18);hero=QWidget();hero.setObjectName('hero');hero_box=QVBoxLayout(hero);hero_box.setContentsMargins(24,22,24,22);hero_box.setSpacing(9);hero_box.addWidget(label(('COLLECTION','METADATA','SOUND QUALITY','ACTIVITY','DISCOVERY')[self.stack.count()],'eyebrow'));hero_box.addWidget(label(title,'title'));hero_box.addWidget(label(subtitle,'subtitle'));box.addWidget(hero);self.stack.addWidget(w);return box
     def steps(self,box,text):
@@ -239,13 +244,22 @@ class Workbench(QMainWindow):
         card=QGroupBox('升级偏好');card.setObjectName('card');form=QVBoxLayout(card);self.prefer24=QCheckBox('同一录音优先选择无损 24 bit');self.prefer24.setChecked(True);form.addWidget(self.prefer24);form.addWidget(label('有损格式比较有效码率；无损格式比较位深、采样率和实际编码，不按文件大小判断。','hint'));box.addWidget(card)
         box.addWidget(label('替换前核对曲目、发行和全部音频。旧版移出音乐库后保留短期恢复副本；下载与做种源不改动。','hint'));box.addStretch();box.addWidget(button('检查并自动升级',lambda:self.start('upgrade'),True))
     def _tasks(self):
-        box=self.page('任务中心','下载、资料处理和入库进度在这里查看。关闭窗口后后台继续工作。');row=QHBoxLayout();row.addWidget(button('暂停',lambda:self.call('pause_pipeline',{},lambda _:self.refresh())));row.addWidget(button('继续',lambda:self.call('resume_pipeline',{},lambda _:self.refresh())));row.addWidget(button('核对 / 重试选中任务',self.review));row.addStretch();row.addWidget(button('取消选中任务',self.cancel));box.addLayout(row)
-        self.job_table=self.table(['任务','内容','当前步骤','进度','结果']);header=self.job_table.horizontalHeader()
-        for column in (0,2,3):header.setSectionResizeMode(column,QHeaderView.ResizeToContents)
-        header.setSectionResizeMode(1,QHeaderView.Interactive);self.job_table.setColumnWidth(1,220);header.setSectionResizeMode(4,QHeaderView.Stretch)
-        box.addWidget(self.job_table);self.job_detail=label('选择一项查看结果或需要补充的信息。','hint');self.job_detail.setMinimumHeight(42);box.addWidget(self.job_detail);self.job_table.itemSelectionChanged.connect(self.show_detail)
-        actions=QHBoxLayout();actions.addWidget(button('AI 解释选中问题',self.explain));actions.addWidget(button('恢复选中任务的原版',self.restore));actions.addStretch();actions.addWidget(button('退出应用及后台',self.exit_background));box.addLayout(actions)
+        box=self.page('任务中心','先检查本地库，再识别歌曲与专辑，最后搜索音源。展开分类和专辑可查看明细。关闭窗口后后台继续工作。')
+        box.setSpacing(12);box.itemAt(0).widget().layout().setContentsMargins(20,14,20,14)
+        self.checked_jobs={};self.job_items={};self.job_groups={};self.job_detail_cache={};self.job_detail_notes={};self.job_track_versions={};self.job_detail_requests=set();self.expanded_job_ids=set();self.bulk_pending=False
+        row=QHBoxLayout();self.job_select_page=QCheckBox('勾选本页');self.job_select_page.setTristate(True);self.job_select_page.stateChanged.connect(self.select_job_page);row.addWidget(self.job_select_page);self.job_selection_note=label('已勾选 0 项','hint');row.addWidget(self.job_selection_note);row.addStretch();row.addWidget(button('清空勾选',self.clear_checked_jobs));box.addLayout(row)
+        row=QHBoxLayout();self.bulk_buttons=[]
+        for text,action in (('暂停勾选','pause'),('继续勾选','resume'),('取消勾选','cancel')):
+            action_button=button(text,lambda checked=False,a=action:self.bulk_action(a));self.bulk_buttons.append(action_button);row.addWidget(action_button)
+        self.bulk_ai_button=button('AI 解释勾选',self.explain);row.addWidget(self.bulk_ai_button);row.addStretch();row.addWidget(button('核对当前任务',self.review));box.addLayout(row)
+        self.job_table=QTreeWidget();self.job_table.setColumnCount(5);self.job_table.setHeaderLabels(['任务 / 专辑 / 歌曲','类型 / 艺人','当前步骤 / 专辑','进度','结果']);self.job_table.setAlternatingRowColors(True);self.job_table.setSelectionMode(QAbstractItemView.SingleSelection);self.job_table.setEditTriggers(QAbstractItemView.NoEditTriggers);self.job_table.setUniformRowHeights(True);self.job_table.setIndentation(20);self.job_table.setRootIsDecorated(True)
+        header=self.job_table.header();header.setDefaultAlignment(Qt.AlignLeft|Qt.AlignVCenter);header.setSectionResizeMode(0,QHeaderView.Interactive);self.job_table.setColumnWidth(0,270);header.setSectionResizeMode(1,QHeaderView.Interactive);self.job_table.setColumnWidth(1,125)
+        for column in (2,3):header.setSectionResizeMode(column,QHeaderView.ResizeToContents)
+        header.setSectionResizeMode(4,QHeaderView.Stretch)
+        box.addWidget(self.job_table);self.job_detail=QPlainTextEdit();self.job_detail.setReadOnly(True);self.job_detail.setPlaceholderText('选择一项查看结果；勾选任务后可批量操作。');self.job_detail.setFixedHeight(80);box.addWidget(self.job_detail);self.job_table.itemSelectionChanged.connect(self.show_detail);self.job_table.itemChanged.connect(self.job_check_changed);self.job_table.itemExpanded.connect(self.expand_job);self.job_table.itemCollapsed.connect(self.collapse_job)
+        actions=QHBoxLayout();actions.addWidget(button('恢复当前任务原版',self.restore));actions.addStretch();actions.addWidget(button('暂停整个后台',lambda:self.call('pause_pipeline',{},lambda _:self.refresh())));actions.addWidget(button('继续整个后台',lambda:self.call('resume_pipeline',{},lambda _:self.refresh())));actions.addWidget(button('退出应用及后台',self.exit_background));box.addLayout(actions)
         pages=QHBoxLayout();self.job_counts=label('');self.job_counts.setWordWrap(False);pages.addWidget(self.job_counts);pages.addStretch();pages.addWidget(button('上一页',lambda:self.job_page(-200)));pages.addWidget(button('下一页',lambda:self.job_page(200)));box.addLayout(pages)
+        self.update_job_selection()
     def setup(self):
         if not self.config:return
         self.wizard=SetupWizard(self);self.wizard.open()
@@ -342,7 +356,7 @@ class Workbench(QMainWindow):
     def status(self,result):
         if self.notice.text()==getattr(self,'_connection_notice',None):self.notice.clear()
         self._connection_notice=None
-        self.config=result['config']['values'];self.available_refs=[r['ref'] if isinstance(r,dict) else r for r in result.get('secret_refs',[])];self.timer.start();connected=[name for key,name,_ in SITES if self.config['providers'][key]['enabled'] and self.config['providers'][key]['credential_ref'] in self.available_refs]
+        self.pipeline_paused=bool(result.get('paused'));self.config=result['config']['values'];self.available_refs=[r['ref'] if isinstance(r,dict) else r for r in result.get('secret_refs',[])];self.timer.start();connected=[name for key,name,_ in SITES if self.config['providers'][key]['enabled'] and self.config['providers'][key]['credential_ref'] in self.available_refs]
         self.connection.setText('音乐库：'+self.config['paths']['library']+'     ·     '+('已配置 '+', '.join(connected) if connected else '尚未连接资源站；可在“连接与设置”添加'))
         if not self.wizard_shown and not self.config['workflow']['setup_done']:
             self.wizard_shown=True;QTimer.singleShot(200,self.setup)
@@ -391,40 +405,171 @@ class Workbench(QMainWindow):
             self.refresh()
         self.call('start_workflow',{'scene':scene,'target_ids':targets,'prefer_24bit':self.prefer24.isChecked(),'refresh_resources':refresh_resources},started)
     def show_jobs(self,result):
-        self.job_total=result.get('total',0);self.active_jobs=result.get('active',0);self.job_counts.setText(f"共 {self.job_total} 项 · 运行 {self.active_jobs} · 完成 {result.get('finished',0)} · 第 {self.job_offset//200+1} 页")
-        selected=self.selected_job();jobs=result.get('jobs',[]);self.jobs={j['job_id']:j for j in jobs};self.job_table.blockSignals(True);self.job_table.setRowCount(len(jobs))
-        for i,job in enumerate(jobs):
-            batch=job.get('job_kind')=='batch';progress='扫描中' if batch and job['stage']=='preparing' and not job.get('progress') else str(job.get('progress',0))+'%';values=(SCENES.get(job['scene'],job['scene'])+(' · 批次' if batch else ''),job.get('label','音乐库'),STAGES.get(job['stage'],job['stage']),progress,job.get('message',''))
-            for j,value in enumerate(values):
-                item=QTableWidgetItem(str(value));item.setData(Qt.UserRole,job['job_id']);item.setToolTip(str(value)+('\n'+job.get('detail','') if j==4 and job.get('detail') else ''))
-                if j==2:
-                    item.setForeground(QColor('#6ee7d0' if job['stage'] in ('completed','restored') else '#f4c77c' if job['stage'] in ('failed','needs_review') else '#9bbbf4'))
-                self.job_table.setItem(i,j,item)
-            if job['job_id']==selected:self.job_table.selectRow(i)
-        if not selected and jobs:self.job_table.selectRow(next((i for i,job in enumerate(jobs) if job.get('job_kind')=='batch' and job['stage']=='preparing'),0))
+        self.job_total=result.get('total',0);self.active_jobs=result.get('active',0);self.paused_jobs=result.get('paused_count',0);self.job_counts.setText(f"共 {self.job_total} 项 · 运行 {self.active_jobs} · 暂停 {self.paused_jobs} · 完成 {result.get('finished',0)} · 第 {self.job_offset//200+1} 页")
+        selected=self.selected_job();jobs=result.get('jobs',[]);collapsed={key for key,item in self.job_groups.items() if not item.isExpanded()};scroll=self.job_table.verticalScrollBar().value()
+        self.jobs={j['job_id']:j for j in jobs};self.job_table.blockSignals(True);self.job_table.setUpdatesEnabled(False);self.job_table.clear();self.job_items={};self.job_groups={}
+        for key,title in TASK_GROUPS:
+            group=QTreeWidgetItem(self.job_table,[title]);group.setData(0,Qt.UserRole+1,key);group.setFlags(Qt.ItemIsEnabled|Qt.ItemIsUserCheckable);group.setCheckState(0,Qt.Unchecked);group.setExpanded(key not in collapsed);group.setForeground(0,QColor('#8ce6d2'));font=group.font(0);font.setBold(True);group.setFont(0,font);self.job_groups[key]=group
+        for job in jobs:
+            job_id=job['job_id'];batch=job.get('job_kind')=='batch';group_key=self.job_group(job);stage=job.get('stage','queued');progress='扫描中' if batch and stage=='preparing' and not job.get('progress') else str(job.get('progress',0))+'%'
+            paused=bool(job.get('paused')) and stage not in ('completed','failed','cancelled','skipped','restored','needs_review')
+            step='阶段结束后暂停' if paused and job.get('pause_pending') else '已暂停' if paused else STAGES.get(stage,stage)
+            kind='检查本地库 · 批次' if batch else {'identification':'专辑识别','catalog_identification':'在线资料识别','manual_search':'手动专辑检索','search':'专辑音源检索'}.get(job.get('task_type'),SCENES.get(job.get('scene'),job.get('scene','专辑任务')))
+            item=QTreeWidgetItem(self.job_groups[group_key],[job.get('label','音乐库'),kind,step,progress,job.get('message','')]);item.setData(0,Qt.UserRole,job_id);item.setData(0,Qt.UserRole+1,'job');item.setFlags(Qt.ItemIsEnabled|Qt.ItemIsSelectable|Qt.ItemIsUserCheckable);item.setCheckState(0,Qt.Checked if job_id in self.checked_jobs else Qt.Unchecked);self.job_items[job_id]=item
+            for column in range(5):item.setToolTip(column,item.text(column)+('\n'+job.get('detail','') if column==4 and job.get('detail') else ''))
+            item.setForeground(2,QColor('#f4c77c' if paused or stage in ('failed','needs_review') else '#6ee7d0' if stage in ('completed','restored') else '#9bbbf4'))
+            if job_id in self.checked_jobs:self.checked_jobs[job_id]=self.ai_job_context(job)
+            if not batch:
+                track_version=(stage,job.get('target_count'),job.get('matched_count'))
+                if self.job_track_versions.get(job_id)!=track_version:self.job_detail_cache.pop(job_id,None);self.job_detail_notes.pop(job_id,None)
+                self.job_track_versions[job_id]=track_version
+                if job_id in self.job_detail_cache and job_id in self.expanded_job_ids:self.fill_job_tracks(item,self.job_detail_cache[job_id])
+                else:QTreeWidgetItem(item,['展开查看歌曲明细'])
+                item.setExpanded(job_id in self.expanded_job_ids)
+            if job_id==selected:self.job_table.setCurrentItem(item)
+        for key,item in self.job_groups.items():item.setText(1,f'{item.childCount()} 项（本页）')
+        if not selected and jobs:
+            preferred=next((job for job in jobs if job.get('job_kind')=='batch' and job.get('stage')=='preparing'),jobs[0]);self.job_table.setCurrentItem(self.job_items[preferred['job_id']])
+        self.job_table.blockSignals(False);self.job_table.setUpdatesEnabled(True);self.job_table.verticalScrollBar().setValue(scroll);self.update_job_selection();self.show_detail();self.update_activity()
+        for job_id in self.expanded_job_ids.intersection(self.job_items):
+            if job_id not in self.job_detail_cache:self.expand_job(self.job_items[job_id])
+    @staticmethod
+    def job_group(job):
+        if job.get('task_group') in dict(TASK_GROUPS):return job['task_group']
+        if job.get('job_kind')=='batch' or job.get('task_type')=='identification' or job.get('stage') in ('identifying','preparing','planning','enrich','metadata'):return 'identify'
+        if job.get('stage') in ('searching','requesting') or job.get('identification_job_id'):return 'search'
+        return 'process'
+    @staticmethod
+    def ai_job_context(job):
+        # Details contain local directories and transport errors. Explain only
+        # compact public state, removing embedded paths/links from display text.
+        def clean(value):
+            value=str(redact(str(value or '')))
+            value=re.sub(r'https?://[^\s<>"\']+','[链接]',value,flags=re.I)
+            value=re.sub(r'(?:[A-Za-z]:[\\/]|\\\\)[^\r\n;；|]*','[本地路径]',value)
+            value=re.sub(r'(?<![\w:/])/(?:[^\s;；|]+/?)+','[本地路径]',value)
+            value=re.sub(r'\b(?:api[_ -]?key|token|authorization|cookie|passkey|authkey|password)\s*[:=]\s*(?:Bearer\s+)?[^\s;；]+','[凭据]',value,flags=re.I)
+            return value[:500]
+        return {key:clean(job.get(key)) for key in ('job_id','scene','stage','label','message')}
+    def job_check_changed(self,item,column):
+        if column!=0:return
+        role=item.data(0,Qt.UserRole+1);checked=item.checkState(0)==Qt.Checked
+        if role=='job':items=[item]
+        elif role in self.job_groups:items=[item.child(i) for i in range(item.childCount())]
+        else:return
+        self.job_table.blockSignals(True)
+        for child in items:
+            job_id=child.data(0,Qt.UserRole)
+            if checked and job_id not in self.checked_jobs and len(self.checked_jobs)>=500:
+                child.setCheckState(0,Qt.Unchecked);self.notice.setText('每次最多勾选 500 项；请先处理本批勾选，再继续其他任务。');continue
+            child.setCheckState(0,Qt.Checked if checked else Qt.Unchecked)
+            if checked:self.checked_jobs[job_id]=self.ai_job_context(self.jobs.get(job_id,{}))
+            else:self.checked_jobs.pop(job_id,None)
+        self.job_table.blockSignals(False);self.update_job_selection();self.update_activity()
+    def update_job_selection(self):
+        self.job_table.blockSignals(True)
+        for group in self.job_groups.values():
+            count=sum(group.child(i).data(0,Qt.UserRole) in self.checked_jobs for i in range(group.childCount()));group.setCheckState(0,Qt.Checked if count and count==group.childCount() else Qt.PartiallyChecked if count else Qt.Unchecked)
         self.job_table.blockSignals(False)
-        self.show_detail();self.update_activity()
+        count=sum(job_id in self.checked_jobs for job_id in self.job_items);self.job_select_page.blockSignals(True);self.job_select_page.setCheckState(Qt.Checked if count and count==len(self.job_items) else Qt.PartiallyChecked if count else Qt.Unchecked);self.job_select_page.blockSignals(False)
+        off_page=len(self.checked_jobs)-count;self.job_selection_note.setText(f'已勾选 {len(self.checked_jobs)} 项'+(f' · 其他页 {off_page} 项' if off_page else ''))
+        for action_button in self.bulk_buttons:action_button.setEnabled(bool(self.checked_jobs) and not self.bulk_pending)
+        self.bulk_ai_button.setEnabled(bool(self.checked_jobs) and not getattr(self,'bulk_ai_pending',False))
+    def select_job_page(self,state):
+        # A click on a partially selected page means select the entire page.
+        checked=state!=Qt.Unchecked.value
+        self.job_table.blockSignals(True)
+        for job_id,item in self.job_items.items():
+            if checked and job_id not in self.checked_jobs and len(self.checked_jobs)>=500:continue
+            item.setCheckState(0,Qt.Checked if checked else Qt.Unchecked)
+            if checked:self.checked_jobs[job_id]=self.ai_job_context(self.jobs[job_id])
+            else:self.checked_jobs.pop(job_id,None)
+        self.job_table.blockSignals(False);self.update_job_selection()
+    def clear_checked_jobs(self):
+        self.checked_jobs.clear();self.job_table.blockSignals(True)
+        for item in self.job_items.values():item.setCheckState(0,Qt.Unchecked)
+        self.job_table.blockSignals(False);self.update_job_selection()
+    def expand_job(self,item):
+        if item.data(0,Qt.UserRole+1)!='job':return
+        job_id=item.data(0,Qt.UserRole);self.expanded_job_ids.add(job_id)
+        if job_id in self.job_detail_cache:self.fill_job_tracks(item,self.job_detail_cache[job_id]);return
+        if job_id in self.job_detail_requests:return
+        self.job_detail_requests.add(job_id)
+        def received(result):
+            self.job_detail_requests.discard(job_id);job=result.get('job') or {};rows=self.job_child_rows(job)
+            self.job_detail_cache[job_id]=rows or [['暂时没有歌曲明细']]
+            while len(self.job_detail_cache)>50:
+                oldest=next(iter(self.job_detail_cache));self.job_detail_cache.pop(oldest);self.job_detail_notes.pop(oldest,None)
+            current=self.job_items.get(job_id)
+            if current:self.fill_job_tracks(current,self.job_detail_cache[job_id])
+            text=job.get('message','')+'\n'+job.get('detail','');names={key:name for key,name,_ in SITES};outcomes=job.get('source_outcomes') or job.get('outcomes') or {}
+            if isinstance(outcomes,dict):
+                states={'OK':'检索有结果','NO_RESOURCE':'检索完成，未找到资源','DISABLED':'未启用','AUTH_FAILED':'登录失效','AUTH_REQUIRED':'需要登录','RATE_LIMITED':'访问限流','NETWORK_ERROR':'网络连接失败','TRANSIENT_ERROR':'站点暂时不可用','PARSE_ERROR':'页面内容未识别','ACCESS_BLOCKED':'访问受限','SNAPSHOT_INCOMPLETE':'已读取的结果有限'}
+                for source,outcome in outcomes.items():
+                    if isinstance(outcome,dict):text+='\n'+names.get(source,source)+'：'+states.get(outcome.get('status'),outcome.get('status','未知'))+(' · '+str(outcome.get('reason')) if outcome.get('reason') else '')
+            self.job_detail_notes[job_id]=text
+            if self.selected_job()==job_id and not getattr(self,'detail_pinned',False):self.job_detail.setPlainText(text)
+        def failed(message):
+            self.job_detail_requests.discard(job_id);self.job_detail.setPlainText('读取歌曲明细失败：'+message+'\n收起后重新展开可重试。')
+        self.call('get_workflow',{'job_id':job_id},received,failed)
+    @staticmethod
+    def job_child_rows(job):
+        tracks=job.get('prepared') or job.get('targets') or job.get('old_files') or [];rows=[]
+        def artists(row):
+            credits=row.get('artists') or []
+            return ' / '.join(str(value) for value in (credits if isinstance(credits,list) else [credits]))
+        for track in tracks[:200]:rows.append([str(track.get('raw_title') or track.get('title') or '待识别歌曲'),artists(track),str(track.get('album') or '待识别专辑'),' / '.join(str(track.get(key) or '') for key in ('disc','track')).strip(' /'),PLATFORMS.get(track.get('source'),track.get('source',''))])
+        if len(tracks)>200:rows.append([f'另有 {len(tracks)-200} 首；此处显示前 200 首'])
+        candidates=job.get('choices') or job.get('catalog_choices') or []
+        if candidates:
+            search=job.get('task_group')=='search';names={key:name for key,name,_ in SITES};names.update(musicbrainz='MusicBrainz',discogs='Discogs',allmusic='AllMusic',rateyourmusic='Rate Your Music',albumoftheyear='Album of the Year',vgmdb='VGMdb')
+            if rows:rows.append([f'{"检索结果" if search else "识别候选"} · {len(candidates)} 项'])
+            for candidate in candidates[:200]:
+                source=names.get(candidate.get('source'),candidate.get('source',''));title=str(candidate.get('album') or candidate.get('title') or '待核对专辑');media=candidate.get('media') or {};quality=' '.join(str(media.get(key) or '') for key in ('format','encoding','media')).strip();date=str(candidate.get('date') or candidate.get('year') or '')
+                rows.append([title,artists(candidate),source,quality or date,('精准匹配' if candidate.get('precise_match') else '待核对发行')+(' · 做种 '+str(candidate['seeders']) if candidate.get('seeders') is not None else '')])
+            if len(candidates)>200:rows.append([f'另有 {len(candidates)-200} 项结果；此处显示前 200 项'])
+        return rows
+    def collapse_job(self,item):
+        if item.data(0,Qt.UserRole+1)=='job':self.expanded_job_ids.discard(item.data(0,Qt.UserRole))
+    def fill_job_tracks(self,item,rows):
+        item.takeChildren()
+        for values in rows:
+            track=QTreeWidgetItem(item,values);track.setData(0,Qt.UserRole+1,'track');track.setFlags(Qt.ItemIsEnabled|Qt.ItemIsSelectable)
+            for column in range(len(values)):track.setToolTip(column,str(values[column]))
     def job_page(self,delta):
         self.job_offset=max(0,min(max(0,(self.job_total-1)//200*200),self.job_offset+delta));self.refresh()
     def show_detail(self):
-        row=self.job_table.currentRow()
-        if row>=0:
-            job=self.jobs.get(self.job_table.item(row,0).data(Qt.UserRole),{});self.job_detail.setText(job.get('message','')+'\n'+job.get('detail',''))
+        job_id=self.selected_job();job=self.jobs.get(job_id)
+        if job_id!=getattr(self,'_detail_job_id',None):self.detail_pinned=False;self._detail_job_id=job_id
+        if job and not getattr(self,'detail_pinned',False):self.job_detail.setPlainText(self.job_detail_notes.get(job_id,job.get('message','')+'\n'+job.get('detail','')))
     def cancel(self):
-        row=self.job_table.currentRow()
-        if row>=0:self.call('cancel_workflow',{'job_id':self.job_table.item(row,0).data(Qt.UserRole)},lambda _:self.refresh())
+        self.bulk_action('cancel')
+    def bulk_action(self,action):
+        if self.bulk_pending or not self.checked_jobs:return
+        ids=list(self.checked_jobs);self.bulk_pending=True;self.detail_pinned=True;self.update_job_selection();names={'pause':'暂停','resume':'继续','cancel':'取消'};self.job_detail.setPlainText(f'正在{names[action]} {len(ids)} 项任务；操作在安全阶段生效。')
+        def completed(result):
+            self.bulk_pending=False;message=result.get('message') or f"{names[action]}：成功 {result.get('succeeded',0)} 项，跳过 {result.get('skipped',0)} 项，未完成 {result.get('failed',0)} 项";self.notice.setText(message)
+            failures=[row for row in result.get('results',[]) if row.get('status') in ('FAILED','ERROR','NOT_FOUND','failed','error')]
+            self.job_detail.setPlainText(message+''.join('\n'+str(row.get('job_id',''))+'：'+str(row.get('message','')) for row in failures[:20]));self.update_job_selection();self.refresh()
+        def failed(message):self.bulk_pending=False;self.job_detail.setPlainText('批量操作未完成：'+message);self.update_job_selection()
+        self.call('bulk_workflows',{'action':action,'job_ids':ids},completed,failed)
     def selected_job(self):
-        row=self.job_table.currentRow()
-        return self.job_table.item(row,0).data(Qt.UserRole) if row>=0 and self.job_table.item(row,0) else None
+        item=self.job_table.currentItem()
+        if item and item.data(0,Qt.UserRole+1)=='track':item=item.parent()
+        return item.data(0,Qt.UserRole) if item and item.data(0,Qt.UserRole+1)=='job' else None
     def explain(self):
-        job=self.jobs.get(self.selected_job())
-        if not job:return
-        if not self.config.get('ai',{}).get('enabled'):self.job_detail.setText('可在“连接与设置”中启用 AI 并填写服务地址、模型和 API Key。');return
-        self.call('ai_analyze',{'context':{k:job.get(k) for k in ('scene','stage','label','message','detail')},'instructions':'用中文解释此音乐整理任务为什么等待，给出简短处理步骤。不要确认发行身份，不要生成下载或删除命令。'},lambda result:self.job_detail.setText(str(result.get('answer') or result.get('explanation') or result)))
+        if not self.checked_jobs or getattr(self,'bulk_ai_pending',False):return
+        self.detail_pinned=True
+        if not self.config.get('ai',{}).get('enabled'):self.job_detail.setPlainText('可在“连接与设置”中启用 AI 并填写服务地址、模型和 API Key。');return
+        entries=list(self.checked_jobs.values());context={'jobs':entries[:20],'total_selected':len(entries),'shown':min(20,len(entries)),'truncated':len(entries)>20};self.bulk_ai_pending=True;self.update_job_selection();self.job_detail.setPlainText('正在分析勾选的问题'+('（本次前 20 项，其余请分批勾选）' if len(entries)>20 else '')+'…')
+        def received(result):
+            self.bulk_ai_pending=False;self.update_job_selection();self.job_detail.setPlainText(('本次分析前 20 项，共勾选 '+str(len(entries))+' 项。\n' if len(entries)>20 else '')+str(result.get('answer') or result.get('explanation') or result))
+        def failed(message):self.bulk_ai_pending=False;self.update_job_selection();self.job_detail.setPlainText('AI 解释未完成：'+message)
+        self.call('ai_analyze',{'context':context,'instructions':'按任务名称用中文分别解释这些音乐整理任务为什么等待，合并相同原因，给出简短处理步骤。只解释列出的任务，不猜测未显示项目；不要确认发行身份，不要生成下载或删除命令。'},received,failed)
     def restore(self):
         job_id=self.selected_job()
         if not job_id:return
-        if self.jobs.get(job_id,{}).get('job_kind')=='batch':self.job_detail.setText('批次记录不包含已替换文件。请选择具体专辑任务恢复原版。');return
+        if self.jobs.get(job_id,{}).get('job_kind')=='batch':self.job_detail.setPlainText('批次记录不包含已替换文件。请选择具体专辑任务恢复原版。');return
         if QMessageBox.question(self,'恢复原版','恢复此任务保存的原版，并移出本任务新发布的文件？后来被改动的文件会拦截恢复；做种任务保留。正在处理的任务请先取消。')!=QMessageBox.Yes:return
         self.call('restore_workflow',{'job_id':job_id},lambda _:self.refresh())
     def review(self):
@@ -524,14 +669,16 @@ QListWidget { background: transparent; border: 0; outline: 0; font-size: 14px; }
 QListWidget::item { padding: 15px 12px; border-radius: 9px; color: #a6bad2; border: 1px solid transparent; }
 QListWidget::item:hover { background: #1a2c43; color: #eef6ff; }
 QListWidget::item:selected { background: #1b3b44; color: #9df2dd; border-color: #2c6062; font-weight: 600; }
-QTableWidget { background: #121f32; alternate-background-color: #16253a; border: 1px solid #2b3e56; border-radius: 10px; selection-background-color: #24485a; selection-color: #f0fffb; outline: 0; }
+QTableWidget,QTreeWidget { background: #121f32; alternate-background-color: #16253a; border: 1px solid #2b3e56; border-radius: 10px; selection-background-color: #24485a; selection-color: #f0fffb; outline: 0; }
 QHeaderView::section { background: #1d3048; color: #9eb7d1; padding: 13px 12px; border: 0; border-bottom: 1px solid #32445d; font-weight: 600; font-size: 12px; }
 QTableWidget::item { padding: 10px; border-bottom: 1px solid #1e3045; }
-QTableWidget::item:selected { background: #24485a; }
+QTreeWidget::item { padding: 7px 5px; border-bottom: 1px solid #1e3045; min-height: 19px; }
+QTableWidget::item:selected,QTreeWidget::item:selected { background: #24485a; }
 QCheckBox { spacing: 10px; color: #c1d4e9; min-height: 24px; }
-QCheckBox::indicator,QTableWidget::indicator { width: 17px; height: 17px; border: 1px solid #617d98; background: #14243a; border-radius: 4px; }
-QCheckBox::indicator:checked,QTableWidget::indicator:checked { background: #5cddc5; border: 2px solid #a0f4e4; image: none; }
-QCheckBox::indicator:hover,QTableWidget::indicator:hover { border-color: #8be9d7; }
+QCheckBox::indicator,QTableWidget::indicator,QTreeWidget::indicator { width: 17px; height: 17px; border: 1px solid #617d98; background: #14243a; border-radius: 4px; }
+QCheckBox::indicator:checked,QTableWidget::indicator:checked,QTreeWidget::indicator:checked { background: #5cddc5; border: 2px solid #a0f4e4; image: none; }
+QCheckBox::indicator:indeterminate,QTreeWidget::indicator:indeterminate { background: #357d7b; border: 2px solid #78beb5; }
+QCheckBox::indicator:hover,QTableWidget::indicator:hover,QTreeWidget::indicator:hover { border-color: #8be9d7; }
 QProgressBar#activityProgress { background: #1d2c41; border: 0; border-radius: 1px; }
 QProgressBar#activityProgress::chunk { background: #4dcab9; border-radius: 1px; }
 QScrollArea { border: 0; }

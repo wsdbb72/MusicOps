@@ -118,8 +118,9 @@ def test_pending_task_is_polled_by_id_even_when_missing_from_compact_status(app,
 def test_batch_preparation_is_visible_in_task_center(app,tmp_path):
     window=Workbench(tmp_path,Client(tmp_path),autostart=False)
     window.show_jobs({'jobs':[{'job_id':'batch-1','job_kind':'batch','scene':'complete','label':'准备资料检查','stage':'preparing','progress':40,'message':'已检查 200 个音频文件'}],'total':1,'active':1})
-    assert '批次' in window.job_table.item(0,0).text() and window.job_table.item(0,2).text()=='准备专辑任务'
-    assert '200' in window.job_table.item(0,4).text();window.close()
+    item=window.job_items['batch-1']
+    assert item.parent().text(0)=='识别任务' and '批次' in item.text(1) and '检查本地库' in item.text(2)
+    assert '200' in item.text(4);window.close()
 
 def test_interrupted_batch_review_returns_to_scene_without_generic_retry(app,tmp_path,monkeypatch):
     client=Client(tmp_path);window=Workbench(tmp_path,client,autostart=False);messages=[]

@@ -24,7 +24,7 @@ class AppService:
         self.paused=False; self.stop=threading.Event(); self.mutex=threading.RLock()
         self.active=None; self.thread=threading.Thread(target=self._loop,daemon=True,name='MusicOpsQueue')
         for task in self.store.list('tasks'):
-            if task['state'] in ('running','paused'): task.update(state='recovery_required',error='上次进程中断；先核对事务/请求，不能盲重试'); self.store.put('tasks',task['task_id'],task)
+            if task['state']=='running' or task['state']=='paused' and task.get('started_at'): task.update(state='recovery_required',error='上次进程中断；先核对事务/请求，不能盲重试'); self.store.put('tasks',task['task_id'],task)
         from musicops.app.pipeline import Workflows
         self.workflows=Workflows(self);self.workflows.recover();self._last_workflow_tick=0
         self.thread.start()
@@ -51,10 +51,11 @@ class AppService:
         if command=='get_workflow':
             job=self.store.get('evidence','workflow:'+payload['job_id'])
             if not job:raise ValueError('任务不存在')
-            public={k:job.get(k) for k in ('job_id','job_kind','scene','stage','message','detail','review_kind','choices','lookup_links','catalog_choices')}
+            public={k:job.get(k) for k in ('job_id','job_kind','task_type','task_group','scene','stage','label','message','detail','review_kind','choices','lookup_links','catalog_choices','paused','pause_pending','ai_fallback','search_summary','outcomes','source_outcomes','target_count','identification_job_id','search_job_id')}
             public['prepared']=[{**{k:r.get(k) for k in ('raw_title','artists','album','duration')},'track':(r.get('tags',{}).get('tracknumber') or [r.get('track','')])[0],'disc':(r.get('tags',{}).get('discnumber') or [r.get('disc','1')])[0]} for r in job.get('prepared',[]) or job.get('targets',[]) or job.get('old_files',[])]
             return {'job':public}
         if command=='cancel_workflow':return self.workflows.cancel(payload['job_id'])
+        if command=='bulk_workflows':return self.workflows.bulk(payload.get('action'),payload.get('job_ids'))
         if command=='review_workflow':return self.workflows.review(payload['job_id'],payload.get('choice'),payload.get('metadata'),payload.get('cover_path'))
         if command in ('enable_online','enable_demo'):
             current=self.config.current();values=copy.deepcopy(current['values'])
@@ -164,6 +165,9 @@ class AppService:
         args=copy.deepcopy(args);batch=None
         if command=='start_workflow':
             batch=self.workflows.queue(args,cfg['values'],task_id);args['_batch_job_id']=batch['job_id']
+        if command in ('manual_album_search','identify_metadata','resolve_metadata'):
+            group='search' if command=='manual_album_search' and (args.get('mode','literal')=='literal' or args.get('candidate_id')) else 'identify'
+            self.workflows.put({'kind':'workflow','job_kind':'activity','job_id':'activity:'+task_id,'task_group':group,'task_type':'manual_search' if group=='search' else 'catalog_identification','start_task_id':task_id,'scene':'playlist','stage':'queued','progress':0,'label':str(args.get('query') or args.get('album') or args.get('title') or '在线资料识别')[:300],'message':'等待检索' if group=='search' else '等待识别','created_at':utcnow(),'target_count':1})
         task=dict(schema_version=1,task_id=task_id,command=command,args=copy.deepcopy(args),state='queued',created_at=utcnow(),config_version=cfg['version'],config_snapshot=cfg,progress=0,result=None)
         self.store.put('tasks',task_id,task); self.store.event('task_queued',{'command':command,'config_version':cfg['version']},task_id)
         return {'accepted':True,'task_id':task_id,'state':'queued',**({'job_id':batch['job_id'],'batch_id':batch['batch_id']} if batch else {})}
@@ -178,6 +182,8 @@ class AppService:
                     if self.workflows.next_job():self.enqueue('advance_workflows',{})
                     continue
                 task=json.loads(row[0]); self.active=task['task_id']; task.update(state='running',started_at=utcnow()); self.store.put('tasks',self.active,task)
+                activity=self.store.get('evidence','workflow:activity:'+task['task_id'])
+                if activity:self.workflows.put(activity,stage='running',message='正在独立检索' if activity['task_group']=='search' else '正在识别歌曲与专辑')
             try:
                 self._checkpoint('before_execute')
                 result=self._execute(task['command'],task['args'],task['config_snapshot']['values'])
@@ -194,11 +200,15 @@ class AppService:
             if saved and saved.get('cancel_requested'): task['cancel_requested']=True; task['cancel_result']='任务已到安全点，未自动回滚或停种'
             if task['command']=='start_workflow' and task['state']!='completed' and task.get('args',{}).get('_batch_job_id'):
                 self.workflows.start_failed(task['args']['_batch_job_id'],task.get('error_class',task['state']),task.get('error',''))
+            activity=self.store.get('evidence','workflow:activity:'+task['task_id'])
+            if activity:
+                result=task.get('result') or {};stage='cancelled' if task.get('cancel_requested') else 'completed' if task['state']=='completed' else 'needs_review' if task['state'] in ('blocked','recovery_required') else 'failed'
+                self.workflows.put(activity,stage=stage,progress=100 if stage=='completed' else 0,message=result.get('message') or ('检索完成' if activity['task_group']=='search' else '识别完成') if stage=='completed' else '任务已取消' if stage=='cancelled' else '任务需要检查：'+str(task.get('error_class','')),detail=result.get('reason',''),ai_fallback=result.get('ai_fallback'),source_outcomes=result.get('source_outcomes'),lookup_links=result.get('lookup_links',[]),catalog_choices=result.get('albums') or result.get('candidates',[]),target_count=len(result.get('albums') or result.get('candidates',[])))
             self.store.put('tasks',task['task_id'],task); self.store.event('task_'+task['state'],{'command':task['command'],'error':task.get('error'),'result':task.get('result')},task['task_id']); self.active=None
     @staticmethod
     def _task_state(state):
         if state=='CANCELLED':return 'cancelled'
-        if state in ('POLICY_BLOCKED','AUTH_REQUIRED','AUTH_FAILED','RATE_LIMITED','ACCESS_BLOCKED','INVALID_INPUT','INPUT_TOO_LARGE','NEEDS_NETWORK','API_CONTRACT_ERROR','SNAPSHOT_INCOMPLETE'):return 'blocked'
+        if state in ('POLICY_BLOCKED','AUTH_REQUIRED','AUTH_FAILED','RATE_LIMITED','ACCESS_BLOCKED','INVALID_INPUT','INPUT_TOO_LARGE','NEEDS_NETWORK','API_CONTRACT_ERROR','SNAPSHOT_INCOMPLETE','SEARCH_UNAVAILABLE','NOT_CONFIGURED'):return 'blocked'
         if state in ('CONFLICT','RECOVERY_REQUIRED','REQUEST_UNKNOWN','ADD_UNKNOWN','START_UNKNOWN'):return 'recovery_required'
         if state in ('NETWORK_ERROR','TRANSIENT_ERROR','PARSE_ERROR','INVALID_PAYLOAD','VALIDATION_FAILED','FAILED','corrupt','unsupported','timeout','tool_error','changed_during_check'):return 'failed'
         return 'completed'
@@ -491,12 +501,15 @@ class AppService:
             if len(self._catalog_clients)>=4:self._catalog_clients.pop(next(iter(self._catalog_clients)))
             self._catalog_clients[key]=CatalogResolver(cfg['catalog'],secret_getter=self.vault.get,checkpoint=self._checkpoint)
         return self._catalog_clients[key]
+    def _recognize_metadata(self,query,cfg,found=None,force=False):
+        from musicops.app.recognition import RecognitionFallback
+        return RecognitionFallback(cfg,self._catalog_resolver(cfg),self.vault.get,self._checkpoint).identify(query,found=found,force=force)
     def _catalog_command(self,command,args,cfg):
         resolver=self._catalog_resolver(cfg)
         if command=='identify_metadata':
-            query={k:args.get(k) for k in ('title','artists','album','duration','target_id') if k in args}
+            query={k:args.get(k) for k in ('title','artists','album','duration','target_id','filename_hint') if k in args}
             if 'artists' not in query:query['artists']=args.get('artist',[])
-            result=resolver.identify(query)
+            result=self._recognize_metadata(query,cfg)
             target=self.store.get('target_tracks',str(query.get('target_id',''))) or self.store.get('library_files',str(query.get('target_id','')))
             for candidate in result.get('candidates',[]):
                 self.store.put('evidence','catalog:'+candidate['candidate_id'],{'kind':'catalog_candidate','candidate':candidate,'query':query,'target_hash':digest(target) if target else None,'catalog_config_hash':digest(cfg['catalog']),'observed_at':utcnow()})

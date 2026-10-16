@@ -2,6 +2,7 @@
 import re
 from musicops.clients.http import PolicyBlocked
 from musicops.domain.identity import strict_text
+from musicops.app.search_status import search_site,summarize,detail
 
 SITES=('open.cd','dicmusic','orpheus','redacted')
 
@@ -46,7 +47,7 @@ def manual_album_search(service,args,cfg):
     for site in SITES:
         if not cfg['providers'][site]['enabled']:outcomes[site]={'status':'DISABLED','candidate_count':0};continue
         service._checkpoint('manual_album_search_'+site)
-        result=service._real_pt(site,cfg).search(query)
+        result=search_site(lambda:service._real_pt(site,cfg),query)
         outcomes[site]={key:result.get(key) for key in ('status','search_complete','page','pages')}
         outcomes[site]['candidate_count']=len(result.get('candidates',[]))
         for raw in result.get('candidates',[]):
@@ -55,8 +56,10 @@ def manual_album_search(service,args,cfg):
             candidate['precise_match']=matched
             service.store.put('candidates',candidate['candidate_id'],candidate);candidates.append(candidate)
     configured=any(value['status']!='DISABLED' for value in outcomes.values())
-    failed=any(value['status'] not in ('OK','NO_RESOURCE','DISABLED') or value.get('search_complete') is False for value in outcomes.values())
+    summary=summarize(outcomes)
     message=f'找到 {len(candidates)} 条资源。'+(f' 已排除 {excluded} 条专辑或艺人不一致的候选。' if excluded else '')
     if not configured:message='尚未启用资源站，请在连接与设置中导入 Cookie 并开启参与检索。'
-    elif failed:message+=' 部分站点未完成检索或仍有未读取的结果页，请检查下方各站状态；当前结果不能用于断言全站无匹配。'
-    return {'status':'NOT_CONFIGURED' if not configured else 'PARTIAL' if failed else 'OK' if candidates else 'NO_MATCH','mode':mode,'query':query,'album':identity,'candidates':candidates,'source_outcomes':outcomes,'excluded_count':excluded,'read_only':True,'music_writes':0,'message':message}
+    elif not summary['successful_sites']:message='已启用站点当前均不可用，请查看各站状态后重试。'
+    elif summary['unavailable_sites']:message+=' 可访问站点的检索已完成，其他站点可稍后单独重试。'
+    if summary['limited_sites']:message+=' 部分站点仅返回首页，当前结果不能用于断言全站无匹配。'
+    return {'status':'NOT_CONFIGURED' if not configured else 'SEARCH_UNAVAILABLE' if not summary['successful_sites'] else 'OK' if candidates else 'NO_MATCH','mode':mode,'query':query,'album':identity,'candidates':candidates,'source_outcomes':outcomes,'excluded_count':excluded,'read_only':True,'music_writes':0,'message':message,**summary}

@@ -80,6 +80,11 @@ def main():
             task=wait_for(finished,20);checks[scene+'_preparation_completed']=task['state']=='completed'
             wait_for(lambda:client.call('list_workflows')['active']==0,20)
         checks['three_preparation_records']=len([job for job in client.call('list_workflows')['jobs'] if job.get('job_kind')=='batch'])==3
+        workflow_rows=client.call('list_workflows')['jobs']
+        checks['identification_and_search_are_separate']=any(job.get('task_type')=='identification' and job['stage']=='completed' and job.get('search_job_id') for job in workflow_rows) and any(job.get('task_type')=='search' and job.get('identification_job_id') for job in workflow_rows)
+        review_ids=[job['job_id'] for job in workflow_rows if job.get('task_type')=='search' and job['stage']=='needs_review']
+        cancelled=client.call('bulk_workflows',{'action':'cancel','job_ids':review_ids})
+        checks['native_bulk_cancel_review_tasks']=bool(review_ids) and cancelled['succeeded']==len(review_ids) and cancelled['failed']==0
         def completed(command,payload):
             accepted=client.call(command,payload)
             def finished_task():
@@ -93,7 +98,8 @@ def main():
         checks['native_multiplatform_file_import']=imported['state']=='completed' and len(targets)==1 and targets[0].get('source')=='spotify' and targets[0].get('target_id')=='spotify:synthetic-track'
         phase='manual_album_search';searched=completed('manual_album_search',{'mode':'literal','query':'Synthetic Album'})
         result=searched.get('result',{})
-        checks['native_manual_search_readonly']=searched['state']=='completed' and result.get('status')=='NOT_CONFIGURED' and result.get('read_only') is True and result.get('music_writes')==0 and not any(library.rglob('*'))
+        checks['native_manual_search_readonly']=searched['state']=='blocked' and result.get('status')=='NOT_CONFIGURED' and result.get('read_only') is True and result.get('music_writes')==0 and not any(library.rglob('*'))
+        checks['native_search_activity_visible']=any(job.get('job_kind')=='activity' and job.get('task_group')=='search' for job in client.call('list_workflows')['jobs'])
         phase='configuration_write';result=client.call('save_setup',{'workflow':{'fl_unlimited':True,'fl_per_batch':2}})
         checks['configuration_roundtrip']=result['config']['values']['workflow']['fl_unlimited'] is True and result['config']['values']['workflow']['fl_per_batch']==2
         phase='native_gui_exit';process.wait(25);checks['native_cocoa_window_exit_zero']=process.returncode==0;checks['native_window_rendered']=screenshot.is_file() and screenshot.stat().st_size>2000

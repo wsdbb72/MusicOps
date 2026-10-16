@@ -23,7 +23,7 @@ def main():
     env=os.environ.copy();env['QT_QPA_PLATFORM']='offscreen'
     for key in ('PYTHONPATH','PYTHONHOME','VIRTUAL_ENV'):env.pop(key,None)
     process=subprocess.Popen([str(bundle/'MusicOps.exe'),'--base',str(base),'--quit-after','20000'],cwd=bundle,env=env,creationflags=0x08000000)
-    client=WorkerClient(base);report={'version':'0.4.1','evidence':'packaged_worker_three_entry_points','external_requests':0,'checks':{}}
+    client=WorkerClient(base);report={'version':'0.4.2','evidence':'packaged_worker_three_entry_points','external_requests':0,'checks':{}}
     try:
         deadline=time.monotonic()+25
         while True:
@@ -48,7 +48,11 @@ def main():
             if not jobs['active']:break
             if time.monotonic()>deadline:raise TimeoutError('synthetic album task')
             time.sleep(.1)
-        report['checks']['synthetic_target_visible_as_album']=any(j.get('job_kind')!='batch' and j['scene']=='playlist' and j['stage']=='skipped' for j in jobs['jobs'])
+        report['checks']['synthetic_target_visible_as_album']=any(j.get('task_type')=='search' and j['scene']=='playlist' and j['stage']=='needs_review' for j in jobs['jobs'])
+        report['checks']['identification_and_search_are_separate']=any(j.get('task_type')=='identification' and j['stage']=='completed' and j.get('search_job_id') for j in jobs['jobs']) and any(j.get('task_type')=='search' and j.get('identification_job_id') for j in jobs['jobs'])
+        review_ids=[j['job_id'] for j in jobs['jobs'] if j.get('task_type')=='search' and j['stage']=='needs_review']
+        cancelled=client.call('bulk_workflows',{'action':'cancel','job_ids':review_ids})
+        report['checks']['native_bulk_cancel_review_tasks']=cancelled['succeeded']==len(review_ids) and cancelled['failed']==0
         report['checks']['three_preparation_records']=len([j for j in jobs['jobs'] if j.get('job_kind')=='batch'])==3
         result=client.call('save_setup',{'workflow':{'fl_unlimited':True,'fl_per_batch':0}})
         report['checks']['native_unlimited_fl_roundtrip']=result['config']['values']['workflow']['fl_unlimited'] is True and result['config']['values']['workflow']['fl_per_batch']==0
@@ -63,7 +67,8 @@ def main():
         imported=completed('refresh_playlist',{'file_path':str(fixture),'platform':'auto'})
         report['checks']['native_multiplatform_file_import']=imported['state']=='completed' and len(imported['result'].get('targets',[]))==1 and imported['result']['targets'][0]['source']=='spotify'
         searched=completed('manual_album_search',{'mode':'literal','query':'Synthetic Album'})
-        report['checks']['native_manual_search_readonly']=searched['state']=='completed' and searched['result']['status']=='NOT_CONFIGURED' and searched['result']['music_writes']==0
+        report['checks']['native_manual_search_readonly']=searched['state']=='blocked' and searched['result']['status']=='NOT_CONFIGURED' and searched['result']['music_writes']==0
+        report['checks']['native_search_activity_visible']=any(j.get('job_kind')=='activity' and j.get('task_group')=='search' for j in client.call('list_workflows')['jobs'])
         process.wait(30);report['checks']['gui_exit_zero']=process.returncode==0
         report['passed']=all(report['checks'].values())
     except Exception as exc:report.update(passed=False,error_class=type(exc).__name__,error=str(exc))

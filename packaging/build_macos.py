@@ -46,7 +46,7 @@ def package(args):
     for executable in ('MusicOps','MusicOps-worker'):
         path=app/'Contents/MacOS'/executable
         if not path.is_file() or not os.access(path,os.X_OK):raise RuntimeError('Packaged executable missing: '+executable)
-        run('/usr/bin/lipo','-verify_arch',args.arch,path)
+        run('/usr/bin/lipo',path,'-verify_arch',args.arch)
     # PyInstaller signs the complete app during BUNDLE construction. Verify the
     # signature and explicitly record that it provides no Developer ID identity.
     run('/usr/bin/codesign','--verify','--deep','--strict',app)

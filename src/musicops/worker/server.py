@@ -107,7 +107,10 @@ def main(argv=None):
         key = auth_key(base)
         prepare_ipc_socket(base)
         address=pipe_address(base)
-        with Listener(address, family=ipc_family(), authkey=key) as listener:
+        family=ipc_family()
+        # GUI polling and task progress can arrive together. A one-connection
+        # Unix socket queue rejects healthy concurrent clients on macOS.
+        with Listener(address, family=family, backlog=32 if family=='AF_UNIX' else 1, authkey=key) as listener:
             secure_ipc_socket(address)
             while not service.stop.is_set():
                 try:

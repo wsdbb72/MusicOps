@@ -58,6 +58,11 @@ def main():
         store.put('target_tracks','macos:fixture',{'target_id':'macos:fixture','source':'local','raw_title':'Synthetic Song','artists':['Synthetic Artist'],'album':'Synthetic Album','duration':120,'metadata_complete':True})
         phase='native_cocoa_gui';screenshot=work/'native-window.png';process=launch(gui,'--base',base,'--screenshot',screenshot,'--quit-after','14000')
         status=wait_for(lambda:client.call('get_status',{'compact':True}));checks['gui_started_frozen_worker']=Path(status['base'])==base and status['offline'] is False
+        phase='concurrent_gui_polling'
+        from concurrent.futures import ThreadPoolExecutor
+        with ThreadPoolExecutor(max_workers=8) as pool:
+            replies=list(pool.map(lambda _:WorkerClient(base,timeout=20).call('get_status',{'compact':True}),range(16)))
+        checks['concurrent_gui_polling_stays_connected']=len(replies)==16 and all(Path(reply['base'])==base for reply in replies)
         # The worker receives a new token over authenticated local IPC and writes
         # encrypted data. No token value is printed or added to the report.
         phase='keychain_vault_roundtrip';secret='synthetic-macos-'+uuid.uuid4().hex;ref='vault://smoke/macos/token';host='smoke.example.invalid';sensitive_values.append(secret)

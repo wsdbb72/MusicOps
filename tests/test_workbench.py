@@ -182,7 +182,7 @@ def test_recovered_connection_clears_only_its_transient_notice(app,tmp_path):
             return super().call(command,payload)
     client=ConnectingClient(tmp_path);window=Workbench(tmp_path,client,autostart=False)
     window.call('get_status',{'compact':True},window.status);wait(app,lambda:not window.requests)
-    assert 'Connection refused' in window.notice.text()
+    assert '重新连接后台' in window.notice.text() and 'Errno' not in window.notice.text()
     window.call('get_status',{'compact':True},window.status);wait(app,lambda:not window.requests)
     assert window.notice.text()==''
     window._connection_notice='需要处理：[Errno 61] Connection refused';window.notice.setText('任务未完成：请核对发行')

@@ -310,8 +310,9 @@ class Workbench(QMainWindow):
             self.requests.discard(request)
             if failed:failed(message)
             else:
-                self.notice.setText('需要处理：'+message)
-                if command in ('attach','get_status','list_workflows','get_task') and (message.startswith(('[Errno ','[WinError ')) or 'IPC_CONNECTION_ERROR' in message or '后台响应超时' in message):self._connection_notice=self.notice.text()
+                reconnecting=command in ('attach','get_status','list_workflows','get_task') and (message.startswith(('[Errno ','[WinError ')) or 'IPC_CONNECTION_ERROR' in message or '后台响应超时' in message)
+                self.notice.setText('正在重新连接后台，请稍候…' if reconnecting else '需要处理：'+message)
+                if reconnecting:self._connection_notice=self.notice.text()
             self.update_activity()
         request.signals.done.connect(success);request.signals.failed.connect(failure);self.pool.start(request)
     def poll_tasks(self):

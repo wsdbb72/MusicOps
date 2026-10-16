@@ -304,7 +304,7 @@ jobs:
               if obj['type'] != 'commit' or obj['sha'] != commit:
                   raise SystemExit('The existing tag does not identify the tested source')
           notes = pathlib.Path('release-notes.md')
-          notes.write_text('本轮更新：自动识别旧版并在原目录升级；已配置 AI 自动参与识别兜底并回查真实目录；单站故障不再阻断其他站点；识别、搜索和下载入库保留独立任务记录；任务中心支持勾选后批量暂停、继续、取消及 AI 解释。\n\n提供 Windows 安装包与便携版、macOS Apple Silicon 和 Intel 原生 PKG 安装包及应用 ZIP，以及同一提交的源码 ZIP。所有产物通过回归、实际安装升级和打包运行验收。请按 SHA256SUMS 核验下载文件。macOS 使用 ad-hoc 完整性签名，尚无 Apple Developer ID 签名和公证。\n\nSource commit: '+commit+'\n', 'utf-8')
+          notes.write_text('本轮更新：自动识别旧版并在原目录升级；已配置 AI 自动参与识别兜底并回查真实目录；单站故障不再阻断其他站点；识别、搜索和下载入库保留独立任务记录；任务中心支持勾选后批量暂停、继续、取消及 AI 解释。\n\n提供 Windows 安装包与便携版、macOS Apple Silicon 和 Intel 原生 PKG 安装包及应用 ZIP，以及同一提交的源码 ZIP。所有产物通过回归、实际安装升级和打包运行验收。请按 SHA256SUMS 核验下载文件。macOS 使用 ad-hoc 完整性签名，尚无 Apple Developer ID 签名和公证。\n\n自动验收使用隔离档案、合成音频和模拟服务，不代表所有私人站点账号均已现场验证。Windows 安装前请在任务中心选择“退出应用及后台”。\n\nSource commit: '+commit+'\n', 'utf-8')
           def gh(*arguments):
               subprocess.run(['gh', *arguments], check=True)
           gh('release', 'create', tag, '--verify-tag', '--target', commit, '--draft', '--title', 'MusicOps '+version, '--notes-file', str(notes))

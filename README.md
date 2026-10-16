@@ -54,7 +54,7 @@ MusicOps 把日常音乐库维护收敛为三个入口：把歌单中缺少的�
 | `MusicOps-版本号-macOS-x86_64.pkg` | Intel Mac，推荐 | 双击运行安装向导，安装到“应用程序” |
 | `MusicOps-版本号-macOS-芯片.zip` | Mac 手动安装版 | 解压，将 `MusicOps.app` 拖入“应用程序” |
 | `MusicOps-版本号-source.zip` | 开发用源码 | 普通使用无需下载 |
-| `SHA256SUMS.txt` | 下载完整性核对 | 对照同一 Release 中对应文件的 SHA256 |
+| `SHA256SUMS` / `SHA512SUMS` | 下载完整性核对 | 对照同一 Release 中对应文件的校验值 |
 
 Windows 运行环境为 **Windows 10 / 11 64 位**；macOS 构建目标为 **macOS 15 及以上**，分 Apple Silicon `arm64` 与 Intel `x86_64`，不承诺兼容旧系统。桌面发行包无需安装 Python。Windows 绿色版需要保留整个文件夹，尤其是 `_internal`，不能只取出一个 EXE。
 
@@ -77,7 +77,7 @@ Mac 安装包和 ZIP 附带对应 `.sha256`、`.sha512` 和 `-build.json`，由 
 Get-FileHash -LiteralPath .\MusicOps-版本号-Setup.exe -Algorithm SHA256
 ```
 
-将结果与同一 Release 的 `SHA256SUMS.txt` 对照。把命令中的“版本号”替换为实际文件名。
+将结果与同一 Release 的 `SHA256SUMS` 对照。把命令中的“版本号”替换为实际文件名。
 
 </details>
 

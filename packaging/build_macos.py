@@ -5,12 +5,26 @@ provides the corresponding credentials. The runner smoke test is mandatory
 before a release artifact is produced.
 """
 from __future__ import annotations
-import argparse,hashlib,json,os,platform,plistlib,shutil,subprocess,sys,tomllib
+import argparse,hashlib,json,os,platform,plistlib,re,shutil,subprocess,sys,tomllib
 from pathlib import Path
 
 ROOT=Path(__file__).resolve().parents[1]
 
 def run(*args,**kwargs):return subprocess.run([str(arg) for arg in args],check=True,**kwargs)
+
+def verify_crypto_static(extension):
+    """Reject OpenSSL dylib collisions before and after PyInstaller freezing.
+
+    cryptography 49+ no longer supplies Intel Mac wheels. Follow the upstream
+    macOS static build instructions instead of dynamically linking Homebrew:
+    https://cryptography.io/en/latest/installation/#building-cryptography-on-macos
+    """
+    linked=run('/usr/bin/otool','-L',extension,capture_output=True,text=True).stdout
+    for line in linked.splitlines()[1:]:
+        dependency=line.strip().split(' (',1)[0]
+        if re.fullmatch(r'lib(?:ssl|crypto)(?:[.-].*)?\.dylib',Path(dependency).name):
+            raise RuntimeError('cryptography must statically link OpenSSL before packaging; reinstall with OPENSSL_STATIC=1, --no-binary=cryptography and --no-cache-dir. Dynamic dependency: '+Path(dependency).name)
+    print('Verified static OpenSSL linkage: '+str(extension),flush=True)
 
 def version():
     value=tomllib.loads((ROOT/'pyproject.toml').read_text('utf-8'))['project']['version']
@@ -37,12 +51,17 @@ def audit_bundle(app):
 def package(args):
     if sys.platform!='darwin':raise SystemExit('macOS bundles must be built and smoke-tested on macOS')
     if platform.machine()!=args.arch:raise SystemExit('Use a native runner for each architecture; cross-builds are not accepted')
+    from cryptography.hazmat.bindings import _rust
+    verify_crypto_static(Path(_rust.__file__))
     output=Path(args.output).resolve();output.mkdir(parents=True,exist_ok=True);app_version=version();stem=f'MusicOps-{app_version}-macOS-{args.arch}'
     icon=output/'build-assets/musicops.icns';make_icon(icon)
     env=os.environ.copy();env.update(MUSICOPS_MAC_ARCH=args.arch,MUSICOPS_MAC_ICON=str(icon),MACOSX_DEPLOYMENT_TARGET='15.0',PYINSTALLER_STRICT_BUNDLE_CODESIGN_ERROR='1')
     dist=output/'dist';run(sys.executable,'-m','PyInstaller','--noconfirm','--clean','--workpath',output/'build','--distpath',dist,ROOT/'packaging/MusicOps-mac.spec',cwd=ROOT,env=env)
     app=dist/'MusicOps.app';info=plistlib.loads((app/'Contents/Info.plist').read_bytes())
     if info.get('CFBundleIdentifier')!='com.wsdbb72.MusicOps' or info.get('CFBundleShortVersionString')!=app_version or info.get('CFBundleExecutable')!='MusicOps' or info.get('LSBackgroundOnly') is not False:raise RuntimeError('App identity/version/GUI mode mismatch')
+    crypto_extensions={path.resolve() for path in (app/'Contents/Frameworks/cryptography/hazmat/bindings').glob('_rust*.so') if path.is_file()}
+    if not crypto_extensions:raise RuntimeError('Packaged cryptography extension missing')
+    for extension in crypto_extensions:verify_crypto_static(extension)
     for executable in ('MusicOps','MusicOps-worker'):
         path=app/'Contents/MacOS'/executable
         if not path.is_file() or not os.access(path,os.X_OK):raise RuntimeError('Packaged executable missing: '+executable)
@@ -77,7 +96,7 @@ def package(args):
         with archive.open('rb') as stream:digests[algorithm]=hashlib.file_digest(stream,algorithm).hexdigest()
     for algorithm,digest in digests.items():(output/(stem+'.'+algorithm)).write_text(digest+'  '+archive.name+'\n','utf-8')
     commit=subprocess.run(['git','rev-parse','HEAD'],cwd=ROOT,capture_output=True,text=True,check=True).stdout.strip()
-    metadata={'version':app_version,'architecture':args.arch,'minimum_macos':'15.0','commit':commit,'archive':archive.name,'digests':digests,'signing':'ad-hoc','developer_id_signed':False,'notarized':False,'smoke_passed':True,'runner_macos':platform.mac_ver()[0]}
+    metadata={'version':app_version,'architecture':args.arch,'minimum_macos':'15.0','commit':commit,'archive':archive.name,'digests':digests,'signing':'ad-hoc','developer_id_signed':False,'notarized':False,'cryptography_openssl_static':True,'smoke_passed':True,'runner_macos':platform.mac_ver()[0]}
     (output/(stem+'-build.json')).write_text(json.dumps(metadata,ensure_ascii=False,indent=2)+'\n','utf-8')
     print(json.dumps(metadata,ensure_ascii=True))
 

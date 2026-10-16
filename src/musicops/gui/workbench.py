@@ -270,6 +270,7 @@ class Workbench(QMainWindow):
                 if not ok:self.album_note.setText('尚未选择专辑，可以调整搜索内容或使用原样搜索。');return
                 self.album_note.setText('正在核对专辑资料并精准检索四站…');self.call('manual_album_search',{**payload,'candidate_id':albums[texts.index(value)]['candidate_id']},received);return
             outcomes=result.get('source_outcomes',{});names={key:name for key,name,_ in SITES};states={'OK':'有结果','NO_RESOURCE':'无资源','DISABLED':'未启用','AUTH_FAILED':'登录失效','AUTH_REQUIRED':'需登录','RATE_LIMITED':'限流','ACCESS_BLOCKED':'访问未通过'}
+            states.update(NETWORK_ERROR='网络连接失败',TRANSIENT_ERROR='站点暂时不可用',PARSE_ERROR='页面内容未识别',INVALID_INPUT='检索词格式无效',API_CONTRACT_ERROR='接口返回异常',INVALID_PAYLOAD='返回内容无效',POLICY_BLOCKED='访问已暂停',INPUT_TOO_LARGE='检索词过长',SNAPSHOT_INCOMPLETE='结果尚不完整',FAILED='检索失败')
             summary='；'.join(names.get(key,key)+'：'+states.get(value.get('status'),value.get('status','未知')) for key,value in outcomes.items())
             self.album_note.setText(result.get('message','')+(' 检索词：'+result['query'] if result.get('query') else '')+('\n'+summary if summary else ''))
             rows=result.get('candidates',[]);self.album_results.setRowCount(len(rows))
@@ -301,7 +302,9 @@ class Workbench(QMainWindow):
         def failure(message):
             self.requests.discard(request)
             if failed:failed(message)
-            else:self.notice.setText('需要处理：'+message)
+            else:
+                self.notice.setText('需要处理：'+message)
+                if command in ('attach','get_status','list_workflows','get_task') and (message.startswith(('[Errno ','[WinError ')) or 'IPC_CONNECTION_ERROR' in message or '后台响应超时' in message):self._connection_notice=self.notice.text()
             self.update_activity()
         request.signals.done.connect(success);request.signals.failed.connect(failure);self.pool.start(request)
     def poll_tasks(self):
@@ -329,6 +332,8 @@ class Workbench(QMainWindow):
         self.call('get_status',{'compact':True},self.status)
         self.call('list_workflows',{'offset':self.job_offset},self.show_jobs)
     def status(self,result):
+        if self.notice.text()==getattr(self,'_connection_notice',None):self.notice.clear()
+        self._connection_notice=None
         self.config=result['config']['values'];self.available_refs=[r['ref'] if isinstance(r,dict) else r for r in result.get('secret_refs',[])];self.timer.start();connected=[name for key,name,_ in SITES if self.config['providers'][key]['enabled'] and self.config['providers'][key]['credential_ref'] in self.available_refs]
         self.connection.setText('音乐库：'+self.config['paths']['library']+'     ·     '+('已配置 '+', '.join(connected) if connected else '尚未连接资源站；可在“连接与设置”添加'))
         if not self.wizard_shown and not self.config['workflow']['setup_done']:

@@ -172,3 +172,20 @@ def test_optional_platform_authorization_is_masked_and_saved_without_mask(app,tm
     payload=next(p for c,p in client.calls if c=='save_setup')
     assert payload['playlist_credentials']['spotify']=='' and '••••' not in str(payload)
     window.close()
+
+def test_recovered_connection_clears_only_its_transient_notice(app,tmp_path):
+    class ConnectingClient(Client):
+        failures=1
+        def call(self,command,payload):
+            if command=='get_status' and self.failures:
+                self.failures-=1;raise ConnectionRefusedError(61,'Connection refused')
+            return super().call(command,payload)
+    client=ConnectingClient(tmp_path);window=Workbench(tmp_path,client,autostart=False)
+    window.call('get_status',{'compact':True},window.status);wait(app,lambda:not window.requests)
+    assert 'Connection refused' in window.notice.text()
+    window.call('get_status',{'compact':True},window.status);wait(app,lambda:not window.requests)
+    assert window.notice.text()==''
+    window._connection_notice='需要处理：[Errno 61] Connection refused';window.notice.setText('任务未完成：请核对发行')
+    window.call('get_status',{'compact':True},window.status);wait(app,lambda:not window.requests)
+    assert window.notice.text()=='任务未完成：请核对发行'
+    window.close()

@@ -161,7 +161,29 @@ class Workflows:
             job_id='batch:'+task['task_id'];scene=task.get('args',{}).get('scene','complete')
             self.put({'kind':'workflow','job_kind':'batch','job_id':job_id,'batch_id':task['task_id'],'scene':scene,'stage':'needs_review','progress':0,'label':SCENES.get(scene,scene)+' · 上次准备任务','created_at':task.get('created_at',utcnow()),'message':'旧版准备任务已停止，请重新开始本批次','detail':'保留了原来的歌单选择和设置；旧版重复排队请求不会自动执行下载。','review_kind':'interrupted','start_task_id':task['task_id']})
             task.update(state='recovery_required',error='旧版准备任务已停止，请重新开始本批次',error_class='RECOVERY_REQUIRED');self.store.put('tasks',task['task_id'],task)
-        for job in self.rows(include_batches=True):
+        jobs=self.rows(include_batches=True)
+        batches={job['batch_id'] for job in jobs if job.get('job_kind')=='batch' and isinstance(job.get('batch_id'),str) and job['batch_id'] and job.get('job_id')=='batch:'+job['batch_id']}
+        legacy=[]
+        for job in jobs:
+            if job.get('job_kind')!='batch' and job.get('stage') not in TERMINAL and job.get('batch_id') not in batches:
+                # A 0.3.1 scan could finish after its window appeared stuck,
+                # leaving hundreds of invisible album requests. They have no
+                # durable preparation batch and must never restart downloads
+                # merely because the user installs the new application.
+                original_stage=job.get('stage')
+                job.update(legacy_stage=original_stage,resume_stage=job.get('resume_stage') or original_stage,
+                           legacy_batch_requires_review=True,stage='needs_review',review_kind='interrupted',
+                           message='旧版专辑队列已暂停；请核对后手动继续，或重新开始本批次',
+                           detail='升级不会自动重放旧版下载请求。已有下载、做种任务、令牌记录和文件事务保持原状。',updated_at=utcnow())
+                legacy.append(job)
+        if legacy:
+            # One commit, rather than a full synchronous filesystem flush for
+            # every legacy album, keeps first startup responsive on large queues.
+            with self.store.connection() as connection:
+                connection.execute('BEGIN IMMEDIATE')
+                connection.executemany('UPDATE evidence SET payload=?,updated_at=? WHERE id=?',
+                    [(json.dumps(job,ensure_ascii=False),job['updated_at'],'workflow:'+job['job_id']) for job in legacy])
+        for job in jobs:
             if job.get('job_kind')=='batch' and job.get('stage')=='preparing':
                 task=self.store.get('tasks',job.get('start_task_id')) if job.get('start_task_id') else None
                 if not task or task['state']!='queued':

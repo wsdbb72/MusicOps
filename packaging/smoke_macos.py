@@ -37,8 +37,8 @@ def main():
     base=work/('new profile '+uuid.uuid4().hex[:8]);base.mkdir()
     report_path=Path(args.report).resolve();report_path.parent.mkdir(parents=True,exist_ok=True)
     gui=app/'Contents/MacOS/MusicOps';worker=app/'Contents/MacOS/MusicOps-worker';before=digest_tree(app)
-    report={'version':__version__,'platform':'macOS','architecture':platform.machine(),'runner_macos':platform.mac_ver()[0],'evidence':'native_packaged_app_worker_keychain_three_entries','external_requests':0,'developer_id_signed':False,'notarized':False,'checks':{}}
-    checks=report['checks'];client=WorkerClient(base,timeout=20);processes=[];handles=[]
+    report={'version':__version__,'platform':'macOS','architecture':platform.machine(),'runner_macos':platform.mac_ver()[0],'evidence':'native_packaged_app_worker_keychain_three_entries_file_import_manual_search','external_requests':0,'developer_id_signed':False,'notarized':False,'checks':{}}
+    checks=report['checks'];client=WorkerClient(base,timeout=20);processes=[];handles=[];sensitive_values=[]
     env=os.environ.copy()
     for key in ('PYTHONPATH','PYTHONHOME','VIRTUAL_ENV','QT_PLUGIN_PATH','QT_QPA_PLATFORM_PLUGIN_PATH'):env.pop(key,None)
     env['QT_QPA_PLATFORM']='cocoa';env['PYTHONIOENCODING']='utf-8'
@@ -60,7 +60,7 @@ def main():
         status=wait_for(lambda:client.call('get_status',{'compact':True}));checks['gui_started_frozen_worker']=Path(status['base'])==base and status['offline'] is False
         # The worker receives a new token over authenticated local IPC and writes
         # encrypted data. No token value is printed or added to the report.
-        phase='keychain_vault_roundtrip';secret='synthetic-macos-'+uuid.uuid4().hex;ref='vault://smoke/macos/token';host='smoke.example.invalid'
+        phase='keychain_vault_roundtrip';secret='synthetic-macos-'+uuid.uuid4().hex;ref='vault://smoke/macos/token';host='smoke.example.invalid';sensitive_values.append(secret)
         saved=client.call('set_secret',{'ref':ref,'value':secret,'host':host});checks['keychain_encrypted_vault_write']=saved.get('configured') is True
         vault=Vault(base);checks['keychain_cross_process_roundtrip']=vault.get(ref,host)==secret
         checks['vault_has_no_plaintext_secret']=secret.encode() not in vault.path.read_bytes()
@@ -75,6 +75,20 @@ def main():
             task=wait_for(finished,20);checks[scene+'_preparation_completed']=task['state']=='completed'
             wait_for(lambda:client.call('list_workflows')['active']==0,20)
         checks['three_preparation_records']=len([job for job in client.call('list_workflows')['jobs'] if job.get('job_kind')=='batch'])==3
+        def completed(command,payload):
+            accepted=client.call(command,payload)
+            def finished_task():
+                task=client.call('get_task',{'task_id':accepted['task_id']})['task']
+                return task if task['state'] not in ('queued','running','paused') else None
+            return wait_for(finished_task,12)
+        phase='multiplatform_file_import';fixture=base/'playlist.csv'
+        fixture.write_text('title,artist,album,duration,source,id\nSong,Artist,Album,180,spotify,synthetic-track\n','utf-8')
+        imported=completed('refresh_playlist',{'file_path':str(fixture),'platform':'auto'})
+        targets=imported.get('result',{}).get('targets',[])
+        checks['native_multiplatform_file_import']=imported['state']=='completed' and len(targets)==1 and targets[0].get('source')=='spotify' and targets[0].get('target_id')=='spotify:synthetic-track'
+        phase='manual_album_search';searched=completed('manual_album_search',{'mode':'literal','query':'Synthetic Album'})
+        result=searched.get('result',{})
+        checks['native_manual_search_readonly']=searched['state']=='completed' and result.get('status')=='NOT_CONFIGURED' and result.get('read_only') is True and result.get('music_writes')==0 and not any(library.rglob('*'))
         phase='configuration_write';result=client.call('save_setup',{'workflow':{'fl_unlimited':True,'fl_per_batch':2}})
         checks['configuration_roundtrip']=result['config']['values']['workflow']['fl_unlimited'] is True and result['config']['values']['workflow']['fl_per_batch']==2
         phase='native_gui_exit';process.wait(25);checks['native_cocoa_window_exit_zero']=process.returncode==0;checks['native_window_rendered']=screenshot.is_file() and screenshot.stat().st_size>2000
@@ -94,7 +108,7 @@ def main():
         checks['no_profile_inside_app']=not any(path.name in ('profile','vault','state') for path in app.rglob('*'))
         report['passed']=all(checks.values())
     except Exception as exc:
-        report.update(passed=False,error_class=type(exc).__name__,error_phase=phase)
+        report.update(passed=False,error_class=type(exc).__name__,error_phase=phase,process_exit_codes_before_cleanup=[process.poll() for process in processes])
     finally:
         try:client.call('shutdown_worker')
         except Exception:pass
@@ -104,6 +118,20 @@ def main():
                 try:process.wait(8)
                 except subprocess.TimeoutExpired:process.kill();process.wait(5)
         for handle in handles:handle.close()
+        if not report.get('passed'):
+            # Only native loader error lines from this synthetic profile are
+            # public diagnostics; never upload raw child logs or vault data.
+            markers=('Symbol not found:','Library not loaded:','ImportError:','ModuleNotFoundError:','[PYI-','Could not load the Qt platform plugin')
+            diagnostics=[]
+            for handle in handles:
+                with Path(handle.name).open('rb') as stream:
+                    stream.seek(max(0,Path(handle.name).stat().st_size-8192));tail=stream.read().decode('utf-8',errors='replace')
+                for line in tail.splitlines():
+                    if not any(marker in line for marker in markers):continue
+                    for value in sensitive_values:line=line.replace(value,'[REDACTED]')
+                    for path,label in ((str(base),'<profile>'),(str(work),'<work>'),(str(app),'<app>')):line=line.replace(path,label)
+                    if line[:512] not in diagnostics:diagnostics.append(line[:512])
+            report['native_loader_diagnostics']=diagnostics[:8]
         report_path.write_text(json.dumps(report,ensure_ascii=False,indent=2)+'\n','utf-8')
     print(json.dumps(report,ensure_ascii=True))
     if not report['passed']:raise SystemExit(1)

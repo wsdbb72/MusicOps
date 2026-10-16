@@ -127,3 +127,45 @@ def test_metadata_cache_invalidates_old_or_changed_evidence(tmp_path,monkeypatch
     elif invalid=='path':row['path']=str(tmp_path/'Other.flac')
     refreshed=index_library(tmp_path,metadata_only=True,cached={row['file_id']:row})[0]
     assert len(calls)==1 and refreshed['path']==str(track) and refreshed['read_error'] is None
+
+
+def test_orphan_legacy_album_jobs_are_held_but_new_batches_keep_pending_stages(preparation,monkeypatch):
+    service,cfg=preparation
+    common={'kind':'workflow','scene':'playlist','config':cfg,'targets':[],'old_files':[],'progress':0,'message':''}
+    for job_id,stage,resume in [('old-pending','searching',None),('old-active','running','fallback'),('old-finished','completed',None)]:
+        value={**common,'job_id':job_id,'batch_id':'legacy-batch','stage':stage}
+        if resume:value['resume_stage']=resume
+        service.workflows.put(value)
+    service.workflows.put({**common,'job_kind':'batch','job_id':'batch:current','batch_id':'current','stage':'completed'})
+    service.workflows.put({**common,'job_id':'new-pending','batch_id':'current','stage':'searching'})
+    service.workflows.put({**common,'job_id':'new-active','batch_id':'current','stage':'running','resume_stage':'downloading'})
+    # Recovery is a state-only action, even when an old task had already added
+    # a torrent or consumed a token before the process stopped.
+    service.store.put('download_tasks','existing-download',{'state':'seeding','resource_id':'fixture'})
+    service.store.put('transactions','existing-transaction',{'state':'COMMITTED'})
+    downloads=service.store.list('download_tasks');transactions=service.store.list('transactions')
+    monkeypatch.setattr(service.workflows,'provider',lambda *a:pytest.fail('recovery contacted a PT site'))
+    service.workflows.recover()
+    rows={row['job_id']:row for row in service.workflows.rows()}
+    assert rows['old-pending']['stage']=='needs_review' and rows['old-pending']['legacy_stage']=='searching'
+    assert rows['old-pending']['resume_stage']=='searching' and rows['old-pending']['legacy_batch_requires_review']
+    assert rows['old-active']['stage']=='needs_review' and rows['old-active']['legacy_stage']=='running'
+    assert rows['old-active']['resume_stage']=='fallback' and rows['old-active']['review_kind']=='interrupted'
+    assert rows['old-finished']['stage']=='completed' and 'legacy_stage' not in rows['old-finished']
+    assert rows['new-pending']['stage']=='searching' and 'legacy_stage' not in rows['new-pending']
+    assert rows['new-active']['stage']=='needs_review' and rows['new-active']['resume_stage']=='downloading'
+    assert 'legacy_batch_requires_review' not in rows['new-active']
+    assert service.workflows.next_job()['job_id']=='new-pending'
+    assert service.store.list('download_tasks')==downloads and service.store.list('transactions')==transactions
+    service.workflows.recover()
+    assert service.store.get('evidence','workflow:old-active')['legacy_stage']=='running'
+
+
+def test_malformed_batch_identity_cannot_auto_resume_orphan_albums(preparation):
+    service,_=preparation
+    service.workflows.put({'job_kind':'batch','job_id':'wrong-identity','batch_id':'old','stage':'completed'})
+    service.workflows.put({'job_id':'legacy','batch_id':'old','stage':'fallback','scene':'playlist','message':''})
+    service.workflows.recover()
+    legacy=service.store.get('evidence','workflow:legacy')
+    assert legacy['stage']=='needs_review' and legacy['legacy_stage']=='fallback'
+    assert service.workflows.next_job() is None

@@ -21,7 +21,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 def run_process(arguments, *, timeout=90):
-    return subprocess.run(list(map(str, arguments)), capture_output=True, text=True,
+    return subprocess.run(list(map(str, arguments)), capture_output=True, text=True, encoding='utf-8', errors='replace',
                           creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0), timeout=timeout)
 
 

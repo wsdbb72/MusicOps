@@ -376,7 +376,7 @@ pwsh -File packaging/build_windows.ps1 -Python .\.venv\Scripts\python.exe
 
 构建产物位于 `dist/MusicOps-Windows`；安装器脚本为 [`packaging/MusicOps.iss`](packaging/MusicOps.iss)，使用 Inno Setup 7 编译。公开发布前还需收集许可证、核对打包清单、运行 EXE 验证并检查敏感信息。FFmpeg 的本地测试安装与其二进制再分发是两件事，自行加入发行包时需履行对应许可。
 
-CI 使用锁定依赖、临时目录、合成音频和模拟服务验证行为。macOS 运行包由 GitHub Actions 在对应架构机器构建，构建与发布结果以具体 Release 和 Actions 为准。测试通过说明覆盖场景通过，不代表所有私人站点账号、真实资源和音乐服务器均已现场验收；未配置的站点不会被当作已验证连接。
+CI 使用锁定依赖、临时目录、合成音频和模拟服务验证行为。完整发布工作流在 GitHub Actions 构建 Windows、Mac 两种架构的原生安装包和运行包；三种平台全部通过测试、安装升级与打包运行验收后，校验源码提交和文件散列，再发布标题为 `MusicOps X.Y.Z` 的 Release。任一构建失败不会发布缺少平台的正式版。构建与发布结果以具体 Release 和 Actions 为准。测试通过说明覆盖场景通过，不代表所有私人站点账号、真实资源和音乐服务器均已现场验收；未配置的站点不会被当作已验证连接。
 
 欢迎通过 [Issue](https://github.com/wsdbb72/MusicOps/issues) 反馈可复现问题，或提交聚焦一个问题的 Pull Request。请写明版本、操作入口、预期与实际结果，附脱敏提示；提交代码时补上与行为相关的回归验证。适配器变更应覆盖鉴权失败、限流、超时、部分响应、取消与身份冲突。
 

@@ -2,8 +2,14 @@ name: macOS app and release assets
 
 on:
   push:
-    branches: ['codex/**']
+    branches: ['codex/**', '!codex/release-*']
     tags: ['v*']
+  workflow_call:
+    inputs:
+      ref:
+        description: 'Exact source commit supplied by the desktop release workflow'
+        type: string
+        required: true
   workflow_dispatch:
     inputs:
       ref:
@@ -16,8 +22,9 @@ permissions:
   contents: read
 
 concurrency:
-  group: macos-release-${{ github.event_name }}-${{ inputs.ref || github.ref }}
-  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
+  # A called workflow must never share the caller's cancellation group.
+  group: musicops-macos-${{ github.run_id }}-${{ github.run_attempt }}
+  cancel-in-progress: false
 
 jobs:
   build:
@@ -134,7 +141,7 @@ jobs:
 
   publish:
     name: Attach verified Mac assets to the existing release
-    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v') && !inputs.ref
     needs: build
     runs-on: ubuntu-latest
     timeout-minutes: 15

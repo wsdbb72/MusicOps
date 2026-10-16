@@ -1,4 +1,4 @@
-; Build with Inno Setup 7: ISCC /DBundleDir=<audited runtime folder> /O<output folder> MusicOps.iss
+; Build with Inno Setup 6.5+: ISCC /DBundleDir=<audited runtime folder> /O<output folder> MusicOps.iss
 #ifndef BundleDir
   #define BundleDir "..\dist\MusicOps-Windows"
 #endif
@@ -55,7 +55,7 @@ english.NewerVersion=MusicOps %1 is newer than this {#MusicOpsVersion} installer
 english.BusyApplication=MusicOps or its background worker is still running, or an application file is temporarily in use.%n%nWait for the current stage to finish, or safely cancel tasks that prevent exiting, then use "Quit app and background worker" in the task center and choose Retry. Setup will not terminate processes or cancel tasks.
 
 [Languages]
-Name: "chinesesimp"; MessagesFile: "compiler:Languages\ChineseSimplified.isl"
+Name: "chinesesimp"; MessagesFile: "{#SourcePath}\Languages\ChineseSimplified.isl"
 Name: "english"; MessagesFile: "compiler:Default.isl"
 
 [Tasks]

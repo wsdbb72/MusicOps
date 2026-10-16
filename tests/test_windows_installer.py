@@ -1,7 +1,7 @@
 """Exercise real Inno installation/upgrade behavior using an isolated test AppId.
 
 The tiny payload is a synthetic .NET executable, never a user's MusicOps process.
-Set INNO_ISCC to the Inno Setup 7 compiler to run these Windows-only checks.
+Set INNO_ISCC to an Inno Setup 6.5+ compiler to run these Windows-only checks.
 """
 from __future__ import annotations
 

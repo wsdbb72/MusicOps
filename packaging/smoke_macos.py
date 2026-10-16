@@ -7,6 +7,26 @@ from __future__ import annotations
 import argparse,hashlib,json,os,platform,plistlib,subprocess,sys,time,uuid
 from pathlib import Path
 
+REQUIRED_CHECKS=frozenset({
+    'native_architecture','bundle_identity_version_icon','gui_started_frozen_worker',
+    'concurrent_gui_polling_stays_connected','keychain_encrypted_vault_write',
+    'keychain_cross_process_roundtrip','vault_has_no_plaintext_secret','vault_host_binding',
+    'complete_immediately_visible','complete_preparation_completed','upgrade_immediately_visible',
+    'upgrade_preparation_completed','playlist_immediately_visible','playlist_preparation_completed',
+    'three_preparation_records','identification_and_search_are_separate','native_bulk_cancel_review_tasks',
+    'native_multiplatform_file_import','native_manual_search_readonly','native_search_activity_visible',
+    'configuration_roundtrip','native_cocoa_window_exit_zero','native_window_rendered',
+    'frozen_worker_restart_keeps_credentials','configuration_persisted_after_restart',
+    'offscreen_gui_rendered','worker_clean_shutdown','app_bundle_unchanged_after_use','no_profile_inside_app',
+})
+
+def valid_acceptance(result):
+    """Require named runtime evidence, allowing additional successful checks."""
+    checks=result.get('checks',{})
+    return (result.get('passed') is True and result.get('external_requests')==0
+            and isinstance(checks,dict) and REQUIRED_CHECKS.issubset(checks)
+            and all(value is True for value in checks.values()))
+
 def wait_for(action,timeout=25):
     deadline=time.monotonic()+timeout
     while True:
@@ -117,7 +137,7 @@ def main():
         phase='clean_shutdown';client.call('shutdown_worker');restarted.wait(15);checks['worker_clean_shutdown']=restarted.returncode==0
         checks['app_bundle_unchanged_after_use']=before==digest_tree(app)
         checks['no_profile_inside_app']=not any(path.name in ('profile','vault','state') for path in app.rglob('*'))
-        report['passed']=all(checks.values())
+        report['passed']=REQUIRED_CHECKS.issubset(checks) and all(value is True for value in checks.values())
     except Exception as exc:
         report.update(passed=False,error_class=type(exc).__name__,error_phase=phase,process_exit_codes_before_cleanup=[process.poll() for process in processes])
     finally:

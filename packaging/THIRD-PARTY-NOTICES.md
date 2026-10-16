@@ -13,3 +13,8 @@ Kugou public-playlist request formatting/signature material is adapted from
 LengxiQwQ/playlistout, Copyright (c) 2026 LengxiQwQ, under the MIT License.
 Its complete notice is included in `licenses/PlaylistOut/LICENSE.txt` in the
 application distribution and `docs/references/PlaylistOut-LICENSE.txt` in source.
+
+## Inno Setup 简体中文翻译
+
+Windows 安装向导使用 [kira-96/Inno-Setup-Chinese-Simplified-Translation](https://github.com/kira-96/Inno-Setup-Chinese-Simplified-Translation) 的简体中文翻译，固定提交 `1ff90acc4ed4aee82b1cda43253243deee3daed4`，适用 Inno Setup 6.5.0+。
+Copyright (c) 2019 - 2020 kirakira，采用 MIT 许可。完整授权及来源说明保存在运行包的 `licenses/Inno-Setup-Translation/` 和源码的 `packaging/Languages/`。

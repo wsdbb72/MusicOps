@@ -6,6 +6,26 @@ import pytest
 path=Path(__file__).resolve().parents[1]/'packaging/macos_installer.py'
 spec=importlib.util.spec_from_file_location('macos_installer_materials',path);module=importlib.util.module_from_spec(spec);spec.loader.exec_module(module)
 
+smoke_spec=importlib.util.spec_from_file_location('macos_acceptance_contract',path.with_name('smoke_macos.py'))
+smoke=importlib.util.module_from_spec(smoke_spec);smoke_spec.loader.exec_module(smoke)
+
+def test_installed_app_gate_uses_named_checks_and_accepts_additional_passed_evidence():
+    evidence={'passed':True,'external_requests':0,'checks':dict.fromkeys(smoke.REQUIRED_CHECKS,True)}
+    assert len(evidence['checks'])==29 and smoke.valid_acceptance(evidence)
+    evidence['checks']['future_additional_check']=True
+    assert smoke.valid_acceptance(evidence)
+    del evidence['checks']['identification_and_search_are_separate']
+    assert not smoke.valid_acceptance(evidence)
+
+@pytest.mark.parametrize('invalid',['failed_check','missing_old_check','untrusted_pass_flag','network_request'])
+def test_installed_app_gate_requires_all_runtime_boundaries(invalid):
+    evidence={'passed':True,'external_requests':0,'checks':dict.fromkeys(smoke.REQUIRED_CHECKS,True)}
+    if invalid=='failed_check':evidence['checks']['keychain_cross_process_roundtrip']=False
+    elif invalid=='missing_old_check':del evidence['checks']['app_bundle_unchanged_after_use']
+    elif invalid=='untrusted_pass_flag':evidence['passed']=False
+    else:evidence['external_requests']=1
+    assert not smoke.valid_acceptance(evidence)
+
 @pytest.mark.parametrize('arch',['arm64','x86_64'])
 def test_installer_is_one_system_app_payload_with_preserved_user_data(tmp_path,arch):
     directory=module.materials(tmp_path,'0.4.1',arch);root=ET.parse(directory/'Distribution.xml').getroot()

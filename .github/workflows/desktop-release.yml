@@ -148,7 +148,7 @@ jobs:
               synthetic_fixture = 'MusicOps-'+version+'/tests/fixtures/providers/synthetic.ncm'
               if archive.comment.decode('ascii') != commit or any(name != synthetic_fixture and private_path(pathlib.PurePosixPath(name)) for name in archive.namelist()):
                   raise SystemExit('Source archive contains private state or has the wrong commit')
-              required_licenses = {'MusicOps-'+version+'/LICENSE', 'MusicOps-'+version+'/packaging/THIRD-PARTY-NOTICES.md', 'MusicOps-'+version+'/docs/references/PlaylistOut-LICENSE.txt'}
+              required_licenses = {'MusicOps-'+version+'/LICENSE', 'MusicOps-'+version+'/packaging/THIRD-PARTY-NOTICES.md', 'MusicOps-'+version+'/docs/references/PlaylistOut-LICENSE.txt', 'MusicOps-'+version+'/packaging/Languages/LICENSE'}
               if not required_licenses.issubset(archive.namelist()):
                   raise SystemExit('Source archive is missing license notices')
           installer = root/f'MusicOps-{version}-Setup.exe'

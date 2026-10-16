@@ -1,7 +1,7 @@
 """Install/reinstall the real PKG on a clean disposable GitHub macOS runner."""
 import argparse,hashlib,json,os,plistlib,subprocess,sys,time,uuid
 from pathlib import Path
-from smoke_macos import digest_tree,wait_for
+from smoke_macos import digest_tree,wait_for,valid_acceptance
 from macos_installer import IDENTIFIER
 
 def run(*args,**kwargs):return subprocess.run([str(a) for a in args],check=True,**kwargs)
@@ -45,7 +45,8 @@ def main():
         checks['reinstall_preserves_profile_and_credentials']=sentinel.read_text('utf-8')=='synthetic profile must survive' and vault.path.read_bytes()==encrypted_before and vault.get(ref,host)==secret
         phase='installed_app_acceptance';installed_report=Path(args.report).with_name(Path(args.report).stem+'-app.json')
         run(sys.executable,Path(__file__).with_name('smoke_macos.py'),'--app',installed,'--work',work/'installed-app','--report',installed_report,'--expected-arch',args.arch)
-        result=json.loads(installed_report.read_text('utf-8'));checks['installed_app_26_acceptance_checks']=result['passed'] and len(result['checks'])==26 and all(result['checks'].values())
+        result=json.loads(installed_report.read_text('utf-8'));checks['installed_app_acceptance_checks']=valid_acceptance(result)
+        report['installed_app_check_count']=len(result.get('checks',{}))
         report['passed']=all(checks.values()) and len(checks)==11
     except Exception as exc:report.update(passed=False,error_class=type(exc).__name__,error_phase=phase)
     finally:

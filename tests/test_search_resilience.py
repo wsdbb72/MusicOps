@@ -74,3 +74,19 @@ def test_no_resource_is_success_even_without_search_complete_field(service,monke
     result=manual_album_search(service,{'query':'Album'},service.config.current()['values'])
     assert result['status']=='NO_MATCH' and result['warnings']==[]
     assert len(result['successful_sites'])==4
+
+
+@pytest.mark.parametrize('fallback',[True,False])
+def test_skipping_all_pt_accounts_respects_explicit_netease_fallback_without_ai_or_pt_requests(service,monkeypatch,fallback):
+    job=make_job(service);job['config']['workflow']['netease_fallback']=fallback
+    job['config']['ai']['enabled']=True
+    for site in SITES:job['config']['providers'][site]['enabled']=False
+    monkeypatch.setattr(service.workflows,'provider',lambda *a:pytest.fail('disabled site contacted'))
+    monkeypatch.setattr(service,'_recognize_metadata',lambda *a,**k:pytest.fail('no PT query does not need AI'))
+    service.workflows._searching(job)
+    if fallback:
+        process=service.store.get('evidence','workflow:'+job['processing_job_id'])
+        assert job['stage']=='completed' and process['stage']=='fallback'
+        assert process['task_group']=='process' and process['search_job_id']==job['job_id']
+    else:assert job['stage']=='needs_review' and not job.get('processing_job_id')
+    assert not service.store.list('download_tasks') and not service.store.list('token_reservations')

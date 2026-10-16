@@ -375,6 +375,11 @@ class Workflows:
                         exact=True;c['artists']=artists;c['release']['album']=album
                 if exact or site=='open.cd' or job.get('search_query'):candidates.append({**c,'identity_exact':exact})
         summary=summarize(outcomes);job['outcomes']=outcomes;job['choices']=candidates;job['search_summary']=summary;job['detail']=search_detail(summary)
+        if not summary['successful_sites'] and not summary['unavailable_sites']:
+            if job['scene']=='playlist' and cfg['workflow']['netease_fallback']:
+                self._queue_processing(job,'fallback','未启用资源站，按设置使用网易云下载',progress=20)
+            else:self.put(job,stage='needs_review',review_kind='search',message='尚未启用可检索站点',detail='请在连接与设置中启用资源站，或为歌单开启网易云回退。')
+            return
         exact=[c for c in candidates if c.get('identity_exact') and (c['source']=='open.cd' or (c.get('seeders') or 0)>0)]
         if job['scene']=='upgrade':
             useful=[]

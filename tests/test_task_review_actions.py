@@ -170,3 +170,16 @@ def test_stale_ai_result_is_not_applied_to_deleted_task(controls, monkeypatch):
     monkeypatch.setattr(RecognitionFallback, '_provider', lambda self: (AI(), None))
     result = assist_workflows(service, {'job_ids': [row['job_id']]}, service.config.current()['values'])
     assert result['results'][0]['status'] == 'STALE' and not read_job(service, row['job_id']).get('ai_assistance')
+
+
+def test_ai_web_metadata_leads_are_editable_without_claiming_confirmed_release(controls, monkeypatch):
+    service=controls;monkeypatch.setattr(RecognitionFallback,'_provider',lambda self:(object(),None))
+    query={'title':'Synthetic Song','artists':['Synthetic Artist'],'album':'Observed Album'}
+    monkeypatch.setattr(service,'_recognize_metadata',lambda *a,**k:{'selected_candidate':None,'candidates':[],
+        'lookup_links':[{'source':'discogs','url':'https://www.discogs.com/release/123'}],
+        'ai_fallback':{'web_queries':[query],'web_sources':[{'url':'https://www.discogs.com/release/123'}],'web_reason':'Observed web source'}})
+    row=album(service,stage='needs_review',review_kind='metadata');row['targets'][0]['album']='';service.workflows.put(row)
+    assist_workflows(service,{'job_ids':[row['job_id']]},service.config.current()['values'])
+    saved=read_job(service,row['job_id']);proposal=saved['ai_assistance']
+    assert proposal['status']=='NEEDS_REVIEW' and proposal['web_queries']==[query] and proposal['requires_review']
+    assert saved['targets'][0]['album']=='' and saved['stage']=='needs_review' and not saved.get('selected')

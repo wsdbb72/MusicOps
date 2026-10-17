@@ -44,7 +44,8 @@ class ReviewDialog(QDialog):
 
     def populate(self, job):
         self.job = job; proposal = job.get('ai_assistance') or {}
-        valid = proposal.get('revision') == job.get('review_revision')
+        valid = bool(job.get('review_revision')) and proposal.get('revision') == job.get('review_revision')
+        if not valid: proposal={}
         self.summary.setPlainText(job.get('message', '') + '\n' + (job.get('detail') or ''))
         self.ai_note.setText(('AI 建议：' + str(proposal.get('message', '')) + '\n' + str(proposal.get('reason', ''))) if valid else '可自行核对，也可让 AI 查询真实目录、推荐候选或搜索词。建议不会自动生效。')
         rows = job.get('prepared') or []; suggestions = proposal.get('metadata') if valid else None
@@ -57,6 +58,11 @@ class ReviewDialog(QDialog):
                 if value != original[j]: item.setBackground(QColor('#574925')); item.setForeground(QColor('#f4cf78')); item.setToolTip('AI 根据真实目录建议；保存前可修改')
                 self.metadata.setItem(i, j, item)
         self.catalog_rows = proposal.get('catalog_choices') or job.get('catalog_choices') or []
+        fallback=job.get('ai_fallback') or {}
+        web_queries=proposal.get('web_queries') or (fallback.get('web_queries') if fallback.get('web_sources') else []) or []
+        self.catalog_rows=list(self.catalog_rows)+[{'source':'AI 联网线索（待核实）','title':row.get('title') or row.get('album',''),'artists':row.get('artists',[]),'album':row.get('album',''),'entity_kind':'recording' if row.get('title') else 'release'} for row in web_queries[:2]]
+        if not valid and web_queries:
+            self.ai_note.setText('AI 联网找到以下名称线索，尚未核实完整发行。可在下方选择填入、修改后保存。\n'+str(fallback.get('web_reason') or ''))
         links = proposal.get('lookup_links') or job.get('lookup_links') or []
         self.source_links.setText('资料来源：' + ' · '.join('<a href="' + escape(row['url'], quote=True) + '">' + escape(row.get('name') or row.get('source') or '来源') + '</a>' for row in links if isinstance(row, dict) and detail_url(row.get('url'))) if any(isinstance(row, dict) and detail_url(row.get('url')) for row in links) else '')
         self.catalog.clear()

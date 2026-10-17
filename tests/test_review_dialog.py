@@ -54,3 +54,24 @@ def test_assist_uses_task_id_instead_of_gui_details_or_private_paths(app):
     owner=Owner(); value=job();value['detail']='private local directory';dialog=ReviewDialog(owner,value)
     dialog.assist();assert owner.calls[-1]==('assist_workflows',{'job_ids':['fixture']})
     assert not dialog.ai_button.isEnabled();dialog.close();owner.close()
+
+
+def test_web_search_lead_remains_explicitly_unverified_and_requires_manual_fill(app):
+    owner=Owner();value=job();value['ai_fallback']={'web_queries':[{'title':'Song','artists':['Observed Artist'],'album':'Web Album'}],
+        'web_sources':[{'url':'https://www.discogs.com/release/123'}],'web_reason':'Observed source lead'}
+    value['lookup_links']=[{'source':'discogs','url':'https://www.discogs.com/release/123'}]
+    dialog=ReviewDialog(owner,value)
+    assert dialog.metadata.item(0,2).text()=='Album' and not owner.calls
+    assert '待核实' in dialog.catalog.itemText(0) and '尚未核实' in dialog.ai_note.text()
+    assert 'https://www.discogs.com/release/123' in dialog.source_links.text()
+    dialog.use_catalog()
+    assert dialog.metadata.item(0,2).text()=='Web Album' and dialog.metadata.item(0,3).text()=='120'
+    assert not owner.calls
+    dialog.close();owner.close()
+
+
+def test_stale_ai_web_lead_is_not_offered_as_current_suggestion(app):
+    owner=Owner();value=job();value['ai_assistance']={'revision':'outdated','web_queries':[{'album':'Stale','artists':[],'title':''}]}
+    dialog=ReviewDialog(owner,value)
+    assert dialog.catalog.count()==0 and dialog.metadata.item(0,2).text()=='Album'
+    dialog.close();owner.close()

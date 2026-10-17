@@ -178,6 +178,9 @@ class RecognitionFallback:
             result['recognition_stages'].append({'stage': 'ai_web_search', 'status': 'OK'})
             result['ai_web_sources'] = alternate.get('sources', [])
             report['web_sources'] = result['ai_web_sources']
+            if result['ai_web_sources']:
+                report['web_queries'] = copy.deepcopy(alternate['queries'])
+                report['web_reason'] = alternate.get('reason', '')
             result['lookup_links'] = list({row['url']: row for row in result['lookup_links'] + result['ai_web_sources']}.values())
         except Exception as exc:
             report.update(status=self._failure(exc), reason='AI 联网搜索未完成；请确认服务与模型支持 Responses web_search。已保留 API 和网站识别结果。')

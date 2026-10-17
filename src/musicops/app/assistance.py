@@ -24,7 +24,12 @@ def _metadata(service, job, cfg):
     proposal = {'status': 'NEEDS_INPUT', 'kind': 'metadata', 'message': 'AI 未找到足够明确的真实目录证据，请手动选择或填写',
                 'catalog_choices': found.get('candidates', []), 'lookup_links': found.get('lookup_links', []),
                 'reason': found.get('ai_fallback', {}).get('reason', '')}
-    if not selected: return proposal
+    if not selected:
+        web=found.get('ai_fallback',{})
+        if web.get('web_sources') and web.get('web_queries'):
+            proposal.update(status='NEEDS_REVIEW',message='AI 联网找到了资料线索，但本机尚未核实完整发行；可查看来源并手动填入，不能自动确认',
+                            web_queries=web['web_queries'],reason=web.get('web_reason') or proposal['reason'])
+        return proposal
     source_id = 'release:' + selected['release_id'] if selected.get('entity_kind') == 'recording' and selected.get('release_id') else selected.get('source_id')
     resolved = service._catalog_resolver(cfg).resolve_candidate(selected['source'], source_id).get('candidate')
     if not resolved: return proposal
@@ -97,6 +102,13 @@ def assist_workflows(service, args, cfg):
                             'search_query': query if len(query) <= 300 else '',
                             'reason': found.get('ai_fallback', {}).get('reason', ''),
                             'message': '已生成真实目录支持的搜索词，可编辑后重新搜索' if query else '请检查各站状态，修改搜索词或站点后重试'}
+                web=found.get('ai_fallback',{})
+                if not selected and web.get('web_sources') and web.get('web_queries'):
+                    first_query=web['web_queries'][0]
+                    suggested=(' '.join(first_query['artists'])+' '+(first_query['album'] or first_query['title'])).strip()
+                    proposal.update(status='NEEDS_REVIEW',search_query=suggested if len(suggested)<=300 else '',
+                        lookup_links=found.get('lookup_links',[]),web_queries=web['web_queries'],reason=web.get('web_reason',''),
+                        message='AI 联网找到了检索线索，尚未核实完整发行；请查看来源并编辑搜索词后重试')
             else:
                 proposal = {'status': 'NEEDS_INPUT', 'kind': kind, 'message': '此问题需要手动选择封面、曲序、歌词服务或发行版本，请打开核对窗口'}
         except Exception as exc:

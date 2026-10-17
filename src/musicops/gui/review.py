@@ -74,7 +74,7 @@ class ReviewDialog(QDialog):
         if not valid and web_queries:
             self.ai_note.setText('AI 联网找到以下名称线索，尚未核实完整发行。可在下方选择填入、修改后保存。\n'+str(fallback.get('web_reason') or ''))
         links = proposal.get('lookup_links') or job.get('lookup_links') or []
-        anchors=['<a href="'+escape(row['url'],quote=True)+'">'+escape(('检索 · ' if row.get('kind')=='search_link' else '资料 · ')+(row.get('name') or row.get('source') or '来源'))+'</a>' for row in links if isinstance(row,dict) and review_source_url(row.get('url'))]
+        anchors=['<a style="color:#68dbcc;" href="'+escape(row['url'],quote=True)+'">'+escape(('检索 · ' if row.get('kind')=='search_link' else '资料 · ')+(row.get('name') or row.get('source') or '来源'))+'</a>' for row in links if isinstance(row,dict) and review_source_url(row.get('url'))]
         self.source_links.setText('网站核对：'+' · '.join(anchors) if anchors else '')
         self.catalog.clear()
         for candidate in self.catalog_rows:

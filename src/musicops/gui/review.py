@@ -6,7 +6,17 @@ from PySide6.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QLabel, QPushB
     QCheckBox, QPlainTextEdit, QAbstractItemView, QComboBox)
 from musicops.app.search_status import SITE_NAMES
 from html import escape
-from musicops.providers.catalog_web import detail_url
+from musicops.providers.catalog_web import HOSTS, detail_url
+from urllib.parse import urlsplit
+
+
+def review_source_url(value):
+    if detail_url(value): return True
+    if not isinstance(value,str) or len(value)>2000:return False
+    try:
+        parsed=urlsplit(value)
+        return parsed.scheme=='https' and parsed.hostname in HOSTS.values() and parsed.port in (None,443) and not (parsed.username or parsed.password)
+    except ValueError:return False
 
 
 class ReviewDialog(QDialog):
@@ -64,7 +74,8 @@ class ReviewDialog(QDialog):
         if not valid and web_queries:
             self.ai_note.setText('AI 联网找到以下名称线索，尚未核实完整发行。可在下方选择填入、修改后保存。\n'+str(fallback.get('web_reason') or ''))
         links = proposal.get('lookup_links') or job.get('lookup_links') or []
-        self.source_links.setText('资料来源：' + ' · '.join('<a href="' + escape(row['url'], quote=True) + '">' + escape(row.get('name') or row.get('source') or '来源') + '</a>' for row in links if isinstance(row, dict) and detail_url(row.get('url'))) if any(isinstance(row, dict) and detail_url(row.get('url')) for row in links) else '')
+        anchors=['<a href="'+escape(row['url'],quote=True)+'">'+escape(('检索 · ' if row.get('kind')=='search_link' else '资料 · ')+(row.get('name') or row.get('source') or '来源'))+'</a>' for row in links if isinstance(row,dict) and review_source_url(row.get('url'))]
+        self.source_links.setText('网站核对：'+' · '.join(anchors) if anchors else '')
         self.catalog.clear()
         for candidate in self.catalog_rows:
             self.catalog.addItem(' · '.join([str(candidate.get('source', '')), str(candidate.get('title', '')), ' / '.join(candidate.get('artists', [])), str(candidate.get('album') or '')]))

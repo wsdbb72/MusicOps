@@ -75,3 +75,13 @@ def test_stale_ai_web_lead_is_not_offered_as_current_suggestion(app):
     dialog=ReviewDialog(owner,value)
     assert dialog.catalog.count()==0 and dialog.metadata.item(0,2).text()=='Album'
     dialog.close();owner.close()
+
+
+def test_manual_website_search_links_remain_visible_without_identity_claim(app):
+    from musicops.providers.catalog import lookup_links
+    owner=Owner();value=job();value['lookup_links']=lookup_links({'title':'Song','album':'Album','artists':['Artist']})
+    dialog=ReviewDialog(owner,value)
+    assert dialog.source_links.text().count('检索 · ')==6
+    assert 'Album of the Year' in dialog.source_links.text()
+    assert not owner.calls and all(not row['identity_evidence'] for row in value['lookup_links'])
+    dialog.close();owner.close()

@@ -286,7 +286,7 @@ def test_one_site_construction_failure_does_not_block_other_sites_or_matching_al
     monkeypatch.setattr(service.workflows, 'provider', provider)
     service.workflows._searching(row)
     saved = read_job(service, row['job_id'])
-    assert calls == [site for site in sites if site != 'dicmusic']
+    assert calls == [site for site in sites if site != 'dicmusic' for _ in range(1 if site=='orpheus' else 2)]
     processing = read_job(service, saved['processing_job_id'])
     assert saved['stage'] == 'completed' and saved['task_type'] == 'search'
     assert processing['stage'] == 'requesting' and processing['selected']['source'] == 'orpheus'

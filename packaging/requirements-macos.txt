@@ -1,7 +1,6 @@
 # Native macOS builds omit the Windows-only wheel helpers and custom Qt split
 # packages from the Windows runtime lock. All top-level build/runtime tools pin
 # to the same reviewed versions as requirements.lock.
-# Intel must build cryptography with OPENSSL_STATIC=1 and no cached wheel;
 # cryptography 49+ publishes macOS wheels only for arm64. The workflow enforces
 # this and build_macos.py rejects dynamically linked OpenSSL before freezing.
 PySide6==6.12.0

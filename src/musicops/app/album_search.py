@@ -2,12 +2,13 @@
 import re
 from musicops.clients.http import PolicyBlocked
 from musicops.domain.identity import strict_text
-from musicops.app.search_status import search_site,summarize,detail
+from musicops.app.search_status import search_site,search_album,edition_conflict,summarize,detail
 
 SITES=('open.cd','dicmusic','orpheus','redacted')
 
 
 def exact_album(candidate,album,artists):
+    if edition_conflict(candidate.get('title',''),' '.join(artists)+' '+album):return False
     title=strict_text(candidate.get('title'));expected=strict_text(album)
     credits={strict_text(a) for a in candidate.get('artists',[])};wanted={strict_text(a) for a in artists}
     if title==expected and credits==wanted:return True
@@ -43,18 +44,21 @@ def manual_album_search(service,args,cfg):
         if not album or not artists:raise PolicyBlocked('专辑详细资料缺少规范专辑名或艺人，无法精准检索')
         query=' '.join(artists)+' '+album
         if len(query)>300:raise PolicyBlocked('识别后的完整艺人与专辑名称超过站点 300 字符检索上限，请使用原样搜索精简关键词')
+    from musicops.app.workflow_actions import validate_sites
+    selected_sites=validate_sites(args['sites'],cfg) if 'sites' in args else SITES
     outcomes={};candidates=[];excluded=0
     for site in SITES:
-        if not cfg['providers'][site]['enabled']:outcomes[site]={'status':'DISABLED','candidate_count':0};continue
+        if not cfg['providers'][site]['enabled'] or site not in selected_sites:outcomes[site]={'status':'DISABLED','candidate_count':0};continue
         service._checkpoint('manual_album_search_'+site)
-        result=search_site(lambda:service._real_pt(site,cfg),query)
-        outcomes[site]={key:result.get(key) for key in ('status','search_complete','page','pages')}
+        result=search_album(lambda:service._real_pt(site,cfg),query,album=album if mode=='precise' else '',checkpoint=lambda:service._checkpoint('manual_album_search_'+site))
+        outcomes[site]={key:result.get(key) for key in ('status','search_complete','page','pages','attempts')}
         outcomes[site]['candidate_count']=len(result.get('candidates',[]))
         for raw in result.get('candidates',[]):
             candidate=dict(raw);matched=exact_album(candidate,album,artists) if mode=='precise' else None
             if mode=='precise' and not matched:excluded+=1;continue
             candidate['precise_match']=matched
             service.store.put('candidates',candidate['candidate_id'],candidate);candidates.append(candidate)
+    candidates=list({(c['source'],c['candidate_id']):c for c in candidates}.values())
     configured=any(value['status']!='DISABLED' for value in outcomes.values())
     summary=summarize(outcomes)
     message=f'找到 {len(candidates)} 条资源。'+(f' 已排除 {excluded} 条专辑或艺人不一致的候选。' if excluded else '')

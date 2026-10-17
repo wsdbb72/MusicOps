@@ -59,8 +59,9 @@ class Catalog:
 
 
 def ai_response(value):
-    return Response(200, json.dumps({'status': 'completed', 'output': [{'content': [
-        {'type': 'output_text', 'text': json.dumps(value)}]}]}).encode())
+    return Response(200, json.dumps({'status': 'completed', 'output': [
+        {'type': 'web_search_call', 'status': 'completed', 'action': {'type': 'search'}}, {'content': [
+        {'type': 'output_text', 'text': json.dumps(value), 'annotations': [{'type': 'url_citation', 'url': 'https://www.discogs.com/release/123'}]}]}]}).encode())
 
 
 def install_providers(service, monkeypatch, catalog, responses):
@@ -240,7 +241,7 @@ def test_ai_alias_retries_real_site_but_does_not_promote_different_identity_to_d
     assert job['stage'] == 'searching' and job['search_query'] == 'Canonical Artist Canonical Album'
     service.workflows._searching(job)
     saved = service.store.get('evidence', 'workflow:' + job['job_id'])
-    assert queries == ['Artist Album', 'Canonical Artist Canonical Album']
+    assert queries == ['Artist Album', 'Album', 'Canonical Artist Canonical Album']
     assert saved['stage'] == 'needs_review' and saved['review_kind'] == 'candidate'
     assert not saved['choices'][0]['identity_exact']
     assert saved['targets'][0]['artists'] == ['Artist'] and saved['targets'][0]['album'] == 'Album'

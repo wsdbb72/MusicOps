@@ -6,6 +6,7 @@ from PySide6.QtCore import QObject,QRunnable,QThreadPool,QTimer,Qt,Signal,QPrope
 from PySide6.QtGui import QFont,QDesktopServices,QIcon,QPixmap,QPainter,QPen,QColor,QPalette
 from PySide6.QtCore import QUrl
 from PySide6.QtWidgets import (QApplication,QMainWindow,QWidget,QVBoxLayout,QHBoxLayout,QLabel,QPushButton,QLineEdit,QPlainTextEdit,QFileDialog,QCheckBox,QGroupBox,QFormLayout,QWizard,QWizardPage,QListWidget,QStackedWidget,QTableWidget,QTableWidgetItem,QTreeWidget,QTreeWidgetItem,QHeaderView,QMessageBox,QSpinBox,QScrollArea,QInputDialog,QDialog,QDialogButtonBox,QGraphicsOpacityEffect,QProgressBar,QAbstractItemView,QComboBox,QRadioButton)
+from musicops import __version__
 from musicops.worker.client import WorkerClient
 from musicops.clients.http import redact
 from musicops.gui.branding import app_icon,apply_native_titlebar
@@ -108,6 +109,12 @@ class SetupWizard(QWizard):
                     except Exception:QMessageBox.information(self,'无法导入','请使用 Cookie-Editor 导出的 JSON 文件。')
             actions.addWidget(button('导入 JSON 文件',load_json));actions.addWidget(button('打开站点',lambda checked=False,h=host:QDesktopServices.openUrl(QUrl('https://'+h))));actions.addStretch();layout.addLayout(actions)
             p.addRow(group);self.site_fields[key]=(enabled,cookie)
+        solver=self.values.get('browser_solver',{});self.solver_enabled=QCheckBox('遇到浏览器挑战时使用本机 FlareSolverr');self.solver_enabled.setChecked(solver.get('enabled',False));p.addRow(self.solver_enabled)
+        self.solver_url=line(solver.get('base_url','http://127.0.0.1:8191'),'本机 FlareSolverr 地址');p.addRow('验证服务地址',self.solver_url)
+        row,self.solver_executable=browse_field(solver.get('executable',''),False);p.addRow('Windows 程序（可选）',row)
+        self.solver_auto=QCheckBox('服务未运行时自动启动上述程序');self.solver_auto.setChecked(solver.get('auto_start',False));self.solver_auto.setEnabled(os.name=='nt');p.addRow(self.solver_auto)
+        self.solver_note=label('内置 FlareSolverr 接入；服务本体需单独安装。Windows 可选择官方 EXE，Mac 可在 Docker 中运行本机服务。仅本机回环地址可接收站点 Cookie。','hint');p.addRow(self.solver_note)
+        p.addRow(button('测试 FlareSolverr 连接',self.test_solver));p.addRow(button('打开 FlareSolverr 安装说明',lambda:QDesktopServices.openUrl(QUrl('https://github.com/FlareSolverr/FlareSolverr#installation'))))
         p=self._add_page('连接 qBittorrent','用于接收站点种子并下载。qBittorrent → 选项 → WebUI，启用 Web 用户界面；把地址与登录账号填在这里。')
         cfg=self.values.get('qbt',{});qbt_saved=cfg.get('credential_ref') in self.saved_refs;self.qbt_url=line(cfg.get('base_url','http://127.0.0.1:8080'),'例如 http://127.0.0.1:8080');self.qbt_user=CredentialField('WebUI 用户名',qbt_saved);self.qbt_pass=CredentialField('WebUI 密码',qbt_saved)
         p.addRow('WebUI 地址',self.qbt_url);p.addRow('用户名',self.qbt_user);p.addRow('密码',self.qbt_pass)
@@ -115,6 +122,7 @@ class SetupWizard(QWizard):
         fl_row=QWidget();fl_layout=QHBoxLayout(fl_row);fl_layout.setContentsMargins(0,0,0,0);self.fl_limit=QSpinBox();self.fl_limit.setRange(0,100);self.fl_limit.setValue(self.values.get('workflow',{}).get('fl_per_batch',3));self.fl_limit.setSuffix(' 次 / 批次');self.fl_unlimited=QCheckBox('全部');self.fl_unlimited.setToolTip('不限制本批次使用 FL 的次数；仍仅请求站点确认免费的下载。');self.fl_unlimited.setChecked(self.values.get('workflow',{}).get('fl_unlimited',False));self.fl_limit.setDisabled(self.fl_unlimited.isChecked());self.fl_unlimited.toggled.connect(self.fl_limit.setDisabled);fl_layout.addWidget(self.fl_limit,1);fl_layout.addWidget(self.fl_unlimited);p.addRow('最多使用 FL 免费下载',fl_row)
         p.addRow(label('勾选“全部”后忽略左侧次数，按本批次需要使用 FL。OpenCD 直接获取种子；其他站点仅使用已确认免费的下载，额度不足时等待处理。','hint'))
         p=self._add_page('网易云回退与媒体工具','四站没有合适音源时使用网易云。无法获取的曲目会保留说明，不会用其他歌曲冒充。')
+        self.auto_updates=QCheckBox('启动时检查、下载并启动当前系统更新');self.auto_updates.setChecked(self.values.get('updates',{}).get('enabled',True));p.addRow('软件更新',self.auto_updates)
         flow=self.values.get('workflow',{});self.fallback=QCheckBox('启用网易云回退');self.fallback.setChecked(flow.get('netease_fallback',True));p.addRow(self.fallback)
         self.netease_api=line(flow.get('netease_api_url',''),'可选：本地网易云 API 服务地址');p.addRow('API 服务（可选）',self.netease_api)
         row,self.import_dir=browse_field(flow.get('netease_import_dir',''));p.addRow('客户端下载目录（可选）',row)
@@ -156,11 +164,12 @@ class SetupWizard(QWizard):
         lyrics=self.values.get('lyrics',{}).get('primary',{});self.lyric_url=line('' if '.example.invalid' in lyrics.get('base_url','') else lyrics.get('base_url',''),'歌词与封面接口地址');self.lyric_key=CredentialField('填写服务提供的完整 Authorization 值',lyrics.get('auth_secret_ref') in self.saved_refs)
         p.addRow('歌词接口地址',self.lyric_url);p.addRow('接口鉴权值',self.lyric_key);p.addRow(label('这里填服务给你的鉴权原文，无需填写“凭据引用”。没有服务可留空。','hint'))
         self.discogs=CredentialField('Discogs 设置中生成的个人 Token；可跳过',self.values.get('catalog',{}).get('discogs',{}).get('credential_ref') in self.saved_refs);p.addRow('Discogs Token',self.discogs)
-        ai=self.values.get('ai',{});self.ai_enabled=QCheckBox('启用 AI：常规识别无法匹配时自动兜底，并辅助解释问题');self.ai_enabled.setChecked(ai.get('enabled',False));p.addRow(self.ai_enabled)
+        self.catalog_web=QCheckBox('API 无匹配时自动读取公开音乐资料网站');self.catalog_web.setChecked(self.values.get('catalog',{}).get('web_enabled',True));p.addRow(self.catalog_web)
+        ai=self.values.get('ai',{});self.ai_enabled=QCheckBox('启用 AI：API 和网站均无法匹配时联网搜索，并辅助核对');self.ai_enabled.setChecked(ai.get('enabled',False));p.addRow(self.ai_enabled)
         self.ai_url=line('' if '.example.invalid' in ai.get('base_url','') else ai.get('base_url',''),'兼容 Responses 的 API 地址');self.ai_model=line(ai.get('model',''),'服务提供的模型名称');self.ai_key=CredentialField('API Key',ai.get('auth_secret_ref') in self.saved_refs)
         self.ai_key.textChanged.connect(lambda value:self.ai_enabled.setChecked(True) if value.strip() else None)
         p.addRow('AI 地址',self.ai_url);p.addRow('模型名称',self.ai_model);p.addRow('API Key',self.ai_key)
-        p.addRow(label('填写有效 API 后默认启用兜底识别。AI 可结合识别接口和在线资料提出匹配；无法可靠确认的发行仍会等待核对。','hint'))
+        p.addRow(label('顺序：识别 API → 公开资料网站 → AI 联网搜索。AI 地址和模型必须支持 Responses web_search；不支持时会显示原因并等待手动核对，不会伪装联网成功。网站限制访问时可打开来源人工核对。','hint'))
         p=self._add_page('连接 Navidrome（可选）','程序完成入库后会触发 Navidrome 扫描。若只使用 Roon，可直接保存。')
         nav=self.values.get('music_servers',{}).get('navidrome',{});self.nav_enabled=QCheckBox('启用 Navidrome');self.nav_enabled.setChecked(nav.get('enabled',False));p.addRow(self.nav_enabled)
         self.nav_url=line(nav.get('url',''),'例如 http://127.0.0.1:4533');self.nav_user=line(nav.get('username',''),'具有扫描权限的账号');self.nav_pass=CredentialField('Navidrome 账号密码',nav.get('password_ref') in self.saved_refs)
@@ -169,6 +178,9 @@ class SetupWizard(QWizard):
         self.save_note=label('');p.addRow(self.save_note)
     def _add_page(self,title,subtitle):
         page=QWizardPage();page.setTitle(title);page.setSubTitle(subtitle);outer=QVBoxLayout(page);scroll=QScrollArea();scroll.setWidgetResizable(True);scroll.setFrameShape(QScrollArea.NoFrame);body=QWidget();form=QFormLayout(body);form.setVerticalSpacing(16);form.setHorizontalSpacing(22);form.setFieldGrowthPolicy(QFormLayout.ExpandingFieldsGrow);scroll.setWidget(body);outer.addWidget(scroll);self.addPage(page);return form
+    def test_solver(self):
+        self.solver_note.setText('正在连接本机 FlareSolverr…')
+        self.owner.call('browser_solver_preflight',{'settings':{'base_url':self.solver_url.text().strip(),'executable':self.solver_executable.text().strip(),'auto_start':self.solver_auto.isChecked()}},lambda result:self.solver_note.setText(result.get('message') or result.get('error') or str(result.get('status'))),lambda error:self.solver_note.setText(error))
     def showEvent(self,event):
         super().showEvent(event);QTimer.singleShot(0,lambda:apply_native_titlebar(self))
     def accept(self):
@@ -176,8 +188,9 @@ class SetupWizard(QWizard):
                  'playlist_credentials':{key:edit.text() for key,edit in self.playlist_credentials.items()},
                  'qbt':{'url':self.qbt_url.text().strip(),'username':self.qbt_user.text().strip(),'password':self.qbt_pass.text()},
                  'lyrics':{'url':self.lyric_url.text().strip(),'authorization':self.lyric_key.text()},'discogs_token':self.discogs.text(),
-                 'ai':{'enabled':self.ai_enabled.isChecked(),'url':self.ai_url.text().strip(),'model':self.ai_model.text().strip(),'key':self.ai_key.text()},
+                 'ai':{'enabled':self.ai_enabled.isChecked(),'url':self.ai_url.text().strip(),'model':self.ai_model.text().strip(),'key':self.ai_key.text()},'catalog_web':self.catalog_web.isChecked(),
                  'servers':{'roon':self.roon.isChecked(),'navidrome':{'enabled':self.nav_enabled.isChecked(),'url':self.nav_url.text().strip(),'username':self.nav_user.text().strip(),'password':self.nav_pass.text()}},
+                 'updates':{'enabled':self.auto_updates.isChecked()},'browser_solver':{'enabled':self.solver_enabled.isChecked(),'base_url':self.solver_url.text().strip(),'executable':self.solver_executable.text().strip(),'auto_start':self.solver_auto.isChecked()},
                  'workflow':{'netease_fallback':self.fallback.isChecked(),'netease_api_url':self.netease_api.text().strip(),'netease_import_dir':self.import_dir.text().strip(),'fl_per_batch':self.fl_limit.value(),'fl_unlimited':self.fl_unlimited.isChecked()},
                  **{k:w.text().strip() for k,w in self.fields.items()}}
         self.button(QWizard.FinishButton).setEnabled(False);self.save_note.setText('正在保存…')
@@ -186,8 +199,8 @@ class SetupWizard(QWizard):
         self.owner.call('save_setup',payload,saved,failed)
 
 class Workbench(QMainWindow):
-    def __init__(self,base,client=None,autostart=True):
-        super().__init__();self.base=Path(base);self.client=client or WorkerClient(base);self.config={};self.tasks={};self.jobs={};self.targets=[];self.requests=set();self.task_polls=set();self.pool=QThreadPool(self);self.setWindowTitle('MusicOps · 音乐库工作台');self.resize(1260,860);self.setMinimumSize(1040,740);self.setWindowIcon(app_icon())
+    def __init__(self,base,client=None,autostart=True,updates_enabled=False):
+        super().__init__();self.updates_enabled=updates_enabled;self.update_checked=False;self.update_controller=None;self.base=Path(base);self.client=client or WorkerClient(base);self.config={};self.tasks={};self.jobs={};self.targets=[];self.requests=set();self.task_polls=set();self.pool=QThreadPool(self);self.setWindowTitle('MusicOps · 音乐库工作台');self.resize(1260,860);self.setMinimumSize(1040,740);self.setWindowIcon(app_icon())
         if QApplication.instance():QApplication.instance().setWindowIcon(app_icon())
         self.setStyleSheet(STYLE);self.setPalette(dark_palette())
         container=QWidget();self.setCentralWidget(container);layout=QHBoxLayout(container);layout.setContentsMargins(0,0,0,0);layout.setSpacing(0)
@@ -195,7 +208,7 @@ class Workbench(QMainWindow):
         logo=QLabel();logo.setObjectName('brandMark');logo.setFixedSize(58,58);logo.setPixmap(app_icon().pixmap(58,58));s.addWidget(logo);s.addSpacing(8);s.addWidget(label('MusicOps','brand'));s.addWidget(label('每一张专辑，井然有序','muted'));s.addSpacing(30);s.addWidget(label('工作台','sectionCaption'))
         self.nav=QListWidget();self.nav.addItems(['歌单入库','资料补全','音质升级','任务中心','专辑搜索']);self.nav.setSpacing(4);self.nav.setIconSize(QSize(22,22))
         for index in range(self.nav.count()):self.nav.item(index).setIcon(nav_icon(index))
-        s.addWidget(self.nav);s.addWidget(button('连接与设置',self.setup));s.addSpacing(14);s.addWidget(label('你的音乐 · 你的收藏','sidebarFoot'));layout.addWidget(side)
+        s.addWidget(self.nav);s.addWidget(button('连接与设置',self.setup));s.addWidget(button('检查更新',lambda:self.check_updates(True)));self.update_note=label('','sidebarFoot');self.update_note.setWordWrap(True);s.addWidget(self.update_note);s.addSpacing(14);s.addWidget(label('MusicOps '+__version__+' · 你的音乐收藏','sidebarFoot'));layout.addWidget(side)
         content=QWidget();content.setObjectName('workspace');c=QVBoxLayout(content);c.setContentsMargins(32,23,32,24);c.setSpacing(16);top=QHBoxLayout();self.connection=label('正在连接后台…','connection');top.addWidget(self.connection,1);self.activity=label('正在连接','activity');top.addWidget(self.activity);c.addLayout(top)
         self.busy_bar=QProgressBar();self.busy_bar.setObjectName('activityProgress');self.busy_bar.setRange(0,0);self.busy_bar.setTextVisible(False);self.busy_bar.setFixedHeight(3);c.addWidget(self.busy_bar)
         self.notice=label('','notice');self.notice.setVisible(False)
@@ -238,7 +251,9 @@ class Workbench(QMainWindow):
         card=QGroupBox('将补齐的内容');card.setObjectName('card');form=QVBoxLayout(card)
         for text in ('专辑名、艺人和专辑艺人','封面图片','同名 .lrc 歌词（有匹配时）','多碟编号与目录结构'):
             form.addWidget(label('✓  '+text))
-        box.addWidget(card);box.addWidget(label('保留已有可靠资料；有冲突时等待核对。暂无资料的结果缓存一天，避免重复查询。','hint'));box.addStretch();row=QHBoxLayout();row.addWidget(button('重新查询暂无资料',lambda:self.start('complete',True)));row.addStretch();row.addWidget(button('检查并自动补全',lambda:self.start('complete'),True));box.addLayout(row)
+        box.addWidget(card);self.catalog_note=label('本地专辑资料库：尚未建立','hint');box.addWidget(self.catalog_note)
+        catalog_actions=QHBoxLayout();catalog_actions.addWidget(button('更新本地资料库',self.refresh_catalog));catalog_actions.addWidget(button('查看专辑资料库',self.browse_catalog));catalog_actions.addStretch();box.addLayout(catalog_actions)
+        box.addWidget(label('保留已有可靠资料；有冲突时等待核对。暂无资料的结果缓存一天，避免重复查询。','hint'));box.addStretch();row=QHBoxLayout();row.addWidget(button('重新查询暂无资料',lambda:self.start('complete',True)));row.addStretch();row.addWidget(button('检查并自动补全',lambda:self.start('complete'),True));box.addLayout(row)
     def _upgrade(self):
         box=self.page('寻找更好的音源','比较同一录音、同一发行的音源，验证新版完整后，再将旧版移出音乐库。');self.steps(box,'识别现有音质  →  四站寻找更好版本  →  下载与补齐  →  完整验证  →  替换旧版')
         card=QGroupBox('升级偏好');card.setObjectName('card');form=QVBoxLayout(card);self.prefer24=QCheckBox('同一录音优先选择无损 24 bit');self.prefer24.setChecked(True);form.addWidget(self.prefer24);form.addWidget(label('有损格式比较有效码率；无损格式比较位深、采样率和实际编码，不按文件大小判断。','hint'));box.addWidget(card)
@@ -249,17 +264,32 @@ class Workbench(QMainWindow):
         self.checked_jobs={};self.job_items={};self.job_groups={};self.job_detail_cache={};self.job_detail_notes={};self.job_track_versions={};self.job_detail_requests=set();self.expanded_job_ids=set();self.bulk_pending=False
         row=QHBoxLayout();self.job_select_page=QCheckBox('勾选本页');self.job_select_page.setTristate(True);self.job_select_page.stateChanged.connect(self.select_job_page);row.addWidget(self.job_select_page);self.job_selection_note=label('已勾选 0 项','hint');row.addWidget(self.job_selection_note);row.addStretch();row.addWidget(button('清空勾选',self.clear_checked_jobs));box.addLayout(row)
         row=QHBoxLayout();self.bulk_buttons=[]
-        for text,action in (('暂停勾选','pause'),('继续勾选','resume'),('取消勾选','cancel')):
+        for text,action in (('暂停勾选','pause'),('继续勾选','resume'),('取消勾选','cancel'),('重试失败勾选','retry'),('删除勾选','delete')):
             action_button=button(text,lambda checked=False,a=action:self.bulk_action(a));self.bulk_buttons.append(action_button);row.addWidget(action_button)
-        self.bulk_ai_button=button('AI 解释勾选',self.explain);row.addWidget(self.bulk_ai_button);row.addStretch();row.addWidget(button('核对当前任务',self.review));box.addLayout(row)
+        self.bulk_ai_button=button('AI 辅助勾选',self.explain);row.addWidget(self.bulk_ai_button);row.addStretch();box.addLayout(row)
         self.job_table=QTreeWidget();self.job_table.setColumnCount(5);self.job_table.setHeaderLabels(['任务 / 专辑 / 歌曲','类型 / 艺人','当前步骤 / 专辑','进度','结果']);self.job_table.setAlternatingRowColors(True);self.job_table.setSelectionMode(QAbstractItemView.SingleSelection);self.job_table.setEditTriggers(QAbstractItemView.NoEditTriggers);self.job_table.setUniformRowHeights(True);self.job_table.setIndentation(20);self.job_table.setRootIsDecorated(True)
         header=self.job_table.header();header.setDefaultAlignment(Qt.AlignLeft|Qt.AlignVCenter);header.setSectionResizeMode(0,QHeaderView.Interactive);self.job_table.setColumnWidth(0,270);header.setSectionResizeMode(1,QHeaderView.Interactive);self.job_table.setColumnWidth(1,125)
         for column in (2,3):header.setSectionResizeMode(column,QHeaderView.ResizeToContents)
         header.setSectionResizeMode(4,QHeaderView.Stretch)
         box.addWidget(self.job_table);self.job_detail=QPlainTextEdit();self.job_detail.setReadOnly(True);self.job_detail.setPlaceholderText('选择一项查看结果；勾选任务后可批量操作。');self.job_detail.setFixedHeight(80);box.addWidget(self.job_detail);self.job_table.itemSelectionChanged.connect(self.show_detail);self.job_table.itemChanged.connect(self.job_check_changed);self.job_table.itemExpanded.connect(self.expand_job);self.job_table.itemCollapsed.connect(self.collapse_job)
-        actions=QHBoxLayout();actions.addWidget(button('恢复当前任务原版',self.restore));actions.addStretch();actions.addWidget(button('暂停整个后台',lambda:self.call('pause_pipeline',{},lambda _:self.refresh())));actions.addWidget(button('继续整个后台',lambda:self.call('resume_pipeline',{},lambda _:self.refresh())));actions.addWidget(button('退出应用及后台',self.exit_background));box.addLayout(actions)
+        actions=QHBoxLayout();actions.addWidget(button('核对当前任务',self.review));actions.addWidget(button('重试当前任务',lambda:self.bulk_action('retry',[self.selected_job()]) if self.selected_job() else None));actions.addWidget(button('恢复当前任务原版',self.restore));actions.addStretch();actions.addWidget(button('暂停整个后台',lambda:self.call('pause_pipeline',{},lambda _:self.refresh())));actions.addWidget(button('继续整个后台',lambda:self.call('resume_pipeline',{},lambda _:self.refresh())));actions.addWidget(button('退出应用及后台',self.exit_background));box.addLayout(actions)
         pages=QHBoxLayout();self.job_counts=label('');self.job_counts.setWordWrap(False);pages.addWidget(self.job_counts);pages.addStretch();pages.addWidget(button('上一页',lambda:self.job_page(-200)));pages.addWidget(button('下一页',lambda:self.job_page(200)));box.addLayout(pages)
         self.update_job_selection()
+    def check_updates(self,manual=False):
+        if not self.updates_enabled:
+            if manual:self.update_note.setText('源码或验收运行不启动自动安装；安装版可自动检查更新。')
+            return
+        if not manual and not self.config.get('updates',{}).get('enabled',True):return
+        if not self.update_controller:
+            from musicops.gui.updates import UpdateController
+            self.update_controller=UpdateController(self)
+        self.update_controller.start(automatic=not manual)
+    def refresh_catalog(self):
+        if not self.config:return
+        self.call('index_library',{'root':self.config['paths']['library'],'lightweight':True},lambda result:(self.notice.setText('本地专辑资料库已更新：'+str(result.get('count',0))+' 个音频文件'),self.refresh()))
+    def browse_catalog(self):
+        from musicops.gui.catalog import LibraryCatalogDialog
+        self.catalog_window=LibraryCatalogDialog(self);self.catalog_window.open()
     def setup(self):
         if not self.config:return
         self.wizard=SetupWizard(self);self.wizard.open()
@@ -357,10 +387,13 @@ class Workbench(QMainWindow):
         if self.notice.text()==getattr(self,'_connection_notice',None):self.notice.clear()
         self._connection_notice=None
         self.pipeline_paused=bool(result.get('paused'));self.config=result['config']['values'];self.available_refs=[r['ref'] if isinstance(r,dict) else r for r in result.get('secret_refs',[])];self.timer.start();connected=[name for key,name,_ in SITES if self.config['providers'][key]['enabled'] and self.config['providers'][key]['credential_ref'] in self.available_refs]
+        catalog=result.get('local_catalog') or {};self.catalog_note.setText('本地专辑资料库：'+str(catalog.get('album_count',0))+' 张专辑 · '+str(catalog.get('matched_track_count',0))+' 首已预匹配'+(' · 扫描时增量更新' if catalog.get('updated_at') else ' · 首次扫描后自动建立'))
         self.connection.setText('音乐库：'+self.config['paths']['library']+'     ·     '+('已配置 '+', '.join(connected) if connected else '尚未连接资源站；可在“连接与设置”添加'))
         if not self.wizard_shown and not self.config['workflow']['setup_done']:
             self.wizard_shown=True;QTimer.singleShot(200,self.setup)
         self.poll_tasks()
+        if not self.update_checked and self.updates_enabled:
+            self.update_checked=True;QTimer.singleShot(1500,self.check_updates)
     def parse(self):
         self.read_playlist({'playlist_input':self.playlist.text().strip(),'platform':self.playlist_platform.currentData()})
     def import_playlist(self):
@@ -414,8 +447,8 @@ class Workbench(QMainWindow):
             job_id=job['job_id'];batch=job.get('job_kind')=='batch';group_key=self.job_group(job);stage=job.get('stage','queued');progress='扫描中' if batch and stage=='preparing' and not job.get('progress') else str(job.get('progress',0))+'%'
             paused=bool(job.get('paused')) and stage not in ('completed','failed','cancelled','skipped','restored','needs_review')
             step='阶段结束后暂停' if paused and job.get('pause_pending') else '已暂停' if paused else STAGES.get(stage,stage)
-            kind='检查本地库 · 批次' if batch else {'identification':'专辑识别','catalog_identification':'在线资料识别','manual_search':'手动专辑检索','search':'专辑音源检索'}.get(job.get('task_type'),SCENES.get(job.get('scene'),job.get('scene','专辑任务')))
-            item=QTreeWidgetItem(self.job_groups[group_key],[job.get('label','音乐库'),kind,step,progress,job.get('message','')]);item.setData(0,Qt.UserRole,job_id);item.setData(0,Qt.UserRole+1,'job');item.setFlags(Qt.ItemIsEnabled|Qt.ItemIsSelectable|Qt.ItemIsUserCheckable);item.setCheckState(0,Qt.Checked if job_id in self.checked_jobs else Qt.Unchecked);self.job_items[job_id]=item
+            kind='检查本地库 · 批次' if batch else {'identification':'专辑识别','review_assistance':'AI 辅助核对','library_index':'本地专辑索引','catalog_identification':'在线资料识别','manual_search':'手动专辑检索','search':'专辑音源检索'}.get(job.get('task_type'),SCENES.get(job.get('scene'),job.get('scene','专辑任务')))
+            item=QTreeWidgetItem(self.job_groups[group_key],[job.get('label','音乐库'),kind,step,progress,job.get('message','')+(' · AI 建议待核对' if (job.get('ai_assistance') or {}).get('status')=='READY' else '')]);item.setData(0,Qt.UserRole,job_id);item.setData(0,Qt.UserRole+1,'job');item.setFlags(Qt.ItemIsEnabled|Qt.ItemIsSelectable|Qt.ItemIsUserCheckable);item.setCheckState(0,Qt.Checked if job_id in self.checked_jobs else Qt.Unchecked);self.job_items[job_id]=item
             for column in range(5):item.setToolTip(column,item.text(column)+('\n'+job.get('detail','') if column==4 and job.get('detail') else ''))
             item.setForeground(2,QColor('#f4c77c' if paused or stage in ('failed','needs_review') else '#6ee7d0' if stage in ('completed','restored') else '#9bbbf4'))
             if job_id in self.checked_jobs:self.checked_jobs[job_id]=self.ai_job_context(job)
@@ -544,12 +577,17 @@ class Workbench(QMainWindow):
         if job and not getattr(self,'detail_pinned',False):self.job_detail.setPlainText(self.job_detail_notes.get(job_id,job.get('message','')+'\n'+job.get('detail','')))
     def cancel(self):
         self.bulk_action('cancel')
-    def bulk_action(self,action):
-        if self.bulk_pending or not self.checked_jobs:return
-        ids=list(self.checked_jobs);self.bulk_pending=True;self.detail_pinned=True;self.update_job_selection();names={'pause':'暂停','resume':'继续','cancel':'取消'};self.job_detail.setPlainText(f'正在{names[action]} {len(ids)} 项任务；操作在安全阶段生效。')
+    def bulk_action(self,action,job_ids=None):
+        if self.bulk_pending or not (job_ids or self.checked_jobs):return
+        ids=job_ids or list(self.checked_jobs)
+        if action=='delete' and QMessageBox.question(self,'删除任务记录','删除选中的任务及后续任务记录？未完成的后续处理会取消；音乐文件、下载和做种均保留。')!=QMessageBox.Yes:return
+        self.bulk_pending=True;self.detail_pinned=True;self.update_job_selection();names={'pause':'暂停','resume':'继续','cancel':'取消','retry':'重试','delete':'删除'};self.job_detail.setPlainText(f'正在{names[action]} {len(ids)} 项任务；操作在安全阶段生效。')
         def completed(result):
             self.bulk_pending=False;message=result.get('message') or f"{names[action]}：成功 {result.get('succeeded',0)} 项，跳过 {result.get('skipped',0)} 项，未完成 {result.get('failed',0)} 项";self.notice.setText(message)
-            failures=[row for row in result.get('results',[]) if row.get('status') in ('FAILED','ERROR','NOT_FOUND','failed','error')]
+            failures=[row for row in result.get('results',[]) if row.get('status')!='OK']
+            if action=='delete':
+                for row in result.get('results',[]):
+                    for removed in row.get('removed_job_ids',[]):self.checked_jobs.pop(removed,None)
             self.job_detail.setPlainText(message+''.join('\n'+str(row.get('job_id',''))+'：'+str(row.get('message','')) for row in failures[:20]));self.update_job_selection();self.refresh()
         def failed(message):self.bulk_pending=False;self.job_detail.setPlainText('批量操作未完成：'+message);self.update_job_selection()
         self.call('bulk_workflows',{'action':action,'job_ids':ids},completed,failed)
@@ -561,11 +599,13 @@ class Workbench(QMainWindow):
         if not self.checked_jobs or getattr(self,'bulk_ai_pending',False):return
         self.detail_pinned=True
         if not self.config.get('ai',{}).get('enabled'):self.job_detail.setPlainText('可在“连接与设置”中启用 AI 并填写服务地址、模型和 API Key。');return
-        entries=list(self.checked_jobs.values());context={'jobs':entries[:20],'total_selected':len(entries),'shown':min(20,len(entries)),'truncated':len(entries)>20};self.bulk_ai_pending=True;self.update_job_selection();self.job_detail.setPlainText('正在分析勾选的问题'+('（本次前 20 项，其余请分批勾选）' if len(entries)>20 else '')+'…')
+        ids=list(self.checked_jobs)[:20];total=len(self.checked_jobs);self.bulk_ai_pending=True;self.update_job_selection();self.job_detail.setPlainText('正在查询真实目录并辅助核对'+('（本次前 20 项，其余请分批勾选）' if total>20 else '')+'…')
         def received(result):
-            self.bulk_ai_pending=False;self.update_job_selection();self.job_detail.setPlainText(('本次分析前 20 项，共勾选 '+str(len(entries))+' 项。\n' if len(entries)>20 else '')+str(result.get('answer') or result.get('explanation') or result))
-        def failed(message):self.bulk_ai_pending=False;self.update_job_selection();self.job_detail.setPlainText('AI 解释未完成：'+message)
-        self.call('ai_analyze',{'context':context,'instructions':'按任务名称用中文分别解释这些音乐整理任务为什么等待，合并相同原因，给出简短处理步骤。只解释列出的任务，不猜测未显示项目；不要确认发行身份，不要生成下载或删除命令。'},received,failed)
+            self.bulk_ai_pending=False;self.update_job_selection()
+            text=('本次辅助前 20 项，共勾选 '+str(total)+' 项。\n' if total>20 else '')+str(result.get('message') or result.get('error') or 'AI 辅助已完成')
+            self.job_detail.setPlainText(text+''.join('\n'+str(row.get('label') or row.get('job_id'))+'：'+str(row.get('message','')) for row in result.get('results',[])));self.refresh()
+        def failed(message):self.bulk_ai_pending=False;self.update_job_selection();self.job_detail.setPlainText('AI 辅助未完成：'+message)
+        self.call('assist_workflows',{'job_ids':ids},received,failed)
     def restore(self):
         job_id=self.selected_job()
         if not job_id:return
@@ -581,6 +621,9 @@ class Workbench(QMainWindow):
                 QMessageBox.information(self,'重新开始任务准备','上次准备已中断，请返回对应入口重新开始。本记录不会自动执行。');self.nav.setCurrentRow({'playlist':0,'complete':1,'upgrade':2}.get(job.get('scene'),3))
             else:QMessageBox.information(self,'批次准备记录','正在准备时可查看扫描进度或取消本批次。准备完成后，请选择具体的专辑任务进行核对。')
             return
+        if job.get('review_kind') in ('metadata','candidate','search','error','interrupted') or job.get('stage') in ('failed','skipped'):
+            from musicops.gui.review import ReviewDialog
+            self.review_window=ReviewDialog(self,job);self.review_window.open();return
         kind=job.get('review_kind');payload={'job_id':job['job_id']}
         if kind=='candidate':
             choices=job.get('choices') or [];texts=[c['source']+' · '+c['title']+' · '+' / '.join(c.get('artists',[]))+' · '+str(c.get('media',{}).get('format') or '')+' '+str(c.get('media',{}).get('encoding') or '') for c in choices]
@@ -681,6 +724,9 @@ QCheckBox::indicator:indeterminate,QTreeWidget::indicator:indeterminate { backgr
 QCheckBox::indicator:hover,QTableWidget::indicator:hover,QTreeWidget::indicator:hover { border-color: #8be9d7; }
 QProgressBar#activityProgress { background: #1d2c41; border: 0; border-radius: 1px; }
 QProgressBar#activityProgress::chunk { background: #4dcab9; border-radius: 1px; }
+QTabWidget::pane { border: 1px solid #2b3e56; border-radius: 8px; background: #0d1523; }
+QTabBar::tab { background: #14243a; color: #9eb7d1; border: 1px solid #2b3e56; padding: 10px 20px; margin-right: 4px; border-top-left-radius: 7px; border-top-right-radius: 7px; }
+QTabBar::tab:selected { background: #1b3b44; color: #9df2dd; border-bottom-color: #1b3b44; }
 QScrollArea { border: 0; }
 QScrollBar:vertical { width: 9px; background: transparent; margin: 3px; }
 QScrollBar::handle:vertical { background: #3b526b; min-height: 36px; border-radius: 3px; }

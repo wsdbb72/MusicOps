@@ -54,6 +54,11 @@ def save_setup(service,payload):
             target['enabled']=bool(item.get('enabled',target['enabled']))
             if item.get('model'):target['model']=item['model']
         secret(kind,target['base_url'],item.get('key' if kind=='ai' else 'authorization',''),('ai','auth_secret_ref') if kind=='ai' else ('lyrics','primary','auth_secret_ref'))
+    if 'browser_solver' in payload:
+        settings=payload['browser_solver']
+        if not isinstance(settings,dict) or set(settings)-{'enabled','base_url','timeout','executable','auto_start'}:raise ValueError('浏览器验证设置无效')
+        values['browser_solver'].update(settings)
+    if 'catalog_web' in payload:values['catalog']['web_enabled']=bool(payload['catalog_web'])
     if payload.get('discogs_token'):secret('discogs','https://api.discogs.com',payload['discogs_token'],('catalog','discogs','credential_ref'))
     server=payload.get('servers',{})
     roon=values['music_servers']['roon'];roon['enabled']=bool(server.get('roon',roon['enabled']))
@@ -68,6 +73,9 @@ def save_setup(service,payload):
     workflow=payload.get('workflow',{})
     for key in ('netease_fallback','netease_api_url','netease_downloader','netease_download_args','netease_import_dir','prefer_24bit','fl_per_batch','fl_unlimited'):
         if key in workflow:values['workflow'][key]=workflow[key]
+    if 'updates' in payload:
+        if not isinstance(payload['updates'],dict) or type(payload['updates'].get('enabled')) is not bool:raise ValueError('自动更新设置无效')
+        values['updates']['enabled']=payload['updates']['enabled']
     values['workflow']['setup_done']=True
     # Save URLs first: a changed domain intentionally unbinds its previous key.
     from musicops.config.schema import validate_config
@@ -80,4 +88,5 @@ def save_setup(service,payload):
         for key in path[:-1]:obj=obj[key]
         obj[path[-1]]=ref
     if pending:saved=service.config.save(values,saved['version'])
+    service.prepare_local_catalog()
     return {'config':saved,'saved':True,'credentials_saved':len(pending),'message':'设置已保存，可以开始使用。'}

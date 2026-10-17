@@ -181,11 +181,9 @@ jobs:
           retention-days: 14
 
   macos:
-    name: Both native macOS installers
+    name: Apple Silicon native installer
     permissions:
-      # The reused file still defines its legacy direct-tag publisher. Its build
-      # jobs reduce this to read; that publisher is skipped for calls with ref.
-      contents: write
+      contents: read
     uses: ./.github/workflows/macos-release.yml
     with:
       ref: ${{ github.sha }}
@@ -213,12 +211,7 @@ jobs:
         with:
           name: MusicOps-macOS-arm64
           path: release-assets
-      - name: Download Intel release assets
-        uses: actions/download-artifact@v8
-        with:
-          name: MusicOps-macOS-x86_64
-          path: release-assets
-      - name: Validate all seven assets, create draft, upload, verify and publish
+      - name: Validate all five assets, create draft, upload, verify and publish
         shell: python
         run: |
           import hashlib, json, os, pathlib, re, subprocess, urllib.error, urllib.request, zipfile
@@ -228,14 +221,14 @@ jobs:
           root = pathlib.Path('release-assets'); tag = 'v'+version
           core = {f'MusicOps-{version}-Setup.exe', f'MusicOps-{version}-Windows.zip', f'MusicOps-{version}-source.zip'}
           expected = set(core); covered = set(); windows = None
-          for platform in ('Windows', 'macOS-arm64', 'macOS-x86_64'):
+          for platform in ('Windows', 'macOS-arm64'):
               manifest_name = f'MusicOps-{version}-{platform}-build.json'; expected.add(manifest_name)
               data = json.loads((root/manifest_name).read_text('utf-8'))
               if data.get('version') != version or data.get('commit') != commit or data.get('smoke_passed') is not True or data.get('installer_smoke_passed') is not True:
                   raise SystemExit('Build source, version or native acceptance mismatch: '+platform)
               if platform == 'Windows':
                   windows = data
-                  if data.get('architecture') != 'x86_64' or data.get('unit_tests_passed') is not True or data.get('installer_test_count') != 6 or data.get('source_archive_commit') != commit or data.get('external_requests') != 0 or not data.get('packaged_checks') or not all(data['packaged_checks'].values()) or len(data.get('installer_smoke_checks', {})) != 9 or not all(data['installer_smoke_checks'].values()):
+                  if not {'native_bulk_retry_search','native_review_snapshot','native_local_album_database','native_ai_assistance_guard','native_delete_records_only','native_update_setting','native_browser_solver_guard'}.issubset(data.get('packaged_checks',{})) or data.get('architecture') != 'x86_64' or data.get('unit_tests_passed') is not True or data.get('installer_test_count') != 6 or data.get('source_archive_commit') != commit or data.get('external_requests') != 0 or not data.get('packaged_checks') or not all(data['packaged_checks'].values()) or len(data.get('installer_smoke_checks', {})) != 9 or not all(data['installer_smoke_checks'].values()):
                       raise SystemExit('Windows regression or packaged evidence is incomplete')
                   names = {f'MusicOps-{version}-Setup.exe', f'MusicOps-{version}-Windows.zip', f'MusicOps-{version}-source.zip'}
               else:
@@ -264,7 +257,7 @@ jobs:
                           raise SystemExit('Artifact checksum mismatch: '+name)
                   covered.add(name)
           expected.update(core)
-          if len(core) != 7 or covered != core or {path.name for path in root.iterdir()} != expected:
+          if len(core) != 5 or covered != core or {path.name for path in root.iterdir()} != expected:
               raise SystemExit('Release is missing required files or contains unexpected files')
           with zipfile.ZipFile(root/f'MusicOps-{version}-source.zip') as source:
               if source.comment.decode('ascii') != commit:
@@ -304,7 +297,7 @@ jobs:
               if obj['type'] != 'commit' or obj['sha'] != commit:
                   raise SystemExit('The existing tag does not identify the tested source')
           notes = pathlib.Path('release-notes.md')
-          notes.write_text('本轮更新：自动识别旧版并在原目录升级；已配置 AI 自动参与识别兜底并回查真实目录；单站故障不再阻断其他站点；识别、搜索和下载入库保留独立任务记录；任务中心支持勾选后批量暂停、继续、取消及 AI 解释。\n\n提供 Windows 安装包与便携版、macOS Apple Silicon 和 Intel 原生 PKG 安装包及应用 ZIP，以及同一提交的源码 ZIP。所有产物通过回归、实际安装升级和打包运行验收。请按 SHA256SUMS 核验下载文件。macOS 使用 ad-hoc 完整性签名，尚无 Apple Developer ID 签名和公证。\n\n自动验收使用隔离档案、合成音频和模拟服务，不代表所有私人站点账号均已现场验证。Windows 安装前请在任务中心选择“退出应用及后台”。\n\nSource commit: '+commit+'\n', 'utf-8')
+          notes.write_text('本轮更新：任务记录删除；单项与批量失败重试；可编辑的人工核对与 AI 辅助建议；持久化本地专辑和曲目预匹配数据库；启动时检查 GitHub、自动下载并校验当前系统安装包，安全退出后台后打开更新向导。资源站搜索增加有边界的关键词补充、去重与版本核对。资料识别按 API、公开网站、AI 实际联网搜索依次回退，并保留可核查来源；新增本机 FlareSolverr 接入、连接测试和 Windows 独立程序自动启动，服务本体需另行安装。\n\n提供 Windows 安装包与便携版、Apple Silicon ARM Mac 原生 PKG 与应用 ZIP，以及同一提交源码和 SHA-256 / SHA-512 校验文件。停止构建新的 Intel Mac 版本，历史附件保留。所有产物通过回归与实际安装运行验收。Mac 尚无 Developer ID 签名和 Apple 公证。\n\n自动验收使用隔离档案、合成音频和模拟服务，不代表所有私人站点账号均已现场验证。手动更新前请退出应用及后台。\n\nSource commit: '+commit+'\n', 'utf-8')
           def gh(*arguments):
               subprocess.run(['gh', *arguments], check=True)
           gh('release', 'create', tag, '--verify-tag', '--target', commit, '--draft', '--title', 'MusicOps '+version, '--notes-file', str(notes))

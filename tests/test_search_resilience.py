@@ -28,7 +28,7 @@ def test_one_site_failure_does_not_block_netease_fallback_after_successful_empty
     monkeypatch.setattr(service.workflows,'provider',lambda site,cfg:SimpleNamespace(search=lambda _:search(site)))
     job=make_job(service);service.workflows._searching(job)
     process=service.store.get('evidence','workflow:'+job['processing_job_id'])
-    assert job['stage']=='completed' and process['stage']=='fallback' and len(calls)==4
+    assert job['stage']=='completed' and process['stage']=='fallback' and len(calls)==7 and calls.count('open.cd')==1
     assert job['search_summary']['unavailable_sites']==['open.cd']
     assert '四站均无' not in job['message']
     assert not service.store.list('download_tasks') and not service.store.list('token_reservations')

@@ -21,6 +21,9 @@ class StateStore:
             c.execute('CREATE TABLE IF NOT EXISTS events (seq INTEGER PRIMARY KEY AUTOINCREMENT, at TEXT NOT NULL, phase TEXT NOT NULL, task_id TEXT, tx_id TEXT, payload TEXT NOT NULL)')
             c.execute('CREATE TABLE IF NOT EXISTS token_reservations (id TEXT PRIMARY KEY, site TEXT NOT NULL, resource_id TEXT NOT NULL, cost INTEGER NOT NULL, state TEXT NOT NULL, payload TEXT NOT NULL, updated_at TEXT NOT NULL)')
             c.execute("CREATE UNIQUE INDEX IF NOT EXISTS token_active ON token_reservations(site,resource_id) WHERE state NOT IN ('RELEASED','REJECTED')")
+            c.execute('CREATE TABLE IF NOT EXISTS library_matches (root_key TEXT NOT NULL,file_id TEXT NOT NULL,title_key TEXT NOT NULL,artist_key TEXT NOT NULL,album_key TEXT NOT NULL,duration REAL NOT NULL,album_id TEXT NOT NULL,PRIMARY KEY(root_key,file_id))')
+            c.execute('CREATE INDEX IF NOT EXISTS library_match_identity ON library_matches(root_key,title_key,artist_key,album_key)')
+            c.execute('CREATE TABLE IF NOT EXISTS library_albums (root_key TEXT NOT NULL,album_id TEXT NOT NULL,payload TEXT NOT NULL,PRIMARY KEY(root_key,album_id))')
             c.execute('PRAGMA user_version=1')
     @contextlib.contextmanager
     def connection(self):

@@ -15,8 +15,8 @@ def run(*args,**kwargs):return subprocess.run([str(arg) for arg in args],check=T
 def verify_crypto_static(extension):
     """Reject OpenSSL dylib collisions before and after PyInstaller freezing.
 
-    cryptography 49+ no longer supplies Intel Mac wheels. Follow the upstream
-    macOS static build instructions instead of dynamically linking Homebrew:
+    Prevent frozen Python/OpenSSL dylib collisions. Use the upstream
+    macOS static build instructions if a source build is needed:
     https://cryptography.io/en/latest/installation/#building-cryptography-on-macos
     """
     linked=run('/usr/bin/otool','-L',extension,capture_output=True,text=True).stdout
@@ -49,6 +49,7 @@ def audit_bundle(app):
             except ValueError:raise RuntimeError('Bundle symlink escapes application') from None
 
 def package(args):
+    if args.arch!='arm64':raise SystemExit('Only Apple Silicon arm64 is published')
     if sys.platform!='darwin':raise SystemExit('macOS bundles must be built and smoke-tested on macOS')
     if platform.machine()!=args.arch:raise SystemExit('Use a native runner for each architecture; cross-builds are not accepted')
     from cryptography.hazmat.bindings import _rust
@@ -112,6 +113,6 @@ def package(args):
     print(json.dumps(metadata,ensure_ascii=True))
 
 def main():
-    parser=argparse.ArgumentParser();parser.add_argument('--arch',choices=('arm64','x86_64'),default=platform.machine());parser.add_argument('--output',default='dist/macos');args=parser.parse_args();package(args)
+    parser=argparse.ArgumentParser();parser.add_argument('--arch',choices=('arm64',),default=platform.machine());parser.add_argument('--output',default='dist/macos');args=parser.parse_args();package(args)
 
 if __name__=='__main__':main()

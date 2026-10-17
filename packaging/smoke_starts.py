@@ -23,7 +23,7 @@ def main():
     env=os.environ.copy();env['QT_QPA_PLATFORM']='offscreen'
     for key in ('PYTHONPATH','PYTHONHOME','VIRTUAL_ENV'):env.pop(key,None)
     process=subprocess.Popen([str(bundle/'MusicOps.exe'),'--base',str(base),'--quit-after','20000'],cwd=bundle,env=env,creationflags=0x08000000)
-    client=WorkerClient(base);report={'version':'0.4.2','evidence':'packaged_worker_three_entry_points','external_requests':0,'checks':{}}
+    client=WorkerClient(base);report={'version':'0.4.3','evidence':'packaged_worker_three_entry_points','external_requests':0,'checks':{}}
     try:
         deadline=time.monotonic()+25
         while True:
@@ -51,6 +51,10 @@ def main():
         report['checks']['synthetic_target_visible_as_album']=any(j.get('task_type')=='search' and j['scene']=='playlist' and j['stage']=='needs_review' for j in jobs['jobs'])
         report['checks']['identification_and_search_are_separate']=any(j.get('task_type')=='identification' and j['stage']=='completed' and j.get('search_job_id') for j in jobs['jobs']) and any(j.get('task_type')=='search' and j.get('identification_job_id') for j in jobs['jobs'])
         review_ids=[j['job_id'] for j in jobs['jobs'] if j.get('task_type')=='search' and j['stage']=='needs_review']
+        retried=client.call('bulk_workflows',{'action':'retry','job_ids':review_ids})
+        report['checks']['native_bulk_retry_search']=bool(review_ids) and retried['succeeded']==len(review_ids) and all(client.call('get_workflow',{'job_id':jid})['job']['job_id']==jid for jid in review_ids)
+        snapshot=client.call('get_workflow',{'job_id':review_ids[0]})['job']
+        report['checks']['native_review_snapshot']=bool(snapshot.get('review_revision')) and bool(snapshot.get('prepared'))
         cancelled=client.call('bulk_workflows',{'action':'cancel','job_ids':review_ids})
         report['checks']['native_bulk_cancel_review_tasks']=cancelled['succeeded']==len(review_ids) and cancelled['failed']==0
         report['checks']['three_preparation_records']=len([j for j in jobs['jobs'] if j.get('job_kind')=='batch'])==3
@@ -69,6 +73,17 @@ def main():
         searched=completed('manual_album_search',{'mode':'literal','query':'Synthetic Album'})
         report['checks']['native_manual_search_readonly']=searched['state']=='blocked' and searched['result']['status']=='NOT_CONFIGURED' and searched['result']['music_writes']==0
         report['checks']['native_search_activity_visible']=any(j.get('job_kind')=='activity' and j.get('task_group')=='search' for j in client.call('list_workflows')['jobs'])
+        album_db=client.call('list_library_albums',{})
+        report['checks']['native_local_album_database']=album_db['total']==0 and album_db['summary']['updated_at'] is not None
+        ai_guard=completed('assist_workflows',{'job_ids':review_ids})
+        report['checks']['native_ai_assistance_guard']=ai_guard['state']=='blocked' and ai_guard.get('error_class')=='POLICY_BLOCKED'
+        activity_id='activity:'+searched['task_id']
+        removed=client.call('bulk_workflows',{'action':'delete','job_ids':[activity_id]})
+        report['checks']['native_delete_records_only']=removed['succeeded']==1 and not any(j['job_id']==activity_id for j in client.call('list_workflows')['jobs']) and not any(Path(values['paths']['library']).rglob('*'))
+        update_setting=client.call('save_setup',{'updates':{'enabled':False}})
+        report['checks']['native_update_setting']=update_setting['config']['values']['updates']['enabled'] is False
+        solver_guard=completed('browser_solver_preflight',{'settings':{'base_url':'http://192.0.2.1:8191'}})
+        report['checks']['native_browser_solver_guard']=solver_guard['state']=='failed' and solver_guard.get('error_class')=='ValueError'
         process.wait(30);report['checks']['gui_exit_zero']=process.returncode==0
         report['passed']=all(report['checks'].values())
     except Exception as exc:report.update(passed=False,error_class=type(exc).__name__,error=str(exc))

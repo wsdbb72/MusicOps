@@ -18,7 +18,7 @@ def default_config(base,offline=True):
       qbt=dict(base_url='http://127.0.0.1:8085',credential_ref='vault://qbt/local/credentials',category='MusicOps',tag_prefix='musicops-',poll_seconds=5,auto_tmm=False),
       lyrics=dict(primary=dict(base_url='https://lyrics.example.invalid',lyrics_path='/lyrics',candidates_path='/jsonapi',cover_path='/cover',auth_mode='raw',auth_header='Authorization',auth_secret_ref='vault://lyrics/default/authorization'),direct_backup=dict(base_url='http://backup.example.invalid',enabled=False,auth_secret_ref='vault://lyrics/default/authorization'),public_fallback=dict(enabled=False,lyrics_url='https://api.lrc.cx/lyrics',cover_url='https://api.lrc.cx/cover',auth_mode='none'),fallback_on_auth_error=False,write_mode='sidecar',overwrite_existing='review',connect_timeout=3,read_timeout=12,max_attempts=2,total_budget=60,concurrency=1,min_cover_side=300,max_response_bytes=10_000_000,cache_ttl=86400,negative_ttl=86400),
       ai=dict(enabled=False,protocol='responses',base_url='https://ai.example.invalid/v1',model='',auth_secret_ref='vault://ai/default/key',timeout=60,max_output_tokens=2048,temperature=0.2,structured_outputs=True,allow_plan_only=True),
-      catalog=dict(enabled=True,timeout=15,candidate_limit=20,cache_ttl=86400,cache_entries=128,musicbrainz=dict(enabled=True),discogs=dict(enabled=True,credential_ref='vault://catalog/discogs/token')),
+      catalog=dict(enabled=True,web_enabled=True,timeout=15,candidate_limit=20,cache_ttl=86400,cache_entries=128,musicbrainz=dict(enabled=True),discogs=dict(enabled=True,credential_ref='vault://catalog/discogs/token')),
       quality=dict(lossless_first=True,format_order=['flac','alac','wav','aiff','mp3','aac'],prefer_24bit=False,dsd_policy='preserve',multichannel='separate',upgrade_suggestions=True),
       metadata=dict(preserve_multivalue=True,directory_template='{albumartist}/{album} [{edition}]/CD{disc}/{track} {title}',track_padding=2,preserve_unknown=True,overwrite='review',locked_fields=[]),
       repair=dict(mode='report',fields=['album','albumartist','artist','title','date','tracknumber','discnumber'],backup_retention_days=90),
@@ -26,6 +26,8 @@ def default_config(base,offline=True):
       scheduler=dict(enabled=False,mode='report',timezone='Asia/Shanghai',playlist_time='06:30',health_weekday=6,health_time='07:00',missed='report_once',notify='meaningful_changes'),
       worker=dict(concurrency=1,keep_background=True,decode_timeout=60),
       netease=dict(batch_size=150,timeout=15,max_attempts=2,credential_ref='',strip_layers=['VipSongsDownload']),
+      updates=dict(enabled=True),
+      browser_solver=dict(enabled=False,base_url='http://127.0.0.1:8191',timeout=60,executable='',auto_start=False),
       workflow=dict(setup_done=False,source_order=['open.cd','dicmusic','orpheus','redacted'],free_only=True,fl_per_batch=3,fl_unlimited=False,max_albums=50,netease_fallback=True,netease_api_url='',netease_downloader='',netease_download_args=[],netease_import_dir='',backup_days=7,prefer_24bit=True),
       music_servers=dict(roon=dict(enabled=False,library='',watched_folders=[],credential_ref='',client='Roon',host='127.0.0.1',port=9330,timeout=8),navidrome=dict(enabled=False,url='',username='',password_ref='',library='')),
       playlist_sources={key:dict(credential_ref='',timeout=15) for key in ('qqmusic','qishui','kugou','kuwo','migu','bilibili','applemusic','spotify','youtube')})
@@ -65,6 +67,8 @@ def validate_config(values):
             if type(obj) not in (int,float) or not math.isfinite(obj) or (type(template) is int and type(obj) is not int):raise ValueError(label+'数值无效')
         elif not isinstance(obj,str):raise ValueError(label+'须为文本')
     check_types(values,default_config(Path.cwd()))
+    from musicops.clients.browser_solver import validate_solver
+    validate_solver(values['browser_solver'])
     def bounded(obj,key,low,high,label):
         if not low<=obj[key]<=high:raise ValueError(label+'超出允许范围')
     def clean_url(value,label,https=True,origin=False):

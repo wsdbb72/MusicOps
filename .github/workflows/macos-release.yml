@@ -3,7 +3,6 @@ name: macOS app and release assets
 on:
   push:
     branches: ['codex/**', '!codex/release-*']
-    tags: ['v*']
   workflow_call:
     inputs:
       ref:
@@ -37,8 +36,6 @@ jobs:
         include:
           - runner: macos-15
             arch: arm64
-          - runner: macos-15-intel
-            arch: x86_64
     env:
       PYTHONIOENCODING: utf-8
       MACOSX_DEPLOYMENT_TARGET: '15.0'
@@ -52,7 +49,7 @@ jobs:
         uses: actions/setup-python@v7
         with:
           python-version: '3.12'
-          architecture: ${{ matrix.arch == 'arm64' && 'arm64' || 'x64' }}
+          architecture: arm64
           cache: pip
           cache-dependency-path: packaging/requirements-macos.txt
       - name: Install reviewed build dependencies
@@ -60,14 +57,7 @@ jobs:
         env:
           BUILD_ARCH: ${{ matrix.arch }}
         run: |
-          if [[ "$BUILD_ARCH" == 'x86_64' ]]; then
-            # cryptography 49+ has no Intel Mac wheel. A dynamic source build
-            # collides with Python's older same-named OpenSSL in a frozen app.
-            python -m pip uninstall --yes cryptography
-            OPENSSL_STATIC=1 python -m pip install --no-cache-dir --no-binary=cryptography -r packaging/requirements-macos.txt
-          else
-            python -m pip install --only-binary=cryptography -r packaging/requirements-macos.txt
-          fi
+          python -m pip install --only-binary=cryptography -r packaging/requirements-macos.txt
           python -m pip install --no-deps -e .
       - name: Create an isolated unlocked test keychain
         shell: bash
@@ -138,79 +128,3 @@ jobs:
           if [[ -f "$MUSICOPS_KEYCHAIN_PATH" ]]; then
             security delete-keychain "$MUSICOPS_KEYCHAIN_PATH"
           fi
-
-  publish:
-    name: Attach verified Mac assets to the existing release
-    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v') && !inputs.ref
-    needs: build
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    permissions:
-      contents: write
-    env:
-      GH_TOKEN: ${{ github.token }}
-      GH_REPO: ${{ github.repository }}
-      RELEASE_TAG: ${{ github.ref_name }}
-      RELEASE_COMMIT: ${{ github.sha }}
-    steps:
-      - name: Download tested Apple Silicon artifact
-        uses: actions/download-artifact@v8
-        with:
-          name: MusicOps-macOS-arm64
-          path: release-assets
-      - name: Download tested Intel artifact
-        uses: actions/download-artifact@v8
-        with:
-          name: MusicOps-macOS-x86_64
-          path: release-assets
-      - name: Verify version, commit, architecture and archive checksums
-        shell: python
-        run: |
-          import hashlib, json, os, pathlib, re
-          root = pathlib.Path('release-assets')
-          tag = os.environ['RELEASE_TAG']
-          if not re.fullmatch(r'v\d+\.\d+\.\d+(?:[a-z0-9.-]+)?', tag):
-              raise SystemExit('Invalid release tag')
-          manifests = list(root.glob('MusicOps-*-macOS-*-build.json'))
-          if len(manifests) != 2:
-              raise SystemExit('Both native architecture build manifests are required')
-          architectures = set()
-          for path in manifests:
-              data = json.loads(path.read_text('utf-8'))
-              if data['version'] != tag[1:] or data['commit'] != os.environ['RELEASE_COMMIT'] or not data['smoke_passed'] or not data['installer_smoke_passed']:
-                  raise SystemExit('Release source/version/acceptance mismatch')
-              architectures.add(data['architecture'])
-              expected = {data['archive'], data['installer']}
-              if set(data['artifacts']) != expected or not data['installer'].endswith('.pkg'):
-                  raise SystemExit('Both ZIP and native installer are required')
-              for name, hashes in data['artifacts'].items():
-                  if pathlib.Path(name).name != name:
-                      raise SystemExit('Invalid artifact path')
-                  for algorithm in ('sha256', 'sha512'):
-                      with (root / name).open('rb') as stream:
-                          digest = hashlib.file_digest(stream, algorithm).hexdigest()
-                      if digest != hashes[algorithm]:
-                          raise SystemExit('Artifact digest mismatch')
-          if architectures != {'arm64', 'x86_64'}:
-              raise SystemExit('Missing native architecture')
-      - name: Wait for the matching release without creating an empty release
-        shell: bash
-        run: |
-          for attempt in {1..20}; do
-            if gh release view "$RELEASE_TAG" --json tagName --jq '.tagName' >/dev/null 2>&1; then
-              exit 0
-            fi
-            sleep 30
-          done
-          echo 'The release does not exist yet. Tested files remain in the workflow artifacts; create the matching release and rerun this job.'
-          exit 1
-      - name: Upload only matching Mac release assets
-        shell: bash
-        run: |
-          gh release upload "$RELEASE_TAG" \
-            release-assets/MusicOps-*-macOS-*.zip \
-            release-assets/MusicOps-*-macOS-*.pkg \
-            release-assets/MusicOps-*-macOS-*.sha256 \
-            release-assets/MusicOps-*-macOS-*.sha512 \
-            release-assets/MusicOps-*-macOS-*-build.json \
-            --clobber

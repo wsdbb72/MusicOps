@@ -1,8 +1,7 @@
-"""Read-only catalogue evidence; web search links are never identity evidence.
+"""Read-only API evidence, with a separately bounded public-page fallback.
 
-MusicBrainz supplies recording/release IDs. Discogs search requires its own user
-token. Other sites remain explicit browser lookups until an authorised API is
-configured. A candidate, including an exact textual match, always needs review.
+Search links alone never confirm identity. Website evidence is kept separate
+from official API identifiers and resolved through the observed page adapter.
 """
 from __future__ import annotations
 
@@ -30,7 +29,7 @@ SOURCES = {
     'albumoftheyear': {'name': 'Album of the Year', 'host': 'www.albumoftheyear.org', 'mode': 'manual_lookup'},
     'vgmdb': {'name': 'VGMdb', 'host': 'vgmdb.net', 'mode': 'manual_lookup'},
 }
-USER_AGENT = 'MusicOps/0.4.2 (Windows desktop; personal catalogue lookup)'
+USER_AGENT = 'MusicOps/0.4.3 (desktop; personal catalogue lookup)'
 MAX_BYTES = 2_000_000
 CACHE_MAX_BYTES = 32 * 1024 * 1024
 _MBID = re.compile(r'[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\Z')
@@ -134,6 +133,12 @@ class CatalogResolver:
         self.cache_bytes = 0
         self.cache_lock = threading.Lock()
         self._fake_blocked = {}
+        self._web_transport = transport
+        if self._web_transport is None and (config.get('browser_solver') or {}).get('enabled'):
+            from musicops.clients.browser_solver import browser_transport
+            from musicops.providers.catalog_web import HOSTS
+            self._web_transport = browser_transport(config['browser_solver'], list(HOSTS.values()), checkpoint=self.checkpoint)
+        self._web = None
         with self._guard:
             for source in ('musicbrainz', 'discogs'):
                 self._locks.setdefault(source, threading.Lock())
@@ -630,7 +635,31 @@ class CatalogResolver:
                          country=data.get('country'), lookup_links=[])
         return candidate
 
+    def website(self):
+        if self._web is None:
+            from musicops.providers.catalog_web import WebCatalog
+            self._web = WebCatalog(self.config, transport=self._web_transport, checkpoint=self.checkpoint)
+        return self._web
+
+    def web_identify(self, query):
+        if self.offline or not self.config.get('enabled', True) or not self.config.get('web_enabled', True):
+            return {'candidates': [], 'sources': [], 'status': 'DISABLED'}
+        return self.website().identify(self._query(query))
+
+    def web_read(self, url):
+        if self.offline or not self.config.get('enabled', True) or not self.config.get('web_enabled', True):
+            return []
+        return self.website().read(url)
+
     def resolve_candidate(self, source, source_id):
+        if source in SOURCES and isinstance(source_id, str) and source_id.startswith('web:'):
+            if self.offline or not self.config.get('enabled', True) or not self.config.get('web_enabled', True):
+                return {'status': 'POLICY_BLOCKED', 'read_only': True}
+            try:
+                return self.website().resolve(source, source_id)
+            except Exception as exc:
+                if getattr(exc, 'error_class', None) == 'CANCELLED': raise
+                return {**self._error(exc), 'read_only': True, 'requires_review': True}
         try:
             if source not in ('musicbrainz', 'discogs') or not isinstance(source_id, str):
                 raise ValueError('只能读取已接入目录来源的候选详情')

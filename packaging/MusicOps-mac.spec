@@ -11,7 +11,7 @@ root=Path(SPECPATH).parent
 version=tomllib.loads((root/'pyproject.toml').read_text('utf-8'))['project']['version']
 architecture=os.environ.get('MUSICOPS_MAC_ARCH',platform.machine())
 icon=Path(os.environ['MUSICOPS_MAC_ICON'])
-if architecture not in ('arm64','x86_64'):raise ValueError('Unsupported macOS architecture')
+if architecture not in ('arm64',):raise ValueError('Unsupported macOS architecture')
 shared=collect_submodules('musicops')
 data=collect_data_files('PySide6',includes=['Qt/plugins/imageformats/*','Qt/translations/qtbase_zh_CN.qm'])
 data += [(str(root/'src/musicops/assets'),'musicops/assets')]

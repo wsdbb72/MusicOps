@@ -27,7 +27,20 @@ class AppService:
             if task['state']=='running' or task['state']=='paused' and task.get('started_at'): task.update(state='recovery_required',error='上次进程中断；先核对事务/请求，不能盲重试'); self.store.put('tasks',task['task_id'],task)
         from musicops.app.pipeline import Workflows
         self.workflows=Workflows(self);self.workflows.recover();self._last_workflow_tick=0
+        self.prepare_local_catalog()
         self.thread.start()
+    def prepare_local_catalog(self,force=False):
+        cfg=self.config.current()['values']
+        if cfg['offline'] or not cfg['workflow']['setup_done'] or not Path(cfg['paths']['library']).is_dir():return
+        from musicops.library.catalog import AlbumCatalog
+        summary=AlbumCatalog(self.store).summary(cfg['paths']['library'])
+        fresh=False
+        try:fresh=summary.get('updated_at') and (dt.datetime.now(dt.timezone.utc)-dt.datetime.fromisoformat(summary['updated_at'])).total_seconds()<300
+        except (ValueError,TypeError):pass
+        if fresh and not force:return
+        for task in self.store.list('tasks'):
+            if task.get('command')=='index_library' and task.get('state') in ('queued','running','paused') and task.get('args',{}).get('root')==cfg['paths']['library']:return
+        self.enqueue('index_library',{'root':cfg['paths']['library'],'lightweight':True})
     def _safe_path(self,value):
         raw=Path(value).absolute()
         for parent in [raw,*raw.parents]:
@@ -47,16 +60,21 @@ class AppService:
         if command=='save_setup':
             from musicops.app.setup import save_setup
             return save_setup(self,payload)
+        if command=='list_library_albums':
+            from musicops.library.catalog import AlbumCatalog
+            return AlbumCatalog(self.store).albums(self.config.current()['values']['paths']['library'],payload.get('offset',0))
         if command=='list_workflows':return self.workflows.list(payload.get('offset',0))
         if command=='get_workflow':
             job=self.store.get('evidence','workflow:'+payload['job_id'])
-            if not job:raise ValueError('任务不存在')
-            public={k:job.get(k) for k in ('job_id','job_kind','task_type','task_group','scene','stage','label','message','detail','review_kind','choices','lookup_links','catalog_choices','paused','pause_pending','ai_fallback','search_summary','outcomes','source_outcomes','target_count','identification_job_id','search_job_id')}
+            if not job or job.get('hidden'):raise ValueError('任务不存在或已删除')
+            from musicops.app.assistance import review_revision
+            public={k:job.get(k) for k in ('job_id','job_kind','task_type','task_group','scene','stage','label','message','detail','review_kind','choices','lookup_links','catalog_choices','paused','pause_pending','ai_fallback','search_summary','outcomes','source_outcomes','target_count','identification_job_id','search_job_id','ai_assistance','retry_job_id','search_query','search_sites')}
+            public['review_revision']=review_revision(job)
             public['prepared']=[{**{k:r.get(k) for k in ('raw_title','artists','album','duration')},'track':(r.get('tags',{}).get('tracknumber') or [r.get('track','')])[0],'disc':(r.get('tags',{}).get('discnumber') or [r.get('disc','1')])[0]} for r in job.get('prepared',[]) or job.get('targets',[]) or job.get('old_files',[])]
             return {'job':public}
         if command=='cancel_workflow':return self.workflows.cancel(payload['job_id'])
         if command=='bulk_workflows':return self.workflows.bulk(payload.get('action'),payload.get('job_ids'))
-        if command=='review_workflow':return self.workflows.review(payload['job_id'],payload.get('choice'),payload.get('metadata'),payload.get('cover_path'))
+        if command=='review_workflow':return self.workflows.review(payload['job_id'],payload.get('choice'),payload.get('metadata'),payload.get('cover_path'),payload.get('query'),payload.get('sites'),payload.get('expected_revision'))
         if command in ('enable_online','enable_demo'):
             current=self.config.current();values=copy.deepcopy(current['values'])
             if command=='enable_demo' and not values['offline'] and self.base.name!='demo-profile':raise PolicyBlocked('演示使用独立demo-profile档案，不切换现有正式档案')
@@ -78,7 +96,9 @@ class AppService:
             with self.store.connection() as c:
                 file_count=c.execute('SELECT COUNT(*) FROM library_files').fetchone()[0]
                 file_rows=c.execute('SELECT payload FROM library_files ORDER BY id LIMIT ?',(500 if payload.get('compact') else 2000,)).fetchall()
-            return dict(schema_version=1,base=str(self.base),offline=offline,paused=self.paused,active=self.active,config=config,tasks=tasks,counts=counts,provider_status={p:('连接未配置' if offline else '已启用' if config['values']['providers'][p]['enabled'] else '来源已停用') for p in config['values']['providers']},roon=self.store.get('evidence','roon-preflight') or 'pending',next_schedule=self.next_schedule(),secret_refs=self.vault.list_refs(),files=[json.loads(r[0]) for r in file_rows],library_file_count=file_count,library_files_truncated=file_count>len(file_rows),candidates=self.store.list('candidates')[-200:],transactions=self.store.list('transactions'),reviews=self.store.list('match_decisions'))
+            from musicops.library.catalog import AlbumCatalog
+            local_catalog=AlbumCatalog(self.store).summary(config['values']['paths']['library'])
+            return dict(local_catalog=local_catalog,schema_version=1,base=str(self.base),offline=offline,paused=self.paused,active=self.active,config=config,tasks=tasks,counts=counts,provider_status={p:('连接未配置' if offline else '已启用' if config['values']['providers'][p]['enabled'] else '来源已停用') for p in config['values']['providers']},roon=self.store.get('evidence','roon-preflight') or 'pending',next_schedule=self.next_schedule(),secret_refs=self.vault.list_refs(),files=[json.loads(r[0]) for r in file_rows],library_file_count=file_count,library_files_truncated=file_count>len(file_rows),candidates=self.store.list('candidates')[-200:],transactions=self.store.list('transactions'),reviews=self.store.list('match_decisions'))
         if command=='list_library_files':
             offset=payload.get('offset',0);limit=payload.get('limit',200);query=payload.get('query','')
             if type(offset) is not int or offset<0 or type(limit) is not int or not 1<=limit<=500 or not isinstance(query,str) or len(query)>300:raise ValueError('索引分页参数无效')
@@ -156,7 +176,7 @@ class AppService:
         if command=='shutdown_worker':
             if self.active: raise RuntimeError('当前任务尚未到安全退出点，请先暂停流水线')
             self.stop.set(); return {'stopped':True,'seeding_unchanged':True}
-        if command in ('manual_album_search','restore_workflow','start_workflow','advance_workflows','demo','index_library','compare','search','resources','prepare_fill','prepare_resource','prepare_repair','prepare_dedup','submit_plan','request_rollback','export_report','refresh_playlist','submit_download','recover','pt_preflight','qbt_preflight','ai_analyze','ai_plan','ai_test','lyrics_preflight','identify_metadata','resolve_metadata','accept_metadata','validate_selected_file','roon_preflight'):
+        if command in ('browser_solver_preflight','assist_workflows','manual_album_search','restore_workflow','start_workflow','advance_workflows','demo','index_library','compare','search','resources','prepare_fill','prepare_resource','prepare_repair','prepare_dedup','submit_plan','request_rollback','export_report','refresh_playlist','submit_download','recover','pt_preflight','qbt_preflight','ai_analyze','ai_plan','ai_test','lyrics_preflight','identify_metadata','resolve_metadata','accept_metadata','validate_selected_file','roon_preflight'):
             return self.enqueue(command,payload,request_id=request_id)
         raise ValueError('UNKNOWN_COMMAND:'+command)
     def enqueue(self,command,args,request_id=None):
@@ -165,9 +185,9 @@ class AppService:
         args=copy.deepcopy(args);batch=None
         if command=='start_workflow':
             batch=self.workflows.queue(args,cfg['values'],task_id);args['_batch_job_id']=batch['job_id']
-        if command in ('manual_album_search','identify_metadata','resolve_metadata'):
+        if command in ('assist_workflows','index_library','manual_album_search','identify_metadata','resolve_metadata'):
             group='search' if command=='manual_album_search' and (args.get('mode','literal')=='literal' or args.get('candidate_id')) else 'identify'
-            self.workflows.put({'kind':'workflow','job_kind':'activity','job_id':'activity:'+task_id,'task_group':group,'task_type':'manual_search' if group=='search' else 'catalog_identification','start_task_id':task_id,'scene':'playlist','stage':'queued','progress':0,'label':str(args.get('query') or args.get('album') or args.get('title') or '在线资料识别')[:300],'message':'等待检索' if group=='search' else '等待识别','created_at':utcnow(),'target_count':1})
+            self.workflows.put({'kind':'workflow','job_kind':'activity','job_id':'activity:'+task_id,'task_group':group,'task_type':'review_assistance' if command=='assist_workflows' else 'library_index' if command=='index_library' else 'manual_search' if group=='search' else 'catalog_identification','start_task_id':task_id,'scene':'playlist','stage':'queued','progress':0,'label':str('AI 辅助核对 · '+str(len(args.get('job_ids',[])))+' 项' if command=='assist_workflows' else '更新本地专辑资料库' if command=='index_library' else args.get('query') or args.get('album') or args.get('title') or '在线资料识别')[:300],'message':'等待检索' if group=='search' else '等待识别','created_at':utcnow(),'target_count':1})
         task=dict(schema_version=1,task_id=task_id,command=command,args=copy.deepcopy(args),state='queued',created_at=utcnow(),config_version=cfg['version'],config_snapshot=cfg,progress=0,result=None)
         self.store.put('tasks',task_id,task); self.store.event('task_queued',{'command':command,'config_version':cfg['version']},task_id)
         return {'accepted':True,'task_id':task_id,'state':'queued',**({'job_id':batch['job_id'],'batch_id':batch['batch_id']} if batch else {})}
@@ -232,6 +252,14 @@ class AppService:
         for key in ('library','source','work','backup','quarantine'): self._safe_path(cfg['paths'][key])
         return TransactionEngine(self.store,cfg['paths'],validator=self._validator(cfg))
     def _execute(self,command,args,cfg):
+        if command=='browser_solver_preflight':
+            if cfg['offline']:raise PolicyBlocked('请先完成连接设置')
+            from musicops.clients.browser_solver import FlareSolverrClient
+            settings={**cfg['browser_solver'],**args.get('settings',{})}
+            return FlareSolverrClient(settings,checkpoint=self._checkpoint).check()
+        if command=='assist_workflows':
+            from musicops.app.assistance import assist_workflows
+            return assist_workflows(self,args,cfg)
         if command=='manual_album_search':
             from musicops.app.album_search import manual_album_search
             return manual_album_search(self,args,cfg)
@@ -495,11 +523,11 @@ class AppService:
         return offline_search(self.store,cfg,args.get('query',''))
     def _catalog_resolver(self,cfg):
         from musicops.providers.catalog import CatalogResolver
-        key=digest(cfg['catalog'])
+        key=digest({'catalog':cfg['catalog'],'offline':cfg['offline'],'browser_solver':cfg.get('browser_solver',{})})
         if not hasattr(self,'_catalog_clients'):self._catalog_clients={}
         if key not in self._catalog_clients:
             if len(self._catalog_clients)>=4:self._catalog_clients.pop(next(iter(self._catalog_clients)))
-            self._catalog_clients[key]=CatalogResolver(cfg['catalog'],secret_getter=self.vault.get,checkpoint=self._checkpoint)
+            self._catalog_clients[key]=CatalogResolver(cfg,secret_getter=self.vault.get,checkpoint=self._checkpoint)
         return self._catalog_clients[key]
     def _recognize_metadata(self,query,cfg,found=None,force=False):
         from musicops.app.recognition import RecognitionFallback
@@ -584,7 +612,9 @@ class AppService:
                 old=json.loads(row['payload'])
                 if row['id'] not in live and Path(old.get('path','')).resolve().is_relative_to(root_resolved) and not Path(old['path']).exists():
                     old.update(location_state='externally_missing',read_error='文件已移出索引目录');c.execute('UPDATE library_files SET payload=?,updated_at=? WHERE id=?',(json.dumps(old,ensure_ascii=False),utcnow(),row['id']))
-        return {'files':files[:200],'count':len(files),'truncated':len(files)>200,'root':str(root),'metadata_only':True,'format_counts':dict(collections.Counter(f.get('media_info',{}).get('codec','unknown') for f in files)),'music_writes':0}
+        from musicops.library.catalog import AlbumCatalog
+        catalog=AlbumCatalog(self.store).sync(root,files,self._checkpoint)
+        return {'catalog':catalog,'files':files[:200],'count':len(files),'truncated':len(files)>200,'root':str(root),'metadata_only':True,'format_counts':dict(collections.Counter(f.get('media_info',{}).get('codec','unknown') for f in files)),'music_writes':0}
     def _compare_targets(self,args):
         from musicops.domain.identity import match_track,search_text
         import re
@@ -606,8 +636,17 @@ class AppService:
     def _real_pt(self,site,cfg):
         if not cfg['providers'][site]['enabled']:raise PolicyBlocked('该PT来源已停用；启用并保存配置后再验证')
         from musicops.providers.pt_readonly import PTReadOnlyProvider,HOSTS
-        from musicops.clients.http import SafeHttpTransport
-        return PTReadOnlyProvider(site,cfg['providers'][site],SafeHttpTransport([HOSTS[site]],offline=False),self.vault.get)
+        return PTReadOnlyProvider(site,cfg['providers'][site],self._pt_transport(site,cfg),self.vault.get)
+    def _pt_transport(self,site,cfg):
+        from musicops.providers.pt_readonly import HOSTS
+        from musicops.clients.browser_solver import browser_transport
+        settings=cfg.get('browser_solver') or self.config.current()['values']['browser_solver']
+        key=digest([site,settings,cfg['providers'][site].get('credential_ref')])
+        if not hasattr(self,'_pt_transports'):self._pt_transports={}
+        if key not in self._pt_transports:
+            if len(self._pt_transports)>=8:self._pt_transports.pop(next(iter(self._pt_transports)))
+            self._pt_transports[key]=browser_transport(settings,[HOSTS[site]],checkpoint=self._checkpoint)
+        return self._pt_transports[key]
     def _refresh_real_playlists(self,args,cfg):
         from musicops.app.playlists import use_platform_reader,refresh_platform_playlists
         if use_platform_reader(args):return refresh_platform_playlists(self,args,cfg)

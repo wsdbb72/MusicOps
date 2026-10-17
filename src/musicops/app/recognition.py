@@ -124,7 +124,7 @@ class RecognitionFallback:
         state = getattr(exc, 'error_class', None)
         if state == 'CANCELLED':
             raise exc
-        return state if state in ('AUTH_REQUIRED', 'AUTH_FAILED', 'RATE_LIMITED', 'TRANSIENT_ERROR', 'NETWORK_ERROR', 'INPUT_TOO_LARGE', 'POLICY_BLOCKED') else 'API_CONTRACT_ERROR'
+        return state if state in ('AUTH_REQUIRED', 'AUTH_FAILED', 'RATE_LIMITED', 'TRANSIENT_ERROR', 'NETWORK_ERROR', 'INPUT_TOO_LARGE', 'POLICY_BLOCKED', 'WEB_SEARCH_UNAVAILABLE', 'WEB_SEARCH_UNGROUNDED') else 'API_CONTRACT_ERROR'
 
     def identify(self, query, *, found=None, force=False):
         try:
@@ -144,8 +144,26 @@ class RecognitionFallback:
         result.setdefault('lookup_links', lookup_links(catalog_query))
         report = {'status': 'NOT_NEEDED', 'calls': 0, 'queries': [], 'reason': ''}
         result['ai_fallback'] = report
+        result['recognition_stages'] = [{'stage': 'api', 'status': found.get('status')}]
         if not force and self._has_unique_exact(query, result['candidates']):
             return result
+        if not self.config.get('offline') and hasattr(self.resolver, 'web_identify'):
+            self.checkpoint('recognition_websites')
+            websites = self.resolver.web_identify(catalog_query)
+            result['sources'].extend(websites.get('sources', []))
+            combined = {c['candidate_id']: c for c in result['candidates']}
+            combined.update({c['candidate_id']: c for c in websites.get('candidates', [])})
+            result['candidates'] = list(combined.values())[:50]
+            result['recognition_stages'].append({'stage': 'websites', 'candidate_count': len(websites.get('candidates', [])), 'sources': websites.get('sources', [])})
+            report['website_sources'] = websites.get('sources', [])
+            result['lookup_links'].extend({'source': c['source'], 'name': '已读取资料 · ' + c['source'], 'url': c['url'], 'kind': 'public_page', 'identity_evidence': True, 'requires_review': True} for c in websites.get('candidates', []))
+            if websites.get('candidates'):
+                result['status'] = 'OK'
+                # A website match remains editable/unconfirmed. Do not spend an
+                # AI call merely because a caller asked to resolve API ambiguity.
+                if self._has_unique_exact(query, websites['candidates']):
+                    report['status'] = 'NOT_NEEDED'
+                    return result
         provider, unavailable = self._provider()
         if unavailable:
             report['status'] = unavailable
@@ -156,10 +174,24 @@ class RecognitionFallback:
         self.checkpoint('ai_before_normalize')
         try:
             report['calls'] += 1
-            alternate = provider.recognition_queries(query, contexts)
+            alternate = provider.web_recognition_queries(query, contexts)
+            result['recognition_stages'].append({'stage': 'ai_web_search', 'status': 'OK'})
+            result['ai_web_sources'] = alternate.get('sources', [])
+            report['web_sources'] = result['ai_web_sources']
+            result['lookup_links'] = list({row['url']: row for row in result['lookup_links'] + result['ai_web_sources']}.values())
         except Exception as exc:
-            report.update(status=self._failure(exc), reason='AI 检索词规范化未完成，保留常规识别结果。')
+            report.update(status=self._failure(exc), reason='AI 联网搜索未完成；请确认服务与模型支持 Responses web_search。已保留 API 和网站识别结果。')
             return result
+        web_candidates = []
+        for source in alternate.get('sources', [])[:4]:
+            self.checkpoint('ai_web_source_verify')
+            try:
+                web_candidates.extend(self.resolver.web_read(source['url']))
+            except Exception as exc:
+                if getattr(exc, 'error_class', None) == 'CANCELLED': raise
+        for candidate in web_candidates:
+            candidates.setdefault(candidate['candidate_id'], candidate)
+            initial_ids.append(candidate['candidate_id'])
         seen = {(catalog_query['title'], tuple(catalog_query['artists']), catalog_query['album'])}
         attempts = []
         alternate_ids = []

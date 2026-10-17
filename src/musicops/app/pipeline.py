@@ -15,7 +15,7 @@ from musicops.library.paths import reject_reparse_chain
 from musicops.library.transactions import TransactionEngine,durable_copy
 from musicops.media.tags import read_tag_fields,apply_tag_changes,embedded_covers,apply_cover_changes
 from musicops.media.resources import validate_lrc,validate_cover
-from musicops.app.search_status import search_site,summarize,detail as search_detail
+from musicops.app.search_status import search_site,search_album,edition_conflict,summarize,detail as search_detail
 
 TERMINAL={'completed','failed','needs_review','cancelled','skipped','restored'}
 SCENES={'playlist':'歌单入库','complete':'资料补全','upgrade':'音质升级'}
@@ -54,12 +54,13 @@ def no_downgrade(old,new):
 class Workflows:
     def __init__(self,service):self.s=service;self.store=service.store
     def rows(self,include_batches=False):
-        where='' if include_batches else " AND coalesce(json_extract(payload,'$.job_kind'),'album')!='batch'"
+        where=" AND coalesce(json_extract(payload,'$.hidden'),0)=0" + ('' if include_batches else " AND coalesce(json_extract(payload,'$.job_kind'),'album')!='batch'")
         with self.store.connection() as c:rows=c.execute("SELECT payload FROM evidence WHERE id LIKE 'workflow:%'"+where+" ORDER BY updated_at DESC,id").fetchall()
         return [json.loads(r[0]) for r in rows]
     def put(self,job,**changes):
         with self.s.mutex:
             previous=self.store.get('evidence','workflow:'+job['job_id'])
+            if previous and previous.get('hidden'):job['hidden']=True
             if previous and previous.get('cancel_requested'):
                 job['cancel_requested']=True
                 if changes.get('stage')!='cancelled':changes.update(stage='cancelled',message='已在安全阶段取消；已经发布的内容和做种任务保留')
@@ -69,11 +70,12 @@ class Workflows:
     def list(self,offset=0):
         if type(offset) is not int or offset<0:raise ValueError('任务分页参数无效')
         with self.store.connection() as c:
-            counts=c.execute("SELECT json_extract(payload,'$.stage'),coalesce(json_extract(payload,'$.job_kind'),'album'),COUNT(*),coalesce(json_extract(payload,'$.paused'),0) FROM evidence WHERE id LIKE 'workflow:%' GROUP BY 1,2,4").fetchall()
-            rows=c.execute("SELECT json_remove(payload,'$.config','$.targets','$.old_files','$.prepared','$.choices','$.outcomes','$.publication_plan','$.catalog_choices','$.lookup_links','$.engine_paths') FROM evidence WHERE id LIKE 'workflow:%' ORDER BY updated_at DESC,id LIMIT 200 OFFSET ?",(offset,)).fetchall()
+            counts=c.execute("SELECT json_extract(payload,'$.stage'),coalesce(json_extract(payload,'$.job_kind'),'album'),COUNT(*),coalesce(json_extract(payload,'$.paused'),0) FROM evidence WHERE id LIKE 'workflow:%' AND coalesce(json_extract(payload,'$.hidden'),0)=0 GROUP BY 1,2,4").fetchall()
+            rows=c.execute("SELECT json_remove(payload,'$.config','$.targets','$.old_files','$.prepared','$.choices','$.outcomes','$.publication_plan','$.catalog_choices','$.lookup_links','$.engine_paths') FROM evidence WHERE id LIKE 'workflow:%' AND coalesce(json_extract(payload,'$.hidden'),0)=0 ORDER BY updated_at DESC,id LIMIT 200 OFFSET ?",(offset,)).fetchall()
         public=[]
         for j in [json.loads(r[0]) for r in rows]:
-            row={k:j.get(k) for k in ('job_id','job_kind','task_type','scene','stage','label','progress','message','detail','review_kind','batch_id','scanned_count','cached_count','current_directory','album_count','selected_target_count','target_count','matched_count','identification_job_id','search_job_id','processing_job_id','progress_phase','ai_fallback')}
+            row={k:j.get(k) for k in ('job_id','job_kind','task_type','scene','stage','label','progress','message','detail','review_kind','batch_id','scanned_count','cached_count','current_directory','album_count','selected_target_count','target_count','matched_count','identification_job_id','search_job_id','processing_job_id','progress_phase','ai_fallback','ai_assistance','retry_job_id','retry_count')}
+            if j.get('ai_assistance'):row['ai_assistance']={k:j['ai_assistance'].get(k) for k in ('status','kind','message')}
             pending=bool(j.get('paused') and j['stage']=='running')
             if j.get('paused') and j.get('job_kind')=='batch' and j['stage']=='preparing':
                 task=self.store.get('tasks',j.get('start_task_id'))
@@ -84,7 +86,7 @@ class Workflows:
     def next_job(self):
         import time
         with self.store.connection() as c:
-            row=c.execute("SELECT payload FROM evidence AS current WHERE id LIKE 'workflow:%' AND coalesce(json_extract(payload,'$.job_kind'),'album') NOT IN ('batch','activity') AND coalesce(json_extract(payload,'$.paused'),0)=0 AND json_extract(payload,'$.stage') NOT IN ('completed','failed','needs_review','cancelled','skipped','restored') AND (json_extract(payload,'$.identification_job_id') IS NULL OR EXISTS (SELECT 1 FROM evidence AS parent WHERE parent.id='workflow:'||json_extract(current.payload,'$.identification_job_id') AND json_extract(parent.payload,'$.stage')='completed')) AND (json_extract(payload,'$.search_job_id') IS NULL OR coalesce(json_extract(payload,'$.task_type'),'')!='album' OR EXISTS (SELECT 1 FROM evidence AS searched WHERE searched.id='workflow:'||json_extract(current.payload,'$.search_job_id') AND json_extract(searched.payload,'$.stage')='completed')) AND coalesce(json_extract(payload,'$.next_poll'),0)<=? ORDER BY updated_at,id LIMIT 1",(time.time(),)).fetchone()
+            row=c.execute("SELECT payload FROM evidence AS current WHERE id LIKE 'workflow:%' AND coalesce(json_extract(payload,'$.hidden'),0)=0 AND coalesce(json_extract(payload,'$.job_kind'),'album') NOT IN ('batch','activity') AND coalesce(json_extract(payload,'$.paused'),0)=0 AND json_extract(payload,'$.stage') NOT IN ('completed','failed','needs_review','cancelled','skipped','restored') AND (json_extract(payload,'$.identification_job_id') IS NULL OR EXISTS (SELECT 1 FROM evidence AS parent WHERE parent.id='workflow:'||json_extract(current.payload,'$.identification_job_id') AND json_extract(parent.payload,'$.stage')='completed')) AND (json_extract(payload,'$.search_job_id') IS NULL OR coalesce(json_extract(payload,'$.task_type'),'')!='album' OR EXISTS (SELECT 1 FROM evidence AS searched WHERE searched.id='workflow:'||json_extract(current.payload,'$.search_job_id') AND json_extract(searched.payload,'$.stage')='completed')) AND coalesce(json_extract(payload,'$.next_poll'),0)<=? ORDER BY updated_at,id LIMIT 1",(time.time(),)).fetchone()
         return json.loads(row[0]) if row else None
     def queue(self,args,cfg,task_id=None):
         """Expose the preparation before the serial worker begins any filesystem IO."""
@@ -93,7 +95,7 @@ class Workflows:
         if cfg['offline']:raise PolicyBlocked('请先在连接向导完成设置')
         # Prevent two live batches from modifying the same album or issuing duplicate FL.
         with self.store.connection() as c:
-            active=c.execute("SELECT 1 FROM evidence WHERE id LIKE 'workflow:%' AND coalesce(json_extract(payload,'$.job_kind'),'album')!='activity' AND json_extract(payload,'$.stage') NOT IN ('completed','failed','needs_review','cancelled','skipped','restored') LIMIT 1").fetchone()
+            active=c.execute("SELECT 1 FROM evidence WHERE id LIKE 'workflow:%' AND coalesce(json_extract(payload,'$.hidden'),0)=0 AND coalesce(json_extract(payload,'$.job_kind'),'album')!='activity' AND json_extract(payload,'$.stage') NOT IN ('completed','failed','needs_review','cancelled','skipped','restored') LIMIT 1").fetchone()
         if active:raise PolicyBlocked('已有任务正在准备或运行，请等待完成或取消后再开始下一批')
         root=Path(cfg['paths']['library']);reject_reparse_chain(root)
         if not root.is_dir():raise ValueError('音乐库目录不存在，请在设置中选择已有目录')
@@ -134,14 +136,16 @@ class Workflows:
             # Read all requested targets in one snapshot; thousands of SQLite
             # connections made a large playlist needlessly slow to prepare.
             targets={t['target_id']:t for t in self.store.list('target_tracks')}
-            present=collections.defaultdict(list)
-            for f in files:present[identity(f)].append(f)
+            from musicops.library.catalog import AlbumCatalog
+            catalog=AlbumCatalog(self.store)
+            catalog.sync(root,files,lambda phase:self.checkpoint(batch,phase))
+            selected=[targets[tid] for tid in tids if tid in targets]
+            present=catalog.matched_targets(root,selected,lambda phase:self.checkpoint(batch,phase))
             for i,tid in enumerate(tids):
                 if i%50==0:self.checkpoint(batch,'grouping_targets')
                 t=targets.get(tid)
                 if not t:raise ValueError('歌单曲目已改变，请重新解析')
-                same=[f for f in present[identity(t)] if strict_text(f.get('album'))==strict_text(t.get('album')) and t.get('duration') and f.get('duration') and abs(t['duration']-f['duration'])<=2]
-                if same:continue
+                if tid in present:continue
                 key=(t.get('source') or 'netease','album',str(t['source_album_id'])) if t.get('source_album_id') else (strict_text(t.get('album')),artist_key(t.get('artists',[])))
                 if not t.get('album') or not t.get('artists'):key=('unresolved',t['target_id'])
                 groups[key].append(t)
@@ -212,7 +216,7 @@ class Workflows:
     def cancel(self,job_id):
         job=self.store.get('evidence','workflow:'+job_id)
         if not job:raise ValueError('任务不存在')
-        if job['stage'] in ('completed','failed','cancelled','skipped'):return {'status':'OK','job':self.list()}
+        if job['stage'] in ('completed','failed','cancelled','skipped','restored'):return {'status':'OK','job':self.list()}
         if job.get('job_kind') in ('batch','activity'):
             task=self.store.get('tasks',job.get('start_task_id')) if job.get('start_task_id') else None
             if task and task['state'] in ('queued','running','paused'):
@@ -222,6 +226,9 @@ class Workflows:
             if job.get('job_kind')=='batch':self._cancel_children(job['batch_id'],'准备任务已取消，后续专辑处理已停止')
         self.put(job,cancel_requested=True,stage='cancelled',message='已取消后续处理；已发布文件和做种任务保留');return {'status':'OK'}
     def bulk(self,action,job_ids):
+        if action in ('retry','delete'):
+            from musicops.app.workflow_actions import bulk
+            return bulk(self,action,job_ids)
         if action not in ('pause','resume','cancel'):raise ValueError('请选择暂停、继续或取消')
         if not isinstance(job_ids,list) or not 1<=len(job_ids)<=500 or any(not isinstance(j,str) or not j or len(j)>160 for j in job_ids):raise ValueError('一次请选择 1 至 500 个有效任务')
         results=[]
@@ -275,7 +282,7 @@ class Workflows:
     def provider(self,site,cfg):
         from musicops.providers.pt_download import PTDownloadProvider
         from musicops.providers.pt_readonly import HOSTS
-        return PTDownloadProvider(site,cfg['providers'][site],SafeHttpTransport([HOSTS[site]],offline=False),self.s.vault.get)
+        return PTDownloadProvider(site,cfg['providers'][site],self.s._pt_transport(site,cfg),self.s.vault.get)
     def _snapshotting(self,job):
         # Hash only the current album after its task is visible, instead of
         # reading the entire library before any task can appear.
@@ -362,8 +369,8 @@ class Workflows:
         outcomes={};candidates=[]
         for site in cfg['workflow']['source_order']:
             settings=cfg['providers'][site]
-            if not settings['enabled']:outcomes[site]={'status':'DISABLED'};continue
-            self.checkpoint(job,'search_'+site);result=search_site(lambda:self.provider(site,cfg),job.get('search_query') or ' '.join(artists)+' '+album)
+            if not settings['enabled'] or job.get('search_sites') is not None and site not in job['search_sites']:outcomes[site]={'status':'DISABLED'};continue
+            self.checkpoint(job,'search_'+site);result=search_album(lambda:self.provider(site,cfg),job.get('search_query') or ' '.join(artists)+' '+album,album='' if job.get('search_query') else album,checkpoint=lambda:self.checkpoint(job,'search_'+site))
             outcomes[site]={k:v for k,v in result.items() if k not in ('candidates','reason')}
             for c in result.get('candidates',[]):
                 exact=strict_text(c['title'])==strict_text(album) and artist_key(c['artists'])==artist_key(artists)
@@ -373,7 +380,9 @@ class Workflows:
                     tail=text[len(prefix):] if text.startswith(prefix) else None
                     if tail is not None and (not tail.strip() or re.match(r'^\s*(?:\(?\d{4}\)?|\[?(?:flac|alac|mp3|wav|24\s*bit|16\s*bit)\b)',tail)):
                         exact=True;c['artists']=artists;c['release']['album']=album
-                if exact or site=='open.cd' or job.get('search_query'):candidates.append({**c,'identity_exact':exact})
+                if edition_conflict(c['title'],' '.join(artists)+' '+album):exact=False
+                candidates.append({**c,'identity_exact':exact})
+        candidates=list({(c['source'],c['candidate_id']):c for c in candidates}.values())
         summary=summarize(outcomes);job['outcomes']=outcomes;job['choices']=candidates;job['search_summary']=summary;job['detail']=search_detail(summary)
         if not summary['successful_sites'] and not summary['unavailable_sites']:
             if job['scene']=='playlist' and cfg['workflow']['netease_fallback']:
@@ -400,7 +409,6 @@ class Workflows:
             return (fmt in ('flac','alac','wav'),job['prefer_24bit'] and '24' in encoding,c.get('seeders') or 0,-cfg['workflow']['source_order'].index(c['source']))
         if exact:
             best=sorted(exact,key=rank,reverse=True)[0];self._queue_processing(job,'requesting','找到匹配专辑，准备下载',selected=best,progress=20);return
-        if candidates:self.put(job,stage='needs_review',review_kind='candidate',message='找到了候选发行，需要核对艺人和版本');return
         if not job.get('ai_search_attempted') and cfg['ai'].get('enabled'):
             job['ai_search_attempted']=True
             found=self.s._recognize_metadata({'title':first.get('raw_title',''),'artists':artists,'album':album,'duration':first.get('duration')},cfg,force=True)
@@ -411,6 +419,7 @@ class Workflows:
                 credits=candidate.get('artists',[]);query=' '.join(credits)+' '+str(canonical or '')
                 if canonical and credits and len(query)<=300 and strict_text(query)!=strict_text(' '.join(artists)+' '+album):
                     self.put(job,stage='searching',search_query=query,message='AI 找到真实目录中的别名，使用规范关键词重新检索',detail='别名仅用于检索；不一致的艺人或发行仍需核对。');return
+        if candidates:self.put(job,stage='needs_review',review_kind='candidate',message='找到了候选发行，需要核对艺人和版本');return
         if not summary['successful_sites']:
             self.put(job,stage='needs_review',review_kind='search',message='已启用站点当前均不可用' if summary['unavailable_sites'] else '尚未启用可检索站点',detail=search_detail(summary) or '请在连接与设置中启用资源站。');return
         if job['scene']=='playlist' and cfg['workflow']['netease_fallback']:
@@ -734,10 +743,16 @@ class Workflows:
         try:result=scan(job['config']['music_servers']['navidrome'],self.s.vault.get);message=result['message']
         except (HttpError,PolicyBlocked):message='音乐已入库；Navidrome 扫描未成功，请检查连接设置'
         self.put(job,stage='completed',progress=100,message='已完成 · '+message,detail=f"暂无匹配歌词：{job.get('lyrics_missing',0)} 首；未找到可靠封面：{job.get('cover_missing',0)} 首。恢复副本保存在音乐库外，不影响 Roon 分组。")
-    def review(self,job_id,choice=None,metadata=None,cover_path=None):
+    def review(self,job_id,choice=None,metadata=None,cover_path=None,query=None,sites=None,expected_revision=None):
         job=self.store.get('evidence','workflow:'+job_id)
         if job and job.get('job_kind')=='batch':raise ValueError('请返回“'+SCENES.get(job['scene'],job['scene'])+'”页面重新开始；此准备记录不会自动重放')
-        if not job or job['stage']!='needs_review':raise ValueError('该任务不需要核对')
+        if expected_revision is not None:
+            from musicops.app.assistance import review_revision
+            if not job or review_revision(job)!=expected_revision:raise PolicyBlocked('任务资料已改变，请重新打开核对窗口')
+        if job and choice in ('retry','research') and (job.get('review_kind') in ('search','error','interrupted') or job['stage'] in ('failed','skipped') or choice=='research' and job.get('task_type')=='search'):
+            from musicops.app.workflow_actions import retry
+            return {'status':'OK',**retry(self,job,query=query,sites=sites,allow_review_search=choice=='research')}
+        if not job or job['stage']!='needs_review' and not (choice=='edit_metadata' and job['stage'] in ('failed','skipped') and job.get('task_type') in ('identification','search')):raise ValueError('该任务不需要核对')
         if job.get('review_kind')=='numbering' and metadata:
             prepared=job['prepared']
             if len(metadata)!=len(prepared):raise ValueError('请逐曲核对曲序')
@@ -767,7 +782,7 @@ class Workflows:
                     if not embedded_covers(row['path']):apply_cover_changes(row['path'],content,min_side=job['config']['lyrics']['min_cover_side'])
                 self.put(job,cover_missing=0,stage='validating',message='用户确认封面已写入副本，重新检查完整音频')
             else:raise ValueError('请选择已确认的封面或跳过')
-        elif job.get('review_kind')=='metadata' and metadata:
+        elif (job.get('review_kind')=='metadata' or choice=='edit_metadata' and job.get('task_type') in ('identification','search')) and metadata:
             prepared=job.get('prepared',[])
             if not prepared:
                 targets=job['targets'] or job['old_files']

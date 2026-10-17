@@ -11,7 +11,7 @@ smoke=importlib.util.module_from_spec(smoke_spec);smoke_spec.loader.exec_module(
 
 def test_installed_app_gate_uses_named_checks_and_accepts_additional_passed_evidence():
     evidence={'passed':True,'external_requests':0,'checks':dict.fromkeys(smoke.REQUIRED_CHECKS,True)}
-    assert len(evidence['checks'])==29 and smoke.valid_acceptance(evidence)
+    assert {'native_bulk_retry_search','native_local_album_database','native_ai_assistance_guard','native_delete_records_only','native_update_setting'}.issubset(evidence['checks']) and smoke.valid_acceptance(evidence)
     evidence['checks']['future_additional_check']=True
     assert smoke.valid_acceptance(evidence)
     del evidence['checks']['identification_and_search_are_separate']
@@ -26,7 +26,7 @@ def test_installed_app_gate_requires_all_runtime_boundaries(invalid):
     else:evidence['external_requests']=1
     assert not smoke.valid_acceptance(evidence)
 
-@pytest.mark.parametrize('arch',['arm64','x86_64'])
+@pytest.mark.parametrize('arch',['arm64'])
 def test_installer_is_one_system_app_payload_with_preserved_user_data(tmp_path,arch):
     directory=module.materials(tmp_path,'0.4.1',arch);root=ET.parse(directory/'Distribution.xml').getroot()
     assert root.find('options').get('hostArchitectures')==arch
@@ -42,7 +42,7 @@ def test_installer_is_one_system_app_payload_with_preserved_user_data(tmp_path,a
     assert 'sudo' not in script and 'MusicOps-worker' in script
     assert all((directory/'resources'/file).is_file() for file in ('Welcome.html','ReadMe.html','License.html'))
 
-@pytest.mark.parametrize('version,arch',[('0.4.1;exit','arm64'),('../0.4.1','arm64'),('0.4.1','other'),('','x86_64')])
+@pytest.mark.parametrize('version,arch',[('0.4.1;exit','arm64'),('../0.4.1','arm64'),('0.4.1','other'),('','arm64'),('0.4.3','x86_64')])
 def test_installer_rejects_invalid_build_identity(tmp_path,version,arch):
     with pytest.raises(ValueError):module.materials(tmp_path,version,arch)
     assert not list(tmp_path.iterdir())

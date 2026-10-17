@@ -50,6 +50,8 @@ class Model:
             raise self.error
         return {'queries': self.queries, 'reason': '尝试发行别名'}
 
+    web_recognition_queries = recognition_queries
+
     def recognize_candidate(self, query, candidates):
         self.requests.append(('select', copy.deepcopy(query), copy.deepcopy(candidates)))
         return copy.deepcopy(self.choice)

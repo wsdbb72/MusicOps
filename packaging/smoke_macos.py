@@ -14,6 +14,8 @@ REQUIRED_CHECKS=frozenset({
     'complete_immediately_visible','complete_preparation_completed','upgrade_immediately_visible',
     'upgrade_preparation_completed','playlist_immediately_visible','playlist_preparation_completed',
     'three_preparation_records','identification_and_search_are_separate','native_bulk_cancel_review_tasks',
+    'native_bulk_retry_search','native_review_snapshot','native_local_album_database',
+    'native_ai_assistance_guard','native_delete_records_only','native_update_setting','native_browser_solver_guard',
     'native_multiplatform_file_import','native_manual_search_readonly','native_search_activity_visible',
     'configuration_roundtrip','native_cocoa_window_exit_zero','native_window_rendered',
     'frozen_worker_restart_keeps_credentials','configuration_persisted_after_restart',
@@ -45,7 +47,7 @@ def digest_tree(root):
     return result
 
 def main():
-    parser=argparse.ArgumentParser();parser.add_argument('--app',required=True);parser.add_argument('--work',required=True);parser.add_argument('--report',required=True);parser.add_argument('--expected-arch',choices=('arm64','x86_64'),required=True);args=parser.parse_args()
+    parser=argparse.ArgumentParser();parser.add_argument('--app',required=True);parser.add_argument('--work',required=True);parser.add_argument('--report',required=True);parser.add_argument('--expected-arch',choices=('arm64',),required=True);args=parser.parse_args()
     if sys.platform!='darwin':raise SystemExit('Run this acceptance test on a real macOS runner')
     from musicops.config.schema import ConfigManager
     from musicops.state.store import StateStore
@@ -103,6 +105,10 @@ def main():
         workflow_rows=client.call('list_workflows')['jobs']
         checks['identification_and_search_are_separate']=any(job.get('task_type')=='identification' and job['stage']=='completed' and job.get('search_job_id') for job in workflow_rows) and any(job.get('task_type')=='search' and job.get('identification_job_id') for job in workflow_rows)
         review_ids=[job['job_id'] for job in workflow_rows if job.get('task_type')=='search' and job['stage']=='needs_review']
+        retried=client.call('bulk_workflows',{'action':'retry','job_ids':review_ids})
+        checks['native_bulk_retry_search']=bool(review_ids) and retried['succeeded']==len(review_ids) and all(client.call('get_workflow',{'job_id':jid})['job']['job_id']==jid for jid in review_ids)
+        snapshot=client.call('get_workflow',{'job_id':review_ids[0]})['job']
+        checks['native_review_snapshot']=bool(snapshot.get('review_revision')) and bool(snapshot.get('prepared'))
         cancelled=client.call('bulk_workflows',{'action':'cancel','job_ids':review_ids})
         checks['native_bulk_cancel_review_tasks']=bool(review_ids) and cancelled['succeeded']==len(review_ids) and cancelled['failed']==0
         def completed(command,payload):
@@ -120,6 +126,17 @@ def main():
         result=searched.get('result',{})
         checks['native_manual_search_readonly']=searched['state']=='blocked' and result.get('status')=='NOT_CONFIGURED' and result.get('read_only') is True and result.get('music_writes')==0 and not any(library.rglob('*'))
         checks['native_search_activity_visible']=any(job.get('job_kind')=='activity' and job.get('task_group')=='search' for job in client.call('list_workflows')['jobs'])
+        album_db=client.call('list_library_albums',{})
+        checks['native_local_album_database']=album_db['total']==0 and album_db['summary']['updated_at'] is not None
+        ai_guard=completed('assist_workflows',{'job_ids':review_ids})
+        checks['native_ai_assistance_guard']=ai_guard['state']=='blocked' and ai_guard.get('error_class')=='POLICY_BLOCKED'
+        activity_id='activity:'+searched['task_id']
+        removed=client.call('bulk_workflows',{'action':'delete','job_ids':[activity_id]})
+        checks['native_delete_records_only']=removed['succeeded']==1 and not any(j['job_id']==activity_id for j in client.call('list_workflows')['jobs']) and not any(library.rglob('*'))
+        update_setting=client.call('save_setup',{'updates':{'enabled':False}})
+        checks['native_update_setting']=update_setting['config']['values']['updates']['enabled'] is False
+        solver_guard=completed('browser_solver_preflight',{'settings':{'base_url':'http://192.0.2.1:8191'}})
+        checks['native_browser_solver_guard']=solver_guard['state']=='failed' and solver_guard.get('error_class')=='ValueError'
         phase='configuration_write';result=client.call('save_setup',{'workflow':{'fl_unlimited':True,'fl_per_batch':2}})
         checks['configuration_roundtrip']=result['config']['values']['workflow']['fl_unlimited'] is True and result['config']['values']['workflow']['fl_per_batch']==2
         phase='native_gui_exit';process.wait(25);checks['native_cocoa_window_exit_zero']=process.returncode==0;checks['native_window_rendered']=screenshot.is_file() and screenshot.stat().st_size>2000

@@ -30,8 +30,13 @@ def digest(p):return hashlib.sha256(p.read_bytes()).hexdigest()
 try:
     code,_=installation.run(directory=target);checks['fresh_native_installer']=code==0
     assert checks['fresh_native_installer']
-    store=StateStore(profile/'state/musicops.sqlite');cfg=ConfigManager(store,profile,initial_offline=True)
-    current=cfg.current();values=current['values'];values['workflow']['setup_done']=True;cfg.save(values,current['version'])
+    # Production GUI attachment enables online mode. Seed that mode explicitly;
+    # checking an offline fixture raced the asynchronous enable_online request.
+    # Every external source remains disabled in this isolated installation.
+    store=StateStore(profile/'state/musicops.sqlite');cfg=ConfigManager(store,profile,initial_offline=False)
+    current=cfg.current();values=current['values'];values['workflow']['setup_done']=True;values['catalog']['enabled']=False
+    for provider in values['providers'].values():provider['enabled']=False
+    cfg.save(values,current['version'])
     vault=Vault(profile);vault.set('vault://qa/synthetic','synthetic-credential-'+uuid.uuid4().hex,'example.invalid')
     tool=target/'tools/preserved-tool.txt';tool.parent.mkdir(exist_ok=True);tool.write_text('synthetic preserved tool','utf-8')
     preserve=[p for root in (profile,target/'tools') for p in root.rglob('*') if p.is_file()]
@@ -49,7 +54,7 @@ try:
         except (OSError,EOFError):
             if time.monotonic()>deadline:raise
             time.sleep(.1)
-    checks['installed_frozen_worker_connects']=status['offline'] is True and any(v['ref']=='vault://qa/synthetic' for v in status['secret_refs'])
+    checks['installed_frozen_worker_connects']=status['offline'] is False and Path(status['base']).resolve()==profile.resolve() and any(v['ref']=='vault://qa/synthetic' for v in status['secret_refs'])
     code,_=installation.run();checks['active_frozen_app_blocks_upgrade']=code!=0
     process.wait(20);checks['installed_gui_runs_and_renders']=process.returncode==0 and (work/'installed-runtime.png').stat().st_size>2000
     client.call('shutdown_worker')

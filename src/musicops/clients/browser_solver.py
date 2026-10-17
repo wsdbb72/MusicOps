@@ -121,7 +121,8 @@ class BrowserChallengeTransport:
             stored = self.clearance.get(parsed.hostname)
             if stored and stored[0] > time.monotonic():
                 outgoing['User-Agent'] = stored[1]
-                cookie = '; '.join(v for k, v in outgoing.items() if k.lower() == 'cookie')
+                cookie = '; '.join(pair.strip() for k, v in outgoing.items() if k.lower() == 'cookie'
+                                   for pair in v.split(';') if pair.strip().partition('=')[0] != 'cf_clearance')
                 outgoing = {k: v for k, v in outgoing.items() if k.lower() != 'cookie'}
                 outgoing['Cookie'] = '; '.join(filter(None, (cookie, stored[2])))
         response = self.direct.request(method, url, params=params, headers=outgoing, **kwargs)

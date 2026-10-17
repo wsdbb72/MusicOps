@@ -22,7 +22,7 @@ def test_solver_recovers_api_json_and_reuses_clearance_with_exact_user_agent():
     response = transport.request('GET', URL, params={'action': 'browse', 'searchstr': 'Artist Album'}, headers={'Cookie': 'session=fixture-login'}, max_response_bytes=1_000_000)
     assert response.json() == {'status': 'success', 'response': {}}
     assert requests[0]['cookies'] == [{'name': 'session', 'value': 'fixture-login', 'domain': 'orpheus.network', 'path': '/'}]
-    transport.request('GET', URL, params={'action': 'torrent', 'id': 1}, headers={'Cookie': 'session=fixture-login'})
+    transport.request('GET', URL, params={'action': 'torrent', 'id': 1}, headers={'Cookie': 'session=fixture-login; cf_clearance=obsolete-clearance'})
     assert direct.requests[1]['headers']['User-Agent'] == 'Browser-UA'
     assert direct.requests[1]['headers']['Cookie'] == 'session=fixture-login; cf_clearance=clearance-fixture'
     assert 'ignored-session' not in str(direct.requests)

@@ -19,6 +19,7 @@ on:
 
 permissions:
   contents: read
+  checks: write
 
 concurrency:
   # A called workflow must never share the caller's cancellation group.
@@ -98,9 +99,19 @@ jobs:
                   raise SystemExit('A required native macOS runtime test did not execute successfully: ' + name)
           PY
       - name: Build app, verify ad-hoc signatures, run packaged acceptance and archive
+        id: native_build
         env:
           BUILD_ARCH: ${{ matrix.arch }}
-        run: python packaging/build_macos.py --arch "$BUILD_ARCH" --output dist/macos
+        run: |
+          mkdir -p dist/macos/reports
+          set -o pipefail
+          python packaging/build_macos.py --arch "$BUILD_ARCH" --output dist/macos 2>&1 | tee dist/macos/reports/native-build.log
+      - name: Save a directly readable native diagnostic check
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BUILD_OUTCOME: ${{ steps.native_build.outcome }}
+        run: python packaging/publish_ci_diagnostics.py
       - name: Save tested release files
         uses: actions/upload-artifact@v7
         with:
@@ -115,6 +126,7 @@ jobs:
           compression-level: 0
           retention-days: 30
       - name: Save native acceptance report and screenshots
+        timeout-minutes: 3
         if: always()
         uses: actions/upload-artifact@v7
         with:
@@ -122,6 +134,7 @@ jobs:
           path: |
             dist/macos/reports/*.json
             dist/macos/reports/*.xml
+            dist/macos/reports/*.log
             dist/macos/smoke/*window.png
             dist/macos/installer-smoke/installed-app/*window.png
           if-no-files-found: ignore

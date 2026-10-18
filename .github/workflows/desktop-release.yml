@@ -7,6 +7,7 @@ on:
 
 permissions:
   contents: read
+  checks: write
 
 # Finish a publication transaction before another candidate can publish.
 concurrency:

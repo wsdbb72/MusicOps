@@ -20,7 +20,10 @@ class StateStore:
                 c.execute(f'CREATE TABLE IF NOT EXISTS {table} (id TEXT PRIMARY KEY, payload TEXT NOT NULL, updated_at TEXT NOT NULL)')
             c.execute('CREATE TABLE IF NOT EXISTS events (seq INTEGER PRIMARY KEY AUTOINCREMENT, at TEXT NOT NULL, phase TEXT NOT NULL, task_id TEXT, tx_id TEXT, payload TEXT NOT NULL)')
             c.execute('CREATE TABLE IF NOT EXISTS token_reservations (id TEXT PRIMARY KEY, site TEXT NOT NULL, resource_id TEXT NOT NULL, cost INTEGER NOT NULL, state TEXT NOT NULL, payload TEXT NOT NULL, updated_at TEXT NOT NULL)')
-            c.execute("CREATE UNIQUE INDEX IF NOT EXISTS token_active ON token_reservations(site,resource_id) WHERE state NOT IN ('RELEASED','REJECTED')")
+            # Completed spends remain in the ledger/batch budget, but a later
+            # authenticated FL renewal may create another active reservation.
+            c.execute("CREATE UNIQUE INDEX IF NOT EXISTS token_active_v2 ON token_reservations(site,resource_id) WHERE state NOT IN ('RELEASED','REJECTED','CONFIRMED','CONSUMED')")
+            c.execute('DROP INDEX IF EXISTS token_active')
             c.execute('CREATE TABLE IF NOT EXISTS library_matches (root_key TEXT NOT NULL,file_id TEXT NOT NULL,title_key TEXT NOT NULL,artist_key TEXT NOT NULL,album_key TEXT NOT NULL,duration REAL NOT NULL,album_id TEXT NOT NULL,PRIMARY KEY(root_key,file_id))')
             c.execute('CREATE INDEX IF NOT EXISTS library_match_identity ON library_matches(root_key,title_key,artist_key,album_key)')
             c.execute('CREATE TABLE IF NOT EXISTS library_albums (root_key TEXT NOT NULL,album_id TEXT NOT NULL,payload TEXT NOT NULL,PRIMARY KEY(root_key,album_id))')
@@ -60,7 +63,7 @@ class StateStore:
     def events(self,after=0):
         with self.connection() as c: rows=c.execute('SELECT * FROM events WHERE seq>? ORDER BY seq LIMIT 1000',(after,)).fetchall()
         return [{**dict(r),'payload':json.loads(r['payload'])} for r in rows]
-    def reserve_token(self,site,resource_id,cost,balance,budget,observed_at,ttl=300,budget_ref='default'):
+    def reserve_token(self,site,resource_id,cost,balance,budget,observed_at,ttl=300,budget_ref='default',renew_confirmed=False):
         now=dt.datetime.now(dt.timezone.utc)
         if any(type(value) is not int for value in (cost,balance,budget)) or cost<=0 or balance<cost or budget<cost:
             raise RuntimeError('POLICY_BLOCKED:余额或预算不足/未知')
@@ -75,12 +78,13 @@ class StateStore:
         with self.connection() as c:
             c.execute('BEGIN IMMEDIATE')
             if c.execute("SELECT 1 FROM token_reservations WHERE site=? AND state IN ('UNKNOWN','REQUEST_UNKNOWN','REQUESTING')",(site,)).fetchone(): raise RuntimeError('POLICY_BLOCKED:站点请求待对账')
-            if c.execute("SELECT 1 FROM token_reservations WHERE site=? AND resource_id=? AND state NOT IN ('RELEASED','REJECTED')",(site,str(resource_id))).fetchone(): raise RuntimeError('ALREADY_RESERVED')
+            states="('RELEASED','REJECTED','CONFIRMED')" if renew_confirmed is True else "('RELEASED','REJECTED')"
+            if c.execute(f"SELECT 1 FROM token_reservations WHERE site=? AND resource_id=? AND state NOT IN {states}",(site,str(resource_id))).fetchone(): raise RuntimeError('ALREADY_RESERVED')
             rows=c.execute("SELECT cost,state,updated_at,payload FROM token_reservations WHERE site=? AND state NOT IN ('RELEASED','REJECTED')",(site,)).fetchall()
             outstanding=sum(r['cost'] for r in rows if r['state'] not in ('CONSUMED','CONFIRMED') or parse_time(r['updated_at'])>=observed)
             used=sum(r['cost'] for r in rows if json.loads(r['payload']).get('budget_ref','default')==budget_ref)
             if outstanding+cost>balance or used+cost>budget: raise RuntimeError('POLICY_BLOCKED:已预留预算不足')
-            rid=str(uuid.uuid4()); value=dict(schema_version=1,id=rid,site=site,resource_id=str(resource_id),cost=cost,state='RESERVED',observed_at=observed.isoformat(),budget_ref=budget_ref)
+            rid=str(uuid.uuid4()); value=dict(schema_version=1,id=rid,site=site,resource_id=str(resource_id),cost=cost,state='RESERVED',observed_at=observed.isoformat(),budget_ref=budget_ref,renew_confirmed=renew_confirmed is True)
             c.execute('INSERT INTO token_reservations VALUES(?,?,?,?,?,?,?)',(rid,site,str(resource_id),cost,'RESERVED',json.dumps(value),utcnow()))
         return value
     def token_result(self,id,state,evidence=None):

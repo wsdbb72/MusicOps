@@ -7,7 +7,7 @@ import html,json,re
 from html.parser import HTMLParser
 from pathlib import Path
 from urllib.parse import urlsplit,parse_qs
-from musicops.providers.pt_readonly import PTReadOnlyProvider,positive_id
+from musicops.providers.pt_readonly import PTReadOnlyProvider,positive_id,token_balance
 from musicops.clients.http import HttpError,PolicyBlocked
 from musicops.clients.metainfo import parse_metainfo
 from musicops.state.store import utcnow
@@ -76,6 +76,8 @@ class PTDownloadProvider(PTReadOnlyProvider):
             token=bool(token_keys)
             if free and not token:found.append((path,params,0))
             elif not free and token:
+                # Both live Gazelle sites use the lowercase, case-sensitive key.
+                params.pop('useToken',None);params['usetoken']='1'
                 text=html.unescape(link['text']+' '+link['attrs'].get('title',''))
                 # Gazelle renders FL, FL (2), or an explicit cost in title.
                 match=re.search(r'\bFL\s*(?:\((\d+)\)|\[(\d+)\])?',text,re.I)
@@ -99,7 +101,7 @@ class PTDownloadProvider(PTReadOnlyProvider):
         return value is True or str(value).casefold() in ('1','free','freeleech','personal','personal freeleech') or torrent.get('isFreeleech') is True or torrent.get('isPersonalFreeleech') is True
     def page_free(self,page,candidate):
         # DicMusic's torrent API omits personal FL; its authenticated row does not.
-        if self.site!='dicmusic':return None
+        if self.site not in ('dicmusic','orpheus'):return None
         parser=TorrentFreeStatus(positive_id(candidate['resource_id']));parser.feed(page)
         return parser.status()
     def _page(self,details,candidate):
@@ -111,7 +113,7 @@ class PTDownloadProvider(PTReadOnlyProvider):
         consent=store.get('evidence','nonfree-consent:'+str(consent_id)) if consent_id else None
         nonfree=bool(consent and consent.get('approved_by')=='user' and consent.get('batch_id')==batch_id and self.site in ('dicmusic','orpheus') and (consent.get('scope')=='batch' or consent.get('candidate_id')==candidate['candidate_id']))
         if consent_id and not nonfree:raise PolicyBlocked('非免费下载授权不匹配当前任务')
-        reconciliation=None
+        reconciliation=None;renewing=False;details=None;page=None
         if previous:
             if previous.get('state')=='confirmed' and cache.is_file():
                 content=cache.read_bytes();meta=parse_metainfo(content)
@@ -120,22 +122,34 @@ class PTDownloadProvider(PTReadOnlyProvider):
                     if self.site in ('dicmusic','orpheus'):
                         if nonfree:return content,{**proof,'free':False,'consent_id':consent_id,'download_method':'explicit-nonfree'}
                         fresh_details=self.detail(candidate);fresh=fresh_details['torrent']
+                        advertised=fresh.get('infoHash')
+                        if advertised and str(advertised).lower() not in (meta['infohash_v1'],meta['infohash_v2']):raise PolicyBlocked('缓存种子与当前详情哈希不一致')
                         personal=fresh.get('isPersonalFreeleech') is True or str(fresh.get('freeTorrent','')).casefold() in ('personal','personal freeleech')
-                        if not personal and self.site=='dicmusic':personal=self.page_free(self._page(fresh_details,candidate),candidate)=='personal'
-                        if not personal:raise TokenApprovalRequired('缓存种子不等于当前已使用令牌；尚未确认个人免费，默认不启动下载')
-                    return content,proof
-            if self.site!='dicmusic' or previous.get('state')!='unknown':
+                        if not personal:
+                            page=self._page(fresh_details,candidate)
+                            personal=self.page_free(page,candidate)=='personal'
+                        if not personal:
+                            # Legacy caches proved only global free, and personal
+                            # FL may expire. Recheck a live FL button/balance and
+                            # make a NEW explicit token request, never reuse that
+                            # cache as permission to start ordinary downloading.
+                            details=fresh_details;renewing=True
+                        else:
+                            proof={**proof,'free':True,'observed_at':utcnow(),'download_method':'personal-free','method':'personal-free-rechecked'}
+                    if not renewing:return content,proof
+            if not renewing and (self.site not in ('dicmusic','orpheus') or previous.get('state')!='unknown'):
                 raise PolicyBlocked('该资源已有下载请求记录；需要对账，不能再次消耗 FL')
-            with store.connection() as connection:
-                rows=connection.execute("SELECT payload FROM token_reservations WHERE site=? AND resource_id=? AND state IN ('REQUEST_UNKNOWN','UNKNOWN','REQUESTING')",(self.site,str(candidate['resource_id']))).fetchall()
-            if len(rows)!=1:raise PolicyBlocked('该资源请求记录尚不能对账，不能再次消耗 FL')
-            reconciliation=json.loads(rows[0][0])
-        details=self.detail(candidate);torrent=details.get('torrent',{});page=self._page(details,candidate)
+            if not renewing:
+                with store.connection() as connection:
+                    rows=connection.execute("SELECT payload FROM token_reservations WHERE site=? AND resource_id=? AND state IN ('REQUEST_UNKNOWN','UNKNOWN','REQUESTING')",(self.site,str(candidate['resource_id']))).fetchall()
+                if len(rows)!=1:raise PolicyBlocked('该资源请求记录尚不能对账，不能再次消耗 FL')
+                reconciliation=json.loads(rows[0][0])
+        details=details or self.detail(candidate);torrent=details.get('torrent',{});page=page if page is not None else self._page(details,candidate)
         page_status=self.page_free(page,candidate)
-        if reconciliation and page_status!='personal':raise PolicyBlocked('该资源尚未确认个人免费，保留待对账记录；不会重复使用 FL')
         free=self.site=='open.cd' or self.is_free(torrent) or bool(page_status)
         # Global free flags must never silently replace the required FL action.
         personal=page_status=='personal' or torrent.get('isPersonalFreeleech') is True or str(torrent.get('freeTorrent','')).casefold() in ('personal','personal freeleech')
+        if reconciliation and not personal:raise PolicyBlocked('该资源尚未确认个人免费，保留待对账记录；不会重复使用 FL')
         require_token=self.site in ('dicmusic','orpheus') and not (personal or reconciliation or nonfree)
         try:path,params,cost=self._button(page,candidate,True if nonfree else False if require_token else free)
         except PolicyBlocked:
@@ -146,12 +160,7 @@ class PTDownloadProvider(PTReadOnlyProvider):
         if cost:
             account=self._gazelle(self._get('/ajax.php',{'action':'index'}))
             profile=self._gazelle(self._get('/ajax.php',{'action':'user','id':positive_id(account['id'])}))
-            balance=profile.get('personal',{}).get('freeleechTokens')
-            if type(balance) is not int:balance=profile.get('stats',{}).get('tokens',account.get('userstats',{}).get('tokens'))
-            if type(balance) is not int:
-                visible=' '.join(html.unescape(re.sub('<[^>]+>',' ',page)).split())
-                balances={sum(int(n.replace(',','')) for n in re.split(r'\s*\+\s*',m)) for m in re.findall(r'(?:FL\s*令牌|令牌|Tokens?)\s*[:：]\s*([\d,]+(?:\s*\+\s*[\d,]+)*)',visible,re.I)}
-                if len(balances)==1:balance=next(iter(balances))
+            balance=token_balance(account,profile,page)
             if type(balance) is not int:
                 if self.site in ('dicmusic','orpheus'):raise TokenApprovalRequired('无法确认可用 FL 数量；默认不下载，请刷新登录信息，或明确选择普通下载')
                 raise PolicyBlocked('无法确认可用 FL 数量，请刷新登录信息或稍后核对')
@@ -163,7 +172,7 @@ class PTDownloadProvider(PTReadOnlyProvider):
                         "SELECT cost,payload FROM token_reservations WHERE site=? AND state NOT IN ('RELEASED','REJECTED')",(self.site,)
                     ) if json.loads(r['payload']).get('budget_ref','default')==batch_id)
                 budget=spent+balance
-            try:reservation=store.reserve_token(self.site,candidate['resource_id'],cost,balance,budget,utcnow(),budget_ref=batch_id)
+            try:reservation=store.reserve_token(self.site,candidate['resource_id'],cost,balance,budget,utcnow(),budget_ref=batch_id,renew_confirmed=renewing)
             except RuntimeError as exc:
                 # These are local policy messages, never remote exception text.
                 if str(exc).startswith('POLICY_BLOCKED:'):
@@ -174,7 +183,9 @@ class PTDownloadProvider(PTReadOnlyProvider):
         intent={'kind':'pt_request','state':'requesting','site':self.site,'resource_id':candidate['resource_id'],'batch_id':batch_id,'requested_at':utcnow(),
                 'download_method':'explicit-nonfree' if nonfree else 'direct' if self.site=='open.cd' else ('fl-token' if cost else ('personal-free' if personal else 'free-download')),
                 'consent_id':consent_id if nonfree else None,
-                'token_cost':reservation['cost'] if reservation else 0,'reconciled_previous_request':bool(reconciliation)}
+                'token_cost':reservation['cost'] if reservation else 0,'reconciled_previous_request':bool(reconciliation),'renewed_cached_request':renewing}
+        if renewing:
+            store.put('evidence','pt-request-history:'+self.site+':'+str(candidate['resource_id'])+':'+utcnow(),{k:v for k,v in previous.items() if k!='id'})
         store.put('evidence',key,intent)
         if reservation and not reconciliation:store.token_result(reservation['id'],'REQUESTING')
         try:
@@ -183,7 +194,7 @@ class PTDownloadProvider(PTReadOnlyProvider):
             if self.site!='open.cd':
                 fresh_details=self.detail(candidate);fresh=fresh_details['torrent']
                 if not nonfree and not self.is_free(fresh):
-                    page_status=self.page_free(self._page(fresh_details,candidate),candidate) if self.site=='dicmusic' else None
+                    page_status=self.page_free(self._page(fresh_details,candidate),candidate)
                     if not page_status:raise PolicyBlocked('站点未确认 FL 免费生效；暂不启动下载')
                 advertised=fresh.get('infoHash') or torrent.get('infoHash')
                 if advertised and str(advertised).lower() not in (meta['infohash_v1'],meta['infohash_v2']):raise PolicyBlocked('下载种子与详情哈希不一致')

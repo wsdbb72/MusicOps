@@ -771,9 +771,11 @@ class Workbench(QMainWindow):
             if job.get('stage')!='needs_review' or job.get('review_kind')!='token':self.token_prompt_open=False;return
             prompt=QMessageBox(self);prompt.setWindowTitle('FL 令牌下载未通过');prompt.setText(job.get('label','')+'\n'+job.get('detail',''))
             prompt.setInformativeText('默认仅使用令牌免费方式。普通下载可能计入站点下载量，且不消耗 FL。只有在此明确选择才授权；本批次授权不会保存为以后任务的默认设置。')
-            once=prompt.addButton('仅此次普通下载',QMessageBox.ActionRole);batch=prompt.addButton('本批次全部普通下载',QMessageBox.ActionRole);wait=prompt.addButton('保持令牌下载，暂不下载',QMessageBox.RejectRole);prompt.setDefaultButton(wait);prompt.setEscapeButton(wait)
+            retry=prompt.addButton('重新检查并使用 FL 令牌',QMessageBox.ActionRole);once=prompt.addButton('仅此次普通下载',QMessageBox.ActionRole);batch=prompt.addButton('本批次全部普通下载',QMessageBox.ActionRole);wait=prompt.addButton('保持令牌下载，暂不下载',QMessageBox.RejectRole);prompt.setDefaultButton(wait);prompt.setEscapeButton(wait)
             def chosen(_):
                 self.token_prompt_open=False;clicked=prompt.clickedButton()
+                if clicked==retry:
+                    self.call('bulk_workflows',{'action':'retry','job_ids':[job_id]},lambda result:(self.notice.setText(result.get('message','')),self.refresh(),on_saved() if on_saved and result.get('succeeded') else None));return
                 if clicked not in (once,batch):return
                 payload={'job_id':job_id,'choice':'nonfree_once' if clicked==once else 'nonfree_batch','expected_revision':job.get('review_revision')}
                 self.call('review_workflow',payload,lambda _:(self.refresh(),on_saved() if on_saved else None))

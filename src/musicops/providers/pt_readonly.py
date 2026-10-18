@@ -13,6 +13,23 @@ def positive_id(value):
     if not re.fullmatch(r'[1-9][0-9]*',str(value)): raise ValueError('资源ID无效')
     return str(value)
 
+def token_count(value):
+    if type(value) is int and value>=0:return value
+    if isinstance(value,str) and re.fullmatch(r'(?:\d+|\d{1,3}(?:,\d{3})+)',value.strip()):return int(value.strip().replace(',',''))
+    return None
+
+def token_balance(account,profile=None,page=''):
+    profile=profile or {}
+    for block,key in ((profile.get('personal'),'freeleechTokens'),(profile.get('stats'),'tokens'),(account.get('userstats'),'tokens')):
+        count=token_count(block.get(key)) if isinstance(block,dict) else None
+        if count is not None:return count
+    visible=' '.join(html.unescape(re.sub('<[^>]+>',' ',page)).split())
+    balances=set()
+    for match in re.findall(r'(?:FL\s*令牌|令牌|Tokens?)\s*[:：]\s*([\d,]+(?:\s*\+\s*[\d,]+)*)',visible,re.I):
+        counts=[token_count(n) for n in re.split(r'\s*\+\s*',match)]
+        if all(n is not None for n in counts):balances.add(sum(counts))
+    return next(iter(balances)) if len(balances)==1 else None
+
 class NexusRows(HTMLParser):
     """Extract detail-link identity and visible metadata, never download links."""
     def __init__(self):
@@ -113,8 +130,7 @@ class PTReadOnlyProvider:
                 if not payload.get('id') or not payload.get('username'):raise ValueError('缺少登录证据')
                 stats=payload.get('userstats',{})
                 if not isinstance(stats,dict):raise ValueError('账户统计结构改变')
-                balance=stats.get('tokens')
-                if type(balance) is not int or balance<0:balance=None
+                balance=token_balance(payload)
             return {'status':'OK','source':self.site,'authenticated':True,'token_balance':balance,'observed_at':datetime.now(timezone.utc).isoformat(),'download_status':'POLICY_BLOCKED','capabilities':self.capabilities()}
         except Exception as exc:return self._failure(exc)
     def search(self,query):

@@ -3,7 +3,7 @@ import copy
 import json
 from pathlib import Path
 import threading
-from test_task_controls import controls, album, read_job
+from test_task_controls import controls, album, read_job, COMMAND_LOOP
 from musicops.app.review_queue import submit, register, schedule, recover, finish
 from musicops.app.assistance import review_revision
 from musicops.config.schema import digest
@@ -83,6 +83,19 @@ def test_pause_does_not_starve_other_reviews_and_token_is_human_only(controls):
     assert not register(service,token)
     assert schedule(service)
     assert next(r for r in entries(service) if r['state']=='running')['job_id']==active['job_id']
+
+
+def test_ai_backlog_does_not_starve_normal_album_processing(controls,monkeypatch):
+    service=controls;enable(service)
+    album(service,'review',stage='needs_review',review_kind='metadata')
+    monkeypatch.setattr(service.workflows,'next_job',lambda:{'job_id':'ready-for-processing'})
+    commands=[]
+    def enqueue(command,args):
+        commands.append(command);service.stop.set();return {'accepted':True}
+    monkeypatch.setattr(service,'enqueue',enqueue)
+    service.paused=False;service._last_workflow_tick=0
+    COMMAND_LOOP(service)
+    assert commands==['advance_workflows']
 
 
 def test_revision_cache_caps_auto_rounds_but_explicit_retry_allowed(controls):

@@ -206,11 +206,14 @@ class AppService:
                 if self.paused: continue
                 with self.store.connection() as c:row=c.execute("SELECT payload FROM tasks WHERE json_extract(payload,'$.state')='queued' ORDER BY updated_at,id LIMIT 1").fetchone()
                 if row is None:
+                    # A large AI backlog must not prevent already-resolved
+                    # albums from searching, downloading and reaching validation.
+                    if time.monotonic()-self._last_workflow_tick>=3:
+                        self._last_workflow_tick=time.monotonic()
+                        if self.workflows.next_job():
+                            self.enqueue('advance_workflows',{});continue
                     from musicops.app.review_queue import schedule
                     if schedule(self):continue
-                    if time.monotonic()-self._last_workflow_tick<3:continue
-                    self._last_workflow_tick=time.monotonic()
-                    if self.workflows.next_job():self.enqueue('advance_workflows',{})
                     continue
                 task=json.loads(row[0]); self.active=task['task_id']; task.update(state='running',started_at=utcnow()); self.store.put('tasks',self.active,task)
                 activity=self.store.get('evidence','workflow:activity:'+task['task_id'])

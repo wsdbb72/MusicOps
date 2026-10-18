@@ -10,6 +10,8 @@ from musicops.clients.http import PolicyBlocked
 def review_revision(job):
     tracks = job.get('prepared') or job.get('targets') or job.get('old_files') or []
     return digest({'stage': job.get('stage'), 'kind': job.get('review_kind'), 'hidden': bool(job.get('hidden')),
+                   'selected':(job.get('selected') or {}).get('candidate_id'),'batch_id':job.get('batch_id'),
+                   'catalog_choices':[{k:c.get(k) for k in ('candidate_id','source','source_id','release_id')} for c in job.get('catalog_choices',[])],
                    'tracks': [{k: r.get(k) for k in ('raw_title', 'artists', 'album', 'duration', 'file_id')} for r in tracks],
                    'choices': [{k: c.get(k) for k in ('candidate_id', 'source', 'title', 'artists', 'release', 'media')} for c in job.get('choices', [])]})
 
@@ -121,7 +123,21 @@ def assist_workflows(service, args, cfg):
                 results.append({'job_id': job_id, 'status': 'STALE', 'message': '任务已改变，本次建议未保存'}); continue
             proposal.update(revision=revision, created_at=utcnow(), requires_review=True)
             service.workflows.put(current, ai_assistance=proposal)
-        results.append({'job_id': job_id, 'label': job.get('label', ''), **{k: proposal.get(k) for k in ('status', 'message', 'kind')}})
+        applied=False
+        if args.get('apply_verified') is True and proposal.get('status')=='READY':
+            try:
+                if proposal.get('kind')=='metadata' and proposal.get('mapped_count')==len(proposal.get('metadata') or []) and proposal.get('mapped_count',0)>0:
+                    service.workflows.review(job_id,'edit_metadata',metadata=proposal['metadata'],expected_revision=revision);applied=True
+                elif proposal.get('kind')=='candidate' and any(c.get('candidate_id')==proposal.get('candidate_id') and c.get('identity_exact') for c in current.get('choices',[])):
+                    service.workflows.review(job_id,proposal['candidate_id'],expected_revision=revision);applied=True
+                elif proposal.get('kind')=='search' and current.get('review_kind')=='search':
+                    service.workflows.review(job_id,'research',query=proposal['search_query'],expected_revision=revision);applied=True
+            except (ValueError,PolicyBlocked):pass
+        if applied:
+            updated=service.store.get('evidence','workflow:'+job_id)
+            if updated:service.workflows.put(updated,ai_assistance={**proposal,'status':'APPLIED','requires_review':False})
+        results.append({'job_id': job_id, 'label': job.get('label', ''), **{k: proposal.get(k) for k in ('status', 'message', 'kind')},
+                        **({'status':'APPLIED','message':'可靠证据已核对并提交，继续后续处理'} if applied else {})})
     service.store.event('workflow_ai_assistance', {'selected_count': len(ids), 'ready': sum(r['status'] == 'READY' for r in results), 'music_writes': 0})
-    return {'status': 'OK', 'results': results, 'requires_review': True, 'music_writes': 0,
-            'message': f"已辅助核对 {len(results)} 项；请打开任务核对窗口检查并采用建议"}
+    return {'status': 'OK', 'results': results, 'requires_review': any(r['status'] not in ('APPLIED','SKIPPED') for r in results), 'music_writes': 0,
+            'message': f"已辅助核对 {len(results)} 项；已提交 {sum(r['status']=='APPLIED' for r in results)} 项，其余请打开核对窗口检查"}

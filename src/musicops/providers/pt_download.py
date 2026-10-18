@@ -12,6 +12,9 @@ from musicops.clients.http import HttpError,PolicyBlocked
 from musicops.clients.metainfo import parse_metainfo
 from musicops.state.store import utcnow
 
+class TokenApprovalRequired(PolicyBlocked):
+    error_class='TOKEN_APPROVAL_REQUIRED'
+
 class Links(HTMLParser):
     def __init__(self):super().__init__();self.links=[];self.current=None
     def handle_starttag(self,tag,attrs):
@@ -77,7 +80,10 @@ class PTDownloadProvider(PTReadOnlyProvider):
                 # Gazelle renders FL, FL (2), or an explicit cost in title.
                 match=re.search(r'\bFL\s*(?:\((\d+)\)|\[(\d+)\])?',text,re.I)
                 if match:
-                    cost=int(match.group(1) or match.group(2) or '1')
+                    amounts={int(v) for v in (match.group(1),match.group(2)) if v}
+                    amounts.update(int(v) for v in re.findall(r'(?:use\s+|使用\s*)?(\d+)\s*(?:枚|个)?\s*(?:FL\s*)?(?:tokens?\b|令牌|代币)',text,re.I))
+                    if len(amounts)>1:continue
+                    cost=next(iter(amounts)) if amounts else 1
                     if 1<=cost<=100:found.append((path,params,cost))
         unique={(p,tuple(sorted(v.items())),c) for p,v,c in found}
         if self.site=='open.cd' and len(unique)>1:
@@ -100,13 +106,24 @@ class PTDownloadProvider(PTReadOnlyProvider):
         if self.site=='open.cd':return details['page']
         gid=positive_id(details['group'].get('id') or candidate.get('group_id'))
         return self._get('/torrents.php',{'id':gid,'torrentid':str(candidate['resource_id'])}).text
-    def fetch(self,candidate,store,batch_id,budget,cache):
+    def fetch(self,candidate,store,batch_id,budget,cache,consent_id=None):
         cache=Path(cache);key='pt-request:'+candidate['candidate_id'];previous=store.get('evidence',key)
+        consent=store.get('evidence','nonfree-consent:'+str(consent_id)) if consent_id else None
+        nonfree=bool(consent and consent.get('approved_by')=='user' and consent.get('batch_id')==batch_id and self.site in ('dicmusic','orpheus') and (consent.get('scope')=='batch' or consent.get('candidate_id')==candidate['candidate_id']))
+        if consent_id and not nonfree:raise PolicyBlocked('非免费下载授权不匹配当前任务')
         reconciliation=None
         if previous:
             if previous.get('state')=='confirmed' and cache.is_file():
                 content=cache.read_bytes();meta=parse_metainfo(content)
-                if meta['metainfo_sha256']==previous['metainfo_sha256']:return content,previous['free_evidence']
+                if meta['metainfo_sha256']==previous['metainfo_sha256']:
+                    proof=previous['free_evidence']
+                    if self.site in ('dicmusic','orpheus'):
+                        if nonfree:return content,{**proof,'free':False,'consent_id':consent_id,'download_method':'explicit-nonfree'}
+                        fresh_details=self.detail(candidate);fresh=fresh_details['torrent']
+                        personal=fresh.get('isPersonalFreeleech') is True or str(fresh.get('freeTorrent','')).casefold() in ('personal','personal freeleech')
+                        if not personal and self.site=='dicmusic':personal=self.page_free(self._page(fresh_details,candidate),candidate)=='personal'
+                        if not personal:raise TokenApprovalRequired('缓存种子不等于当前已使用令牌；尚未确认个人免费，默认不启动下载')
+                    return content,proof
             if self.site!='dicmusic' or previous.get('state')!='unknown':
                 raise PolicyBlocked('该资源已有下载请求记录；需要对账，不能再次消耗 FL')
             with store.connection() as connection:
@@ -117,7 +134,14 @@ class PTDownloadProvider(PTReadOnlyProvider):
         page_status=self.page_free(page,candidate)
         if reconciliation and page_status!='personal':raise PolicyBlocked('该资源尚未确认个人免费，保留待对账记录；不会重复使用 FL')
         free=self.site=='open.cd' or self.is_free(torrent) or bool(page_status)
-        path,params,cost=self._button(page,candidate,free);reservation=reconciliation
+        # Global free flags must never silently replace the required FL action.
+        personal=page_status=='personal' or torrent.get('isPersonalFreeleech') is True or str(torrent.get('freeTorrent','')).casefold() in ('personal','personal freeleech')
+        require_token=self.site in ('dicmusic','orpheus') and not (personal or reconciliation or nonfree)
+        try:path,params,cost=self._button(page,candidate,True if nonfree else False if require_token else free)
+        except PolicyBlocked:
+            if require_token:raise TokenApprovalRequired('没有可确认的 FL 令牌按钮；默认不下载。可仅为本次或本批次明确授权普通下载。') from None
+            raise
+        reservation=reconciliation
         if reconciliation and cost:raise PolicyBlocked('待对账资源不能再次使用 FL')
         if cost:
             account=self._gazelle(self._get('/ajax.php',{'action':'index'}))
@@ -128,7 +152,9 @@ class PTDownloadProvider(PTReadOnlyProvider):
                 visible=' '.join(html.unescape(re.sub('<[^>]+>',' ',page)).split())
                 balances={sum(int(n.replace(',','')) for n in re.split(r'\s*\+\s*',m)) for m in re.findall(r'(?:FL\s*令牌|令牌|Tokens?)\s*[:：]\s*([\d,]+(?:\s*\+\s*[\d,]+)*)',visible,re.I)}
                 if len(balances)==1:balance=next(iter(balances))
-            if type(balance) is not int:raise PolicyBlocked('无法确认可用 FL 数量，请刷新登录信息或稍后核对')
+            if type(balance) is not int:
+                if self.site in ('dicmusic','orpheus'):raise TokenApprovalRequired('无法确认可用 FL 数量；默认不下载，请刷新登录信息，或明确选择普通下载')
+                raise PolicyBlocked('无法确认可用 FL 数量，请刷新登录信息或稍后核对')
             if budget is None:
                 # Unlimited means no batch cap; the live balance and unresolved
                 # reservation guards still apply inside reserve_token.
@@ -140,10 +166,14 @@ class PTDownloadProvider(PTReadOnlyProvider):
             try:reservation=store.reserve_token(self.site,candidate['resource_id'],cost,balance,budget,utcnow(),budget_ref=batch_id)
             except RuntimeError as exc:
                 # These are local policy messages, never remote exception text.
-                if str(exc).startswith('POLICY_BLOCKED:'):raise PolicyBlocked(str(exc).split(':',1)[1]) from None
+                if str(exc).startswith('POLICY_BLOCKED:'):
+                    reason=str(exc).split(':',1)[1]
+                    if self.site in ('dicmusic','orpheus') and ('余额' in reason or '预算' in reason):raise TokenApprovalRequired(reason+'；默认不下载，可明确选择普通下载') from None
+                    raise PolicyBlocked(reason) from None
                 raise
         intent={'kind':'pt_request','state':'requesting','site':self.site,'resource_id':candidate['resource_id'],'batch_id':batch_id,'requested_at':utcnow(),
-                'download_method':'direct' if self.site=='open.cd' else ('fl-token' if cost else ('personal-free' if page_status=='personal' else 'free-download')),
+                'download_method':'explicit-nonfree' if nonfree else 'direct' if self.site=='open.cd' else ('fl-token' if cost else ('personal-free' if personal else 'free-download')),
+                'consent_id':consent_id if nonfree else None,
                 'token_cost':reservation['cost'] if reservation else 0,'reconciled_previous_request':bool(reconciliation)}
         store.put('evidence',key,intent)
         if reservation and not reconciliation:store.token_result(reservation['id'],'REQUESTING')
@@ -152,7 +182,7 @@ class PTDownloadProvider(PTReadOnlyProvider):
             cache.parent.mkdir(parents=True,exist_ok=True);cache.write_bytes(content)
             if self.site!='open.cd':
                 fresh_details=self.detail(candidate);fresh=fresh_details['torrent']
-                if not self.is_free(fresh):
+                if not nonfree and not self.is_free(fresh):
                     page_status=self.page_free(self._page(fresh_details,candidate),candidate) if self.site=='dicmusic' else None
                     if not page_status:raise PolicyBlocked('站点未确认 FL 免费生效；暂不启动下载')
                 advertised=fresh.get('infoHash') or torrent.get('infoHash')
@@ -160,6 +190,7 @@ class PTDownloadProvider(PTReadOnlyProvider):
             evidence={'confirmed':True,'infohash':meta['infohash_v1'] or meta['infohash_v2'],'source':self.site,'resource_id':candidate['resource_id'],'observed_at':utcnow(),
                       'method':'direct' if self.site=='open.cd' else ('torrent-row-'+page_status if page_status else 'free-status-after-download'),
                       'download_method':intent['download_method'],'token_cost':intent['token_cost'],'reconciled_previous_request':bool(reconciliation)}
+            evidence.update(free=not nonfree,consent_id=consent_id if nonfree else None)
             cache.parent.mkdir(parents=True,exist_ok=True);cache.write_bytes(content)
             intent.update(state='confirmed',metainfo_sha256=meta['metainfo_sha256'],free_evidence=evidence);store.put('evidence',key,intent)
             if reservation:store.token_result(reservation['id'],'CONFIRMED',evidence)

@@ -40,6 +40,14 @@ def save_setup(service,payload):
         if not host:raise ValueError('服务地址需要包含主机名')
         ref='vault://user/'+kind+'/'+hashlib.sha256(host.encode()).hexdigest()[:12]
         if value:pending.append((ref,value,host,path))
+    if 'streaming' in payload:
+        supplied=payload['streaming'];target=values['streaming'];previous_host=urlsplit(target['base_url']).hostname
+        for key in ('enabled','base_url','order','timeout'):
+            if key in supplied:target[key]=supplied[key]
+        if previous_host!=urlsplit(target['base_url']).hostname:target['credential_ref']=''
+        if supplied.get('cookie_json'):
+            host=urlsplit(target['base_url']).hostname;cookies=import_cookies(supplied['cookie_json'],host)
+            secret('streaming',target['base_url'],json.dumps(cookies),('streaming','credential_ref'))
     qbt=payload.get('qbt',{})
     if qbt.get('url'):values['qbt']['base_url']=qbt['url'].rstrip('/')
     if qbt.get('password'):
@@ -71,7 +79,7 @@ def save_setup(service,payload):
         if nav.get('username'):target['username']=nav['username']
         if nav.get('password'):secret('navidrome',target['url'],nav['password'],('music_servers','navidrome','password_ref'))
     workflow=payload.get('workflow',{})
-    for key in ('netease_fallback','netease_api_url','netease_downloader','netease_download_args','netease_import_dir','prefer_24bit','fl_per_batch','fl_unlimited'):
+    for key in ('edition_policy','netease_fallback','netease_api_url','netease_downloader','netease_download_args','netease_import_dir','prefer_24bit','fl_per_batch','fl_unlimited'):
         if key in workflow:values['workflow'][key]=workflow[key]
     if 'updates' in payload:
         if not isinstance(payload['updates'],dict) or type(payload['updates'].get('enabled')) is not bool:raise ValueError('自动更新设置无效')

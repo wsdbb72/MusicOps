@@ -131,10 +131,14 @@ class QbtClient:
             return "新增任务未确认处于停止状态"
         return None
 
-    @staticmethod
-    def _free_matches(evidence, meta):
+    def _free_matches(self,evidence, meta,task_id=None):
         hashes = {x for x in (meta.get("infohash_v1"), meta.get("infohash_v2")) if x}
-        return isinstance(evidence, dict) and evidence.get("confirmed") is True and evidence.get("infohash") in hashes
+        if not (isinstance(evidence, dict) and evidence.get("confirmed") is True and evidence.get("infohash") in hashes):return False
+        if evidence.get('free') is not False:return True
+        if not self.store or not task_id or evidence.get('source') not in ('dicmusic','orpheus'):return False
+        consent=self.store.get('evidence','nonfree-consent:'+str(evidence.get('consent_id'))) or {}
+        job=self.store.get('evidence','workflow:'+task_id) or {}
+        return consent.get('approved_by')=='user' and consent.get('batch_id')==job.get('batch_id') and bool(job.get('batch_id')) and (consent.get('scope')=='batch' or consent.get('scope')=='once' and consent.get('job_id')==task_id and consent.get('candidate_id')==evidence.get('source')+':'+str(evidence.get('resource_id')))
 
     def add_stopped(self, torrent_bytes, task_id, free_evidence):
         if self.capabilities()["status"] != "OK":
@@ -145,7 +149,7 @@ class QbtClient:
             meta = parse_metainfo(torrent_bytes)
         except ValueError:
             return _result("PARSE_ERROR", error_class="PARSE_ERROR")
-        if not self._free_matches(free_evidence, meta):
+        if not self._free_matches(free_evidence, meta,task_id):
             return _result("POLICY_BLOCKED", error_class="POLICY_BLOCKED", reason="缺少与当前种子绑定的免费证据")
         existing_record = self._get(task_id)
         if existing_record:
@@ -210,7 +214,7 @@ class QbtClient:
         if self.capabilities()["status"] != "OK":
             return _result("POLICY_BLOCKED", error_class="POLICY_BLOCKED")
         record = self._get(task_id)
-        if not record or record["state"] != "STOPPED" or not self._free_matches(free_evidence, record["metainfo"]):
+        if not record or record["state"] != "STOPPED" or not self._free_matches(free_evidence, record["metainfo"],task_id):
             return _result("POLICY_BLOCKED", error_class="POLICY_BLOCKED", reason="归属、停止状态或免费证据未确证")
         try:
             row = self._query(record)

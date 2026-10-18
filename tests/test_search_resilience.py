@@ -20,15 +20,19 @@ def make_job(service):
 
 
 @pytest.mark.parametrize('failure',['AUTH_FAILED','NETWORK_ERROR','RATE_LIMITED'])
-def test_one_site_failure_does_not_block_netease_fallback_after_successful_empty_search(service,monkeypatch,failure):
+def test_one_site_failure_waits_for_explicit_fallback_after_other_empty_searches(service,monkeypatch,failure):
     calls=[]
     def search(site):
         calls.append(site)
         return {'status':failure,'candidates':[]} if site=='open.cd' else {'status':'NO_RESOURCE','candidates':[]}
     monkeypatch.setattr(service.workflows,'provider',lambda site,cfg:SimpleNamespace(search=lambda _:search(site)))
     job=make_job(service);service.workflows._searching(job)
+    assert job['stage']=='needs_review' and job['review_kind']=='search' and len(calls)==7 and calls.count('open.cd')==1
+    assert not job.get('processing_job_id')
+    service.workflows.review(job['job_id'],'streaming_fallback')
+    job=service.store.get('evidence','workflow:'+job['job_id'])
     process=service.store.get('evidence','workflow:'+job['processing_job_id'])
-    assert job['stage']=='completed' and process['stage']=='fallback' and len(calls)==7 and calls.count('open.cd')==1
+    assert process['stage']=='fallback'
     assert job['search_summary']['unavailable_sites']==['open.cd']
     assert '四站均无' not in job['message']
     assert not service.store.list('download_tasks') and not service.store.list('token_reservations')

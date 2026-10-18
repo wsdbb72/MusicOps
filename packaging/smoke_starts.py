@@ -84,6 +84,14 @@ def main():
         report['checks']['native_update_setting']=update_setting['config']['values']['updates']['enabled'] is False
         solver_guard=completed('browser_solver_preflight',{'settings':{'base_url':'http://192.0.2.1:8191'}})
         report['checks']['native_browser_solver_guard']=solver_guard['state']=='failed' and solver_guard.get('error_class')=='ValueError'
+        filtered=client.call('list_workflows',{'state':'completed'})
+        report['checks']['native_task_status_filter']=bool(filtered['jobs']) and all(j['stage'] in ('completed','restored','cancelled','skipped') for j in filtered['jobs'])
+        selected=client.call('list_workflows',{'state':'completed','selection':True})['job_ids']
+        report['checks']['native_full_queue_selection']=bool(selected) and all(client.call('get_workflow',{'job_id':jid})['job'].get('job_kind') not in ('batch','activity') for jid in selected)
+        streaming=client.call('save_setup',{'streaming':{'enabled':False,'order':['netease','qqmusic']},'workflow':{'edition_policy':'complete'}})['config']['values']
+        report['checks']['native_streaming_and_edition_settings']=streaming['streaming']['order']==['netease','qqmusic'] and streaming['streaming']['enabled'] is False and streaming['workflow']['edition_policy']=='complete'
+        fill=completed('start_workflow',{'scene':'fill'})
+        report['checks']['native_full_album_preparation']=fill['state']=='completed' and fill.get('result',{}).get('album_count')==0
         process.wait(30);report['checks']['gui_exit_zero']=process.returncode==0
         report['passed']=all(report['checks'].values())
     except Exception as exc:report.update(passed=False,error_class=type(exc).__name__,error=str(exc))

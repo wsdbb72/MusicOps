@@ -16,6 +16,7 @@ REQUIRED_CHECKS=frozenset({
     'three_preparation_records','identification_and_search_are_separate','native_bulk_cancel_review_tasks',
     'native_bulk_retry_search','native_review_snapshot','native_local_album_database',
     'native_ai_assistance_guard','native_delete_records_only','native_update_setting','native_browser_solver_guard',
+    'native_task_status_filter','native_full_queue_selection','native_streaming_and_edition_settings','native_full_album_preparation',
     'native_multiplatform_file_import','native_manual_search_readonly','native_search_activity_visible',
     'configuration_roundtrip','native_cocoa_window_exit_zero','native_window_rendered',
     'frozen_worker_restart_keeps_credentials','configuration_persisted_after_restart',
@@ -137,6 +138,14 @@ def main():
         checks['native_update_setting']=update_setting['config']['values']['updates']['enabled'] is False
         solver_guard=completed('browser_solver_preflight',{'settings':{'base_url':'http://192.0.2.1:8191'}})
         checks['native_browser_solver_guard']=solver_guard['state']=='failed' and solver_guard.get('error_class')=='ValueError'
+        filtered=client.call('list_workflows',{'state':'completed'})
+        checks['native_task_status_filter']=bool(filtered['jobs']) and all(j['stage'] in ('completed','restored','cancelled','skipped') for j in filtered['jobs'])
+        selected=client.call('list_workflows',{'state':'completed','selection':True})['job_ids']
+        checks['native_full_queue_selection']=bool(selected) and all(client.call('get_workflow',{'job_id':jid})['job'].get('job_kind') not in ('batch','activity') for jid in selected)
+        streaming=client.call('save_setup',{'streaming':{'enabled':False,'order':['netease','qqmusic']},'workflow':{'edition_policy':'complete'}})['config']['values']
+        checks['native_streaming_and_edition_settings']=streaming['streaming']['order']==['netease','qqmusic'] and streaming['streaming']['enabled'] is False and streaming['workflow']['edition_policy']=='complete'
+        fill=completed('start_workflow',{'scene':'fill'})
+        checks['native_full_album_preparation']=fill['state']=='completed' and fill.get('result',{}).get('album_count')==0
         phase='configuration_write';result=client.call('save_setup',{'workflow':{'fl_unlimited':True,'fl_per_batch':2}})
         checks['configuration_roundtrip']=result['config']['values']['workflow']['fl_unlimited'] is True and result['config']['values']['workflow']['fl_per_batch']==2
         phase='native_gui_exit';process.wait(25);checks['native_cocoa_window_exit_zero']=process.returncode==0;checks['native_window_rendered']=screenshot.is_file() and screenshot.stat().st_size>2000

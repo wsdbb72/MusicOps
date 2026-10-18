@@ -17,7 +17,7 @@ class NetEaseReadOnlyProvider:
         u=urlsplit(self.config.get('base_url','https://music.163.com'))
         if u.scheme!='https' or u.hostname!='music.163.com' or u.port not in (None,443) or u.username or u.password or u.path not in ('','/') or u.query or u.fragment:raise PolicyBlocked('真实网易云只允许已验证origin')
     def _get(self,path,params):
-        if path not in ('/api/v3/playlist/detail','/api/v6/playlist/detail','/api/v3/song/detail'):raise PolicyBlocked('端点不在网易云只读白名单')
+        if path not in ('/api/v3/playlist/detail','/api/v6/playlist/detail','/api/v3/song/detail') and not re.fullmatch(r'/api/album/[1-9][0-9]{0,18}',path):raise PolicyBlocked('端点不在网易云只读白名单')
         headers={'Referer':'https://music.163.com/','Accept':'application/json'}
         ref=self.config.get('credential_ref')
         if ref:
@@ -42,6 +42,21 @@ class NetEaseReadOnlyProvider:
         if code in (429,509):raise HttpError('RATE_LIMITED','网易云限流')
         if code!=200:raise HttpError('API_CONTRACT_ERROR','网易云业务响应未通过')
         return data
+    def album(self,album_id):
+        aid=identifier(album_id);data=self._get('/api/album/'+aid,{})
+        album=data.get('album') or {};songs=data.get('songs',album.get('songs'))
+        count=album.get('size',album.get('trackCount'))
+        if str(album.get('id'))!=aid or not isinstance(songs,list) or type(count) is not int or not 1<=count<=2000 or len(songs)!=count:
+            raise HttpError('SNAPSHOT_INCOMPLETE','网易云未返回可对账的完整专辑曲目表')
+        result=[]
+        for i,row in enumerate(songs):
+            item_album=row.get('al') or row.get('album') or {}
+            normalized={**row,'ar':row.get('ar') or row.get('artists'),'al':{'id':album['id'],'name':album.get('name',''),**item_album},'dt':row.get('dt',row.get('duration'))}
+            song=self.normalize_song(normalized)
+            if song.get('source_album_id')!=aid or not song.get('duration'):raise HttpError('SNAPSHOT_INCOMPLETE','专辑曲目缺少身份或完整时长')
+            song.update(track=str(row.get('no') or i+1),disc=str(row.get('cd') or 1));result.append(song)
+        if len({r['source_song_id'] for r in result})!=count:raise HttpError('SNAPSHOT_INCOMPLETE','专辑曲目 ID 重复')
+        return result
     def _manifest(self,pid,path='/api/v3/playlist/detail'):
         data=self._get(path,{'id':pid,'n':'10000','s':'0'})
         p=data.get('playlist')

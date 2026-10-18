@@ -63,7 +63,7 @@ class AppService:
         if command=='list_library_albums':
             from musicops.library.catalog import AlbumCatalog
             return AlbumCatalog(self.store).albums(self.config.current()['values']['paths']['library'],payload.get('offset',0))
-        if command=='list_workflows':return self.workflows.list(payload.get('offset',0))
+        if command=='list_workflows':return self.workflows.list(payload.get('offset',0),payload.get('state','all'),payload.get('selection',False))
         if command=='get_workflow':
             job=self.store.get('evidence','workflow:'+payload['job_id'])
             if not job or job.get('hidden'):raise ValueError('任务不存在或已删除')

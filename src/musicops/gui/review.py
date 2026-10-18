@@ -20,8 +20,9 @@ def review_source_url(value):
 
 
 class ReviewDialog(QDialog):
-    def __init__(self, owner, job):
+    def __init__(self, owner, job,on_saved=None):
         super().__init__(owner); self.owner = owner; self.job = job; self.closed = False
+        self.on_saved=on_saved
         self.setWindowTitle('核对任务 · ' + job.get('label', 'MusicOps')); self.resize(960, 700)
         self.finished.connect(lambda _: setattr(self, 'closed', True))
         layout = QVBoxLayout(self)
@@ -34,6 +35,7 @@ class ReviewDialog(QDialog):
         self.metadata = QTableWidget(0, 4); self.metadata.setHorizontalHeaderLabels(['歌曲', '艺人', '专辑', '完整时长（秒）']); self.metadata.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch); self.metadata.verticalHeader().setVisible(False); self.metadata.verticalHeader().setDefaultSectionSize(44); self.metadata.setAlternatingRowColors(True); form.addWidget(self.metadata)
         self.catalog = QComboBox(); self.catalog.setMinimumContentsLength(25); self.catalog.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
         form.addWidget(self.catalog); self.catalog_use = QPushButton('用所选目录候选填入当前曲目（仍可修改）'); self.catalog_use.clicked.connect(self.use_catalog); form.addWidget(self.catalog_use)
+        self.complete_release=QPushButton('采用所选完整发行并继续补缺曲');self.complete_release.clicked.connect(self.submit_complete_release);form.addWidget(self.complete_release)
         self.save_metadata = QPushButton('保存已核对资料并继续'); self.save_metadata.clicked.connect(self.submit_metadata); form.addWidget(self.save_metadata)
         self.tabs.addTab(page, '曲目资料')
         page = QWidget(); form = QVBoxLayout(page)
@@ -48,7 +50,9 @@ class ReviewDialog(QDialog):
             check = QCheckBox(name); enabled = bool(owner.config.get('providers', {}).get(site, {}).get('enabled')); check.setEnabled(enabled); check.setChecked(enabled and (job.get('search_sites') is None or site in job['search_sites'])); self.site_checks[site] = check; row.addWidget(check)
         row.addStretch(); form.addLayout(row)
         self.site_detail = QPlainTextEdit(); self.site_detail.setReadOnly(True); form.addWidget(self.site_detail)
-        self.research = QPushButton('按以上搜索词与站点重新搜索'); self.research.clicked.connect(self.submit_search); form.addWidget(self.research); self.tabs.addTab(page, '重新搜索')
+        self.research = QPushButton('按以上搜索词与站点重新搜索'); self.research.clicked.connect(self.submit_search); form.addWidget(self.research)
+        self.fallback_button=QPushButton('确认按当前检索范围回退流媒体');self.fallback_button.clicked.connect(lambda:self.send({'choice':'streaming_fallback'}));form.addWidget(self.fallback_button)
+        self.retry_processing=QPushButton('问题已处理，重试此任务并继续核对');self.retry_processing.clicked.connect(lambda:self.send({'choice':'retry'}));form.addWidget(self.retry_processing);self.tabs.addTab(page, '重新搜索')
         row = QHBoxLayout(); self.ai_button = QPushButton('AI 辅助核对'); self.ai_button.clicked.connect(self.assist); row.addWidget(self.ai_button); self.result = QLabel(); self.result.setTextFormat(Qt.PlainText); self.result.setWordWrap(True); row.addWidget(self.result, 1); close = QPushButton('关闭'); close.clicked.connect(self.reject); row.addWidget(close); layout.addLayout(row)
         self.populate(job)
 
@@ -80,6 +84,7 @@ class ReviewDialog(QDialog):
         for candidate in self.catalog_rows:
             self.catalog.addItem(' · '.join([str(candidate.get('source', '')), str(candidate.get('title', '')), ' / '.join(candidate.get('artists', [])), str(candidate.get('album') or '')]))
         self.catalog_use.setEnabled(bool(self.catalog_rows and rows)); self.catalog.setEnabled(bool(self.catalog_rows))
+        self.complete_release.setVisible(job.get('scene')=='fill' and job.get('review_kind')=='metadata');self.complete_release.setEnabled(bool(self.catalog_rows))
         choices = job.get('choices') or []; self.candidates.setRowCount(len(choices)); self.candidates.clearSelection()
         for i, candidate in enumerate(choices):
             media = candidate.get('media') or {}; recommended = valid and proposal.get('candidate_id') == candidate.get('candidate_id')
@@ -95,6 +100,8 @@ class ReviewDialog(QDialog):
         self.candidate_use.setEnabled(job.get('stage') == 'needs_review' and job.get('review_kind') == 'candidate' and bool(choices))
         self.research.setEnabled(waiting and (job.get('task_type') == 'search' or job.get('review_kind') == 'search' or job.get('task_type') == 'manual_search'))
         self.ai_button.setEnabled(waiting)
+        self.fallback_button.setVisible(job.get('review_kind')=='search' and job.get('scene') in ('playlist','fill'))
+        self.retry_processing.setVisible(job.get('review_kind') in ('error','interrupted') or job.get('stage') in ('failed','skipped'))
         kind = job.get('review_kind'); self.tabs.setCurrentIndex(1 if kind == 'candidate' else 2 if kind in {'search', 'error', 'interrupted'} or job.get('stage') in {'failed', 'skipped'} else 0)
 
     def use_catalog(self):
@@ -114,8 +121,12 @@ class ReviewDialog(QDialog):
         self.owner.call('review_workflow', {'job_id': self.job['job_id'], 'expected_revision': self.job.get('review_revision'), **payload}, self.saved, lambda error: self.result.setText(error) if not self.closed else None)
 
     def saved(self, result):
+        if result.get('error'):
+            self.result.setText('保存未完成：'+str(result['error']));return
         self.owner.refresh()
-        if not self.closed: self.accept()
+        if not self.closed:
+            self.accept()
+            if self.on_saved:self.on_saved()
 
     def submit_metadata(self):
         rows = [{key: self.metadata.item(i, j).text() for j, key in enumerate(('title', 'artist', 'album', 'duration'))} for i in range(self.metadata.rowCount())]
@@ -125,6 +136,13 @@ class ReviewDialog(QDialog):
         row = self.candidates.currentRow(); choices = self.job.get('choices') or []
         if row < 0 or row >= len(choices): self.result.setText('请选择需要的音源'); return
         self.send({'choice': choices[row]['candidate_id']})
+    def submit_complete_release(self):
+        index=self.catalog.currentIndex()
+        if not 0<=index<len(self.catalog_rows):return
+        candidate_id=self.catalog_rows[index].get('candidate_id')
+        if not candidate_id or not any(c.get('candidate_id')==candidate_id for c in self.job.get('catalog_choices',[])):
+            self.result.setText('此项是资料线索，尚未核实为任务中的完整发行，请选择已有目录候选');return
+        self.send({'choice':'completion_release:'+candidate_id})
 
     def submit_search(self):
         sites = [site for site, check in self.site_checks.items() if check.isEnabled() and check.isChecked()]

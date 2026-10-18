@@ -5,9 +5,21 @@ from pathlib import Path
 import runpy
 import shutil
 import sys
+import multiprocessing
+
+multiprocessing.freeze_support()
 
 import utils
 import bottle
+
+# The upstream detached launcher uses multiprocessing.spawn on macOS. Frozen
+# services must launch Chrome directly, in our owned process group, rather than
+# recursively re-executing this service while waiting for a browser PID.
+chrome_init = utils.uc.Chrome.__init__
+def managed_chrome_init(self, *args, **kwargs):
+    kwargs.setdefault('use_subprocess', True)
+    chrome_init(self, *args, **kwargs)
+utils.uc.Chrome.__init__ = managed_chrome_init
 
 root = Path(sys.executable).resolve().parent
 data = Path(os.environ['MUSICOPS_ENGINE_DATA'])

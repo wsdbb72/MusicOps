@@ -44,6 +44,9 @@ jobs:
           commit = subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip()
           if not re.fullmatch(r'\d+\.\d+\.\d+', version) or commit != os.environ['EXPECTED_COMMIT']:
               raise SystemExit('Invalid version or source commit mismatch')
+          installer = pathlib.Path('packaging/MusicOps.iss').read_text('utf-8')
+          if '#define MusicOpsVersion "'+version+'"' not in installer or 'VersionInfoVersion={#MusicOpsVersion}.0' not in installer:
+              raise SystemExit('Windows installer version does not match the app')
           with open(os.environ['GITHUB_OUTPUT'], 'a', encoding='utf-8') as stream:
               stream.write('version=' + version + '\n')
       - name: Set up pinned Go for bundled engines

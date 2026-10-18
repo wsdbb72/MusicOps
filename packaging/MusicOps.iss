@@ -5,7 +5,7 @@
 #ifndef AppIdentity
   #define AppIdentity "MusicOps.Desktop"
 #endif
-#define MusicOpsVersion "0.4.5"
+#define MusicOpsVersion "0.4.6"
 
 [Setup]
 AppId={#AppIdentity}
@@ -33,7 +33,7 @@ SolidCompression=yes
 CloseApplications=no
 RestartApplications=no
 UninstallDisplayIcon={app}\MusicOps.exe
-VersionInfoVersion=0.4.5.0
+VersionInfoVersion={#MusicOpsVersion}.0
 VersionInfoDescription=MusicOps Windows Installer
 
 [CustomMessages]

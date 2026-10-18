@@ -23,7 +23,7 @@ def main():
     env=os.environ.copy();env['QT_QPA_PLATFORM']='offscreen'
     for key in ('PYTHONPATH','PYTHONHOME','VIRTUAL_ENV'):env.pop(key,None)
     process=subprocess.Popen([str(bundle/'MusicOps.exe'),'--base',str(base),'--quit-after','20000'],cwd=bundle,env=env,creationflags=0x08000000)
-    client=WorkerClient(base);report={'version':'0.4.6','evidence':'packaged_worker_three_entry_points','external_requests':0,'checks':{}}
+    client=WorkerClient(base);report={'version':'0.4.7','evidence':'packaged_worker_three_entry_points','external_requests':0,'checks':{}}
     try:
         deadline=time.monotonic()+25
         while True:
@@ -106,6 +106,15 @@ def main():
         report['checks']['native_managed_engine_cookie']=engine.get('status')=='OK' and cookie.get('saved') is True
         solved=completed('browser_solver_preflight',{'settings':{'managed':True}})
         report['checks']['native_managed_solver']=solved['state']=='completed' and solved.get('result',{}).get('status')=='OK'
+        client.call('pause_pipeline',{})
+        try:
+            direct=client.call('test_browser_solver',{'settings':{'managed':True}})
+            report['checks']['native_solver_independent_test']=direct.get('status')=='OK'
+            qbt_check=client.call('test_qbt_connection',{})
+            report['checks']['native_qbt_independent_test']=qbt_check.get('status')=='AUTH_REQUIRED'
+        finally:client.call('resume_pipeline',{})
+        overview=client.call('list_workflows',{'view':'albums'})
+        report['checks']['native_album_overview']=overview.get('view')=='albums' and all(row.get('overview') and row.get('chain') for row in overview['jobs'])
         queue=client.call('queue_ai_reviews',{'all':True})
         report['checks']['native_durable_ai_registration']=queue.get('status')=='OK' and type(queue.get('registered')) is int
         process.wait(30);report['checks']['gui_exit_zero']=process.returncode==0

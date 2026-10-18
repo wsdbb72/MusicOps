@@ -73,7 +73,7 @@ def handle_request(service, req, key):
             return previous['response']
         if command not in READ_COMMANDS | QUEUED_COMMANDS:
             raise RuntimeError('REQUEST_RESULT_UNKNOWN：先读取当前状态，不盲重发')
-    if command in READ_COMMANDS or command=='engine_control':
+    if command in READ_COMMANDS or command in ('engine_control','test_browser_solver','test_qbt_connection'):
         # Polling is read-only and must return current state. Persisting every
         # full status response would grow the database continuously while idle.
         try:
@@ -102,7 +102,7 @@ def serve_connection(service,conn,key,mutation_lock,address,family):
                 req=json.loads(conn.recv_bytes(MAX_REQUEST_BYTES))
                 request_id=req.get('request_id') if isinstance(req,dict) else None
                 command=req.get('command') if isinstance(req,dict) else None
-                if command in READ_COMMANDS or command=='engine_control':response=handle_request(service,req,key)
+                if command in READ_COMMANDS or command in ('engine_control','test_browser_solver','test_qbt_connection'):response=handle_request(service,req,key)
                 else:
                     # Preserve request-id atomicity for simultaneous mutations.
                     with mutation_lock:response=handle_request(service,req,key)

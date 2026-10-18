@@ -93,9 +93,11 @@ def recover(service):
 
 
 def finish(service, task):
-    key = task.get('args', {}).get('_review_queue_id')
-    entry = service.store.get('evidence', key) if key else None
-    if entry:
-        job=service.store.get('evidence','workflow:'+entry['job_id'])
-        if job:service.store.put('evidence','workflow:'+entry['job_id'],{**job,'ai_review_state':task['state']})
-        service.store.put('evidence', key, {**entry, 'state': task['state'], 'finished_at': utcnow()})
+    # A late AI result must not overwrite a simultaneous delete/cancel/pause.
+    with service.mutex:
+        key = task.get('args', {}).get('_review_queue_id')
+        entry = service.store.get('evidence', key) if key else None
+        if entry:
+            job=service.store.get('evidence','workflow:'+entry['job_id'])
+            if job:service.store.put('evidence','workflow:'+entry['job_id'],{**job,'ai_review_state':task['state']})
+            service.store.put('evidence', key, {**entry, 'state': task['state'], 'finished_at': utcnow()})

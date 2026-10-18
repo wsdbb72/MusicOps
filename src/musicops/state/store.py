@@ -13,6 +13,7 @@ class StateStore:
         self.path=Path(path); self.path.parent.mkdir(parents=True,exist_ok=True)
         self.run_id=str(uuid.uuid4())
         with self.connection() as c:
+            c.execute('PRAGMA journal_mode=WAL')
             if c.execute('PRAGMA integrity_check').fetchone()[0]!='ok': raise RuntimeError('STATE_CORRUPT')
             version=c.execute('PRAGMA user_version').fetchone()[0]
             if version>1: raise RuntimeError('SCHEMA_TOO_NEW')
@@ -27,15 +28,18 @@ class StateStore:
             c.execute("CREATE INDEX IF NOT EXISTS task_state_queue ON tasks(json_extract(payload,'$.state'),updated_at,id)")
             c.execute("CREATE INDEX IF NOT EXISTS workflow_summary ON evidence(coalesce(json_extract(payload,'$.hidden'),0),json_extract(payload,'$.stage'),coalesce(json_extract(payload,'$.job_kind'),'album'),coalesce(json_extract(payload,'$.paused'),0)) WHERE id LIKE 'workflow:%'")
             c.execute("CREATE INDEX IF NOT EXISTS workflow_page ON evidence(coalesce(json_extract(payload,'$.hidden'),0),coalesce(json_extract(payload,'$.created_at'),updated_at) DESC,id) WHERE id LIKE 'workflow:%'")
+            c.execute("CREATE INDEX IF NOT EXISTS ai_review_job ON evidence(json_extract(payload,'$.job_id')) WHERE id LIKE 'ai-review:%'")
+            c.execute("CREATE INDEX IF NOT EXISTS ai_review_pending ON evidence(json_extract(payload,'$.state'),updated_at,id) WHERE id LIKE 'ai-review:%'")
             c.execute('CREATE TABLE IF NOT EXISTS library_matches (root_key TEXT NOT NULL,file_id TEXT NOT NULL,title_key TEXT NOT NULL,artist_key TEXT NOT NULL,album_key TEXT NOT NULL,duration REAL NOT NULL,album_id TEXT NOT NULL,PRIMARY KEY(root_key,file_id))')
             c.execute('CREATE INDEX IF NOT EXISTS library_match_identity ON library_matches(root_key,title_key,artist_key,album_key)')
             c.execute('CREATE TABLE IF NOT EXISTS library_albums (root_key TEXT NOT NULL,album_id TEXT NOT NULL,payload TEXT NOT NULL,PRIMARY KEY(root_key,album_id))')
             c.execute('PRAGMA user_version=1')
     @contextlib.contextmanager
     def connection(self):
-        c=sqlite3.connect(self.path,timeout=15); c.row_factory=sqlite3.Row
-        c.execute('PRAGMA journal_mode=WAL'); c.execute('PRAGMA synchronous=FULL'); c.execute('PRAGMA busy_timeout=15000')
+        c=sqlite3.connect(self.path,timeout=15)
         try:
+            c.row_factory=sqlite3.Row
+            c.execute('PRAGMA busy_timeout=15000'); c.execute('PRAGMA synchronous=FULL')
             yield c; c.commit()
         except BaseException: c.rollback(); raise
         finally: c.close()

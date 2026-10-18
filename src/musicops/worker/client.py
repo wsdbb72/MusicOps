@@ -46,7 +46,8 @@ class WorkerClient:
             raise
         with conn:
             conn.send_bytes(encoded)
-            if not conn.poll(self.timeout):raise WorkerConnectionError('后台响应超时；请先读取任务/配置状态，勿盲重发执行请求')
+            timeout=max(self.timeout,140) if command=='test_browser_solver' else max(self.timeout,90) if command=='test_qbt_connection' else self.timeout
+            if not conn.poll(timeout):raise WorkerConnectionError('后台响应超时；请先读取任务/配置状态，勿盲重发执行请求')
             data=json.loads(conn.recv_bytes(MAX_RESPONSE_BYTES))
         if not isinstance(data,dict) or 'ok' not in data:raise WorkerConnectionError('IPC_INVALID_RESPONSE')
         if not data['ok']: raise WorkerRequestError(data.get('error','IPC_ERROR'),data.get('error_class','IPC_ERROR'),data.get('request_id'))

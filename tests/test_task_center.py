@@ -124,7 +124,7 @@ def test_ai_assistance_never_sends_gui_details_or_private_paths(app,tmp_path):
 def test_paused_counts_and_background_activity_do_not_claim_work_is_running_or_completed(app,tmp_path):
     window,client=window_for(tmp_path);window.show_jobs({'jobs':[job('a',paused=True),job('b','search',paused=True)],'total':2,'active':0,'paused_count':2,'total_active':2,'finished':0})
     window.tasks['pending-callback']=lambda _:None;window.update_activity()
-    assert '运行 0 · 暂停 2 · 完成 0' in window.job_counts.text() and window.activity.text()=='●  已暂停 2 项' and window.busy_bar.maximum()==100
+    assert '待处理 0 · 暂停 2 · 完成 0' in window.job_counts.text() and window.activity.text()=='●  已暂停 2 项' and window.busy_bar.maximum()==100
     result=client.call('get_status',{});result['paused']=True;window.status(result);window.update_activity()
     assert window.activity.text()=='●  后台已暂停' and 'pending-callback' in window.tasks
     window.tasks.clear();wait(app,window);window.close()

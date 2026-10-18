@@ -34,7 +34,7 @@ def read_tag_fields(path) -> dict:
         result = {field:_values((tags or {}).get(field,[])) for field in SUPPORTED}
     return result
 
-def plan_tag_changes(path, changes, locks=[]) -> dict:
+def plan_tag_changes(path, changes, locks=()) -> dict:
     path = Path(path)
     fields = read_tag_fields(path)
     rows = []

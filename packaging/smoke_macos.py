@@ -155,6 +155,15 @@ def main():
         checks['native_managed_engine_cookie']=engine.get('status')=='OK' and cookie.get('saved') is True
         solved=completed('browser_solver_preflight',{'settings':{'managed':True}})
         checks['native_managed_solver']=solved['state']=='completed' and solved.get('result',{}).get('status')=='OK'
+        client.call('pause_pipeline',{})
+        try:
+            direct=client.call('test_browser_solver',{'settings':{'managed':True}})
+            checks['native_solver_independent_test']=direct.get('status')=='OK'
+            qbt_check=client.call('test_qbt_connection',{})
+            checks['native_qbt_independent_test']=qbt_check.get('status')=='AUTH_REQUIRED'
+        finally:client.call('resume_pipeline',{})
+        overview=client.call('list_workflows',{'view':'albums'})
+        checks['native_album_overview']=overview.get('view')=='albums' and all(row.get('overview') and row.get('chain') for row in overview['jobs'])
         queue=client.call('queue_ai_reviews',{'all':True})
         checks['native_durable_ai_registration']=queue.get('status')=='OK' and type(queue.get('registered')) is int
         phase='configuration_write';result=client.call('save_setup',{'workflow':{'fl_unlimited':True,'fl_per_batch':2}})

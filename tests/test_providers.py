@@ -453,7 +453,11 @@ def test_V19_golden_synthetic_NCM_fixture(tmp_path):
     source = fixtures / "synthetic.ncm"
     manifest = json.loads((fixtures / "synthetic-manifest.json").read_text(encoding="utf-8"))
     assert hashlib.sha256(source.read_bytes()).hexdigest() == manifest["ncm_sha256"]
-    result = decrypt_ncm(source, tmp_path / "golden.wav")
+    # The checkout may be reached through a Windows workspace junction. Keep
+    # production reparse protection intact and stage the verified test bytes.
+    staged = tmp_path / 'synthetic.ncm'
+    staged.write_bytes(source.read_bytes())
+    result = decrypt_ncm(staged, tmp_path / "golden.wav")
     assert result["status"] == "REQUIRES_VALIDATION"
     assert result["audio_payload_sha256"] == manifest["audio_sha256"]
     assert result["metadata"]["musicName"] == "Synthetic"

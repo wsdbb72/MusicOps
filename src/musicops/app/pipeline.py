@@ -74,10 +74,19 @@ class Workflows:
                     from musicops.app.review_queue import register
                     register(self.s,job)
             return job
-    def list(self,offset=0,state='all',selection=False):
+    def list(self,offset=0,state='all',selection=False,view='steps',query=''):
         if type(offset) is not int or offset<0:raise ValueError('任务分页参数无效')
+        if not isinstance(query,str) or len(query)>200:raise ValueError('任务关键词最多 200 字符')
+        if view=='albums':
+            from musicops.app.task_overview import listing
+            return listing(self,offset,state,selection,query)
+        if view!='steps':raise ValueError('任务视图无效')
         from musicops.app.task_filters import predicate
         clause,parameters=predicate(state)
+        if query.strip():
+            escaped=query.strip().replace('\\','\\\\').replace('%','\\%').replace('_','\\_')
+            clause+=" AND coalesce(json_extract(payload,'$.label'),'') LIKE ? ESCAPE '\\'"
+            parameters=(*parameters,'%'+escaped+'%')
         with self.store.connection() as c:
             if selection:
                 selected=c.execute("SELECT json_extract(payload,'$.job_id') FROM evidence WHERE id LIKE 'workflow:%' AND coalesce(json_extract(payload,'$.hidden'),0)=0 AND coalesce(json_extract(payload,'$.job_kind'),'album') NOT IN ('batch','activity')"+clause+" ORDER BY coalesce(json_extract(payload,'$.created_at'),updated_at),id",parameters).fetchall()
@@ -86,22 +95,23 @@ class Workflows:
             counts=c.execute("SELECT json_extract(payload,'$.stage'),coalesce(json_extract(payload,'$.job_kind'),'album'),COUNT(*),coalesce(json_extract(payload,'$.paused'),0) FROM evidence WHERE id LIKE 'workflow:%' AND coalesce(json_extract(payload,'$.hidden'),0)=0 GROUP BY 1,2,4").fetchall()
             token_prompts=[r[0] for r in c.execute("SELECT json_extract(payload,'$.job_id') FROM evidence WHERE id LIKE 'workflow:%' AND coalesce(json_extract(payload,'$.hidden'),0)=0 AND json_extract(payload,'$.stage')='needs_review' AND json_extract(payload,'$.review_kind')='token' ORDER BY updated_at,id LIMIT 100").fetchall()]
             rows=c.execute("SELECT json_remove(payload,'$.config','$.targets','$.old_files','$.prepared','$.choices','$.outcomes','$.publication_plan','$.catalog_choices','$.lookup_links','$.engine_paths') FROM evidence WHERE id LIKE 'workflow:%' AND coalesce(json_extract(payload,'$.hidden'),0)=0"+clause+" ORDER BY coalesce(json_extract(payload,'$.created_at'),updated_at) DESC,id LIMIT 200 OFFSET ?",(*parameters,offset)).fetchall()
-        public=[]
-        for j in [json.loads(r[0]) for r in rows]:
-            row={k:j.get(k) for k in ('job_id','job_kind','task_type','scene','stage','label','progress','message','detail','review_kind','batch_id','scanned_count','cached_count','current_directory','album_count','selected_target_count','target_count','matched_count','identification_job_id','search_job_id','processing_job_id','progress_phase','ai_fallback','ai_assistance','retry_job_id','retry_count','ai_review_state')}
-            if j.get('ai_review_state') in ('pending','running'):row['message']='AI 辅助等待后台分批核对' if j['ai_review_state']=='pending' else 'AI 正在核对身份、搜索或恢复方案'
-            if j.get('ai_assistance'):row['ai_assistance']={k:j['ai_assistance'].get(k) for k in ('status','kind','message')}
-            pending=bool(j.get('paused') and j['stage']=='running')
-            if j.get('paused') and j.get('job_kind')=='batch' and j['stage']=='preparing':
-                task=self.store.get('tasks',j.get('start_task_id'))
-                pending=bool(task and task['state']=='running')
-            row.update(task_group=j.get('task_group') or ('identify' if j.get('job_kind')=='batch' or j['stage'] in ('identifying','snapshotting','metadata','enrich','planning') else 'search' if j['stage'] in ('searching','requesting') else 'process'),paused=bool(j.get('paused')),pause_pending=pending)
-            public.append(row)
+        public=[self.public_row(json.loads(r[0])) for r in rows]
         return {'jobs':public,'token_prompts':token_prompts,'total':filtered,'all_total':sum(r[2] for r in counts),'offset':offset,'active':sum(r[2] for r in counts if r[0] not in TERMINAL and not r[3]),'paused_count':sum(r[2] for r in counts if r[0] not in TERMINAL and r[3]),'total_active':sum(r[2] for r in counts if r[0] not in TERMINAL),'finished':sum(r[2] for r in counts if r[0]=='completed' and r[1]!='batch'),'preparing_count':sum(r[2] for r in counts if r[1]=='batch' and r[0] not in TERMINAL)}
+    def public_row(self,j):
+        row={k:j.get(k) for k in ('job_id','job_kind','task_type','scene','stage','label','progress','message','detail','review_kind','batch_id','scanned_count','cached_count','current_directory','album_count','selected_target_count','target_count','matched_count','identification_job_id','search_job_id','processing_job_id','progress_phase','ai_fallback','ai_assistance','retry_job_id','retry_count','ai_review_state')}
+        if j.get('ai_review_state') in ('pending','running'):row['ai_review_message']='AI 辅助等待后台分批核对' if j['ai_review_state']=='pending' else 'AI 正在核对身份、搜索或恢复方案'
+        if j.get('message')=='处理未完成：KeyError' and j.get('resume_stage')=='fallback':row['message']='历史回退任务配置不完整；可重试以更新配置后继续'
+        if j.get('ai_assistance'):row['ai_assistance']={k:j['ai_assistance'].get(k) for k in ('status','kind','message')}
+        pending=bool(j.get('paused') and j['stage']=='running')
+        if j.get('paused') and j.get('job_kind')=='batch' and j['stage']=='preparing':
+            task=self.store.get('tasks',j.get('start_task_id'))
+            pending=bool(task and task['state']=='running')
+        row.update(task_group=j.get('task_group') or ('identify' if j.get('job_kind')=='batch' or j['stage'] in ('identifying','snapshotting','metadata','enrich','planning') else 'search' if j['stage'] in ('searching','requesting') else 'process'),paused=bool(j.get('paused')),pause_pending=pending)
+        return row
     def next_job(self):
         import time
         with self.store.connection() as c:
-            row=c.execute("SELECT payload FROM evidence AS current WHERE id LIKE 'workflow:%' AND coalesce(json_extract(payload,'$.hidden'),0)=0 AND coalesce(json_extract(payload,'$.job_kind'),'album') NOT IN ('batch','activity') AND coalesce(json_extract(payload,'$.paused'),0)=0 AND json_extract(payload,'$.stage') NOT IN ('completed','failed','needs_review','cancelled','skipped','restored') AND (json_extract(payload,'$.identification_job_id') IS NULL OR EXISTS (SELECT 1 FROM evidence AS parent WHERE parent.id='workflow:'||json_extract(current.payload,'$.identification_job_id') AND json_extract(parent.payload,'$.stage')='completed')) AND (json_extract(payload,'$.search_job_id') IS NULL OR coalesce(json_extract(payload,'$.task_type'),'')!='album' OR EXISTS (SELECT 1 FROM evidence AS searched WHERE searched.id='workflow:'||json_extract(current.payload,'$.search_job_id') AND json_extract(searched.payload,'$.stage')='completed')) AND coalesce(json_extract(payload,'$.next_poll'),0)<=? ORDER BY updated_at,id LIMIT 1",(time.time(),)).fetchone()
+            row=c.execute("SELECT payload FROM evidence AS current WHERE id LIKE 'workflow:%' AND coalesce(json_extract(payload,'$.hidden'),0)=0 AND coalesce(json_extract(payload,'$.job_kind'),'album') NOT IN ('batch','activity') AND coalesce(json_extract(payload,'$.paused'),0)=0 AND json_extract(payload,'$.stage') NOT IN ('completed','failed','needs_review','cancelled','skipped','restored','running') AND (json_extract(payload,'$.identification_job_id') IS NULL OR EXISTS (SELECT 1 FROM evidence AS parent WHERE parent.id='workflow:'||json_extract(current.payload,'$.identification_job_id') AND json_extract(parent.payload,'$.stage')='completed')) AND (json_extract(payload,'$.search_job_id') IS NULL OR coalesce(json_extract(payload,'$.task_type'),'')!='album' OR EXISTS (SELECT 1 FROM evidence AS searched WHERE searched.id='workflow:'||json_extract(current.payload,'$.search_job_id') AND json_extract(searched.payload,'$.stage')='completed')) AND coalesce(json_extract(payload,'$.next_poll'),0)<=? ORDER BY CASE json_extract(payload,'$.stage') WHEN 'notifying' THEN 0 WHEN 'validating' THEN 0 WHEN 'metadata' THEN 1 WHEN 'enrich' THEN 1 WHEN 'downloading' THEN 2 WHEN 'requesting' THEN 3 WHEN 'fallback' THEN 3 WHEN 'searching' THEN 4 ELSE 5 END,updated_at,id LIMIT 1",(time.time(),)).fetchone()
         return json.loads(row[0]) if row else None
     def queue(self,args,cfg,task_id=None):
         """Expose the preparation before the serial worker begins any filesystem IO."""
@@ -298,6 +308,10 @@ class Workflows:
             if not job:return {'status':'OK','idle':True}
             stage=job['stage'];self.put(job,stage='running',resume_stage=stage)
         try:
+            # Snapshot defaults evolve independently of the current profile.
+            from musicops.config.schema import upgrade_config
+            if not isinstance(job.get('config'),dict):raise PolicyBlocked('历史任务缺少配置快照，请重新创建本批次')
+            job['config']=upgrade_config(job['config'],self.s.base)
             self.checkpoint(job,stage)
             getattr(self,'_'+stage)(job)
         except Exception as exc:

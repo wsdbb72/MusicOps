@@ -28,7 +28,7 @@ def readonly_preflight(config,secret_getter):
         creds=json.loads(raw)
         if not isinstance(creds,dict) or not isinstance(creds.get('username'),str) or not isinstance(creds.get('password'),str):return _result('AUTH_FAILED',reason='qBittorrent凭据格式无效')
         base=config['base_url'].rstrip('/')+'/api/v2/'
-        with httpx.Client(follow_redirects=False,verify=True,timeout=15) as client:
+        with httpx.Client(follow_redirects=False,verify=True,trust_env=False,timeout=15) as client:
             login=client.post(base+'auth/login',data={k:creds[k] for k in ('username','password')},headers={'Referer':config['base_url']})
             if not (login.status_code==204 or (login.status_code==200 and login.text.strip()=='Ok.')):return _result('AUTH_FAILED',reason='qBittorrent登录失败')
             responses=[client.get(base+endpoint) for endpoint in ('app/version','app/webapiVersion','app/preferences','torrents/info')]

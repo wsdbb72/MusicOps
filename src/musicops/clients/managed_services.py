@@ -1,5 +1,6 @@
 """Private, owned loopback engines. Credentials are kept in the MusicOps vault."""
 import atexit
+from contextlib import ExitStack
 import base64
 import json
 import os
@@ -38,7 +39,7 @@ class ManagedServices:
         self.checkpoint = checkpoint
         self.root = Path(root) if root else engine_root()
         self.diagnostic_output = diagnostic_output
-        self.lock = threading.RLock()
+        self.start_locks = {name:threading.RLock() for name in ('go-music-dl','flaresolverr')}
         self.running = {}
         self.owners = {}
         self.sessions = {}
@@ -47,7 +48,10 @@ class ManagedServices:
         atexit.register(self.close)
 
     def close(self):
-        with self.lock:
+        # Same-engine starts are serialized; unrelated engines can start in
+        # parallel. Closing takes both locks in a fixed order.
+        with ExitStack() as locks:
+            for lock in self.start_locks.values():locks.enter_context(lock)
             for owner in self.owners.values(): owner.close()
             self.owners.clear()
             self.running.clear()
@@ -55,7 +59,7 @@ class ManagedServices:
     def ensure(self, name, tools=None, *, restart_if_changed=False):
         if name not in ('go-music-dl', 'flaresolverr'):
             raise ValueError('未知内置服务')
-        with self.lock:
+        with self.start_locks[name]:
             tools=dict(tools if tools is not None else self.default_tools())
             previous = self.running.get(name)
             if previous and previous[0].poll() is None:

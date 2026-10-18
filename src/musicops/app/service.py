@@ -22,7 +22,7 @@ class AppService:
         self.offline=offline; self.store=StateStore(self.base/'state'/'musicops.sqlite')
         self.config=ConfigManager(self.store,self.base,initial_offline=offline); self.vault=Vault(self.base)
         from musicops.clients.managed_services import ManagedServices
-        self.engines=ManagedServices(self.base,self.vault,lambda phase:self._checkpoint(phase) if threading.current_thread() is self.thread else None)
+        self.engines=ManagedServices(self.base,self.vault,self._managed_checkpoint)
         self.engines.default_tools=lambda:self.config.current()['values']['paths']['tools']
         self.paused=False; self.stop=threading.Event(); self.mutex=threading.RLock()
         self.active=None; self.thread=threading.Thread(target=self._loop,daemon=True,name='MusicOpsQueue')
@@ -59,7 +59,7 @@ class AppService:
             if parent.exists() and (parent.is_symlink() or getattr(parent,'is_junction',lambda:False)()): raise PolicyBlocked('拒绝重解析路径')
         return p
     def dispatch(self,command,payload=None,request_id=None):
-        if command=='engine_control':return self._execute(command,payload or {},self.config.current()['values'])
+        if command in ('engine_control','test_browser_solver','test_qbt_connection'):return self._execute(command,payload or {},self.config.current()['values'])
         with self.mutex:return self._dispatch(command,payload,request_id)
     def _dispatch(self,command,payload=None,request_id=None):
         payload=payload or {}
@@ -69,7 +69,7 @@ class AppService:
         if command=='list_library_albums':
             from musicops.library.catalog import AlbumCatalog
             return AlbumCatalog(self.store).albums(self.config.current()['values']['paths']['library'],payload.get('offset',0))
-        if command=='list_workflows':return self.workflows.list(payload.get('offset',0),payload.get('state','all'),payload.get('selection',False))
+        if command=='list_workflows':return self.workflows.list(payload.get('offset',0),payload.get('state','all'),payload.get('selection',False),payload.get('view','steps'),payload.get('query',''))
         if command=='get_workflow':
             job=self.store.get('evidence','workflow:'+payload['job_id'])
             if not job or job.get('hidden'):raise ValueError('任务不存在或已删除')
@@ -96,6 +96,8 @@ class AppService:
                 current=self.config.save(values,current['version'])
             return {'config':current,'mode':'demo' if desired else 'online','network_used':False}
         if command in ('attach','get_status'):
+            active_task=self.store.get('tasks',self.active) if self.active else None
+            execution={key:active_task.get(key) for key in ('task_id','command','state','started_at','safe_phase')} if active_task else None
             if payload.get('compact'):
                 with self.store.connection() as c:rows=c.execute("SELECT json_remove(payload,'$.args','$.config_snapshot','$.result') FROM tasks ORDER BY updated_at DESC,id LIMIT 200").fetchall()
                 tasks=[json.loads(r[0]) for r in rows]
@@ -107,7 +109,7 @@ class AppService:
                 file_rows=c.execute('SELECT payload FROM library_files ORDER BY id LIMIT ?',(0 if payload.get('compact') else 2000,)).fetchall()
             from musicops.library.catalog import AlbumCatalog
             local_catalog=AlbumCatalog(self.store).summary(config['values']['paths']['library'])
-            return dict(local_catalog=local_catalog,schema_version=1,base=str(self.base),offline=offline,paused=self.paused,active=self.active,config=config,tasks=tasks,counts=counts,provider_status={p:('连接未配置' if offline else '已启用' if config['values']['providers'][p]['enabled'] else '来源已停用') for p in config['values']['providers']},roon=self.store.get('evidence','roon-preflight') or 'pending',next_schedule=self.next_schedule(),secret_refs=self.vault.list_refs(),files=[json.loads(r[0]) for r in file_rows],library_file_count=file_count,library_files_truncated=file_count>len(file_rows),candidates=[] if payload.get('compact') else self.store.list('candidates')[-200:],transactions=[] if payload.get('compact') else self.store.list('transactions'),reviews=[] if payload.get('compact') else self.store.list('match_decisions'))
+            return dict(execution=execution,local_catalog=local_catalog,schema_version=1,base=str(self.base),offline=offline,paused=self.paused,active=self.active,config=config,tasks=tasks,counts=counts,provider_status={p:('连接未配置' if offline else '已启用' if config['values']['providers'][p]['enabled'] else '来源已停用') for p in config['values']['providers']},roon=self.store.get('evidence','roon-preflight') or 'pending',next_schedule=self.next_schedule(),secret_refs=self.vault.list_refs(),files=[json.loads(r[0]) for r in file_rows],library_file_count=file_count,library_files_truncated=file_count>len(file_rows),candidates=[] if payload.get('compact') else self.store.list('candidates')[-200:],transactions=[] if payload.get('compact') else self.store.list('transactions'),reviews=[] if payload.get('compact') else self.store.list('match_decisions'))
         if command=='list_library_files':
             offset=payload.get('offset',0);limit=payload.get('limit',200);query=payload.get('query','')
             if type(offset) is not int or offset<0 or type(limit) is not int or not 1<=limit<=500 or not isinstance(query,str) or len(query)>300:raise ValueError('索引分页参数无效')
@@ -272,6 +274,9 @@ class AppService:
         if state in ('CONFLICT','RECOVERY_REQUIRED','REQUEST_UNKNOWN','ADD_UNKNOWN','START_UNKNOWN'):return 'recovery_required'
         if state in ('NETWORK_ERROR','TRANSIENT_ERROR','PARSE_ERROR','INVALID_PAYLOAD','VALIDATION_FAILED','FAILED','corrupt','unsupported','timeout','tool_error','changed_during_check'):return 'failed'
         return 'completed'
+    def _managed_checkpoint(self,phase):
+        if self.stop.is_set():raise TaskCancelled('后台正在退出，请在更新完成后重试连接')
+        if threading.current_thread() is self.thread:self._checkpoint(phase)
     def _checkpoint(self,phase):
         if not self.active or getattr(self,'_safe_finalizing',False):return
         marked=False
@@ -299,14 +304,14 @@ class AppService:
             if action=='start':
                 self.engines.ensure('go-music-dl',cfg['paths']['tools']);return {'status':'OK','message':'内置引擎已启动'}
             raise ValueError('未知引擎操作')
-        if command=='browser_solver_preflight':
+        if command in ('browser_solver_preflight','test_browser_solver'):
             if cfg['offline']:raise PolicyBlocked('请先完成连接设置')
             from musicops.clients.browser_solver import FlareSolverrClient,validate_solver
             settings={**cfg['browser_solver'],**args.get('settings',{})}
             validate_solver(settings)
             if settings.get('managed'):
                 base,token=self.engines.ensure('flaresolverr');settings.update(base_url=base,_managed_token=token)
-            return FlareSolverrClient(settings,checkpoint=self._checkpoint).check()
+            return FlareSolverrClient(settings,checkpoint=self._managed_checkpoint).check()
         if command=='assist_workflows':
             from musicops.app.assistance import assist_workflows
             return assist_workflows(self,args,cfg)
@@ -339,7 +344,7 @@ class AppService:
             result=self._validator(cfg).validate(path);record['validation']=result;record['validation_id']=result.get('validation_id')
             self.store.put('library_files',record['file_id'],record)
             return {'file':record,'validation':result,'music_writes':0}
-        if command=='qbt_preflight':
+        if command in ('qbt_preflight','test_qbt_connection'):
             if cfg['offline']:raise PolicyBlocked('离线模式不访问真实qBittorrent')
             from musicops.clients.qbt import readonly_preflight
             return readonly_preflight(cfg['qbt'],self.vault.get)

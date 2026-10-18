@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "musicops"
-version = "0.4.5"
+version = "0.4.6"
 description = "MusicOps desktop music library manager for Windows and macOS"
 requires-python = ">=3.12"
 dependencies = [

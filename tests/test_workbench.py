@@ -35,7 +35,8 @@ def test_product_has_three_workflows_and_no_mode_or_internal_credential_fields(a
 
 def test_skippable_wizard_retains_blank_saved_secrets_and_optional_red(app,tmp_path):
     client=Client(tmp_path);window=Workbench(tmp_path,client,autostart=False);window.config=client.config;window.available_refs=['vault://qbt/local/credentials'];wizard=SetupWizard(window)
-    assert len(wizard.pageIds())==8 and isinstance(wizard.page(0),__import__('PySide6.QtWidgets',fromlist=['QWizardPage']).QWizardPage)
+    assert len(wizard.pageIds())==9 and isinstance(wizard.page(0),__import__('PySide6.QtWidgets',fromlist=['QWizardPage']).QWizardPage)
+    assert 'FlareSolverr' in wizard.page(wizard.solver_page_id).title()
     assert not wizard.streaming_enabled.isChecked() and wizard.streaming_cookie.text()==''
     assert not wizard.site_fields['redacted'][0].isChecked()
     assert wizard.qbt_pass.text()=='' and wizard.ai_key.text()=='' and wizard.lyric_key.text()==''

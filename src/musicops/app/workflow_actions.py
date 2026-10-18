@@ -48,7 +48,7 @@ def remove(workflows, job):
     return {'removed_job_ids': [r['job_id'] for r in rows], 'affected_count': len(rows), 'message': '已移除任务记录及后续任务；音乐文件、下载与做种保留'}
 
 
-def retry(workflows, job, *, query=None, sites=None, allow_review_search=False):
+def retry(workflows, job, *, query=None, sites=None, allow_review_search=False,allow_legacy=False):
     if job.get('hidden'):
         raise PolicyBlocked('任务已删除')
     if job['stage'] not in {'failed', 'needs_review', 'skipped'}:
@@ -79,9 +79,18 @@ def retry(workflows, job, *, query=None, sites=None, allow_review_search=False):
     kind = job.get('review_kind')
     if kind in {'metadata', 'candidate', 'numbering', 'cover', 'edition', 'locks', 'resources'} and not (allow_review_search and job.get('task_type')=='search' and kind=='candidate'):
         raise PolicyBlocked('此任务需要选择或补充资料，请打开核对窗口')
-    if job.get('legacy_batch_requires_review'):
+    if job.get('legacy_batch_requires_review') and not allow_legacy:
         raise PolicyBlocked('旧版队列请从对应入口重新创建，避免重放历史下载')
     stage = 'searching' if job.get('task_type') == 'search' or kind == 'search' else job.get('resume_stage')
+    if stage=='running' and allow_legacy:
+        # Old versions overwrote the actual checkpoint with the UI-only state.
+        # Only an explicit Continue action may recover such records.
+        if job.get('selected'):
+            stage='downloading' if workflows.store.get('download_tasks','qbt:'+job['job_id']) else 'requesting'
+        elif job.get('prepared'):stage='validating'
+        elif job.get('scene')=='playlist' and job.get('targets'):stage='identifying'
+        elif job.get('scene') in ('upgrade','fill') and job.get('old_files'):stage='snapshotting'
+        elif job.get('scene')=='complete' and job.get('old_files'):stage='metadata'
     if not stage and job.get('task_type') == 'identification':
         stage = 'identifying' if job['scene'] == 'playlist' else 'snapshotting'
     if stage not in RETRY_STAGES:
@@ -90,6 +99,7 @@ def retry(workflows, job, *, query=None, sites=None, allow_review_search=False):
     changes = dict(config=cfg, stage=stage, paused=False, next_poll=0,
                    review_kind=None, detail='', error_class=None, ai_assistance=None,
                    retry_count=int(job.get('retry_count', 0)) + 1, message='已重新排队，先核对既有状态后重试')
+    if allow_legacy:changes.update(legacy_batch_requires_review=False)
     if stage == 'searching':
         changes.update(choices=[], outcomes={}, search_summary={}, ai_search_attempted=False,progress=0)
         if query is not None:

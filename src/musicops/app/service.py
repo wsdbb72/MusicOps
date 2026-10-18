@@ -104,10 +104,10 @@ class AppService:
             config=self.config.current();offline=config['values']['offline']
             with self.store.connection() as c:
                 file_count=c.execute('SELECT COUNT(*) FROM library_files').fetchone()[0]
-                file_rows=c.execute('SELECT payload FROM library_files ORDER BY id LIMIT ?',(500 if payload.get('compact') else 2000,)).fetchall()
+                file_rows=c.execute('SELECT payload FROM library_files ORDER BY id LIMIT ?',(0 if payload.get('compact') else 2000,)).fetchall()
             from musicops.library.catalog import AlbumCatalog
             local_catalog=AlbumCatalog(self.store).summary(config['values']['paths']['library'])
-            return dict(local_catalog=local_catalog,schema_version=1,base=str(self.base),offline=offline,paused=self.paused,active=self.active,config=config,tasks=tasks,counts=counts,provider_status={p:('连接未配置' if offline else '已启用' if config['values']['providers'][p]['enabled'] else '来源已停用') for p in config['values']['providers']},roon=self.store.get('evidence','roon-preflight') or 'pending',next_schedule=self.next_schedule(),secret_refs=self.vault.list_refs(),files=[json.loads(r[0]) for r in file_rows],library_file_count=file_count,library_files_truncated=file_count>len(file_rows),candidates=self.store.list('candidates')[-200:],transactions=self.store.list('transactions'),reviews=self.store.list('match_decisions'))
+            return dict(local_catalog=local_catalog,schema_version=1,base=str(self.base),offline=offline,paused=self.paused,active=self.active,config=config,tasks=tasks,counts=counts,provider_status={p:('连接未配置' if offline else '已启用' if config['values']['providers'][p]['enabled'] else '来源已停用') for p in config['values']['providers']},roon=self.store.get('evidence','roon-preflight') or 'pending',next_schedule=self.next_schedule(),secret_refs=self.vault.list_refs(),files=[json.loads(r[0]) for r in file_rows],library_file_count=file_count,library_files_truncated=file_count>len(file_rows),candidates=[] if payload.get('compact') else self.store.list('candidates')[-200:],transactions=[] if payload.get('compact') else self.store.list('transactions'),reviews=[] if payload.get('compact') else self.store.list('match_decisions'))
         if command=='list_library_files':
             offset=payload.get('offset',0);limit=payload.get('limit',200);query=payload.get('query','')
             if type(offset) is not int or offset<0 or type(limit) is not int or not 1<=limit<=500 or not isinstance(query,str) or len(query)>300:raise ValueError('索引分页参数无效')
@@ -201,6 +201,30 @@ class AppService:
         self.store.put('tasks',task_id,task); self.store.event('task_queued',{'command':command,'config_version':cfg['version']},task_id)
         return {'accepted':True,'task_id':task_id,'state':'queued',**({'job_id':batch['job_id'],'batch_id':batch['batch_id']} if batch else {})}
     def _loop(self):
+        # Finalization/scheduler errors must not silently kill the only queue
+        # thread while leaving a healthy-looking IPC server and active task.
+        while not self.stop.is_set():
+            try:self._run_loop()
+            except Exception as exc:
+                import traceback
+                active=self.active
+                frames=[{'file':Path(f.filename).name,'line':f.lineno,'function':f.name} for f in traceback.extract_tb(exc.__traceback__)[-8:]]
+                try:
+                    task=self.store.get('tasks',active) if active else None
+                    if task and task.get('state') in ('running','paused'):
+                        task.update(state='recovery_required',error_class=type(exc).__name__,error='后台阶段收尾异常；已保留记录，请核对后继续',result=None,finished_at=utcnow())
+                        self.store.put('tasks',active,task)
+                        with self.store.connection() as connection:
+                            rows=connection.execute("SELECT id,payload FROM evidence WHERE id=? OR (?='advance_workflows' AND id LIKE 'workflow:%' AND json_extract(payload,'$.stage')='running')",('workflow:activity:'+active,task.get('command'))).fetchall()
+                        for row in rows:
+                            job=json.loads(row['payload'])
+                            if job.get('stage') in ('queued','running'):
+                                job.update(stage='needs_review',review_kind='interrupted',error_class=type(exc).__name__,message='后台阶段已保留，请核对后继续')
+                                self.store.put('evidence',row['id'],job)
+                    self.store.event('queue_recovered',{'error_class':type(exc).__name__,'frames':frames},active)
+                finally:self.active=None
+                self.stop.wait(.2)
+    def _run_loop(self):
         while not self.stop.wait(.1):
             with self.mutex:
                 if self.paused: continue

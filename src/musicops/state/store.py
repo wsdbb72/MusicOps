@@ -24,6 +24,9 @@ class StateStore:
             # authenticated FL renewal may create another active reservation.
             c.execute("CREATE UNIQUE INDEX IF NOT EXISTS token_active_v2 ON token_reservations(site,resource_id) WHERE state NOT IN ('RELEASED','REJECTED','CONFIRMED','CONSUMED')")
             c.execute('DROP INDEX IF EXISTS token_active')
+            c.execute("CREATE INDEX IF NOT EXISTS task_state_queue ON tasks(json_extract(payload,'$.state'),updated_at,id)")
+            c.execute("CREATE INDEX IF NOT EXISTS workflow_summary ON evidence(coalesce(json_extract(payload,'$.hidden'),0),json_extract(payload,'$.stage'),coalesce(json_extract(payload,'$.job_kind'),'album'),coalesce(json_extract(payload,'$.paused'),0)) WHERE id LIKE 'workflow:%'")
+            c.execute("CREATE INDEX IF NOT EXISTS workflow_page ON evidence(coalesce(json_extract(payload,'$.hidden'),0),coalesce(json_extract(payload,'$.created_at'),updated_at) DESC,id) WHERE id LIKE 'workflow:%'")
             c.execute('CREATE TABLE IF NOT EXISTS library_matches (root_key TEXT NOT NULL,file_id TEXT NOT NULL,title_key TEXT NOT NULL,artist_key TEXT NOT NULL,album_key TEXT NOT NULL,duration REAL NOT NULL,album_id TEXT NOT NULL,PRIMARY KEY(root_key,file_id))')
             c.execute('CREATE INDEX IF NOT EXISTS library_match_identity ON library_matches(root_key,title_key,artist_key,album_key)')
             c.execute('CREATE TABLE IF NOT EXISTS library_albums (root_key TEXT NOT NULL,album_id TEXT NOT NULL,payload TEXT NOT NULL,PRIMARY KEY(root_key,album_id))')

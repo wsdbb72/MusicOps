@@ -167,6 +167,9 @@ class Workflows:
         else:
             for f in files:
                 groups[(str(album_root(f,root)),strict_text(f.get('album')),artist_key(f.get('albumartist') or f.get('artists',[])))].append(f)
+        local_groups=collections.defaultdict(list)
+        if scene=='playlist':
+            for f in files:local_groups[(strict_text(f.get('album')),artist_key(f.get('albumartist') or f.get('artists',[])))].append(f)
         created=0
         for _,tracks in groups.items():
             self.checkpoint(batch,'creating_album_tasks')
@@ -180,7 +183,7 @@ class Workflows:
             paused=bool((self.store.get('evidence','workflow:'+batch['job_id']) or {}).get('paused'))
             job={'kind':'workflow','job_id':job_id,'batch_id':batch_id,'scene':scene,'config':copy.deepcopy(cfg),'targets':tracks if scene=='playlist' else [],'old_files':tracks if scene!='playlist' else [],'stage':stage,'task_group':'identify','task_type':'album' if scene=='complete' else 'identification','target_count':len(tracks),'paused':paused,'progress':0,'created_at':utcnow(),'message':'等待识别' if scene=='playlist' else '等待处理','detail':'','label':(first.get('album') or '待识别专辑')+' · '+' / '.join(first.get('albumartist') or first.get('artists',[])),'prefer_24bit':args.get('prefer_24bit',cfg['workflow']['prefer_24bit']),'refresh_resources':bool(args.get('refresh_resources'))}
             if scene=='playlist':
-                local=[f for f in files if strict_text(f.get('album'))==strict_text(first.get('album')) and artist_key(f.get('albumartist') or f.get('artists',[]))==artist_key(first.get('albumartist') or first.get('artists',[]))]
+                local=local_groups.get((strict_text(first.get('album')),artist_key(first.get('albumartist') or first.get('artists',[]))),[])
                 if len({str(album_root(f,root)) for f in local})==1:job['existing_album_files']=local
             self.put(job)
             created+=1
@@ -253,6 +256,11 @@ class Workflows:
         for job_id in dict.fromkeys(job_ids):
             job=self.store.get('evidence','workflow:'+job_id)
             if not job:results.append({'job_id':job_id,'status':'NOT_FOUND','message':'任务不存在'});continue
+            if action=='resume' and job.get('stage') in ('failed','needs_review') and job.get('job_kind') not in ('activity','batch') and job.get('review_kind') in ('error','interrupted','search','token') and (job.get('resume_stage') or job.get('task_type')=='search'):
+                from musicops.app.workflow_actions import retry
+                try:results.append({'job_id':job_id,'status':'OK',**retry(self,job,allow_legacy=True)})
+                except (ValueError,PolicyBlocked) as exc:results.append({'job_id':job_id,'status':'SKIPPED','message':str(exc)})
+                continue
             children=[]
             if job.get('job_kind')=='batch':
                 with self.store.connection() as c:
@@ -261,7 +269,9 @@ class Workflows:
             stopped=TERMINAL-{'needs_review'} if action=='cancel' else TERMINAL
             affected=[row for row in [job,*children] if row['stage'] not in stopped]
             # A completed preparation can still control its active album tasks.
-            if not affected:results.append({'job_id':job_id,'status':'SKIPPED','message':'任务已结束或需要核对，未重新执行'});continue
+            if not affected:
+                guidance={'cover':'需要选择或跳过封面，请打开核对窗口','metadata':'需要补充专辑与曲目信息，请打开核对窗口','candidate':'需要选择发行版本，请打开核对窗口','resources':'需要确认歌词服务或跳过，请打开核对窗口','numbering':'需要确认曲序，请打开核对窗口'}
+                results.append({'job_id':job_id,'status':'SKIPPED','message':guidance.get(job.get('review_kind'),'任务已结束或需要核对，未重新执行')});continue
             if action=='cancel':
                 for row in affected:self.cancel(row['job_id'])
             else:
@@ -274,7 +284,9 @@ class Workflows:
             results.append({'job_id':job_id,'status':'OK','affected_count':len(affected),'message':'当前阶段完成后暂停' if action=='pause' else '已继续等待执行' if action=='resume' else '已取消后续处理'})
         counts=collections.Counter(r['status'] for r in results)
         self.store.event('workflow_bulk_'+action,{'selected_count':len(results),'succeeded':counts['OK'],'skipped':counts['SKIPPED'],'failed':counts['NOT_FOUND']})
-        return {'status':'OK','results':results,'succeeded':counts['OK'],'skipped':counts['SKIPPED'],'failed':counts['NOT_FOUND'],'message':f"已处理 {counts['OK']} 项，跳过 {counts['SKIPPED']} 项，未找到 {counts['NOT_FOUND']} 项"}
+        message=f"已处理 {counts['OK']} 项，跳过 {counts['SKIPPED']} 项，未找到 {counts['NOT_FOUND']} 项"
+        if action=='resume' and self.s.paused:message+='；整个后台仍已暂停，请点击“继续整个后台”'
+        return {'status':'OK','results':results,'succeeded':counts['OK'],'skipped':counts['SKIPPED'],'failed':counts['NOT_FOUND'],'message':message}
     def checkpoint(self,job,phase):
         self.s._checkpoint(phase);current=self.store.get('evidence','workflow:'+job['job_id'])
         if current and current.get('cancel_requested'):
@@ -290,13 +302,20 @@ class Workflows:
             getattr(self,'_'+stage)(job)
         except Exception as exc:
             current=self.store.get('evidence','workflow:'+job['job_id'])
-            if current.get('cancel_requested'):self.put(job,stage='cancelled',message='已取消；已有下载和原音源保留')
+            # A failed stage may have partially mutated its in-memory dict
+            # (including a cyclic provider payload). Recover the durable copy.
+            job=current or job
+            if job.get('cancel_requested'):self.put(job,stage='cancelled',message='已取消；已有下载和原音源保留')
             else:
                 category=getattr(exc,'error_class',type(exc).__name__)
                 if category=='TOKEN_APPROVAL_REQUIRED':exc=PolicyBlocked(SITE_NAMES.get((job.get('selected') or {}).get('source'),'资源站')+'：'+str(exc))
                 stage='needs_review' if isinstance(exc,(PolicyBlocked,HttpError)) or category in ('RECOVERY_REQUIRED','CONFLICT') else 'failed'
                 # Never store exception URLs, credentials, API payloads or remote HTML.
-                self.put(job,stage=stage,error_class=category,review_kind='token' if category=='TOKEN_APPROVAL_REQUIRED' else 'error',message='等待令牌下载确认' if category=='TOKEN_APPROVAL_REQUIRED' else '处理未完成：'+category,detail=str(exc) if isinstance(exc,(PolicyBlocked,HttpError)) else '原音源保留；请检查本机工具、文件或磁盘空间。')
+                import traceback
+                frames=[{'file':Path(f.filename).name,'line':f.lineno,'function':f.name} for f in traceback.extract_tb(exc.__traceback__)[-8:]]
+                self.store.event('workflow_error',{'job_id':job['job_id'],'error_class':category,'stage':job.get('resume_stage'),'frames':frames})
+                message='等待令牌下载确认' if category=='TOKEN_APPROVAL_REQUIRED' else str(exc) if isinstance(exc,(PolicyBlocked,HttpError)) else {'KeyError':'历史任务资料不完整，请核对后继续','AttributeError':'旧任务检查点异常，可选择继续恢复','ValueError':'任务资料格式异常，请核对后重试'}.get(category,'处理未完成：'+category)
+                self.put(job,stage=stage,error_class=category,review_kind='token' if category=='TOKEN_APPROVAL_REQUIRED' else 'error',message=message,detail=str(exc) if isinstance(exc,(PolicyBlocked,HttpError)) else '原音源保留；请检查本机工具、文件或磁盘空间。')
         return {'status':'OK','job_id':job['job_id']}
     def provider(self,site,cfg):
         from musicops.providers.pt_download import PTDownloadProvider
@@ -461,18 +480,22 @@ class Workflows:
             self._queue_processing(job,'fallback','可用站点未找到匹配发行，回退网易云下载',progress=20,detail=search_detail(summary));return
         self.put(job,stage='skipped',message='可用站点未找到匹配发行，当前音源保留',detail=search_detail(summary))
     def _requesting(self,job):
-        cfg=job['config'];candidate=job['selected'];cache=Path(cfg['paths']['source'])/'torrents'/(hashlib.sha256(candidate['candidate_id'].encode()).hexdigest()+'.torrent')
+        cfg=job['config'];candidate=job.get('selected') or {}
+        if not isinstance(candidate,dict) or candidate.get('source') not in cfg['providers'] or any(not isinstance(candidate.get(key),(str,int)) or isinstance(candidate.get(key),bool) or not str(candidate[key]).strip() for key in ('candidate_id','resource_id')):
+            raise PolicyBlocked('所选资源缺少有效的站点或种子编号，请重新搜索并选择专辑资源')
+        cache=Path(cfg['paths']['source'])/'torrents'/(hashlib.sha256(str(candidate['candidate_id']).encode()).hexdigest()+'.torrent')
         with self.store.connection() as connection:reservations=[json.loads(r[0]) for r in connection.execute('SELECT payload FROM token_reservations').fetchall()]
         used=sum(r['cost'] for r in reservations if r.get('budget_ref')==job['batch_id'] and r['site']!=candidate['source'] and r['state'] not in ('RELEASED','REJECTED'))
         budget=None if cfg['workflow'].get('fl_unlimited',False) else max(0,cfg['workflow']['fl_per_batch']-used)
         from musicops.app.download_policy import consent_for
         consent_id=consent_for(self.store,job) if candidate['source'] in ('dicmusic','orpheus') else None
         arguments={'consent_id':consent_id} if consent_id else {}
-        content,evidence=self.provider(candidate['source'],cfg).fetch(candidate,self.store,job['batch_id'],budget,cache,**arguments)
-        self.checkpoint(job,'before_qbt_add')
         from musicops.clients.qbt_live import live_client
+        # Verify that the receiving client is reachable before spending FL.
         qbt=live_client(cfg['qbt'],cfg['paths']['source'],self.store,self.s.vault.get)
         try:
+            content,evidence=self.provider(candidate['source'],cfg).fetch(candidate,self.store,job['batch_id'],budget,cache,**arguments)
+            self.checkpoint(job,'before_qbt_add')
             qbt.transport.prepare(cfg['qbt'],cfg['qbt']['tag_prefix']+job['job_id']);result=qbt.add_stopped(content,job['job_id'],evidence)
             if result['status'] in ('START_REQUESTED','DOWNLOADING','COMPLETE'):
                 self.put(job,stage='downloading',progress=30,message='已核对已有下载，继续等待完成');return

@@ -4,9 +4,11 @@ import argparse
 import hashlib
 import hmac
 import json
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from multiprocessing import AuthenticationError
-from multiprocessing.connection import Listener
+from multiprocessing.connection import Listener, Client
 
 from musicops.worker.client import auth_key, pipe_address, MAX_REQUEST_BYTES
 from musicops.worker.lock import WriterLock
@@ -90,6 +92,30 @@ def handle_request(service, req, key):
     service.store.put('ipc_requests', request_id, {**record, 'state': 'DONE', 'response': response})
     return response
 
+def serve_connection(service,conn,key,mutation_lock,address,family):
+    """Slow client work must not occupy the single named-pipe accept loop."""
+    try:
+        with conn:
+            request_id=None
+            try:
+                if not conn.poll(15):return
+                req=json.loads(conn.recv_bytes(MAX_REQUEST_BYTES))
+                request_id=req.get('request_id') if isinstance(req,dict) else None
+                command=req.get('command') if isinstance(req,dict) else None
+                if command in READ_COMMANDS or command=='engine_control':response=handle_request(service,req,key)
+                else:
+                    # Preserve request-id atomicity for simultaneous mutations.
+                    with mutation_lock:response=handle_request(service,req,key)
+            except Exception as exc:response=error_response(exc,request_id)
+            conn.send_bytes(encode_response(response))
+    except (EOFError,OSError,AuthenticationError):pass
+    finally:
+        if service.stop.is_set():
+            # Wake accept after a shutdown served on another thread.
+            try:
+                with Client(address,family=family,authkey=key):pass
+            except (EOFError,OSError,AuthenticationError):pass
+
 
 def main(argv=None):
     parser = argparse.ArgumentParser()
@@ -110,21 +136,14 @@ def main(argv=None):
         family=ipc_family()
         # GUI polling and task progress can arrive together. A one-connection
         # Unix socket queue rejects healthy concurrent clients on macOS.
-        with Listener(address, family=family, backlog=32 if family=='AF_UNIX' else 1, authkey=key) as listener:
+        with ThreadPoolExecutor(max_workers=12,thread_name_prefix='MusicOpsIPC') as requests, Listener(address, family=family, backlog=32 if family=='AF_UNIX' else 1, authkey=key) as listener:
             secure_ipc_socket(address)
+            mutation_lock=threading.RLock()
             while not service.stop.is_set():
                 try:
-                    with listener.accept() as conn:
-                        request_id = None
-                        try:
-                            if not conn.poll(15):
-                                continue
-                            req = json.loads(conn.recv_bytes(MAX_REQUEST_BYTES))
-                            request_id = req.get('request_id') if isinstance(req, dict) else None
-                            response = handle_request(service, req, key)
-                        except Exception as exc:
-                            response = error_response(exc, request_id)
-                        conn.send_bytes(encode_response(response))
+                    conn=listener.accept()
+                    if service.stop.is_set():conn.close();break
+                    requests.submit(serve_connection,service,conn,key,mutation_lock,address,family)
                 except (EOFError, OSError, AuthenticationError):
                     # Dropped clients, malformed frames and failed authentication
                     # must not terminate the shared worker.

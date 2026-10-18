@@ -135,7 +135,7 @@ jobs:
           root = pathlib.Path('release-assets'); bundle = pathlib.Path('dist/MusicOps-Windows')
           report = json.loads(pathlib.Path('dist/windows/reports/packaged-starts.json').read_text('utf-8'))
           installed = json.loads(pathlib.Path('dist/windows/reports/full-installer-smoke.json').read_text('utf-8'))
-          required = {'native_managed_engine_cookie','native_managed_solver','native_durable_ai_registration','native_task_status_filter','native_full_queue_selection','native_streaming_and_edition_settings','native_full_album_preparation','identification_and_search_are_separate', 'native_bulk_cancel_review_tasks', 'native_manual_search_readonly', 'native_search_activity_visible', 'gui_exit_zero'}
+          required = {'native_concurrent_polling','native_managed_engine_cookie','native_managed_solver','native_durable_ai_registration','native_task_status_filter','native_full_queue_selection','native_streaming_and_edition_settings','native_full_album_preparation','identification_and_search_are_separate', 'native_bulk_cancel_review_tasks', 'native_manual_search_readonly', 'native_search_activity_visible', 'gui_exit_zero'}
           if report['version'] != version or report.get('passed') is not True or report.get('external_requests') != 0 or not required.issubset(report['checks']) or not all(report['checks'].values()):
               raise SystemExit('Packaged acceptance evidence is incomplete')
           if installed.get('version') != version or installed.get('passed') is not True or len(installed.get('checks', {})) != 9 or not all(installed['checks'].values()):
@@ -311,7 +311,7 @@ jobs:
               if obj['type'] != 'commit' or obj['sha'] != commit:
                   raise SystemExit('The existing tag does not identify the tested source')
           notes = pathlib.Path('release-notes.md')
-          notes.write_text('内置 FlareSolverr、固定浏览器与 go-music-dl，自动配置并管理本机服务；平台 Cookie 和扫码登录内嵌于 MusicOps 设置。AI 支持本地专辑别名映射、搜索词、候选识别和失败恢复；无法直接匹配的任务自动加入持久化后台队列，取消前 20 项截断，关闭窗口继续处理、重启恢复，批量登记使用单一事务。正常匹配、同一问题和候选比较优先复用缓存，减少 token 消耗；没有联网工具的接口仍可提供别名搜索词并核实目录。证据不足时最后保留人工核对，普通下载额度仍仅由用户授权。修复下拉菜单两端的白条。修复 FL 库存充足却被旧缓存拦截：DicMusic / Orpheus 统一使用 usetoken=1，重试先检查当前个人免费、FL 按钮、余额与批次额度；旧缓存可重新使用令牌，历史消费保留，未知请求先对账防止重复扣费。\n\n提供 Windows 安装包与便携 ZIP、macOS Apple Silicon ARM 原生 PKG 与应用 ZIP、同一提交源码及 SHA-256 校验文件。内置服务对应源码、构建脚本和许可证随包提供。Mac 为 ad-hoc 完整性签名，尚无 Developer ID 签名和 Apple 公证；历史 Intel 附件保留。\n\n验收涵盖真实引擎启动、浏览器本地网页渲染、凭据加密与重启恢复、完整安装和升级。自动化不下载真实音乐、不消费 PT 令牌；未使用真实账号完成扫码确认。手动更新前请退出应用及后台。\n\nSource commit: '+commit+'\n', 'utf-8')
+          notes.write_text('修复 Windows 本地 IPC 请求拥堵与 WinError 121、重复刷新和任务列表跳顶；大队列增加索引、合并状态轮询并原位更新任务。明确点击继续可重新排队有恢复阶段的失败任务，历史下载、FL 和事务仍需对账。内置 FlareSolverr 具有独立设置页、侧栏入口、安装状态与启动测试，当前页可直接保存。修复 qBittorrent 连接错误提示、旧 running 检查点及异常收尾造成的后台停滞。Windows 和 macOS 原生包增加慢连接并发验收。\n\n提供 Windows 安装包与便携 ZIP、macOS Apple Silicon ARM 原生 PKG 与应用 ZIP、同一提交源码及校验文件。内置 FlareSolverr、浏览器与 go-music-dl，保留历史 Intel 附件。Mac 使用 ad-hoc 完整性签名，尚无 Developer ID 签名与 Apple 公证。\n\n本机真实只读歌单、已配置资源站、AI 与内置浏览器已检查；qBittorrent 与 Roon 授权结果据本机实际状态报告。自动验收使用隔离档案，不下载真实音乐或消费 PT 令牌。更新前请退出应用及后台。\n\nSource commit: '+commit+'\n', 'utf-8')
           def gh(*arguments):
               subprocess.run(['gh', *arguments], check=True)
           gh('release', 'create', tag, '--verify-tag', '--target', commit, '--draft', '--title', 'MusicOps '+version, '--notes-file', str(notes))

@@ -144,6 +144,28 @@ def test_macos_real_unix_worker_authentication_and_private_permissions(tmp_path)
         except OSError:pass
 
 
+def test_native_worker_keeps_serving_when_an_authenticated_client_is_idle(tmp_path):
+    """An idle GUI connection used to block every Windows named-pipe client."""
+    if platforms.is_macos():_ci_keychain()
+    from multiprocessing.connection import Client
+    from musicops.worker.client import auth_key
+    from concurrent.futures import ThreadPoolExecutor
+    import time
+    base=tmp_path/'concurrent-native';client=WorkerClient(base,timeout=5);idle=None
+    try:
+        client.ensure_running()
+        idle=Client(pipe_address(base),family=platforms.ipc_family(),authkey=auth_key(base))
+        start=time.monotonic()
+        with ThreadPoolExecutor(max_workers=6) as pool:
+            results=list(pool.map(lambda _:WorkerClient(base,timeout=5).call('get_status',{'compact':True}),range(6)))
+        assert len(results)==6 and all(r['schema_version']==1 for r in results)
+        assert time.monotonic()-start<5
+    finally:
+        if idle:idle.close()
+        try:client.call('shutdown_worker')
+        except OSError:pass
+
+
 @mac_only
 def test_macos_stale_socket_cleanup_refuses_regular_files(tmp_path):
     address=Path(pipe_address(tmp_path/'profile'))

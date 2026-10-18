@@ -23,7 +23,7 @@ def main():
     env=os.environ.copy();env['QT_QPA_PLATFORM']='offscreen'
     for key in ('PYTHONPATH','PYTHONHOME','VIRTUAL_ENV'):env.pop(key,None)
     process=subprocess.Popen([str(bundle/'MusicOps.exe'),'--base',str(base),'--quit-after','20000'],cwd=bundle,env=env,creationflags=0x08000000)
-    client=WorkerClient(base);report={'version':'0.4.5','evidence':'packaged_worker_three_entry_points','external_requests':0,'checks':{}}
+    client=WorkerClient(base);report={'version':'0.4.6','evidence':'packaged_worker_three_entry_points','external_requests':0,'checks':{}}
     try:
         deadline=time.monotonic()+25
         while True:
@@ -31,6 +31,15 @@ def main():
             except (OSError,EOFError):
                 if time.monotonic()>deadline:raise
                 time.sleep(.1)
+        from concurrent.futures import ThreadPoolExecutor
+        from multiprocessing.connection import Client
+        from musicops.worker.client import pipe_address,auth_key
+        from musicops.platforms import ipc_family
+        with Client(pipe_address(base),family=ipc_family(),authkey=auth_key(base)) as idle:
+            started=time.monotonic()
+            with ThreadPoolExecutor(max_workers=6) as pool:
+                replies=list(pool.map(lambda _:WorkerClient(base,timeout=5).call('get_status',{'compact':True}),range(6)))
+            report['checks']['native_concurrent_polling']=len(replies)==6 and time.monotonic()-started<5
         for scene in ('complete','upgrade','playlist'):
             before=time.monotonic();accepted=client.call('start_workflow',{'scene':scene,'target_ids':['fixture-track'] if scene=='playlist' else []})
             visible=client.call('list_workflows')['jobs']

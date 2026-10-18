@@ -84,8 +84,11 @@ def main():
         status=wait_for(lambda:client.call('get_status',{'compact':True}));checks['gui_started_frozen_worker']=Path(status['base'])==base and status['offline'] is False
         phase='concurrent_gui_polling'
         from concurrent.futures import ThreadPoolExecutor
-        with ThreadPoolExecutor(max_workers=8) as pool:
-            replies=list(pool.map(lambda _:WorkerClient(base,timeout=20).call('get_status',{'compact':True}),range(16)))
+        from multiprocessing.connection import Client
+        from musicops.worker.client import pipe_address,auth_key
+        from musicops.platforms import ipc_family
+        with Client(pipe_address(base),family=ipc_family(),authkey=auth_key(base)) as idle, ThreadPoolExecutor(max_workers=8) as pool:
+            replies=list(pool.map(lambda _:WorkerClient(base,timeout=5).call('get_status',{'compact':True}),range(16)))
         checks['concurrent_gui_polling_stays_connected']=len(replies)==16 and all(Path(reply['base'])==base for reply in replies)
         # The worker receives a new token over authenticated local IPC and writes
         # encrypted data. No token value is printed or added to the report.

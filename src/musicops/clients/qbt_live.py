@@ -16,12 +16,19 @@ class QbtSession:
             raise PolicyBlocked('远程 qBittorrent 请使用 HTTPS')
         raw=secret_getter(config['credential_ref'],u.hostname)
         if not raw:raise HttpError('AUTH_REQUIRED','请在连接向导填写 qBittorrent 登录信息')
-        creds=json.loads(raw)
+        try:creds=json.loads(raw)
+        except (ValueError,TypeError):raise HttpError('AUTH_FAILED','qBittorrent 登录资料格式无效，请在连接与设置中重新填写') from None
+        if not isinstance(creds,dict) or any(not isinstance(creds.get(key),str) for key in ('username','password')):
+            raise HttpError('AUTH_FAILED','qBittorrent 登录资料缺少用户名或密码，请在连接与设置中重新填写')
         self.client=httpx.Client(follow_redirects=False,verify=True,timeout=15,headers={'Referer':self.origin+'/'})
         try:
             r=self.client.post(self.origin+'/api/v2/auth/login',data={'username':creds['username'],'password':creds['password']})
             if r.status_code not in (200,204) or r.status_code==200 and r.text.strip()!='Ok.':raise HttpError('AUTH_FAILED','qBittorrent 登录失败')
             self.version=self.request('GET',self.origin+'/api/v2/app/version').text.strip()
+        except httpx.TimeoutException:
+            self.client.close();raise HttpError('TRANSIENT_ERROR','连接 qBittorrent 超时，请检查 WebUI 地址与服务状态') from None
+        except httpx.HTTPError:
+            self.client.close();raise HttpError('NETWORK_ERROR','无法连接 qBittorrent，请确认程序正在运行并已启用 WebUI') from None
         except Exception:
             self.client.close();raise
     def request(self,method,url,**kwargs):

@@ -40,7 +40,11 @@ class WorkerClient:
         req=dict(schema_version=1,request_id=request_id or str(uuid.uuid4()),profile_id='default',config_version=self.config_version,command=command,payload=payload or {})
         encoded=json.dumps(req,ensure_ascii=False,allow_nan=False).encode('utf-8')
         if len(encoded)>MAX_REQUEST_BYTES:raise ValueError('IPC_REQUEST_TOO_LARGE：请减少请求内容后重试')
-        with Client(pipe_address(self.base),family=ipc_family(),authkey=auth_key(self.base)) as conn:
+        try:conn=Client(pipe_address(self.base),family=ipc_family(),authkey=auth_key(self.base))
+        except OSError as exc:
+            if getattr(exc,'winerror',None) in (121,231):raise WorkerConnectionError('IPC_CONNECTION_ERROR：后台连接繁忙，请稍后重连；已有任务仍保留') from None
+            raise
+        with conn:
             conn.send_bytes(encoded)
             if not conn.poll(self.timeout):raise WorkerConnectionError('后台响应超时；请先读取任务/配置状态，勿盲重发执行请求')
             data=json.loads(conn.recv_bytes(MAX_RESPONSE_BYTES))

@@ -86,7 +86,7 @@ class SetupWizard(QWizard):
     def __init__(self,owner):
         super().__init__(owner);self.owner=owner;self.values=copy.deepcopy(owner.config);self.setWindowTitle('MusicOps · 连接与设置');self.setWindowIcon(app_icon());self.setPalette(dark_palette());self.setWizardStyle(QWizard.ClassicStyle);self.resize(900,760);self.setMinimumSize(760,640)
         self.setButtonText(QWizard.NextButton,'继续');self.setButtonText(QWizard.BackButton,'上一步');self.setButtonText(QWizard.FinishButton,'保存并开始使用');self.setButtonText(QWizard.CancelButton,'稍后设置')
-        self.setOption(QWizard.HaveCustomButton1,True);self.setButtonText(QWizard.CustomButton1,'跳过本步');self.customButtonClicked.connect(lambda _:self.accept() if self.currentId()==self.pageIds()[-1] else self.next())
+        self.setOption(QWizard.HaveCustomButton1,True);self.setButtonText(QWizard.CustomButton1,'跳过本步');self.setOption(QWizard.HaveCustomButton2,True);self.setButtonText(QWizard.CustomButton2,'保存设置');self.customButtonClicked.connect(lambda which:self.accept() if which==QWizard.CustomButton2.value or self.currentId()==self.pageIds()[-1] else self.next())
         self.fields={};self.site_fields={};self.saved_refs=set(getattr(owner,'available_refs',[]))
         p=self._add_page('音乐放在哪里','选择你希望 Roon / Navidrome 读取的音乐库。下载与整理的临时数据由 MusicOps 自动管理。')
         row,self.library=browse_field(self.values.get('paths',{}).get('library',''));p.addRow('音乐库目录',row)
@@ -110,16 +110,20 @@ class SetupWizard(QWizard):
                     except Exception:QMessageBox.information(self,'无法导入','请使用 Cookie-Editor 导出的 JSON 文件。')
             actions.addWidget(button('导入 JSON 文件',load_json));actions.addWidget(button('打开站点',lambda checked=False,h=host:QDesktopServices.openUrl(QUrl('https://'+h))));actions.addStretch();layout.addLayout(actions)
             p.addRow(group);self.site_fields[key]=(enabled,cookie)
+        p=self._add_page('浏览器验证 · FlareSolverr','程序已附带 FlareSolverr 和浏览器。选择内置服务后无需填写地址或程序路径；遇到站点验证时自动启动。');self.solver_page_id=self.pageIds()[-1]
         solver=self.values.get('browser_solver',{});self.solver_managed=QCheckBox('使用程序内置 FlareSolverr（自动配置与启动）');self.solver_managed.setChecked(solver.get('managed',True));p.addRow(self.solver_managed);self.solver_enabled=QCheckBox('遇到浏览器挑战时使用本机 FlareSolverr');self.solver_enabled.setChecked(solver.get('enabled',False));p.addRow(self.solver_enabled)
         self.solver_url=line(solver.get('base_url','http://127.0.0.1:8191'),'本机 FlareSolverr 地址');p.addRow('验证服务地址',self.solver_url)
         row,self.solver_executable=browse_field(solver.get('executable',''),False);p.addRow('Windows 程序（可选）',row)
         self.solver_auto=QCheckBox('服务未运行时自动启动上述程序');self.solver_auto.setChecked(solver.get('auto_start',False));self.solver_auto.setEnabled(os.name=='nt');p.addRow(self.solver_auto)
         self.solver_note=label('安装包内含验证服务与浏览器，无需另装 Docker 或填写地址。只对检索页的浏览器挑战启用，不重放下载或令牌请求。取消内置选项后可使用已有本机服务。','hint');p.addRow(self.solver_note)
+        from musicops.clients.managed_services import engine_root
+        engine=engine_root()/'flaresolverr'/('flaresolverr.exe' if os.name=='nt' else 'flaresolverr')
+        p.addRow(label('● 内置 FlareSolverr 已随程序安装' if engine.is_file() else '● 当前目录缺少内置组件，请安装完整安装包。','hint'))
         def solver_mode(enabled):
             self.solver_url.setDisabled(enabled)
             self.solver_executable.setDisabled(enabled or os.name!='nt');self.solver_auto.setDisabled(enabled or os.name!='nt')
         self.solver_managed.toggled.connect(solver_mode);solver_mode(self.solver_managed.isChecked())
-        p.addRow(button('测试 FlareSolverr 连接',self.test_solver))
+        p.addRow(button('启动并测试 FlareSolverr',self.test_solver))
         p=self._add_page('连接 qBittorrent','用于接收站点种子并下载。qBittorrent → 选项 → WebUI，启用 Web 用户界面；把地址与登录账号填在这里。')
         cfg=self.values.get('qbt',{});qbt_saved=cfg.get('credential_ref') in self.saved_refs;self.qbt_url=line(cfg.get('base_url','http://127.0.0.1:8080'),'例如 http://127.0.0.1:8080');self.qbt_user=CredentialField('WebUI 用户名',qbt_saved);self.qbt_pass=CredentialField('WebUI 密码',qbt_saved)
         p.addRow('WebUI 地址',self.qbt_url);p.addRow('用户名',self.qbt_user);p.addRow('密码',self.qbt_pass)
@@ -215,9 +219,9 @@ class SetupWizard(QWizard):
                  'workflow':{'netease_fallback':self.fallback.isChecked(),'netease_api_url':self.netease_api.text().strip(),'netease_import_dir':self.import_dir.text().strip(),'fl_per_batch':self.fl_limit.value(),'fl_unlimited':self.fl_unlimited.isChecked(),'edition_policy':self.edition_policy.currentData()},
                  'streaming':{'managed':self.streaming_managed.isChecked(),'enabled':self.streaming_enabled.isChecked(),'base_url':self.streaming_url.text().strip(),'cookie_json':self.streaming_cookie.text(),'order':[s.strip() for s in self.streaming_order.text().split(',') if s.strip()]},
                  **{k:w.text().strip() for k,w in self.fields.items()}}
-        self.button(QWizard.FinishButton).setEnabled(False);self.save_note.setText('正在保存…')
+        self.button(QWizard.FinishButton).setEnabled(False);self.button(QWizard.CustomButton2).setEnabled(False);self.save_note.setText('正在保存…')
         def saved(result):self.owner.config=result['config']['values'];super(SetupWizard,self).accept();self.owner.refresh()
-        def failed(message):self.button(QWizard.FinishButton).setEnabled(True);self.save_note.setText(message)
+        def failed(message):self.button(QWizard.FinishButton).setEnabled(True);self.button(QWizard.CustomButton2).setEnabled(True);self.save_note.setText(message);self.currentPage().setSubTitle('保存未完成：'+message)
         self.owner.call('save_setup',payload,saved,failed)
 
 class Workbench(QMainWindow):
@@ -230,7 +234,7 @@ class Workbench(QMainWindow):
         logo=QLabel();logo.setObjectName('brandMark');logo.setFixedSize(58,58);logo.setPixmap(app_icon().pixmap(58,58));s.addWidget(logo);s.addSpacing(8);s.addWidget(label('MusicOps','brand'));s.addWidget(label('每一张专辑，井然有序','muted'));s.addSpacing(30);s.addWidget(label('工作台','sectionCaption'))
         self.nav=QListWidget();self.nav.addItems(['歌单入库','资料补全','音质升级','任务中心','专辑搜索']);self.nav.setSpacing(4);self.nav.setIconSize(QSize(22,22))
         for index in range(self.nav.count()):self.nav.item(index).setIcon(nav_icon(index))
-        s.addWidget(self.nav);s.addWidget(button('连接与设置',self.setup));s.addWidget(button('检查更新',lambda:self.check_updates(True)));self.update_note=label('','sidebarFoot');self.update_note.setWordWrap(True);s.addWidget(self.update_note);s.addSpacing(14);s.addWidget(label('MusicOps '+__version__+' · 你的音乐收藏','sidebarFoot'));layout.addWidget(side)
+        s.addWidget(self.nav);s.addWidget(button('连接与设置',self.setup));s.addWidget(button('FlareSolverr · 浏览器验证',lambda:self.setup(browser=True)));s.addWidget(button('检查更新',lambda:self.check_updates(True)));self.update_note=label('','sidebarFoot');self.update_note.setWordWrap(True);s.addWidget(self.update_note);s.addSpacing(14);s.addWidget(label('MusicOps '+__version__+' · 你的音乐收藏','sidebarFoot'));layout.addWidget(side)
         content=QWidget();content.setObjectName('workspace');c=QVBoxLayout(content);c.setContentsMargins(32,23,32,24);c.setSpacing(16);top=QHBoxLayout();self.connection=label('正在连接后台…','connection');top.addWidget(self.connection,1);self.activity=label('正在连接','activity');top.addWidget(self.activity);c.addLayout(top)
         self.busy_bar=QProgressBar();self.busy_bar.setObjectName('activityProgress');self.busy_bar.setRange(0,0);self.busy_bar.setTextVisible(False);self.busy_bar.setFixedHeight(3);c.addWidget(self.busy_bar)
         self.notice=label('','notice');self.notice.setVisible(False)
@@ -317,9 +321,11 @@ class Workbench(QMainWindow):
     def browse_catalog(self):
         from musicops.gui.catalog import LibraryCatalogDialog
         self.catalog_window=LibraryCatalogDialog(self);self.catalog_window.open()
-    def setup(self):
+    def setup(self,browser=False):
         if not self.config:return
-        self.wizard=SetupWizard(self);self.wizard.open()
+        self.wizard=SetupWizard(self)
+        if browser:self.wizard.setStartId(self.wizard.solver_page_id)
+        self.wizard.open()
     def exit_background(self):
         self.timer.stop();self.notice.setText('正在安全退出后台…')
         def stopped(_):self.close()
@@ -370,14 +376,20 @@ class Workbench(QMainWindow):
         path='/details.php?id='+rid if site=='open.cd' else '/torrents.php?id='+(gid if gid.isdigit() else rid)+'&torrentid='+rid
         QDesktopServices.openUrl(QUrl('https://'+host+path))
     def call(self,command,payload,done=None,failed=None):
+        if not hasattr(self,'inflight_reads'):self.inflight_reads=set();self.pool.setMaxThreadCount(8)
+        read_key=(command,json.dumps(payload,sort_keys=True,ensure_ascii=False)) if command in ('get_status','list_workflows') else None
+        if read_key in self.inflight_reads:return
+        if read_key:self.inflight_reads.add(read_key)
         request=Request(self.client,command,payload);self.requests.add(request);self.update_activity()
         def success(result):
+            if read_key:self.inflight_reads.discard(read_key)
             self.requests.discard(request)
             if result.get('accepted') and done:
                 self.tasks[result['task_id']]=done;self.timer.start();QTimer.singleShot(0,self.poll_tasks)
             elif done:done(result)
             self.update_activity()
         def failure(message):
+            if read_key:self.inflight_reads.discard(read_key)
             self.requests.discard(request)
             if failed:failed(message)
             else:
@@ -385,7 +397,7 @@ class Workbench(QMainWindow):
                 self.notice.setText('正在重新连接后台，请稍候…' if reconnecting else '需要处理：'+message)
                 if reconnecting:self._connection_notice=self.notice.text()
             self.update_activity()
-        request.signals.done.connect(success);request.signals.failed.connect(failure);self.pool.start(request)
+        request.signals.done.connect(success);request.signals.failed.connect(failure);self.pool.start(request,0 if command in ('get_status','list_workflows','get_task') else 1)
     def poll_tasks(self):
         # A compact status only contains recent tasks. Follow accepted task IDs
         # directly so a long library scan cannot vanish behind pipeline events.
@@ -410,7 +422,8 @@ class Workbench(QMainWindow):
         if len(self.requests)>5:return
         self.call('get_status',{'compact':True},self.status)
         requested_filter=self.task_filter.currentData()
-        self.call('list_workflows',{'offset':self.job_offset,'state':requested_filter},lambda result:self.show_jobs(result) if self.task_filter.currentData()==requested_filter else None)
+        requested_offset=self.job_offset
+        self.call('list_workflows',{'offset':requested_offset,'state':requested_filter},lambda result:self.show_jobs(result) if self.task_filter.currentData()==requested_filter and self.job_offset==requested_offset else None)
     def status(self,result):
         if self.notice.text()==getattr(self,'_connection_notice',None):self.notice.clear()
         self._connection_notice=None
@@ -468,15 +481,20 @@ class Workbench(QMainWindow):
     def show_jobs(self,result):
         self.job_total=result.get('total',0);self.active_jobs=result.get('active',0);self.paused_jobs=result.get('paused_count',0);self.job_counts.setText(f"共 {self.job_total} 项 · 运行 {self.active_jobs} · 暂停 {self.paused_jobs} · 完成 {result.get('finished',0)} · 第 {self.job_offset//200+1} 页")
         selected=self.selected_job();jobs=result.get('jobs',[]);collapsed={key for key,item in self.job_groups.items() if not item.isExpanded()};scroll=self.job_table.verticalScrollBar().value();anchor=self.scroll_anchor()
-        self.jobs={j['job_id']:j for j in jobs};self.job_table.blockSignals(True);self.job_table.setUpdatesEnabled(False);self.job_table.clear();self.job_items={};self.job_groups={}
-        for key,title in TASK_GROUPS:
+        reuse=list(self.job_items)==[j['job_id'] for j in jobs] and bool(self.job_groups) and all(self.job_items[j['job_id']].parent() is self.job_groups.get(self.job_group(j)) for j in jobs)
+        self.jobs={j['job_id']:j for j in jobs};self.job_table.blockSignals(True);self.job_table.setUpdatesEnabled(False)
+        if not reuse:self.job_table.clear();self.job_items={};self.job_groups={}
+        for key,title in ([] if reuse else TASK_GROUPS):
             group=QTreeWidgetItem(self.job_table,[title]);group.setData(0,Qt.UserRole+1,key);group.setFlags(Qt.ItemIsEnabled|Qt.ItemIsUserCheckable);group.setCheckState(0,Qt.Unchecked);group.setExpanded(key not in collapsed);group.setForeground(0,QColor('#8ce6d2'));font=group.font(0);font.setBold(True);group.setFont(0,font);self.job_groups[key]=group
         for job in jobs:
             job_id=job['job_id'];batch=job.get('job_kind')=='batch';group_key=self.job_group(job);stage=job.get('stage','queued');progress='扫描中' if batch and stage=='preparing' and not job.get('progress') else str(job.get('progress',0))+'%'
             paused=bool(job.get('paused')) and stage not in ('completed','failed','cancelled','skipped','restored','needs_review')
             step='阶段结束后暂停' if paused and job.get('pause_pending') else '已暂停' if paused else STAGES.get(stage,stage)
             kind='检查本地库 · 批次' if batch else {'identification':'专辑识别','review_assistance':'AI 辅助核对','library_index':'本地专辑索引','catalog_identification':'在线资料识别','manual_search':'手动专辑检索','search':'专辑音源检索'}.get(job.get('task_type'),SCENES.get(job.get('scene'),job.get('scene','专辑任务')))
-            item=QTreeWidgetItem(self.job_groups[group_key],[job.get('label','音乐库'),kind,step,progress,job.get('message','')+(' · AI 建议待核对' if (job.get('ai_assistance') or {}).get('status')=='READY' else '')]);item.setData(0,Qt.UserRole,job_id);item.setData(0,Qt.UserRole+1,'job');item.setFlags(Qt.ItemIsEnabled|Qt.ItemIsSelectable|Qt.ItemIsUserCheckable);item.setCheckState(0,Qt.Checked if job_id in self.checked_jobs else Qt.Unchecked);self.job_items[job_id]=item
+            values=[job.get('label','音乐库'),kind,step,progress,job.get('message','')+(' · AI 建议待核对' if (job.get('ai_assistance') or {}).get('status')=='READY' else '')]
+            item=self.job_items[job_id] if reuse else QTreeWidgetItem(self.job_groups[group_key],values)
+            for column,value in enumerate(values):item.setText(column,value)
+            item.setData(0,Qt.UserRole,job_id);item.setData(0,Qt.UserRole+1,'job');item.setFlags(Qt.ItemIsEnabled|Qt.ItemIsSelectable|Qt.ItemIsUserCheckable);item.setCheckState(0,Qt.Checked if job_id in self.checked_jobs else Qt.Unchecked);self.job_items[job_id]=item
             for column in range(5):item.setToolTip(column,item.text(column)+('\n'+job.get('detail','') if column==4 and job.get('detail') else ''))
             item.setForeground(2,QColor('#f4c77c' if paused or stage in ('failed','needs_review') else '#6ee7d0' if stage in ('completed','restored') else '#9bbbf4'))
             if job_id in self.checked_jobs:self.checked_jobs[job_id]=self.ai_job_context(job)
@@ -485,14 +503,14 @@ class Workbench(QMainWindow):
                 if self.job_track_versions.get(job_id)!=track_version:self.job_detail_cache.pop(job_id,None);self.job_detail_notes.pop(job_id,None)
                 self.job_track_versions[job_id]=track_version
                 if job_id in self.job_detail_cache and job_id in self.expanded_job_ids:self.fill_job_tracks(item,self.job_detail_cache[job_id])
-                else:QTreeWidgetItem(item,['展开查看歌曲明细'])
+                elif not reuse:QTreeWidgetItem(item,['展开查看歌曲明细'])
                 item.setExpanded(job_id in self.expanded_job_ids)
-            if job_id==selected:self.job_table.setCurrentItem(item)
+            if job_id==selected and not reuse:self.job_table.setCurrentItem(item)
         for key,item in self.job_groups.items():item.setText(1,f'{item.childCount()} 项（本页）')
         if not selected and jobs:
             preferred=next((job for job in jobs if job.get('job_kind')=='batch' and job.get('stage')=='preparing'),jobs[0]);self.job_table.setCurrentItem(self.job_items[preferred['job_id']])
         self.job_table.blockSignals(False);self.job_table.setUpdatesEnabled(True);self.job_table.verticalScrollBar().setValue(scroll);self.update_job_selection();self.show_detail();self.update_activity()
-        self.restore_scroll(anchor,scroll)
+        if not reuse:self.restore_scroll(anchor,scroll)
         if not getattr(self,'token_prompt_open',False):
             seen=getattr(self,'token_prompt_seen',set());self.token_prompt_seen=seen
             pending=next((job_id for job_id in result.get('token_prompts',[]) if job_id not in seen),None)
@@ -598,6 +616,8 @@ class Workbench(QMainWindow):
     def collapse_job(self,item):
         if item.data(0,Qt.UserRole+1)=='job':self.expanded_job_ids.discard(item.data(0,Qt.UserRole))
     def fill_job_tracks(self,item,rows):
+        if item.data(0,Qt.UserRole+2)==rows:return
+        item.setData(0,Qt.UserRole+2,copy.deepcopy(rows))
         anchor=self.scroll_anchor();scroll=self.job_table.verticalScrollBar().value()
         item.takeChildren()
         for values in rows:

@@ -442,7 +442,12 @@ class Workflows:
             result=qbt.start_download(job['job_id'],evidence)
             if result['status']!='START_REQUESTED':raise PolicyBlocked(result.get('reason','下载启动状态未知，请核对后继续'))
         finally:qbt.transport.close()
-        self.put(job,stage='downloading',progress=30,message='qBittorrent 正在下载，下载完成后自动整理')
+        method=evidence.get('download_method');cost=evidence.get('token_cost',0)
+        free_detail=('OpenCD 按直接下载方式提交' if method=='direct' else
+                     'FL 令牌请求已核验，记录用量 '+str(cost)+' 枚' if method=='fl-token' else
+                     '已核验个人免费；本次未重复使用令牌' if method=='personal-free' else '已核验站点免费状态')
+        if evidence.get('reconciled_previous_request'):free_detail+='；已恢复此前待对账请求'
+        self.put(job,stage='downloading',progress=30,message='qBittorrent 正在下载，下载完成后自动整理',detail=free_detail)
     def _downloading(self,job):
         from musicops.clients.qbt_live import live_client
         cfg=job['config'];qbt=live_client(cfg['qbt'],cfg['paths']['source'],self.store,self.s.vault.get)

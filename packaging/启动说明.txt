@@ -1,4 +1,4 @@
-MusicOps 0.4.3
+MusicOps 0.4.4
 
 打开桌面 MusicOps 或双击 MusicOps.exe，无需安装 Python。
 首次使用会打开可跳过的连接向导：选择音乐库，导入 JSON Cookie，

@@ -297,7 +297,7 @@ jobs:
               if obj['type'] != 'commit' or obj['sha'] != commit:
                   raise SystemExit('The existing tag does not identify the tested source')
           notes = pathlib.Path('release-notes.md')
-          notes.write_text('本轮更新：任务记录删除；单项与批量失败重试；可编辑的人工核对与 AI 辅助建议；持久化本地专辑和曲目预匹配数据库；启动时检查 GitHub、自动下载并校验当前系统安装包，安全退出后台后打开更新向导。资源站搜索增加有边界的关键词补充、去重与版本核对。资料识别按 API、公开网站、AI 实际联网搜索依次回退，并保留可核查来源；新增本机 FlareSolverr 接入、连接测试和 Windows 独立程序自动启动，服务本体需另行安装。\n\n提供 Windows 安装包与便携版、Apple Silicon ARM Mac 原生 PKG 与应用 ZIP，以及同一提交源码和 SHA-256 / SHA-512 校验文件。停止构建新的 Intel Mac 版本，历史附件保留。所有产物通过回归与实际安装运行验收。Mac 尚无 Developer ID 签名和 Apple 公证。\n\n自动验收使用隔离档案、合成音频和模拟服务，不代表所有私人站点账号均已现场验证。手动更新前请退出应用及后台。\n\nSource commit: '+commit+'\n', 'utf-8')
+          notes.write_text('修复 DicMusic FL 令牌请求已生效但 API 未返回个人免费状态时的误判和后续阻塞。增加绑定种子 ID 的网页免费标签核验、旧待对账请求恢复、严格令牌参数和下载方式记录；恢复时不再次使用 FL。令牌余额兼容常规与临时令牌显示，预算或对账拦截提供明确原因。\n\n提供 Windows 安装包与便携版、Apple Silicon ARM Mac 原生 PKG 与应用 ZIP、同一提交源码及校验文件。Mac 尚无 Developer ID 签名和 Apple 公证。历史 Intel 附件保留。\n\n已使用真实登录只读核查 DicMusic API、种子页与令牌历史；自动测试使用模拟响应，不发起真实下载或消耗令牌。手动更新前请退出应用及后台。\n\nSource commit: '+commit+'\n', 'utf-8')
           def gh(*arguments):
               subprocess.run(['gh', *arguments], check=True)
           gh('release', 'create', tag, '--verify-tag', '--target', commit, '--draft', '--title', 'MusicOps '+version, '--notes-file', str(notes))

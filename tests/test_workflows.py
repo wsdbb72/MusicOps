@@ -114,8 +114,12 @@ def test_fl_timeout_is_not_retried_or_double_spent(tmp_path,monkeypatch):
     with pytest.raises(TimeoutError):p.fetch(candidate,store,'batch',3,tmp_path/'private.torrent')
     assert store.get('evidence','pt-request:dicmusic:3')['state']=='unknown'
     requests=len(transport.requests)
+    # A retry may read the exact row to reconcile personal free status, but
+    # must never repeat the token-bearing download when it is not confirmed.
+    transport.responses.append(Response(200,page.encode()))
     with pytest.raises(PolicyBlocked):p.fetch(candidate,store,'batch',3,tmp_path/'private.torrent')
-    assert len(transport.requests)==requests
+    assert len(transport.requests)==requests+1
+    assert transport.requests[-1]['params']=={'id':'2','torrentid':'3'}
     with store.connection() as c:assert c.execute("SELECT state,COUNT(*) FROM token_reservations GROUP BY state").fetchone()[:]==('REQUEST_UNKNOWN',1)
 
 def test_provider_addition_migrates_existing_credentials_without_keyerror(tmp_path):

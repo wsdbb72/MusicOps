@@ -29,7 +29,7 @@ SOURCES = {
     'albumoftheyear': {'name': 'Album of the Year', 'host': 'www.albumoftheyear.org', 'mode': 'manual_lookup'},
     'vgmdb': {'name': 'VGMdb', 'host': 'vgmdb.net', 'mode': 'manual_lookup'},
 }
-USER_AGENT = 'MusicOps/0.4.3 (desktop; personal catalogue lookup)'
+USER_AGENT = 'MusicOps/0.4.4 (desktop; personal catalogue lookup)'
 MAX_BYTES = 2_000_000
 CACHE_MAX_BYTES = 32 * 1024 * 1024
 _MBID = re.compile(r'[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\Z')

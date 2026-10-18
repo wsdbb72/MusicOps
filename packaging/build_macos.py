@@ -63,7 +63,9 @@ def package(args):
     dist=output/'dist';run(sys.executable,'-m','PyInstaller','--noconfirm','--clean','--workpath',output/'build','--distpath',dist,ROOT/'packaging/MusicOps-mac.spec',cwd=ROOT,env=env)
     app=dist/'MusicOps.app'
     run(sys.executable,ROOT/'packaging/prepare_engines.py','--output',app/'Contents/Resources/tools/services','--cache',output/'engine-build')
-    run('/usr/bin/codesign','--force','--deep','--sign','-',app)
+    # Preserve Chrome's upstream helper signatures/entitlements. Re-seal only
+    # MusicOps after adding resources; the patched driver is signed separately.
+    run('/usr/bin/codesign','--force','--sign','-',app)
     info=plistlib.loads((app/'Contents/Info.plist').read_bytes())
     if info.get('CFBundleIdentifier')!='com.wsdbb72.MusicOps' or info.get('CFBundleShortVersionString')!=app_version or info.get('CFBundleExecutable')!='MusicOps' or info.get('LSBackgroundOnly') is not False:raise RuntimeError('App identity/version/GUI mode mismatch')
     crypto_extensions={path.resolve() for path in (app/'Contents/Frameworks/cryptography/hazmat/bindings').glob('_rust*.so') if path.is_file()}

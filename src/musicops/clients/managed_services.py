@@ -32,11 +32,12 @@ def engine_root():
 
 
 class ManagedServices:
-    def __init__(self, profile, vault, checkpoint=lambda _: None, root=None):
+    def __init__(self, profile, vault, checkpoint=lambda _: None, root=None, diagnostic_output=None):
         self.profile = Path(profile)
         self.vault = vault
         self.checkpoint = checkpoint
         self.root = Path(root) if root else engine_root()
+        self.diagnostic_output = diagnostic_output
         self.lock = threading.RLock()
         self.running = {}
         self.owners = {}
@@ -77,7 +78,7 @@ class ManagedServices:
             for key in ('PROXY_URL', 'PROXY_USERNAME', 'PROXY_PASSWORD', 'LOG_FILE'):
                 environment.pop(key, None)
             environment.update(MUSICOPS_SERVICE_TOKEN=token, HOST='127.0.0.1', PORT=str(port),
-                LOG_LEVEL='error', LOG_HTML='false', HEADLESS='true', MUSICOPS_ENGINE_DATA=str(directory),
+                LOG_LEVEL='debug' if self.diagnostic_output else 'error', LOG_HTML='false', HEADLESS='true', MUSICOPS_ENGINE_DATA=str(directory),
                 MUSIC_DL_CONFIG_DB=str(directory / 'settings.db'), MUSIC_DL_COOKIE_FILE=str(directory / 'unused.json'))
             for key, value in (tools or {}).items():
                 if key in ('ffmpeg', 'ffprobe') and value:
@@ -88,7 +89,8 @@ class ManagedServices:
             if name == 'go-music-dl':
                 command += ['web', '--desktop', '--no-browser', '--port', str(port)]
             process = subprocess.Popen(command, cwd=directory, env=environment, stdin=subprocess.DEVNULL,
-                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                stdout=self.diagnostic_output if self.diagnostic_output else subprocess.DEVNULL,
+                stderr=subprocess.STDOUT if self.diagnostic_output else subprocess.DEVNULL,
                 creationflags=subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0, start_new_session=os.name!='nt')
             from musicops.clients.process_owner import ProcessOwner
             self.owners[name]=ProcessOwner(process)

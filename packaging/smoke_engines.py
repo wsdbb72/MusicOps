@@ -5,6 +5,7 @@ import json
 from pathlib import Path
 import sys
 import threading
+import re
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import httpx
@@ -13,7 +14,10 @@ from musicops.clients.vault import Vault
 
 
 def smoke(root, profile):
-    manager=ManagedServices(profile,Vault(profile),root=root)
+    from musicops.platforms import private_directory
+    private_directory(profile)
+    diagnostic=(profile/'engine-diagnostics.log').open('w+b')
+    manager=ManagedServices(profile,Vault(profile),root=root,diagnostic_output=diagnostic)
     checks={}
     try:
         base,token=manager.ensure('go-music-dl')
@@ -40,10 +44,17 @@ def smoke(root, profile):
                 result=client.post(base+'/v1',headers={'X-MusicOps-Service':token},json={'cmd':'request.get','url':f'http://127.0.0.1:{server.server_port}/','maxTimeout':45000}).json()
             checks['flare_real_local_page_render']=result.get('status')=='ok' and 'MusicOps synthetic browser acceptance' in result.get('solution',{}).get('response','')
         finally:server.shutdown();server.server_close();thread.join(5)
+    except Exception:
+        diagnostic.flush();diagnostic.seek(0)
+        text=diagnostic.read().decode('utf-8',errors='replace')[-14000:]
+        text=re.sub(r'\b[0-9a-f]{64}\b','[TRANSIENT TOKEN OR HASH]',text,flags=re.I)
+        print('Native engine diagnostic tail:\n'+text,flush=True)
+        raise
     finally:
         processes=[entry[0] for entry in manager.running.values()]
         manager.close()
         checks['owned_services_stopped']=all(process.poll() is not None for process in processes)
+        diagnostic.close()
     return {'checks':checks,'passed':all(checks.values()),'real_downloads':0,'real_account_login':False}
 
 

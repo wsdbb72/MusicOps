@@ -1,9 +1,10 @@
+from musicops.gui.controls import QComboBox
 """Editable review: proposals are visible and remain separate from adoption."""
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
     QTabWidget, QWidget, QTableWidget, QTableWidgetItem, QHeaderView, QLineEdit,
-    QCheckBox, QPlainTextEdit, QAbstractItemView, QComboBox)
+    QCheckBox, QPlainTextEdit, QAbstractItemView)
 from musicops.app.search_status import SITE_NAMES
 from html import escape
 from musicops.providers.catalog_web import HOSTS, detail_url

@@ -4,10 +4,14 @@ $projectRoot=[IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
 $buildRoot=Join-Path $projectRoot 'work/build'
 $distRoot=Join-Path $projectRoot 'dist'
 New-Item -ItemType Directory -Force -Path $buildRoot,$distRoot | Out-Null
+$engineCache=if ($env:MUSICOPS_ENGINE_CACHE) { $env:MUSICOPS_ENGINE_CACHE } else { Join-Path $projectRoot 'work/engine-build' }
+& $Python (Join-Path $PSScriptRoot 'prepare_engines.py') --output (Join-Path $projectRoot 'work/engines') --cache $engineCache
+if ($LASTEXITCODE -ne 0) { throw 'Bundled engine build failed' }
 & $Python -m PyInstaller --noconfirm --clean --workpath $buildRoot --distpath $distRoot (Join-Path $PSScriptRoot 'MusicOps.spec')
 if ($LASTEXITCODE -ne 0) { throw 'PyInstaller build failed' }
 $bundleRoot=Join-Path $distRoot 'MusicOps-Windows'
 New-Item -ItemType Directory -Force -Path (Join-Path $bundleRoot 'tools') | Out-Null
+Copy-Item -LiteralPath (Join-Path $projectRoot 'work/engines') -Destination (Join-Path $bundleRoot 'tools/services') -Recurse -Force
 foreach ($tool in @(@{Source=$Ffmpeg;Name='ffmpeg.exe'},@{Source=$Ffprobe;Name='ffprobe.exe'})) {
     if ($tool.Source -and (Test-Path -LiteralPath $tool.Source)) { Copy-Item -LiteralPath $tool.Source -Destination (Join-Path $bundleRoot ('tools/'+$tool.Name)) }
 }

@@ -16,6 +16,7 @@ REQUIRED_CHECKS=frozenset({
     'three_preparation_records','identification_and_search_are_separate','native_bulk_cancel_review_tasks',
     'native_bulk_retry_search','native_review_snapshot','native_local_album_database',
     'native_ai_assistance_guard','native_delete_records_only','native_update_setting','native_browser_solver_guard',
+    'native_managed_engine_cookie','native_managed_solver','native_durable_ai_registration',
     'native_task_status_filter','native_full_queue_selection','native_streaming_and_edition_settings','native_full_album_preparation',
     'native_multiplatform_file_import','native_manual_search_readonly','native_search_activity_visible',
     'configuration_roundtrip','native_cocoa_window_exit_zero','native_window_rendered',
@@ -117,7 +118,7 @@ def main():
             def finished_task():
                 task=client.call('get_task',{'task_id':accepted['task_id']})['task']
                 return task if task['state'] not in ('queued','running','paused') else None
-            return wait_for(finished_task,12)
+            return wait_for(finished_task,70 if command=='browser_solver_preflight' and payload.get('settings',{}).get('managed') else 12)
         phase='multiplatform_file_import';fixture=base/'playlist.csv'
         fixture.write_text('title,artist,album,duration,source,id\nSong,Artist,Album,180,spotify,synthetic-track\n','utf-8')
         imported=completed('refresh_playlist',{'file_path':str(fixture),'platform':'auto'})
@@ -146,6 +147,13 @@ def main():
         checks['native_streaming_and_edition_settings']=streaming['streaming']['order']==['netease','qqmusic'] and streaming['streaming']['enabled'] is False and streaming['workflow']['edition_policy']=='complete'
         fill=completed('start_workflow',{'scene':'fill'})
         checks['native_full_album_preparation']=fill['state']=='completed' and fill.get('result',{}).get('album_count')==0
+        engine=client.call('engine_control',{'action':'start'})
+        cookie=client.call('engine_control',{'action':'cookie','source':'qq','cookie':'synthetic_frozen=synthetic-only'})
+        checks['native_managed_engine_cookie']=engine.get('status')=='OK' and cookie.get('saved') is True
+        solved=completed('browser_solver_preflight',{'settings':{'managed':True}})
+        checks['native_managed_solver']=solved['state']=='completed' and solved.get('result',{}).get('status')=='OK'
+        queue=client.call('queue_ai_reviews',{'all':True})
+        checks['native_durable_ai_registration']=queue.get('status')=='OK' and type(queue.get('registered')) is int
         phase='configuration_write';result=client.call('save_setup',{'workflow':{'fl_unlimited':True,'fl_per_batch':2}})
         checks['configuration_roundtrip']=result['config']['values']['workflow']['fl_unlimited'] is True and result['config']['values']['workflow']['fl_per_batch']==2
         phase='native_gui_exit';process.wait(25);checks['native_cocoa_window_exit_zero']=process.returncode==0;checks['native_window_rendered']=screenshot.is_file() and screenshot.stat().st_size>2000

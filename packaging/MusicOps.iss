@@ -5,7 +5,7 @@
 #ifndef AppIdentity
   #define AppIdentity "MusicOps.Desktop"
 #endif
-#define MusicOpsVersion "0.4.4"
+#define MusicOpsVersion "0.4.5"
 
 [Setup]
 AppId={#AppIdentity}
@@ -33,7 +33,7 @@ SolidCompression=yes
 CloseApplications=no
 RestartApplications=no
 UninstallDisplayIcon={app}\MusicOps.exe
-VersionInfoVersion=0.4.4.0
+VersionInfoVersion=0.4.5.0
 VersionInfoDescription=MusicOps Windows Installer
 
 [CustomMessages]
@@ -72,6 +72,8 @@ Source: "{#BundleDir}\licenses\*"; DestDir: "{app}\licenses"; Flags: ignoreversi
 Source: "{#BundleDir}\LICENSE"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#BundleDir}\THIRD-PARTY-NOTICES.md"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#BundleDir}\启动说明.txt"; DestDir: "{app}"; Flags: ignoreversion
+
+Source: "{#BundleDir}\tools\services\*"; DestDir: "{app}\tools\services"; Flags: ignoreversion recursesubdirs createallsubdirs skipifsourcedoesntexist
 
 [Icons]
 Name: "{group}\MusicOps"; Filename: "{app}\MusicOps.exe"; Parameters: "--base ""{app}\profile"""; WorkingDir: "{app}"

@@ -54,7 +54,10 @@ def run(workflows,job):
                     reference=resolve_netease_target(target,cfg,workflows.s.vault.get,lambda phase:workflows.checkpoint(job,phase));target['netease_match']=reference
                     result=Path(download_track(reference,cfg,directory,workflows.s.vault.get,lambda phase:workflows.checkpoint(job,phase)));proof={'source':'netease','source_song_id':reference['source_song_id']}
                 else:
-                    provider=StreamingProvider(settings,workflows.s.vault.get)
+                    effective=dict(settings)
+                    if settings.get('managed'):
+                        base,token=workflows.s.engines.ensure('go-music-dl',cfg['paths']['tools'],restart_if_changed=True);effective.update(base_url=base,credential_ref='',_managed_token=token)
+                    provider=StreamingProvider(effective,workflows.s.vault.get)
                     result,proof=provider.download(platform,target,directory,validator,lambda phase:workflows.checkpoint(job,phase))
                 if result.suffix.lower()!='.ncm':
                     validation=validator.validate(result)

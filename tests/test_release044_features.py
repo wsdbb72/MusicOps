@@ -89,16 +89,16 @@ def test_running_tree_refresh_preserves_viewport(app,tmp_path):
  window.close()
 
 
-def test_all_ai_processes_every_page_in_bounded_chunks(app,tmp_path,monkeypatch):
- window,client=window_for(tmp_path);calls=[]
+def test_all_ai_registers_a_durable_backend_queue_without_gui_owned_chunks(app,tmp_path,monkeypatch):
+ window,client=window_for(tmp_path);window.config['ai']['enabled']=True;calls=[]
  def call(command,payload,done=None,failed=None):
   calls.append((command,payload))
-  result={'job_ids':[str(i) for i in range(47)]} if command=='list_workflows' and payload.get('selection') else client.call(command,payload) if command=='get_status' else {'results':[]}
-  if done:done(result)
- monkeypatch.setattr(window,'call',call);window.all_task_action('ai')
- chunks=[p['job_ids'] for c,p in calls if c=='assist_workflows']
- assert [len(c) for c in chunks]==[20,20,7] and sum(chunks,[])==[str(i) for i in range(47)]
- assert window.all_action_pending is False;window.close()
+  if done:done({'registered':63,'message':'已登记后台核对队列'})
+ monkeypatch.setattr(window,'call',call);monkeypatch.setattr(window,'refresh',lambda:None);window.all_task_action('ai')
+ assert calls[0]==('queue_ai_reviews',{'all':True,'apply_verified':True})
+ assert not any(command=='assist_workflows' for command,_ in calls)
+ assert '后台核对队列' in window.notice.text()
+ window.close()
 
 
 def test_edition_preferences_use_tracks_not_cover_files():

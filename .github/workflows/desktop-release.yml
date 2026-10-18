@@ -45,6 +45,11 @@ jobs:
               raise SystemExit('Invalid version or source commit mismatch')
           with open(os.environ['GITHUB_OUTPUT'], 'a', encoding='utf-8') as stream:
               stream.write('version=' + version + '\n')
+      - name: Set up pinned Go for bundled engines
+        uses: actions/setup-go@v6
+        with:
+          go-version: '1.26.3'
+          cache: false
       - name: Install pinned Python dependencies
         run: |
           python -m pip install -r requirements.lock
@@ -95,6 +100,10 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'Frozen application build failed' }
           Copy-Item -LiteralPath LICENSE -Destination dist/MusicOps-Windows/LICENSE
           Copy-Item -LiteralPath packaging/启动说明.txt -Destination dist/MusicOps-Windows/启动说明.txt
+      - name: Verify bundled services, real local browser rendering and encrypted credentials
+        run: |
+          python packaging/smoke_engines.py --root dist/MusicOps-Windows/tools/services --profile "$env:RUNNER_TEMP/musicops-engine-profile" --report dist/windows/reports/managed-engines.json
+          if ($LASTEXITCODE -ne 0) { throw 'Bundled engine acceptance failed' }
       - name: Verify the actual packaged application and three workflow entry points
         run: |
           python packaging/smoke_starts.py --bundle dist/MusicOps-Windows --profile "$env:RUNNER_TEMP/musicops-release-profile" --report dist/windows/reports/packaged-starts.json
@@ -125,7 +134,7 @@ jobs:
           root = pathlib.Path('release-assets'); bundle = pathlib.Path('dist/MusicOps-Windows')
           report = json.loads(pathlib.Path('dist/windows/reports/packaged-starts.json').read_text('utf-8'))
           installed = json.loads(pathlib.Path('dist/windows/reports/full-installer-smoke.json').read_text('utf-8'))
-          required = {'native_task_status_filter','native_full_queue_selection','native_streaming_and_edition_settings','native_full_album_preparation','identification_and_search_are_separate', 'native_bulk_cancel_review_tasks', 'native_manual_search_readonly', 'native_search_activity_visible', 'gui_exit_zero'}
+          required = {'native_managed_engine_cookie','native_managed_solver','native_durable_ai_registration','native_task_status_filter','native_full_queue_selection','native_streaming_and_edition_settings','native_full_album_preparation','identification_and_search_are_separate', 'native_bulk_cancel_review_tasks', 'native_manual_search_readonly', 'native_search_activity_visible', 'gui_exit_zero'}
           if report['version'] != version or report.get('passed') is not True or report.get('external_requests') != 0 or not required.issubset(report['checks']) or not all(report['checks'].values()):
               raise SystemExit('Packaged acceptance evidence is incomplete')
           if installed.get('version') != version or installed.get('passed') is not True or len(installed.get('checks', {})) != 9 or not all(installed['checks'].values()):
@@ -157,7 +166,9 @@ jobs:
                   raise SystemExit('Source archive is missing license notices')
           installer = root/f'MusicOps-{version}-Setup.exe'
           artifacts = {path.name: hashes(path) for path in (installer, portable, source)}
-          data = {'version': version, 'architecture': 'x86_64', 'commit': commit, 'artifacts': artifacts,
+          engines=json.loads(pathlib.Path('dist/windows/reports/managed-engines.json').read_text('utf-8'))
+          if not engines.get('passed') or len(engines.get('checks',{}))!=9 or not all(engines['checks'].values()):raise SystemExit('Native bundled engines were not accepted')
+          data = {'managed_engines_passed':True,'managed_engine_checks':engines['checks'],'version': version, 'architecture': 'x86_64', 'commit': commit, 'artifacts': artifacts,
                   'unit_tests_passed': True, 'installer_smoke_passed': True, 'installer_test_count': 6,
                   'installer_smoke_checks': installed['checks'],
                   'smoke_passed': True, 'packaged_checks': report['checks'], 'external_requests': 0,
@@ -224,6 +235,7 @@ jobs:
           for platform in ('Windows', 'macOS-arm64'):
               manifest_name = f'MusicOps-{version}-{platform}-build.json'; expected.add(manifest_name)
               data = json.loads((root/manifest_name).read_text('utf-8'))
+              if data.get('managed_engines_passed') is not True or len(data.get('managed_engine_checks',{}))!=9 or not all(data['managed_engine_checks'].values()):raise SystemExit('Native bundled engines acceptance is incomplete')
               if data.get('version') != version or data.get('commit') != commit or data.get('smoke_passed') is not True or data.get('installer_smoke_passed') is not True:
                   raise SystemExit('Build source, version or native acceptance mismatch: '+platform)
               if platform == 'Windows':
@@ -297,7 +309,7 @@ jobs:
               if obj['type'] != 'commit' or obj['sha'] != commit:
                   raise SystemExit('The existing tag does not identify the tested source')
           notes = pathlib.Path('release-notes.md')
-          notes.write_text('新增 DicMusic / Orpheus 令牌不足弹窗及仅一次 / 本批次普通下载授权；任务状态筛选、刷新保持滚动位置、全量失败重试、全量 AI 核对和连续手动核对；日文与中文跨平台别名提示；音质 / 完整曲目 / 特殊发行偏好；库内整专辑缺曲补全；可选 go-music-dl 多流媒体兜底，完整音频校验及成功曲目重试缓存。Spotify / YouTube 原生专有下载器未内置，其他平台依赖外部服务及账号权限。修复 DicMusic FL 令牌已生效但 API 未返回个人免费状态时的误判和后续阻塞。增加绑定种子 ID 的网页免费标签核验、旧待对账请求恢复、严格令牌参数和下载方式记录；恢复时不再次使用 FL。令牌余额兼容常规与临时令牌显示，预算或对账拦截提供明确原因。\n\n提供 Windows 安装包与便携版、Apple Silicon ARM Mac 原生 PKG 与应用 ZIP、同一提交源码及校验文件。Mac 尚无 Developer ID 签名和 Apple 公证。历史 Intel 附件保留。\n\n已使用真实登录只读核查 DicMusic API、种子页与令牌历史；自动测试使用模拟响应，不发起真实下载或消耗令牌。手动更新前请退出应用及后台。\n\nSource commit: '+commit+'\n', 'utf-8')
+          notes.write_text('内置 FlareSolverr、固定浏览器与 go-music-dl，自动配置并管理本机服务；平台 Cookie 和扫码登录内嵌于 MusicOps 设置。AI 支持本地专辑别名映射、搜索词、候选识别和失败恢复；无法直接匹配的任务自动加入持久化后台队列，取消前 20 项截断，关闭窗口继续处理、重启恢复，批量登记使用单一事务。正常匹配、同一问题和候选比较优先复用缓存，减少 token 消耗；没有联网工具的接口仍可提供别名搜索词并核实目录。证据不足时最后保留人工核对，普通下载额度仍仅由用户授权。修复下拉菜单两端的白条。\n\n提供 Windows 安装包与便携 ZIP、macOS Apple Silicon ARM 原生 PKG 与应用 ZIP、同一提交源码及 SHA-256 校验文件。内置服务对应源码、构建脚本和许可证随包提供。Mac 为 ad-hoc 完整性签名，尚无 Developer ID 签名和 Apple 公证；历史 Intel 附件保留。\n\n验收涵盖真实引擎启动、浏览器本地网页渲染、凭据加密与重启恢复、完整安装和升级。自动化不下载真实音乐、不消费 PT 令牌；未使用真实账号完成扫码确认。手动更新前请退出应用及后台。\n\nSource commit: '+commit+'\n', 'utf-8')
           def gh(*arguments):
               subprocess.run(['gh', *arguments], check=True)
           gh('release', 'create', tag, '--verify-tag', '--target', commit, '--draft', '--title', 'MusicOps '+version, '--notes-file', str(notes))

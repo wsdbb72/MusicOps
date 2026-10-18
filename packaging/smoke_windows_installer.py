@@ -22,7 +22,7 @@ compiler=Path(args.compiler).resolve();qa=work/'qa-installer'
 active_profile=Path(os.environ.get('LOCALAPPDATA',''))/'MusicOps/active-profile.json'
 previous_active=active_profile.read_bytes() if active_profile.is_file() else None
 qa.mkdir(exist_ok=True)
-build=run_process([compiler,'/DBundleDir='+str(bundle),'/DAppIdentity='+identity,'/O'+str(qa),repo/'packaging/MusicOps.iss'])
+build=run_process([compiler,'/DBundleDir='+str(bundle),'/DAppIdentity='+identity,'/O'+str(qa),repo/'packaging/MusicOps.iss'],timeout=900)
 assert build.returncode==0,build.stdout+build.stderr
 installation=Installation(next(qa.glob('*-Setup.exe')),target,identity);checks={};process=None;vault=None;tool=None
 profile=target/'profile';client=WorkerClient(profile)
@@ -45,6 +45,10 @@ try:
     code,log=installation.run();checks['upgrade_reuses_existing_registration']=code==0 and str(target).casefold() in log.casefold()
     checks['profile_vault_and_tools_preserved']=all(digest(Path(p))==value for p,value in before.items())
     checks['installed_executables_match_release']=all(digest(target/name)==digest(bundle/name) for name in ('MusicOps.exe','MusicOps-worker.exe'))
+    from smoke_engines import smoke as smoke_engines
+    engines=smoke_engines(target/'tools/services',work/'installed-engine-profile')
+    checks['installed_executables_match_release'] &= engines['passed']
+    (work/'installed-engines.json').write_text(json.dumps(engines,indent=2),'utf-8')
     env=os.environ.copy()
     for k in ('PYTHONPATH','PYTHONHOME','VIRTUAL_ENV','QT_QPA_PLATFORM'):env.pop(k,None)
     process=subprocess.Popen([str(target/'MusicOps.exe'),'--base',str(profile),'--quit-after','5500','--screenshot',str(work/'installed-runtime.png')],cwd=target,env=env,creationflags=0x08000000)

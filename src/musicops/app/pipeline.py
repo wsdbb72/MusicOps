@@ -67,7 +67,13 @@ class Workflows:
                 if changes.get('stage')!='cancelled':changes.update(stage='cancelled',message='已在安全阶段取消；已经发布的内容和做种任务保留')
             if previous and 'paused' in previous and 'paused' not in changes:
                 job['paused']=previous['paused']
-            job.update(changes,updated_at=utcnow());self.store.put('evidence','workflow:'+job['job_id'],job);return job
+            job.update(changes,updated_at=utcnow());self.store.put('evidence','workflow:'+job['job_id'],job)
+            if job.get('stage') in ('needs_review','failed','skipped') and job.get('job_kind') not in ('batch','activity'):
+                config=self.s.config.current()['values']
+                if not config['offline'] and config['ai'].get('enabled'):
+                    from musicops.app.review_queue import register
+                    register(self.s,job)
+            return job
     def list(self,offset=0,state='all',selection=False):
         if type(offset) is not int or offset<0:raise ValueError('任务分页参数无效')
         from musicops.app.task_filters import predicate
@@ -82,7 +88,8 @@ class Workflows:
             rows=c.execute("SELECT json_remove(payload,'$.config','$.targets','$.old_files','$.prepared','$.choices','$.outcomes','$.publication_plan','$.catalog_choices','$.lookup_links','$.engine_paths') FROM evidence WHERE id LIKE 'workflow:%' AND coalesce(json_extract(payload,'$.hidden'),0)=0"+clause+" ORDER BY coalesce(json_extract(payload,'$.created_at'),updated_at) DESC,id LIMIT 200 OFFSET ?",(*parameters,offset)).fetchall()
         public=[]
         for j in [json.loads(r[0]) for r in rows]:
-            row={k:j.get(k) for k in ('job_id','job_kind','task_type','scene','stage','label','progress','message','detail','review_kind','batch_id','scanned_count','cached_count','current_directory','album_count','selected_target_count','target_count','matched_count','identification_job_id','search_job_id','processing_job_id','progress_phase','ai_fallback','ai_assistance','retry_job_id','retry_count')}
+            row={k:j.get(k) for k in ('job_id','job_kind','task_type','scene','stage','label','progress','message','detail','review_kind','batch_id','scanned_count','cached_count','current_directory','album_count','selected_target_count','target_count','matched_count','identification_job_id','search_job_id','processing_job_id','progress_phase','ai_fallback','ai_assistance','retry_job_id','retry_count','ai_review_state')}
+            if j.get('ai_review_state') in ('pending','running'):row['message']='AI 辅助等待后台分批核对' if j['ai_review_state']=='pending' else 'AI 正在核对身份、搜索或恢复方案'
             if j.get('ai_assistance'):row['ai_assistance']={k:j['ai_assistance'].get(k) for k in ('status','kind','message')}
             pending=bool(j.get('paused') and j['stage']=='running')
             if j.get('paused') and j.get('job_kind')=='batch' and j['stage']=='preparing':
@@ -289,7 +296,7 @@ class Workflows:
                 if category=='TOKEN_APPROVAL_REQUIRED':exc=PolicyBlocked(SITE_NAMES.get((job.get('selected') or {}).get('source'),'资源站')+'：'+str(exc))
                 stage='needs_review' if isinstance(exc,(PolicyBlocked,HttpError)) or category in ('RECOVERY_REQUIRED','CONFLICT') else 'failed'
                 # Never store exception URLs, credentials, API payloads or remote HTML.
-                self.put(job,stage=stage,review_kind='token' if category=='TOKEN_APPROVAL_REQUIRED' else 'error',message='等待令牌下载确认' if category=='TOKEN_APPROVAL_REQUIRED' else '处理未完成：'+category,detail=str(exc) if isinstance(exc,(PolicyBlocked,HttpError)) else '原音源保留；请检查本机工具、文件或磁盘空间。')
+                self.put(job,stage=stage,error_class=category,review_kind='token' if category=='TOKEN_APPROVAL_REQUIRED' else 'error',message='等待令牌下载确认' if category=='TOKEN_APPROVAL_REQUIRED' else '处理未完成：'+category,detail=str(exc) if isinstance(exc,(PolicyBlocked,HttpError)) else '原音源保留；请检查本机工具、文件或磁盘空间。')
         return {'status':'OK','job_id':job['job_id']}
     def provider(self,site,cfg):
         from musicops.providers.pt_download import PTDownloadProvider

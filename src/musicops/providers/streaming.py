@@ -51,6 +51,7 @@ class StreamingProvider:
         self.loopback=u.hostname in ('localhost','127.0.0.1','::1')
         raw=secret_getter(settings['credential_ref'],u.hostname) if settings.get('credential_ref') else None
         self.headers={'Cookie':cookie_header(raw,u.hostname,u.path or '/')} if raw else {}
+        if settings.get('_managed_token'):self.headers['X-MusicOps-Service']=settings['_managed_token']
         self.client=client
     def _session(self):return contextlib.nullcontext(self.client) if self.client is not None else httpx.Client(verify=True,follow_redirects=False,trust_env=not self.loopback,timeout=self.settings['timeout'])
     @staticmethod

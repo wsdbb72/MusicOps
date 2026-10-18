@@ -5,7 +5,8 @@ from pathlib import Path
 from PySide6.QtCore import QObject,QRunnable,QThreadPool,QTimer,Qt,Signal,QPropertyAnimation,QEasingCurve,QSize
 from PySide6.QtGui import QFont,QDesktopServices,QIcon,QPixmap,QPainter,QPen,QColor,QPalette
 from PySide6.QtCore import QUrl
-from PySide6.QtWidgets import (QApplication,QMainWindow,QWidget,QVBoxLayout,QHBoxLayout,QLabel,QPushButton,QLineEdit,QPlainTextEdit,QFileDialog,QCheckBox,QGroupBox,QFormLayout,QWizard,QWizardPage,QListWidget,QStackedWidget,QTableWidget,QTableWidgetItem,QTreeWidget,QTreeWidgetItem,QHeaderView,QMessageBox,QSpinBox,QScrollArea,QInputDialog,QDialog,QDialogButtonBox,QGraphicsOpacityEffect,QProgressBar,QAbstractItemView,QComboBox,QRadioButton)
+from PySide6.QtWidgets import (QApplication,QMainWindow,QWidget,QVBoxLayout,QHBoxLayout,QLabel,QPushButton,QLineEdit,QPlainTextEdit,QFileDialog,QCheckBox,QGroupBox,QFormLayout,QWizard,QWizardPage,QListWidget,QStackedWidget,QTableWidget,QTableWidgetItem,QTreeWidget,QTreeWidgetItem,QHeaderView,QMessageBox,QSpinBox,QScrollArea,QInputDialog,QDialog,QDialogButtonBox,QGraphicsOpacityEffect,QProgressBar,QAbstractItemView,QRadioButton)
+from musicops.gui.controls import QComboBox
 from musicops import __version__
 from musicops.worker.client import WorkerClient
 from musicops.clients.http import redact
@@ -109,12 +110,16 @@ class SetupWizard(QWizard):
                     except Exception:QMessageBox.information(self,'无法导入','请使用 Cookie-Editor 导出的 JSON 文件。')
             actions.addWidget(button('导入 JSON 文件',load_json));actions.addWidget(button('打开站点',lambda checked=False,h=host:QDesktopServices.openUrl(QUrl('https://'+h))));actions.addStretch();layout.addLayout(actions)
             p.addRow(group);self.site_fields[key]=(enabled,cookie)
-        solver=self.values.get('browser_solver',{});self.solver_enabled=QCheckBox('遇到浏览器挑战时使用本机 FlareSolverr');self.solver_enabled.setChecked(solver.get('enabled',False));p.addRow(self.solver_enabled)
+        solver=self.values.get('browser_solver',{});self.solver_managed=QCheckBox('使用程序内置 FlareSolverr（自动配置与启动）');self.solver_managed.setChecked(solver.get('managed',True));p.addRow(self.solver_managed);self.solver_enabled=QCheckBox('遇到浏览器挑战时使用本机 FlareSolverr');self.solver_enabled.setChecked(solver.get('enabled',False));p.addRow(self.solver_enabled)
         self.solver_url=line(solver.get('base_url','http://127.0.0.1:8191'),'本机 FlareSolverr 地址');p.addRow('验证服务地址',self.solver_url)
         row,self.solver_executable=browse_field(solver.get('executable',''),False);p.addRow('Windows 程序（可选）',row)
         self.solver_auto=QCheckBox('服务未运行时自动启动上述程序');self.solver_auto.setChecked(solver.get('auto_start',False));self.solver_auto.setEnabled(os.name=='nt');p.addRow(self.solver_auto)
-        self.solver_note=label('内置 FlareSolverr 接入；服务本体需单独安装。Windows 可选择官方 EXE，Mac 可在 Docker 中运行本机服务。仅本机回环地址可接收站点 Cookie。','hint');p.addRow(self.solver_note)
-        p.addRow(button('测试 FlareSolverr 连接',self.test_solver));p.addRow(button('打开 FlareSolverr 安装说明',lambda:QDesktopServices.openUrl(QUrl('https://github.com/FlareSolverr/FlareSolverr#installation'))))
+        self.solver_note=label('安装包内含验证服务与浏览器，无需另装 Docker 或填写地址。只对检索页的浏览器挑战启用，不重放下载或令牌请求。取消内置选项后可使用已有本机服务。','hint');p.addRow(self.solver_note)
+        def solver_mode(enabled):
+            self.solver_url.setDisabled(enabled)
+            self.solver_executable.setDisabled(enabled or os.name!='nt');self.solver_auto.setDisabled(enabled or os.name!='nt')
+        self.solver_managed.toggled.connect(solver_mode);solver_mode(self.solver_managed.isChecked())
+        p.addRow(button('测试 FlareSolverr 连接',self.test_solver))
         p=self._add_page('连接 qBittorrent','用于接收站点种子并下载。qBittorrent → 选项 → WebUI，启用 Web 用户界面；把地址与登录账号填在这里。')
         cfg=self.values.get('qbt',{});qbt_saved=cfg.get('credential_ref') in self.saved_refs;self.qbt_url=line(cfg.get('base_url','http://127.0.0.1:8080'),'例如 http://127.0.0.1:8080');self.qbt_user=CredentialField('WebUI 用户名',qbt_saved);self.qbt_pass=CredentialField('WebUI 密码',qbt_saved)
         p.addRow('WebUI 地址',self.qbt_url);p.addRow('用户名',self.qbt_user);p.addRow('密码',self.qbt_pass)
@@ -144,12 +149,18 @@ class SetupWizard(QWizard):
             row,edit=browse_field(self.values.get('paths',{}).get('tools',{}).get(tool,''),False);self.fields[tool]=edit;p.addRow(tool+' 程序',row)
         p.addRow(label('两个媒体工具用于解密后的音频检查和音质识别。已填写有效路径时不用重新安装。','hint'))
         p=self._add_page('其他流媒体兜底（可选）','先检索资源站，再尝试网易云和这里配置的流媒体。每首都核对歌名、艺人、专辑、完整时长与实际音频，试听和错误歌曲不会入库。')
-        streaming=self.values.get('streaming',{});self.streaming_enabled=QCheckBox('启用 go-music-dl 多平台回退服务');self.streaming_enabled.setChecked(streaming.get('enabled',False));p.addRow(self.streaming_enabled)
+        streaming=self.values.get('streaming',{});self.streaming_managed=QCheckBox('使用程序内置 go-music-dl（自动配置与启动）');self.streaming_managed.setChecked(streaming.get('managed',True));p.addRow(self.streaming_managed);self.streaming_enabled=QCheckBox('启用 go-music-dl 多平台回退服务');self.streaming_enabled.setChecked(streaming.get('enabled',False));p.addRow(self.streaming_enabled)
         self.streaming_url=line(streaming.get('base_url','http://127.0.0.1:8080/music'),'填写 go-music-dl 网页的完整地址，含 /music');p.addRow('服务网页地址',self.streaming_url)
         self.streaming_cookie=CredentialField('可选：go-music-dl 登录 Cookie JSON，未启用登录时留空',streaming.get('credential_ref') in self.saved_refs);p.addRow('服务登录 Cookie',self.streaming_cookie)
         self.streaming_order=line(','.join(streaming.get('order',['netease','qqmusic','kuwo','kugou','migu','qishui','bilibili','applemusic'])),'平台代码用逗号分隔');p.addRow('回退顺序',self.streaming_order)
-        p.addRow(label('代码：netease 网易云、qqmusic QQ、kuwo 酷我、kugou 酷狗、migu 咪咕、qishui 汽水、bilibili、applemusic。平台 Cookie / 订阅权限请在该服务的设置页配置。Apple Music 仅有试听时会拒绝入库；Spotify / YouTube 需要服务提供对应适配器，不能将跨平台音源标成它们的原生下载。','hint'))
-        p.addRow(button('打开服务设置网页',lambda:QDesktopServices.openUrl(QUrl(self.streaming_url.text().strip()))));p.addRow(button('打开 go-music-dl 部署说明',lambda:QDesktopServices.openUrl(QUrl('https://github.com/guohuiyuan/go-music-dl#readme'))))
+        p.addRow(label('代码：netease 网易云、qqmusic QQ、kuwo 酷我、kugou 酷狗、migu 咪咕、qishui 汽水、bilibili、applemusic。平台 Cookie 或扫码登录可点击下方按钮在 MusicOps 中配置。Apple Music 仅有试听时会拒绝入库；Spotify / YouTube 需要服务提供对应适配器，不能将跨平台音源标成它们的原生下载。','hint'))
+        def streaming_mode(enabled):
+            self.streaming_url.setDisabled(enabled);self.streaming_cookie.setDisabled(enabled)
+        self.streaming_managed.toggled.connect(streaming_mode);streaming_mode(self.streaming_managed.isChecked())
+        def login():
+            from musicops.gui.engine_login import EngineLogin
+            dialog=EngineLogin(self.owner,self.saved_refs);dialog.exec();self.saved_refs.update(dialog.saved_refs)
+        p.addRow(button('平台 Cookie / 扫码登录…',login))
         p=self._add_page('歌单平台授权（可选）','公开链接先尝试直接读取；遇到登录要求时再补充。也可以导入各平台或 Playlist Out 导出的歌单文件，本步可跳过。')
         self.playlist_auth_selector=QComboBox();self.playlist_auth_stack=QStackedWidget();self.playlist_credentials={}
         for platform,name in PLATFORMS.items():
@@ -190,7 +201,7 @@ class SetupWizard(QWizard):
         page=QWizardPage();page.setTitle(title);page.setSubTitle(subtitle);outer=QVBoxLayout(page);scroll=QScrollArea();scroll.setWidgetResizable(True);scroll.setFrameShape(QScrollArea.NoFrame);body=QWidget();form=QFormLayout(body);form.setVerticalSpacing(16);form.setHorizontalSpacing(22);form.setFieldGrowthPolicy(QFormLayout.ExpandingFieldsGrow);scroll.setWidget(body);outer.addWidget(scroll);self.addPage(page);return form
     def test_solver(self):
         self.solver_note.setText('正在连接本机 FlareSolverr…')
-        self.owner.call('browser_solver_preflight',{'settings':{'base_url':self.solver_url.text().strip(),'executable':self.solver_executable.text().strip(),'auto_start':self.solver_auto.isChecked()}},lambda result:self.solver_note.setText(result.get('message') or result.get('error') or str(result.get('status'))),lambda error:self.solver_note.setText(error))
+        self.owner.call('browser_solver_preflight',{'settings':{'managed':self.solver_managed.isChecked(),'base_url':self.solver_url.text().strip(),'executable':self.solver_executable.text().strip(),'auto_start':self.solver_auto.isChecked()}},lambda result:self.solver_note.setText(result.get('message') or result.get('error') or str(result.get('status'))),lambda error:self.solver_note.setText(error))
     def showEvent(self,event):
         super().showEvent(event);QTimer.singleShot(0,lambda:apply_native_titlebar(self))
     def accept(self):
@@ -200,9 +211,9 @@ class SetupWizard(QWizard):
                  'lyrics':{'url':self.lyric_url.text().strip(),'authorization':self.lyric_key.text()},'discogs_token':self.discogs.text(),
                  'ai':{'enabled':self.ai_enabled.isChecked(),'url':self.ai_url.text().strip(),'model':self.ai_model.text().strip(),'key':self.ai_key.text()},'catalog_web':self.catalog_web.isChecked(),
                  'servers':{'roon':self.roon.isChecked(),'navidrome':{'enabled':self.nav_enabled.isChecked(),'url':self.nav_url.text().strip(),'username':self.nav_user.text().strip(),'password':self.nav_pass.text()}},
-                 'updates':{'enabled':self.auto_updates.isChecked()},'browser_solver':{'enabled':self.solver_enabled.isChecked(),'base_url':self.solver_url.text().strip(),'executable':self.solver_executable.text().strip(),'auto_start':self.solver_auto.isChecked()},
+                 'updates':{'enabled':self.auto_updates.isChecked()},'browser_solver':{'managed':self.solver_managed.isChecked(),'enabled':self.solver_enabled.isChecked(),'base_url':self.solver_url.text().strip(),'executable':self.solver_executable.text().strip(),'auto_start':self.solver_auto.isChecked()},
                  'workflow':{'netease_fallback':self.fallback.isChecked(),'netease_api_url':self.netease_api.text().strip(),'netease_import_dir':self.import_dir.text().strip(),'fl_per_batch':self.fl_limit.value(),'fl_unlimited':self.fl_unlimited.isChecked(),'edition_policy':self.edition_policy.currentData()},
-                 'streaming':{'enabled':self.streaming_enabled.isChecked(),'base_url':self.streaming_url.text().strip(),'cookie_json':self.streaming_cookie.text(),'order':[s.strip() for s in self.streaming_order.text().split(',') if s.strip()]},
+                 'streaming':{'managed':self.streaming_managed.isChecked(),'enabled':self.streaming_enabled.isChecked(),'base_url':self.streaming_url.text().strip(),'cookie_json':self.streaming_cookie.text(),'order':[s.strip() for s in self.streaming_order.text().split(',') if s.strip()]},
                  **{k:w.text().strip() for k,w in self.fields.items()}}
         self.button(QWizard.FinishButton).setEnabled(False);self.save_note.setText('正在保存…')
         def saved(result):self.owner.config=result['config']['values'];super(SetupWizard,self).accept();self.owner.refresh()
@@ -619,6 +630,8 @@ class Workbench(QMainWindow):
         if getattr(self,'all_action_pending',False):return
         if action=='ai' and not self.config.get('ai',{}).get('enabled'):
             self.notice.setText('请先在连接与设置中启用 AI，并填写服务地址、模型和 API Key。');return
+        if action=='ai':
+            self.call('queue_ai_reviews',{'all':True,'apply_verified':True},lambda result:(self.notice.setText(result.get('message') or '已登记后台核对队列'),self.refresh()),lambda message:self.notice.setText(message));return
         self.all_action_pending=True;self.notice.setText('正在整理全部任务…')
         states=['failed'] if action=='retry' else ['review','failed'];ids=[]
         def collect():
@@ -633,7 +646,7 @@ class Workbench(QMainWindow):
         def process():
             if not ids:
                 self.all_action_pending=False;self.notice.setText(('AI 核对' if action=='ai' else '重试')+'已处理 '+str(done[0])+' 项'+('；部分任务需手动处理' if problems else ''));self.refresh();return
-            size=20 if action=='ai' else 500;chunk=ids[:size];del ids[:size]
+            size=500;chunk=ids[:size];del ids[:size]
             self.notice.setText('正在处理全部任务：'+str(done[0])+' 项完成，剩余 '+str(len(ids)+len(chunk))+' 项')
             def received(result):
                 done[0]+=len(chunk)
@@ -681,13 +694,13 @@ class Workbench(QMainWindow):
         if not self.checked_jobs or getattr(self,'bulk_ai_pending',False):return
         self.detail_pinned=True
         if not self.config.get('ai',{}).get('enabled'):self.job_detail.setPlainText('可在“连接与设置”中启用 AI 并填写服务地址、模型和 API Key。');return
-        ids=list(self.checked_jobs)[:20];total=len(self.checked_jobs);self.bulk_ai_pending=True;self.update_job_selection();self.job_detail.setPlainText('正在查询真实目录并辅助核对'+('（本次前 20 项，其余请分批勾选）' if total>20 else '')+'…')
+        ids=list(self.checked_jobs);self.bulk_ai_pending=True;self.update_job_selection();self.job_detail.setPlainText('正在登记 AI 辅助核对队列…')
         def received(result):
             self.bulk_ai_pending=False;self.update_job_selection()
-            text=('本次辅助前 20 项，共勾选 '+str(total)+' 项。\n' if total>20 else '')+str(result.get('message') or result.get('error') or 'AI 辅助已完成')
+            text=str(result.get('message') or result.get('error') or 'AI 辅助已完成')
             self.job_detail.setPlainText(text+''.join('\n'+str(row.get('label') or row.get('job_id'))+'：'+str(row.get('message','')) for row in result.get('results',[])));self.refresh()
         def failed(message):self.bulk_ai_pending=False;self.update_job_selection();self.job_detail.setPlainText('AI 辅助未完成：'+message)
-        self.call('assist_workflows',{'job_ids':ids},received,failed)
+        self.call('queue_ai_reviews',{'job_ids':ids,'apply_verified':True},received,failed)
     def restore(self):
         job_id=self.selected_job()
         if not job_id:return
@@ -800,7 +813,10 @@ QPushButton#primary:pressed { background: #3fbea9; }
 QPushButton#primary:disabled { background: #244f50; color: #7bada8; border-color: #315e5e; }
 QLineEdit,QPlainTextEdit,QSpinBox { background: #101b2d; color: #ecf5ff; border: 1px solid #34465f; border-radius: 8px; padding: 10px 12px; selection-background-color: #256a6b; selection-color: white; min-height: 20px; }
 QComboBox { background: #101b2d; color: #ecf5ff; border: 1px solid #34465f; border-radius: 8px; padding: 10px 26px 10px 12px; min-height: 20px; }
-QComboBox QAbstractItemView { background: #14243a; color: #ecf5ff; selection-background-color: #24485a; }
+QComboBox { combobox-popup: 0; }
+QComboBox QAbstractItemView { background: #14243a; color: #ecf5ff; selection-background-color: #24485a; border: 1px solid #34465f; padding: 4px 0; outline: 0; }
+QComboBox QAbstractItemView::item { min-height: 30px; padding: 5px 12px; border: 0; }
+QComboBox QAbstractItemView::item:hover { background: #203d50; }
 QComboBox:focus { border-color: #64dcca; } QRadioButton { color: #c1d4e9; spacing: 9px; padding: 6px 0; }
 QLineEdit:hover,QPlainTextEdit:hover,QSpinBox:hover { border-color: #55728e; }
 QLineEdit:focus,QPlainTextEdit:focus,QSpinBox:focus { border: 1px solid #64dcca; background: #14243a; }

@@ -46,6 +46,10 @@ def main():
         phase='installed_app_acceptance';installed_report=Path(args.report).with_name(Path(args.report).stem+'-app.json')
         run(sys.executable,Path(__file__).with_name('smoke_macos.py'),'--app',installed,'--work',work/'installed-app','--report',installed_report,'--expected-arch',args.arch)
         result=json.loads(installed_report.read_text('utf-8'));checks['installed_app_acceptance_checks']=valid_acceptance(result)
+        from smoke_engines import smoke as smoke_engines
+        engines=smoke_engines(installed/'Contents/Resources/tools/services',work/'installed-engine-profile')
+        checks['installed_app_acceptance_checks'] &= engines['passed']
+        report['installed_engine_checks']=engines['checks']
         report['installed_app_check_count']=len(result.get('checks',{}))
         report['passed']=all(checks.values()) and len(checks)==11
     except Exception as exc:report.update(passed=False,error_class=type(exc).__name__,error_phase=phase)

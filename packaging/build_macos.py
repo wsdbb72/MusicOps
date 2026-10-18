@@ -61,7 +61,10 @@ def package(args):
     shutil.copy2(ROOT/'LICENSE',legal/'LICENSE');shutil.copy2(ROOT/'packaging/THIRD-PARTY-NOTICES.md',legal/'THIRD-PARTY-NOTICES.md')
     env=os.environ.copy();env.update(MUSICOPS_MAC_ARCH=args.arch,MUSICOPS_MAC_ICON=str(icon),MUSICOPS_MAC_LEGAL=str(legal),MACOSX_DEPLOYMENT_TARGET='15.0',PYINSTALLER_STRICT_BUNDLE_CODESIGN_ERROR='1')
     dist=output/'dist';run(sys.executable,'-m','PyInstaller','--noconfirm','--clean','--workpath',output/'build','--distpath',dist,ROOT/'packaging/MusicOps-mac.spec',cwd=ROOT,env=env)
-    app=dist/'MusicOps.app';info=plistlib.loads((app/'Contents/Info.plist').read_bytes())
+    app=dist/'MusicOps.app'
+    run(sys.executable,ROOT/'packaging/prepare_engines.py','--output',app/'Contents/Resources/tools/services','--cache',output/'engine-build')
+    run('/usr/bin/codesign','--force','--deep','--sign','-',app)
+    info=plistlib.loads((app/'Contents/Info.plist').read_bytes())
     if info.get('CFBundleIdentifier')!='com.wsdbb72.MusicOps' or info.get('CFBundleShortVersionString')!=app_version or info.get('CFBundleExecutable')!='MusicOps' or info.get('LSBackgroundOnly') is not False:raise RuntimeError('App identity/version/GUI mode mismatch')
     crypto_extensions={path.resolve() for path in (app/'Contents/Frameworks/cryptography/hazmat/bindings').glob('_rust*.so') if path.is_file()}
     if not crypto_extensions:raise RuntimeError('Packaged cryptography extension missing')
@@ -76,6 +79,7 @@ def package(args):
     signature=subprocess.run(['/usr/bin/codesign','-dvv',str(app)],capture_output=True,text=True,check=True).stderr
     if 'Signature=adhoc' not in signature or 'Authority=Developer ID' in signature:raise RuntimeError('Unexpected signing identity; review the release policy')
     reports=output/'reports';reports.mkdir(exist_ok=True)
+    run(sys.executable,ROOT/'packaging/smoke_engines.py','--root',app/'Contents/Resources/tools/services','--profile',output/'engine-smoke-profile','--report',reports/(stem+'-engines.json'),cwd=ROOT,env=env)
     run(sys.executable,ROOT/'packaging/smoke_macos.py','--app',app,'--work',output/'smoke','--report',reports/(stem+'-smoke.json'),'--expected-arch',args.arch,cwd=ROOT,env=env)
     audit_bundle(app)
     stage=output/'package'/stem;stage.mkdir(parents=True,exist_ok=True)
@@ -108,7 +112,9 @@ def package(args):
     digests=artifacts[archive.name]
     for algorithm in ('sha256','sha512'):(output/(stem+'.'+algorithm)).write_text(''.join(values[algorithm]+'  '+name+'\n' for name,values in artifacts.items()),'utf-8')
     commit=subprocess.run(['git','rev-parse','HEAD'],cwd=ROOT,capture_output=True,text=True,check=True).stdout.strip()
-    metadata={'version':app_version,'architecture':args.arch,'minimum_macos':'15.0','commit':commit,'archive':archive.name,'digests':digests,'artifacts':artifacts,'installer':installer.name,'installer_smoke_passed':True,'installer_signed':False,'signing':'ad-hoc','developer_id_signed':False,'notarized':False,'cryptography_openssl_static':True,'smoke_passed':True,'runner_macos':platform.mac_ver()[0]}
+    engines=json.loads((reports/(stem+'-engines.json')).read_text('utf-8'))
+    if not engines.get('passed') or len(engines.get('checks',{}))!=9:raise RuntimeError('Native bundled engines acceptance is incomplete')
+    metadata={'managed_engines_passed':True,'managed_engine_checks':engines['checks'],'version':app_version,'architecture':args.arch,'minimum_macos':'15.0','commit':commit,'archive':archive.name,'digests':digests,'artifacts':artifacts,'installer':installer.name,'installer_smoke_passed':True,'installer_signed':False,'signing':'ad-hoc','developer_id_signed':False,'notarized':False,'cryptography_openssl_static':True,'smoke_passed':True,'runner_macos':platform.mac_ver()[0]}
     (output/(stem+'-build.json')).write_text(json.dumps(metadata,ensure_ascii=False,indent=2)+'\n','utf-8')
     print(json.dumps(metadata,ensure_ascii=True))
 

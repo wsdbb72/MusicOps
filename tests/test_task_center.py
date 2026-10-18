@@ -33,6 +33,7 @@ class Client:
             if self.fail_bulk:raise RuntimeError('连接中断，操作结果请刷新核对')
             return {'succeeded':len(payload['job_ids']),'skipped':0,'failed':0,'results':[{'job_id':value,'status':'OK'} for value in payload['job_ids']]}
         if command=='get_workflow':return {'job':{**job(payload['job_id']),'targets':[{'target_id':'song-1','raw_title':'Track One','artists':['Artist'],'album':'Album'}],'source_outcomes':{'dicmusic':{'status':'NO_RESOURCE'},'orpheus':{'status':'NETWORK_ERROR'}}}}
+        if command=='queue_ai_reviews':return {'message':'已登记后台核对队列','registered':len(payload.get('job_ids',[]))}
         if command=='assist_workflows':return {'message':'AI 辅助建议已保存，请打开核对窗口','results':[{'job_id':value,'status':'READY','message':'已准备核对建议'} for value in payload['job_ids']]}
         if command=='save_setup':return {'config':{'values':self.config}}
         return {}
@@ -105,19 +106,19 @@ def test_bulk_selection_is_capped_and_failure_restores_controls(app,tmp_path):
     assert len(next(payload['job_ids'] for command,payload in client.calls if command=='bulk_workflows'))==500;window.close()
 
 
-def test_ai_assistance_is_a_bounded_id_only_batch_and_persists_polling(app,tmp_path):
+def test_ai_assistance_registers_every_selected_id_and_persists_polling(app,tmp_path):
     window,client=window_for(tmp_path);client.rows=[job(str(number),detail='private-path',config={'password':'synthetic-private'}) for number in range(25)];window.show_jobs({'jobs':client.rows,'total':25});window.job_select_page.setCheckState(Qt.Checked)
-    window.explain();wait(app,window);payload=next(payload for command,payload in client.calls if command=='assist_workflows')
-    assert payload=={'job_ids':[str(number) for number in range(20)]}
+    window.explain();wait(app,window);payload=next(payload for command,payload in client.calls if command=='queue_ai_reviews')
+    assert payload=={'job_ids':[str(number) for number in range(25)],'apply_verified':True}
     assert not any(command=='ai_analyze' for command,_ in client.calls)
-    assert '本次辅助前 20 项' in window.job_detail.toPlainText() and '建议已保存' in window.job_detail.toPlainText()
-    window.show_jobs({'jobs':client.rows,'total':25});assert '建议已保存' in window.job_detail.toPlainText();window.close()
+    assert '前 20' not in window.job_detail.toPlainText() and '后台核对队列' in window.job_detail.toPlainText()
+    window.show_jobs({'jobs':client.rows,'total':25});assert '后台核对队列' in window.job_detail.toPlainText();window.close()
 
 
 def test_ai_assistance_never_sends_gui_details_or_private_paths(app,tmp_path):
     window,client=window_for(tmp_path);client.rows=[job('safe-id',label=r'Album E:\private\name.flac',message='https://private.example/?token=secret',detail='private local directory')]
     window.show_jobs({'jobs':client.rows,'total':1});window.job_select_page.setCheckState(Qt.Checked);window.explain();wait(app,window)
-    assert next(payload for command,payload in client.calls if command=='assist_workflows')=={'job_ids':['safe-id']};window.close()
+    assert next(payload for command,payload in client.calls if command=='queue_ai_reviews')=={'job_ids':['safe-id'],'apply_verified':True};window.close()
 
 
 def test_paused_counts_and_background_activity_do_not_claim_work_is_running_or_completed(app,tmp_path):

@@ -10,7 +10,7 @@ def main():
     env=os.environ.copy();env['PATH']=str(Path(os.environ['SystemRoot'])/'System32');env['QT_QPA_PLATFORM']='offscreen'
     for key in ('PYTHONPATH','PYTHONHOME','VIRTUAL_ENV'):env.pop(key,None)
     process=subprocess.Popen([str(bundle/'MusicOps.exe'),'--base',str(base),'--screenshot',args.screenshot,'--quit-after','10000'],cwd=bundle,env=env,creationflags=0x08000000)
-    client=WorkerClient(base);report={'evidence':'public_packaged_exe_real_named_pipe','version':'0.4.4','checks':{},'external_requests':0,'music_writes':0}
+    client=WorkerClient(base);report={'evidence':'public_packaged_exe_real_named_pipe','version':'0.4.5','checks':{},'external_requests':0,'music_writes':0}
     def task(command,payload):
         accepted=client.call(command,payload);deadline=time.monotonic()+30
         while time.monotonic()<deadline:

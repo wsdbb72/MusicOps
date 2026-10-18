@@ -23,7 +23,7 @@ def main():
     env=os.environ.copy();env['QT_QPA_PLATFORM']='offscreen'
     for key in ('PYTHONPATH','PYTHONHOME','VIRTUAL_ENV'):env.pop(key,None)
     process=subprocess.Popen([str(bundle/'MusicOps.exe'),'--base',str(base),'--quit-after','20000'],cwd=bundle,env=env,creationflags=0x08000000)
-    client=WorkerClient(base);report={'version':'0.4.4','evidence':'packaged_worker_three_entry_points','external_requests':0,'checks':{}}
+    client=WorkerClient(base);report={'version':'0.4.5','evidence':'packaged_worker_three_entry_points','external_requests':0,'checks':{}}
     try:
         deadline=time.monotonic()+25
         while True:
@@ -62,7 +62,7 @@ def main():
         report['checks']['native_unlimited_fl_roundtrip']=result['config']['values']['workflow']['fl_unlimited'] is True and result['config']['values']['workflow']['fl_per_batch']==0
         fixture=base/'playlist.csv';fixture.write_text('title,artist,album,duration,source,id\nSong,Artist,Album,180,spotify,synthetic-track\n','utf-8')
         def completed(command,payload):
-            accepted=client.call(command,payload);deadline=time.monotonic()+12
+            accepted=client.call(command,payload);deadline=time.monotonic()+(70 if command=='browser_solver_preflight' and payload.get('settings',{}).get('managed') else 12)
             while time.monotonic()<deadline:
                 task=client.call('get_task',{'task_id':accepted['task_id']})['task']
                 if task['state'] not in ('queued','running','paused'):return task
@@ -92,6 +92,13 @@ def main():
         report['checks']['native_streaming_and_edition_settings']=streaming['streaming']['order']==['netease','qqmusic'] and streaming['streaming']['enabled'] is False and streaming['workflow']['edition_policy']=='complete'
         fill=completed('start_workflow',{'scene':'fill'})
         report['checks']['native_full_album_preparation']=fill['state']=='completed' and fill.get('result',{}).get('album_count')==0
+        engine=client.call('engine_control',{'action':'start'})
+        cookie=client.call('engine_control',{'action':'cookie','source':'qq','cookie':'synthetic_frozen=synthetic-only'})
+        report['checks']['native_managed_engine_cookie']=engine.get('status')=='OK' and cookie.get('saved') is True
+        solved=completed('browser_solver_preflight',{'settings':{'managed':True}})
+        report['checks']['native_managed_solver']=solved['state']=='completed' and solved.get('result',{}).get('status')=='OK'
+        queue=client.call('queue_ai_reviews',{'all':True})
+        report['checks']['native_durable_ai_registration']=queue.get('status')=='OK' and type(queue.get('registered')) is int
         process.wait(30);report['checks']['gui_exit_zero']=process.returncode==0
         report['passed']=all(report['checks'].values())
     except Exception as exc:report.update(passed=False,error_class=type(exc).__name__,error=str(exc))

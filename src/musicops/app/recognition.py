@@ -183,8 +183,19 @@ class RecognitionFallback:
                 report['web_reason'] = alternate.get('reason', '')
             result['lookup_links'] = list({row['url']: row for row in result['lookup_links'] + result['ai_web_sources']}.values())
         except Exception as exc:
-            report.update(status=self._failure(exc), reason='AI 联网搜索未完成；请确认服务与模型支持 Responses web_search。已保留 API 和网站识别结果。')
-            return result
+            failure=self._failure(exc)
+            if failure not in ('WEB_SEARCH_UNAVAILABLE','API_CONTRACT_ERROR'):
+                report.update(status=failure,reason='AI 联网搜索暂未完成，保留现有目录结果。');return result
+            # A Responses-compatible model can still normalize aliases and
+            # compare observed evidence when it has no hosted web-search tool.
+            try:
+                report['calls']+=1
+                alternate=provider.recognition_queries(query,contexts)
+                alternate['sources']=[]
+                report['reason']='联网工具不可用，改用 AI 提供搜索词，再从真实目录核实'
+                report['suggested_queries']=copy.deepcopy(alternate['queries'])
+            except Exception as fallback_error:
+                report.update(status=self._failure(fallback_error),reason='AI 别名检索未完成，保留现有目录结果。');return result
         web_candidates = []
         for source in alternate.get('sources', [])[:4]:
             self.checkpoint('ai_web_source_verify')

@@ -42,7 +42,7 @@ def save_setup(service,payload):
         if value:pending.append((ref,value,host,path))
     if 'streaming' in payload:
         supplied=payload['streaming'];target=values['streaming'];previous_host=urlsplit(target['base_url']).hostname
-        for key in ('enabled','base_url','order','timeout'):
+        for key in ('managed','enabled','base_url','order','timeout'):
             if key in supplied:target[key]=supplied[key]
         if previous_host!=urlsplit(target['base_url']).hostname:target['credential_ref']=''
         if supplied.get('cookie_json'):
@@ -64,7 +64,7 @@ def save_setup(service,payload):
         secret(kind,target['base_url'],item.get('key' if kind=='ai' else 'authorization',''),('ai','auth_secret_ref') if kind=='ai' else ('lyrics','primary','auth_secret_ref'))
     if 'browser_solver' in payload:
         settings=payload['browser_solver']
-        if not isinstance(settings,dict) or set(settings)-{'enabled','base_url','timeout','executable','auto_start'}:raise ValueError('浏览器验证设置无效')
+        if not isinstance(settings,dict) or set(settings)-{'managed','enabled','base_url','timeout','executable','auto_start'}:raise ValueError('浏览器验证设置无效')
         values['browser_solver'].update(settings)
     if 'catalog_web' in payload:values['catalog']['web_enabled']=bool(payload['catalog_web'])
     if payload.get('discogs_token'):secret('discogs','https://api.discogs.com',payload['discogs_token'],('catalog','discogs','credential_ref'))
@@ -96,5 +96,8 @@ def save_setup(service,payload):
         for key in path[:-1]:obj=obj[key]
         obj[path[-1]]=ref
     if pending:saved=service.config.save(values,saved['version'])
+    if saved['values']['ai'].get('enabled'):
+        from musicops.app.review_queue import submit
+        submit(service,{'all':True})
     service.prepare_local_catalog()
     return {'config':saved,'saved':True,'credentials_saved':len(pending),'message':'设置已保存，可以开始使用。'}

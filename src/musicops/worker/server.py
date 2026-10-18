@@ -16,7 +16,7 @@ from musicops.platforms import ipc_family,prepare_ipc_socket,secure_ipc_socket,p
 
 READ_COMMANDS = {'list_library_albums','attach', 'get_status', 'get_task', 'list_tasks', 'get_playlist_targets', 'list_library_files', 'events', 'parse_playlist','list_workflows','get_workflow'}
 QUEUED_COMMANDS = {'demo', 'index_library', 'compare', 'search', 'resources', 'prepare_fill', 'prepare_resource', 'prepare_repair', 'prepare_dedup', 'submit_plan', 'request_rollback', 'export_report', 'refresh_playlist', 'submit_download', 'recover', 'pt_preflight', 'qbt_preflight', 'ai_analyze', 'ai_plan', 'ai_test', 'lyrics_preflight','identify_metadata','resolve_metadata','accept_metadata','validate_selected_file','roon_preflight'}
-QUEUED_COMMANDS.update({'browser_solver_preflight','assist_workflows','start_workflow','advance_workflows','restore_workflow','manual_album_search'})
+QUEUED_COMMANDS.update({'queue_ai_reviews','browser_solver_preflight','assist_workflows','start_workflow','advance_workflows','restore_workflow','manual_album_search'})
 
 
 def request_signature(command, payload, key):
@@ -71,7 +71,7 @@ def handle_request(service, req, key):
             return previous['response']
         if command not in READ_COMMANDS | QUEUED_COMMANDS:
             raise RuntimeError('REQUEST_RESULT_UNKNOWN：先读取当前状态，不盲重发')
-    if command in READ_COMMANDS:
+    if command in READ_COMMANDS or command=='engine_control':
         # Polling is read-only and must return current state. Persisting every
         # full status response would grow the database continuously while idle.
         try:
@@ -133,6 +133,7 @@ def main(argv=None):
         if service is not None:
             service.stop.set()
             service.thread.join()
+            service.engines.close()
         lock.release()
     return 0
 

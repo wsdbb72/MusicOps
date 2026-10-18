@@ -1,4 +1,5 @@
 """Grounded AI proposals for an explicit, editable review. Never apply on generation."""
+import json
 from musicops.app.recognition import RecognitionFallback
 from musicops.app.workflow_actions import selection
 from musicops.config.schema import digest
@@ -10,19 +11,24 @@ from musicops.clients.http import PolicyBlocked
 def review_revision(job):
     tracks = job.get('prepared') or job.get('targets') or job.get('old_files') or []
     return digest({'stage': job.get('stage'), 'kind': job.get('review_kind'), 'hidden': bool(job.get('hidden')),
+                   'search_query':job.get('search_query'),'search_sites':job.get('search_sites'),
+                   'resume_stage':job.get('resume_stage'),'error_class':job.get('error_class'),
                    'selected':(job.get('selected') or {}).get('candidate_id'),'batch_id':job.get('batch_id'),
                    'catalog_choices':[{k:c.get(k) for k in ('candidate_id','source','source_id','release_id')} for c in job.get('catalog_choices',[])],
                    'tracks': [{k: r.get(k) for k in ('raw_title', 'artists', 'album', 'duration', 'file_id')} for r in tracks],
                    'choices': [{k: c.get(k) for k in ('candidate_id', 'source', 'title', 'artists', 'release', 'media')} for c in job.get('choices', [])]})
 
 
-def _metadata(service, job, cfg):
+def _metadata(service, job, cfg, provider=None):
     rows = job.get('prepared') or job.get('targets') or job.get('old_files') or []
     if not rows: return {'status': 'NEEDS_INPUT', 'message': '没有曲目资料，请手动填写或重新识别'}
     first = rows[0]
     found = service._recognize_metadata({'title': first.get('raw_title', ''), 'artists': first.get('artists', []),
-        'album': first.get('album', ''), 'duration': first.get('duration')}, cfg, force=True)
+        'album': first.get('album', ''), 'duration': first.get('duration'), 'filename_hint': str(first.get('path') or '').replace('\\','/').rsplit('/',1)[-1]}, cfg, force=True)
     selected = found.get('selected_candidate')
+    if not selected and len(found.get('candidates',[]))==1:
+        candidate=found['candidates'][0]
+        if RecognitionFallback._has_unique_exact(RecognitionFallback._query({'title':first.get('raw_title',''),'artists':first.get('artists',[]),'album':first.get('album',''),'duration':first.get('duration')}),[candidate]):selected=candidate
     proposal = {'status': 'NEEDS_INPUT', 'kind': 'metadata', 'message': 'AI 未找到足够明确的真实目录证据，请手动选择或填写',
                 'catalog_choices': found.get('candidates', []), 'lookup_links': found.get('lookup_links', []),
                 'reason': found.get('ai_fallback', {}).get('reason', '')}
@@ -38,11 +44,31 @@ def _metadata(service, job, cfg):
     observed = resolved.get('tracklist', [])
     if not observed and selected.get('entity_kind') == 'recording': observed = [selected]
     metadata = []; changed = 0
-    for row in rows:
+    aliases={}
+    unmatched=[(index,row) for index,row in enumerate(rows) if not any(strict_text(track.get('raw_title') or track.get('title'))==strict_text(row.get('raw_title')) and {strict_text(a) for a in track.get('artists',[])}=={strict_text(a) for a in row.get('artists',[])} for track in observed)]
+    claimed_tracks=[t for t in observed if any(strict_text(t.get('raw_title') or t.get('title'))==strict_text(r.get('raw_title')) and {strict_text(a) for a in t.get('artists',[])}=={strict_text(a) for a in r.get('artists',[])} for r in rows)]
+    if unmatched and hasattr(provider,'map_album_tracks'):
+        for start in range(0,len(unmatched),12):
+            service._checkpoint('ai_album_alias_mapping')
+            batch=unmatched[start:start+12]
+            possible=[t for t in observed if t.get('duration') and any(r.get('duration') and abs(r['duration']-t['duration'])<=2 for _,r in batch)]
+            if not possible:continue
+            def context(row):return {'title':row.get('raw_title') or row.get('title') or '', 'artists':row.get('artists',[]),'duration':row.get('duration')}
+            local=[context(r) for _,r in batch];actual=[context(t) for t in possible]
+            key='ai-album-map:'+digest({'local':local,'observed':actual,'ai':cfg['ai']})
+            saved=service.store.get('evidence',key)
+            mapping=saved['mapping'] if saved else provider.map_album_tracks(local,actual)
+            if not saved:service.store.put('evidence',key,{'mapping':mapping})
+            for item in mapping:
+                position,row=batch[item['local']];track=possible[item['observed']]
+                if row.get('duration') and track.get('duration') and abs(row['duration']-track['duration'])<=2 and possible[item['observed']] not in claimed_tracks:
+                    aliases[position]=track;claimed_tracks.append(track)
+    for position,row in enumerate(rows):
         service._checkpoint('ai_review_mapping')
         matches = [track for track in observed if strict_text(track.get('raw_title') or track.get('title')) == strict_text(row.get('raw_title'))
                    and (not row.get('artists') or {strict_text(a) for a in row['artists']} == {strict_text(a) for a in track.get('artists', [])})
                    and (not row.get('duration') or track.get('duration') and abs(row['duration'] - track['duration']) <= 2)]
+        if not matches and position in aliases:matches=[aliases[position]]
         entry = {'title': row.get('raw_title', ''), 'artist': ' / '.join(row.get('artists', [])),
                  'album': row.get('album', ''), 'duration': str(row.get('duration') or '')}
         if len(matches) == 1:
@@ -66,10 +92,16 @@ def _candidate(service, job, cfg, provider):
     contexts = []
     for candidate in choices:
         context = RecognitionFallback._context_candidate(candidate)
-        context['disambiguation'] = str(candidate.get('media', {}))[:500]
+        context['disambiguation'] = json.dumps({k:candidate.get('media',{}).get(k) for k in ('format','encoding','sample_rate','bits_per_sample','bitrate','channels')},ensure_ascii=False)[:500]
         contexts.append(context)
     query = RecognitionFallback._query({'album': first.get('album', ''), 'artists': first.get('albumartist') or first.get('artists', []), 'title': ''})
-    result = provider.recognize_candidate(query, contexts)
+    key='ai-choice:'+digest({'query':query,'candidates':contexts,'ai':cfg['ai']})
+    cached=service.store.get('evidence',key)
+    import time
+    if cached and time.time()-cached.get('at',0)<86400:result=cached['result']
+    else:
+        result=provider.recognize_candidate(query,contexts)
+        service.store.put('evidence',key,{'kind':'ai_choice_cache','at':time.time(),'result':result})
     ready = result['candidate_id'] is not None and result['confidence'] >= .9 and not result['ambiguous']
     return {'status': 'READY' if ready else 'NEEDS_INPUT', 'kind': 'candidate',
             'candidate_id': result['candidate_id'] if ready else None, 'confidence': result['confidence'],
@@ -78,7 +110,7 @@ def _candidate(service, job, cfg, provider):
 
 
 def assist_workflows(service, args, cfg):
-    ids = selection(args.get('job_ids'), 20)
+    ids = selection(args.get('job_ids'), 10000)
     provider, unavailable = RecognitionFallback(cfg, service._catalog_resolver(cfg), service.vault.get, service._checkpoint)._provider()
     if unavailable: raise PolicyBlocked('请先在连接与设置中启用 AI，并填写服务地址、模型与 API Key')
     results = []
@@ -91,20 +123,41 @@ def assist_workflows(service, args, cfg):
             revision = review_revision(job)
         try:
             kind = job.get('review_kind')
-            if kind == 'candidate' and job.get('choices'):
+            if kind in ('error','interrupted') and job.get('error_class') in ('NETWORK_ERROR','TRANSIENT_ERROR','BROWSER_SOLVER_UNAVAILABLE','SOURCE_UNAVAILABLE') and job.get('resume_stage') in ('downloading','fallback','searching','notifying') and not job.get('retry_count'):
+                proposal={'status':'READY','kind':'retry','message':'瞬时连接问题，沿用已有下载记录重试一次，不额外调用 AI'}
+            elif kind == 'candidate' and job.get('choices'):
                 proposal = _candidate(service, job, cfg, provider)
             elif kind == 'metadata':
-                proposal = _metadata(service, job, cfg)
-            elif kind in {'search', 'error', 'interrupted'} or job['stage'] in {'failed', 'skipped'}:
+                proposal = _metadata(service, job, cfg, provider)
+            elif kind=='search' or job.get('task_type')=='search' and (kind in {'error','interrupted'} or job['stage'] in {'failed','skipped'}):
                 rows = job.get('targets') or job.get('old_files') or []; first = rows[0] if rows else {}
                 found = service._recognize_metadata({'title': '', 'artists': first.get('artists', []), 'album': first.get('album', '')}, cfg, force=True)
                 selected = found.get('selected_candidate')
                 query = (' '.join(selected.get('artists', [])) + ' ' + str(selected.get('album') or selected.get('title') or '')).strip() if selected else ''
+                current_query=job.get('search_query') or (' '.join(first.get('artists',[]))+' '+first.get('album',''))
+                if strict_text(query)==strict_text(current_query):query=''
+                report=found.setdefault('ai_fallback',{})
+                if not query and not (report.get('suggested_queries') or report.get('queries')) and hasattr(provider,'recognition_queries'):
+                    # A correctly identified album can still need different PT
+                    # keywords. Identity success must not disable this fallback.
+                    source_query=RecognitionFallback._query({'title':'','artists':first.get('artists',[]),'album':first.get('album','')})
+                    contexts=[RecognitionFallback._context_candidate(c) for c in found.get('candidates',[])[:12]]
+                    key='ai-search-queries:'+digest({'query':source_query,'candidates':contexts,'ai':cfg['ai']})
+                    cached=service.store.get('evidence',key)
+                    alternate=cached['result'] if cached else provider.recognition_queries(source_query,contexts)
+                    if not cached:service.store.put('evidence',key,{'result':alternate})
+                    report['suggested_queries']=alternate['queries']
                 proposal = {'status': 'READY' if query and len(query) <= 300 else 'NEEDS_INPUT', 'kind': 'search',
                             'search_query': query if len(query) <= 300 else '',
                             'reason': found.get('ai_fallback', {}).get('reason', ''),
                             'message': '已生成真实目录支持的搜索词，可编辑后重新搜索' if query else '请检查各站状态，修改搜索词或站点后重试'}
                 web=found.get('ai_fallback',{})
+                alternatives=web.get('suggested_queries') or web.get('queries') or []
+                if not query and alternatives:
+                    previous_query=job.get('search_query') or (' '.join(first.get('artists',[]))+' '+first.get('album',''))
+                    suggestions=[(' '.join(v.get('artists',[]))+' '+str(v.get('album') or v.get('title') or '')).strip() for v in alternatives]
+                    candidate_query=next((value for value in suggestions if strict_text(value)!=strict_text(previous_query)), '')
+                    if candidate_query and len(candidate_query)<=300:proposal.update(status='READY',search_query=candidate_query,message='AI 已提供别名搜索词，重新检索后仍核实实际候选，不直接确认身份')
                 if not selected and web.get('web_sources') and web.get('web_queries'):
                     first_query=web['web_queries'][0]
                     suggested=(' '.join(first_query['artists'])+' '+(first_query['album'] or first_query['title'])).strip()
@@ -112,7 +165,11 @@ def assist_workflows(service, args, cfg):
                         lookup_links=found.get('lookup_links',[]),web_queries=web['web_queries'],reason=web.get('web_reason',''),
                         message='AI 联网找到了检索线索，尚未核实完整发行；请查看来源并编辑搜索词后重试')
             else:
-                proposal = {'status': 'NEEDS_INPUT', 'kind': kind, 'message': '此问题需要手动选择封面、曲序、歌词服务或发行版本，请打开核对窗口'}
+                advice=provider.recovery_advice({'stage':job['stage'],'review_kind':kind,'resume_stage':job.get('resume_stage'),
+                    'error_class':job.get('error_class'),'album':str(job.get('label') or '')[:200],
+                    'tracks':[RecognitionFallback._context_candidate({'title':r.get('raw_title',''),'artists':r.get('artists',[]),'duration':r.get('duration')}) for r in (job.get('targets') or job.get('old_files') or job.get('prepared') or [])[:12]]}) if hasattr(provider,'recovery_advice') else {}
+                proposal = {'status':'NEEDS_INPUT','kind':kind,'reason':advice.get('reason',''),
+                    'message':advice.get('reason') or '已保留现有证据；此问题需要补充封面、曲序、歌词服务或发行版本，请打开核对窗口'}
         except Exception as exc:
             from musicops.app.service import TaskCancelled
             if isinstance(exc, TaskCancelled): raise
@@ -126,7 +183,10 @@ def assist_workflows(service, args, cfg):
         applied=False
         if args.get('apply_verified') is True and proposal.get('status')=='READY':
             try:
-                if proposal.get('kind')=='metadata' and proposal.get('mapped_count')==len(proposal.get('metadata') or []) and proposal.get('mapped_count',0)>0:
+                if proposal.get('kind')=='retry':
+                    from musicops.app.workflow_actions import retry
+                    retry(service.workflows,current);applied=True
+                elif proposal.get('kind')=='metadata' and proposal.get('mapped_count')==len(proposal.get('metadata') or []) and proposal.get('mapped_count',0)>0:
                     service.workflows.review(job_id,'edit_metadata',metadata=proposal['metadata'],expected_revision=revision);applied=True
                 elif proposal.get('kind')=='candidate' and any(c.get('candidate_id')==proposal.get('candidate_id') and c.get('identity_exact') for c in current.get('choices',[])):
                     service.workflows.review(job_id,proposal['candidate_id'],expected_revision=revision);applied=True

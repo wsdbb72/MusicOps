@@ -43,7 +43,7 @@ class FlareSolverrClient:
         import httpx
         try:
             with httpx.Client(follow_redirects=False, trust_env=False, timeout=httpx.Timeout(self.settings.get('timeout', 60) + 5, connect=3)) as client:
-                with client.stream('POST', self.settings['base_url'].rstrip('/') + '/v1', json=payload) as response:
+                with client.stream('POST', self.settings['base_url'].rstrip('/') + '/v1', json=payload, headers={'X-MusicOps-Service':self.settings['_managed_token']} if self.settings.get('_managed_token') else {}) as response:
                     if response.status_code != 200: raise HttpError('BROWSER_SOLVER_FAILED', '本机 FlareSolverr 返回错误')
                     body = bytearray()
                     for block in response.iter_bytes():
@@ -166,6 +166,6 @@ class BrowserChallengeTransport:
         return solved
 
 
-def browser_transport(settings, hosts, *, checkpoint=None):
+def browser_transport(settings, hosts, *, checkpoint=None, solver=None):
     direct = SafeHttpTransport(hosts, offline=False)
-    return BrowserChallengeTransport(direct, settings, hosts, checkpoint=checkpoint) if settings.get('enabled') else direct
+    return BrowserChallengeTransport(direct, settings, hosts, checkpoint=checkpoint, solver=solver) if settings.get('enabled') else direct

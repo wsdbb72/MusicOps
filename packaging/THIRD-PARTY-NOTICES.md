@@ -18,3 +18,11 @@ application distribution and `docs/references/PlaylistOut-LICENSE.txt` in source
 
 Windows 安装向导使用 [kira-96/Inno-Setup-Chinese-Simplified-Translation](https://github.com/kira-96/Inno-Setup-Chinese-Simplified-Translation) 的简体中文翻译，固定提交 `1ff90acc4ed4aee82b1cda43253243deee3daed4`，适用 Inno Setup 6.5.0+。
 Copyright (c) 2019 - 2020 kirakira，采用 MIT 许可。完整授权及来源说明保存在运行包的 `licenses/Inno-Setup-Translation/` 和源码的 `packaging/Languages/`。
+
+## 内置独立服务（0.4.5 起）
+
+- [go-music-dl v1.1.3](https://github.com/guohuiyuan/go-music-dl/tree/b4aa4c2e00032ff5f636310834168e85bebca010)，AGPL-3.0，作为独立进程通过本机 HTTP 接口调用。MusicOps 适配补丁仅禁止引擎明文持久化平台 Cookie，并增加本机请求鉴权。
+- [FlareSolverr v3.5.2](https://github.com/FlareSolverr/FlareSolverr/tree/93125d6ea6956906c8dfa29e169b2dc67d993dc3)，MIT；独立运行时包括其 Python 依赖及对应许可证。
+- Chrome for Testing / ChromeDriver 固定为 155.0.8059.84，各系统下载包均校验源码中固定的 SHA-256，并保留浏览器随附的许可说明。
+
+每个完整二进制包的 `tools/services/licenses/engine-sources.zip`（macOS 位于应用的 `Contents/Resources/` 下）包含上述两个服务的对应源码、适配补丁、CLI 实际使用的 Go 模块源码及构建脚本。原始提交和浏览器摘要记录在 `tools/services/engines.json`。可使用 MusicOps 源码包中的 `packaging/prepare_engines.py` 在对应系统原生重建；Go 1.26.3、Python 3.12+，首次构建需联网获取固定依赖。MusicOps 源码本身不包含账户数据或第三方二进制。

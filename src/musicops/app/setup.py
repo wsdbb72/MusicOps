@@ -11,7 +11,8 @@ def save_setup(service,payload):
     library=Path(payload.get('library') or values['paths']['library'])
     if not library.is_absolute():raise ValueError('请选择完整的音乐库目录')
     values['offline']=False;values['paths']['library']=str(library)
-    for key in ('source','work','backup','quarantine','reports'):values['paths'][key]=str(base/key)
+    from musicops.library.storage import storage_paths
+    values['paths'].update(storage_paths(library))
     for key in ('ffmpeg','ffprobe'):
         if payload.get(key):values['paths']['tools'][key]=payload[key]
     sites=payload.get('sites',{})

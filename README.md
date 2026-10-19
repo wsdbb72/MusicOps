@@ -2,7 +2,7 @@
   <img src="src/musicops/assets/musicops.png" width="112" alt="MusicOps 图标">
   <h1>MusicOps</h1>
   <p><strong>从主流平台歌单到自己的音乐库，让下载、整理与升级连起来。</strong></p>
-  <p>中文桌面应用 · 十个平台歌单 · 资料补全 · 音质升级</p>
+  <p>中文桌面应用 · 十个平台歌单 · 资料补全 · 音质升级 · 去重合并</p>
   <p>
     <a href="https://github.com/wsdbb72/MusicOps/releases/latest"><img src="https://img.shields.io/github/v/release/wsdbb72/MusicOps?label=%E6%9C%80%E6%96%B0%E7%89%88%E6%9C%AC&amp;color=16857d" alt="最新版本"></a>
     <a href="https://github.com/wsdbb72/MusicOps/actions/workflows/windows-tests.yml"><img src="https://github.com/wsdbb72/MusicOps/actions/workflows/windows-tests.yml/badge.svg" alt="Windows 测试"></a>
@@ -25,6 +25,18 @@
 MusicOps 把日常音乐库维护收敛为三个入口：把歌单中缺少的音乐补进库、补齐已有音源的资料，以及寻找并验证更好的音源。任务在独立后台执行，进度和需要人工核对的项目集中显示。
 
 审阅与验收范围：[代码审阅与验证](docs/代码审阅与验证.md)。
+
+**0.4.9** 新增侧栏 **去重合并**：扫描歌曲与分散专辑副本，勾选可靠项目或一键合并全部可靠项。歌曲去重比对文件字节或完整解码后的音频内容；补齐同发行的分散曲目需要标签或人工确认资料库中的发行身份，保留较好的音源，并补齐缺失标签、歌词和封面。不同版本、声道、CUE 引用、歌词或封面冲突会列明原因；同名不会直接删除。旧副本进入可恢复隔离区，支持恢复最近一批合并，重启软件后仍可读取恢复记录。去重操作不改写做种文件。
+
+下载和整理目录跟随音乐库：例如 `E:/music` 使用 `E:/MusicOps/downloads`、`work`、`seeding`。入库文件逐项校验成功后清理本任务的临时音频；PT 原始文件由 qBittorrent 迁移到永久 `seeding` 目录，保存迁移意图并核对前后文件哈希、客户端路径和做种状态。入库副本可补标签，做种原件保持字节不变，两者用途不同，不能直接删除做种原件来节省空间。历史路径异常按任务创建记录核对后迁移，不接管仅带同名标签的私人种子。
+
+修复网易云回退任务循环引用导致的 `ValueError`。本地资料补全增加按专辑名和艺人精确匹配的封面 API，网易云封面失败后仍可尝试已确认的 MusicBrainz 发行封面。`???`、替换字符和未知艺人占位符会触发资料修复。同步歌词同时保存为同名 UTF-8 `.lrc`，并在入库副本中补写纯文本歌词标签供 Roon 导入；旁置 `.lrc` 的生成不等于 Roon 已显示同步歌词。参见 [Roon 官方歌词说明](https://help.roonlabs.com/portal/en/kb/articles/lyrics)。
+
+修复快速切页时音质偏好文字叠到任务列表上的残影，页面使用独立不透明绘制；小窗口内可滚动，控件不再相互挤压。后台任务失败时正确恢复操作按钮。Windows 按系统报告的核心类别识别小核，对本程序及其启动的内置组件设置小核亲和性、低优先级和 EcoQoS；单处理器组使用严格亲和性，多处理器组使用系统 CPU Sets。未识别到大小核时保留系统分配并降低后台优先级。文件校验最多 4 项并行，界面请求最多 8 项，单个音频解码 1 线程；歌单匹配结果批量写入 SQLite，减少重复开库与提交。
+
+已经下载并验证的专辑优先完成发布，再处理检索与回退下载，避免成品被搜索积压挡住。发布失败可沿用原文件事务重试，已经提交的事务不会重复入库。长目录和文件名会保留区分标记并预留原子提交临时文件所需长度，音频标签中的完整歌名、艺人和专辑名不会缩短。正常重启复用一天内更新过的本地目录数据库；歌单与维护入口仍会先做增量扫描。内置下载器的输入、输出和转码临时文件也使用音乐库同级的工作目录。
+
+![去重与合并](docs/images/duplicates.png)
 
 **0.4.8** qBittorrent 新任务统一使用唯一标签 `MusicOps`。旧任务在安全对账时整理历史任务标签，也可在 **连接与设置 → qBittorrent → 将已有 MusicOps 任务标签统一为 MusicOps** 批量处理；仅处理有创建记录且哈希、分类和目录一致的项目，不启动下载，保留其他手动标签。
 
@@ -425,9 +437,9 @@ MusicOps/
 | --- | --- | --- |
 | `profile/state` | SQLite 中的配置、任务和操作记录 | 保留 |
 | `profile/vault` | 系统账户保护的凭据与连接信息 | 保留，不公开上传 |
-| `profile/source` | 下载源与接入文件 | 可能关联做种，不盲目清空 |
-| `profile/work`、库外同卷工作区 | 整理和验证副本 | 有任务运行时保留 |
-| `profile/backup`、`profile/quarantine` | 原文件与恢复内容 | 确认不再需要恢复后再清理 |
+| 音乐库同级 `MusicOps/downloads`、`MusicOps/work` | 临时下载、解密、整理和验证副本 | 入库及文件校验成功后，程序清理本任务副本；待核对文件保留 |
+| 音乐库同级 `MusicOps/seeding` | 保持原始字节的永久 PT 做种文件 | qBittorrent 正在引用时保留，不能当作临时缓存删除 |
+| 音乐库同级 `MusicOps/backup`、`MusicOps/quarantine` | 原文件与恢复内容 | 确认不再需要恢复后再清理；旧事务仍可能引用历史档案中的恢复文件 |
 | 所选音乐库 | 供 Roon / Navidrome 读取的成品 | 不放运行档案或下载临时文件 |
 
 安装版快捷方式指向该安装目录的 `profile`。绿色版没有指定档案时会使用程序选择的现有档案或本地应用数据目录；需要明确使用随包档案时，可从 PowerShell 运行 `.\MusicOps.exe --base .\profile`。同一个档案的 GUI 与后台必须一致。

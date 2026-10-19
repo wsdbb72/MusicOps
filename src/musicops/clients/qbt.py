@@ -1,7 +1,7 @@
 """Version-aware stopped add, persisted ownership and safe download recovery.
 
-No stop/delete/move or global preference operation is exposed by this adapter.
-Production mutations remain unavailable during the offline implementation stage.
+Only recorded, hash/path-bound torrents can be relocated after publication.
+No stop/delete or global preference operation is exposed by this adapter.
 """
 from __future__ import annotations
 
@@ -305,3 +305,100 @@ class QbtClient:
     def pipeline_event(self, task_id, event):
         """Cancellation/rollback/local ratio limits have no client side effects."""
         return _result("OK", task_id=task_id, event=event, seeding="preserved", client_operations=[])
+
+    def archive_completed(self,task_id,library):
+        """Move originals through the client, with persisted intent and byte verification."""
+        from musicops.library.storage import seed_root
+        from musicops.library.paths import reject_reparse_chain,safe_destination
+        from musicops.library.index import sha256_file
+        record=self._get(task_id)
+        if not record or self.capabilities()['status']!='OK':return _result('POLICY_BLOCKED',reason='缺少客户端创建记录')
+        if not re.fullmatch(r'[A-Za-z0-9_-]{1,120}',task_id):return _result('POLICY_BLOCKED',reason='任务目录无效')
+        destination=seed_root(library)/task_id;reject_reparse_chain(destination)
+        intent=record.get('relocation')
+        row=self._query(record)
+        if not row:return _result('POLICY_BLOCKED',reason='客户端任务不存在')
+        if not intent:
+            problem=self._check_ownership(row,record)
+            if problem:return _result('POLICY_BLOCKED',reason=problem)
+            finished={'uploading','stalledUP','queuedUP','forcedUP','stoppedUP','pausedUP'}
+            if row.get('progress')!=1 or row.get('state') not in finished:return _result('WAITING',reason='等待完整下载后迁移')
+            old=Path(record['source_path']).resolve()
+            if old==destination.resolve():return _result('OK',source_path=str(old))
+            if old.is_relative_to(Path(library).resolve()):return _result('POLICY_BLOCKED',reason='不能自动迁移音乐库内的做种文件')
+            response=self._request('GET','torrents/files',params={'hash':record['client_id']})
+            files=response.json() if response.status_code==200 else None
+            expected=[x for x in record['metainfo']['file_list'] if not x['padding']]
+            if not isinstance(files,list) or len({x.get('name') for x in files})!=len(files):return _result('POLICY_BLOCKED',reason='客户端文件清单不完整')
+            actual={x.get('name'):x for x in files};hashes={}
+            for item in expected:
+                name=item['path'];entry=actual.get(name,{})
+                if entry.get('progress')!=1 or entry.get('priority',0)==0:return _result('POLICY_BLOCKED',reason='发行文件未完整下载')
+                path=safe_destination(old,name,max_length=32760)
+                if not path.is_file():return _result('POLICY_BLOCKED',reason='原始做种文件缺失')
+                target=safe_destination(destination,name,max_length=32760)
+                if target.exists():return _result('POLICY_BLOCKED',reason='做种目标已存在，不能覆盖')
+                hashes[name]=sha256_file(path)
+            intent={'from':str(old),'to':str(destination),'hashes':hashes,'state':'INTENT'}
+            record['relocation']=intent;self._put(task_id,record)
+        if Path(intent['to']).resolve()!=destination.resolve():return _result('POLICY_BLOCKED',reason='迁移目标配置已改变，请核对原迁移')
+        # Verify identity/category/tag even while the save path is in transition.
+        allowed={str(Path(intent[k]).resolve()).casefold() for k in ('from','to')}
+        if (not record.get('creation_intent') or row.get('category')!=record['category'] or row.get('auto_tmm') is not False
+            or not {record['task_tag'],PROJECT_TAG}.intersection(x.strip() for x in row.get('tags','').split(','))
+            or str(Path(row.get('save_path','')).resolve()).casefold() not in allowed):
+            return _result('POLICY_BLOCKED',reason='迁移中客户端归属发生改变')
+        if row.get('state')=='moving':return _result('WAITING',reason='qBittorrent 正在迁移原始文件')
+        if any(row.get(key) and not any(self._bound_path(row[key],Path(intent[k])) for k in ('from','to')) for key in ('content_path','download_path')):
+            return _result('POLICY_BLOCKED',reason='迁移中客户端内容或临时路径越界')
+        if Path(row['save_path']).resolve()!=destination.resolve():
+            response=self._request('POST','torrents/setLocation',data={'hashes':record['client_id'],'location':str(destination)})
+            if response.status_code!=200:return _result('WAITING',reason='客户端未接受做种目录迁移')
+            intent['state']='MOVING';self._put(task_id,record)
+            return _result('WAITING',reason='已请求客户端迁移，等待实际文件确认')
+        if not self._bound_path(row.get('download_path'),destination):
+            response=self._request('POST','torrents/setDownloadPath',data={'id':record['client_id'],'path':str(destination/'.incomplete')})
+            if response.status_code!=200:return _result('WAITING',reason='客户端临时路径尚未同步')
+            return _result('WAITING',reason='正在确认客户端临时路径')
+        if row.get('progress')!=1 or row.get('state') in {'error','missingFiles','checkingUP','checkingDL','checkingResumeData'}:return _result('WAITING',reason='等待客户端确认完整做种状态')
+        for name,expected in intent['hashes'].items():
+            target=safe_destination(destination,name,max_length=32760)
+            if not target.is_file() or sha256_file(target)!=expected:return _result('POLICY_BLOCKED',reason='迁移后原始文件字节校验未通过')
+            old=safe_destination(intent['from'],name,max_length=32760)
+            if old.exists():return _result('POLICY_BLOCKED',reason='客户端迁移后旧目录仍有文件，请核对')
+        record['source_path']=str(destination);intent['state']='VERIFIED';self._put(task_id,record)
+        return _result('OK',source_path=str(destination),verified_files=len(intent['hashes']),seeding='preserved')
+
+    def relocate_active(self,task_id,library):
+        """Repair an unfinished download through qBittorrent, without add/start."""
+        from musicops.library.storage import storage_paths
+        from musicops.library.paths import reject_reparse_chain
+        record=self._get(task_id)
+        if not record or not re.fullmatch(r'[A-Za-z0-9_-]{1,120}',task_id) or self.capabilities()['status']!='OK':return _result('POLICY_BLOCKED')
+        destination=Path(storage_paths(library)['source'])/task_id;reject_reparse_chain(destination)
+        row=self._query(record)
+        if not row:return _result('POLICY_BLOCKED')
+        intent=record.get('active_relocation')
+        if not intent:
+            problem=self._check_ownership(row,record)
+            if problem:return _result('POLICY_BLOCKED',reason=problem)
+            if Path(record['source_path']).resolve()==destination.resolve():return _result('OK',source_path=str(destination))
+            intent={'from':record['source_path'],'to':str(destination)};record['active_relocation']=intent;self._put(task_id,record)
+        if Path(intent['to']).resolve()!=destination.resolve():return _result('POLICY_BLOCKED',reason='迁移配置发生改变')
+        tags={x.strip() for x in row.get('tags','').split(',')}
+        if (not record.get('creation_intent') or not tags.intersection({PROJECT_TAG,record['task_tag']}) or row.get('category')!=record['category'] or row.get('auto_tmm') is not False
+            or any(row.get(key) and not any(self._bound_path(row[key],Path(intent[k])) for k in ('from','to')) for key in ('save_path','download_path','content_path'))):return _result('POLICY_BLOCKED',reason='下载迁移归属发生改变')
+        if row.get('state')=='moving':return _result('WAITING',reason='正在迁移未完成文件')
+        if not self._bound_path(row.get('download_path'),destination):
+            r=self._request('POST','torrents/setDownloadPath',data={'id':record['client_id'],'path':str(destination/'.incomplete')})
+            return _result('WAITING' if r.status_code==200 else 'POLICY_BLOCKED',reason='正在更新临时下载位置')
+        if Path(row['save_path']).resolve()!=destination.resolve():
+            r=self._request('POST','torrents/setLocation',data={'hashes':record['client_id'],'location':str(destination)})
+            return _result('WAITING' if r.status_code==200 else 'POLICY_BLOCKED',reason='正在更新最终下载位置')
+        if row.get('state') in ('error','missingFiles','unknown'):return _result('POLICY_BLOCKED',reason='客户端报告文件异常')
+        if Path(intent['from']).is_dir():
+            for path in Path(intent['from']).rglob('*'):
+                reject_reparse_chain(path)
+                if path.is_file():return _result('WAITING',reason='等待客户端移走全部旧下载文件')
+        record['source_path']=str(destination);intent['state']='VERIFIED';self._put(task_id,record)
+        return _result('OK',source_path=str(destination))

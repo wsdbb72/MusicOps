@@ -51,7 +51,11 @@ def run(workflows,job):
             try:
                 if platform=='import':result=Path(imported);proof={'source':'client-import'}
                 elif platform=='netease':
-                    reference=resolve_netease_target(target,cfg,workflows.s.vault.get,lambda phase:workflows.checkpoint(job,phase));target['netease_match']=reference
+                    reference=resolve_netease_target(target,cfg,workflows.s.vault.get,lambda phase:workflows.checkpoint(job,phase))
+                    # A native NetEase target is already its own reference. Do
+                    # not store it inside itself (circular JSON breaks the queue).
+                    if reference is not target:
+                        target['netease_match']={k:v for k,v in reference.items() if k in ('source','source_song_id','source_album_id','raw_title','artists','album','duration','track','disc')}
                     result=Path(download_track(reference,cfg,directory,workflows.s.vault.get,lambda phase:workflows.checkpoint(job,phase)));proof={'source':'netease','source_song_id':reference['source_song_id']}
                 else:
                     effective=dict(settings)

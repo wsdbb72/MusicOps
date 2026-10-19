@@ -16,7 +16,7 @@ from musicops.domain.errors import Conflict, ValidationFailed
 from musicops.library.index import file_version, sha256_file
 from musicops.library.paths import reject_reparse_chain
 
-DECODE_ARGS = ['-nostdin', '-v', 'error', '-xerror', '-err_detect', 'explode']
+DECODE_ARGS = ['-nostdin', '-v', 'error', '-xerror', '-err_detect', 'explode', '-threads', '1', '-filter_threads', '1']
 SUPPORTED_SUFFIXES = {'.flac', '.m4a', '.aac', '.aif', '.aiff', '.mp3', '.wav', '.ogg', '.dsf', '.dff'}
 SUFFIX_CODECS = {'.flac': {'flac'}, '.m4a': {'alac', 'aac'}, '.aac': {'aac'}, '.aif': {'pcm_s16be', 'pcm_s24be', 'pcm_s32be', 'pcm_f32be', 'pcm_f64be'},
                  '.aiff': {'pcm_s16be', 'pcm_s24be', 'pcm_s32be', 'pcm_f32be', 'pcm_f64be'}, '.mp3': {'mp3'},
@@ -26,7 +26,7 @@ SUFFIX_CODECS = {'.flac': {'flac'}, '.m4a': {'alac', 'aac'}, '.aac': {'aac'}, '.
 
 def _run(command, timeout):
     return subprocess.run(command, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                          timeout=timeout, creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
+                          timeout=timeout, creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0) | getattr(subprocess, 'BELOW_NORMAL_PRIORITY_CLASS', 0))
 
 
 def _unsupported(text):

@@ -167,6 +167,9 @@ class ConfigManager:
         if not store.list('config_versions'): self.save(default_config(base,offline=initial_offline),0)
         else:
             current=self.current();upgraded=upgrade_config(current['values'],base)
+            if not upgraded['offline'] and upgraded['workflow'].get('setup_done'):
+                from musicops.library.storage import storage_paths
+                upgraded['paths'].update(storage_paths(upgraded['paths']['library']))
             if upgraded!=current['values']:self.save(upgraded,current['version'])
     def current(self):
         with self.store.connection() as c:row=c.execute('SELECT payload FROM config_versions ORDER BY CAST(id AS INTEGER) DESC LIMIT 1').fetchone()

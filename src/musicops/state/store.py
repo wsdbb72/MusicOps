@@ -49,6 +49,14 @@ class StateStore:
         with self.connection() as c:
             c.execute(f'INSERT INTO {kind} VALUES (?,?,?) ON CONFLICT(id) DO UPDATE SET payload=excluded.payload,updated_at=excluded.updated_at',(id,json.dumps(value,ensure_ascii=False),utcnow()))
         return value
+    def put_many(self,kind,items):
+        if kind not in TABLES:raise ValueError('INVALID_TABLE')
+        rows=[];stamp=utcnow()
+        for ident,data in items:
+            value=dict(data);value.setdefault('schema_version',1);value.setdefault('id',ident)
+            rows.append((ident,json.dumps(value,ensure_ascii=False),stamp))
+        with self.connection() as c:
+            c.executemany(f'INSERT INTO {kind} VALUES(?,?,?) ON CONFLICT(id) DO UPDATE SET payload=excluded.payload,updated_at=excluded.updated_at',rows)
     def get(self,kind,id):
         if kind not in TABLES and kind!='token_reservations': raise ValueError('INVALID_TABLE')
         with self.connection() as c: row=c.execute(f'SELECT payload FROM {kind} WHERE id=?',(id,)).fetchone()

@@ -34,8 +34,8 @@ class QbtSession:
     def request(self,method,url,**kwargs):
         if not url.startswith(self.origin+'/api/v2/'):raise PolicyBlocked('qBittorrent 请求来源改变')
         endpoint=url[len(self.origin+'/api/v2/'):]
-        reads={'app/version','torrents/info','torrents/files','torrents/categories','torrents/tags'}
-        writes={'torrents/add','torrents/start','torrents/resume','torrents/createCategory','torrents/createTags','torrents/addTags','torrents/removeTags','torrents/deleteTags'}
+        reads={'app/version','torrents/info','torrents/files','torrents/categories','torrents/tags','torrents/export'}
+        writes={'torrents/add','torrents/start','torrents/resume','torrents/createCategory','torrents/createTags','torrents/addTags','torrents/removeTags','torrents/deleteTags','torrents/setLocation','torrents/setDownloadPath'}
         if (method=='GET' and endpoint not in reads) or (method=='POST' and endpoint not in writes) or method not in ('GET','POST'):raise PolicyBlocked('未开放该客户端操作')
         try:r=self.client.request(method,url,**kwargs)
         except httpx.HTTPError:raise HttpError('NETWORK_ERROR','qBittorrent 请求失败') from None

@@ -1,4 +1,5 @@
 import sqlite3
+from pathlib import Path
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from types import SimpleNamespace
@@ -42,8 +43,9 @@ def test_slow_go_start_does_not_block_browser_engine(service,tmp_path,monkeypatc
     entered=threading.Event();release=threading.Event()
     for name in ('go-music-dl','flaresolverr'):
         path=tmp_path/'engines'/name/(name+'.exe');path.parent.mkdir(parents=True);path.write_bytes(b'synthetic-only')
+    environments=[]
     class Process:
-        def __init__(self,*_,**__):self.stopped=False
+        def __init__(self,*_,**options):self.stopped=False;environments.append(options['env'])
         def poll(self):return 0 if self.stopped else None
     class Owner:
         def __init__(self,process):self.process=process
@@ -57,6 +59,7 @@ def test_slow_go_start_does_not_block_browser_engine(service,tmp_path,monkeypatc
     monkeypatch.setattr(ownership,'ProcessOwner',Owner)
     monkeypatch.setattr(engines.httpx,'Client',lambda **kw:client(transport=httpx.MockTransport(response),**kw))
     manager=ManagedServices(tmp_path/'profile',SimpleNamespace(get=lambda *_:None),root=tmp_path/'engines')
+    manager.default_storage=lambda:str(tmp_path/'MusicOps/work')
     try:
         with ThreadPoolExecutor(2) as pool:
             go=pool.submit(manager.ensure,'go-music-dl');assert entered.wait(2)
@@ -65,6 +68,7 @@ def test_slow_go_start_does_not_block_browser_engine(service,tmp_path,monkeypatc
                 assert browser.result(timeout=1)[0].startswith('http://127.0.0.1:')
             finally:release.set()
             assert go.result(timeout=2)[0].endswith('/music')
+            assert all(Path(env['TEMP']).is_relative_to(tmp_path/'MusicOps/work') and env['TEMP']==env['TMP']==env['TMPDIR'] for env in environments)
     finally:release.set();manager.close()
 
 

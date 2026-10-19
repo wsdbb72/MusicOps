@@ -1,6 +1,7 @@
 import copy
 import os
 import time
+import threading
 from pathlib import Path
 os.environ.setdefault('QT_QPA_PLATFORM','offscreen')
 import pytest
@@ -54,7 +55,21 @@ def test_V36_all_parameters_visual_save_no_network_and_snapshots(app,tmp_path):
 
 def test_V37_ipc_runs_off_gui_thread_and_queued_results_are_consumed(app,tmp_path):
     client=GuiFixtureClient(tmp_path);window=MainWindow(tmp_path,client,autostart=False);ticks=[];timer=QTimer();timer.setInterval(10);timer.timeout.connect(lambda:ticks.append(1));timer.start()
-    window.request('slow',{});wait_for(app,lambda:window.pending==0);timer.stop();assert len(ticks)>5
+    entered=threading.Event();release=threading.Event();original=client.call;threads=[]
+    def blocked(command,payload):
+        if command=='slow':
+            threads.append(threading.get_ident());entered.set()
+            assert release.wait(10),'GUI did not release the test request'
+            return {'ok':True}
+        return original(command,payload)
+    client.call=blocked
+    try:
+        window.request('slow',{})
+        wait_for(app,lambda:entered.is_set() and len(ticks)>5)
+        assert len(threads)==1 and threads[0]!=threading.get_ident()
+    finally:
+        release.set();timer.stop()
+    wait_for(app,lambda:window.pending==0)
     window.request('queued',{},lambda r:window.result_to_page('音乐库与音质',r));wait_for(app,lambda:window.pending==0);window._status(client.call('get_status',{}))
     assert window.tables['音乐库与音质'].rowCount()==1 and not window.task_callbacks
     window.close()

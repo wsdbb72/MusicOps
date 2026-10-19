@@ -2,8 +2,16 @@ import copy
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
+import pytest
 
 from test_workflows import service
+
+
+@pytest.mark.parametrize('stage',['publishing','retiring'])
+def test_verified_album_publication_precedes_search_and_streaming_backlog(service,stage):
+    for i in range(25):add(service,'backlog'+str(i),'fallback','album')
+    ready=add(service,'ready-to-publish',stage,'album')
+    assert service.workflows.next_job()['job_id']==ready['job_id']
 
 
 def add(service, identity, stage, task_type, **extra):

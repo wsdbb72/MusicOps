@@ -68,6 +68,8 @@ class FlareSolverrClient:
         environment.update(HOST='127.0.0.1', PORT=str(parsed.port or (443 if parsed.scheme == 'https' else 80)), LOG_LEVEL='error', LOG_HTML='false')
         self.process = subprocess.Popen([str(executable)], cwd=executable.parent, env=environment,
             stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, creationflags=subprocess.CREATE_NO_WINDOW)
+        from musicops.performance import configure_child
+        configure_child(self.process)
         return True
 
     def request(self, payload):

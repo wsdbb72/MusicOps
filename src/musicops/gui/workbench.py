@@ -2,11 +2,12 @@
 from __future__ import annotations
 import copy,json,os,re
 from pathlib import Path
-from PySide6.QtCore import QObject,QRunnable,QThreadPool,QTimer,Qt,Signal,QPropertyAnimation,QEasingCurve,QSize
+from PySide6.QtCore import QObject,QRunnable,QThreadPool,QTimer,Qt,Signal,QSize
 from PySide6.QtGui import QFont,QDesktopServices,QIcon,QPixmap,QPainter,QPen,QColor,QPalette
 from PySide6.QtCore import QUrl
-from PySide6.QtWidgets import (QApplication,QMainWindow,QWidget,QVBoxLayout,QHBoxLayout,QLabel,QPushButton,QLineEdit,QPlainTextEdit,QFileDialog,QCheckBox,QGroupBox,QFormLayout,QWizard,QWizardPage,QListWidget,QStackedWidget,QTableWidget,QTableWidgetItem,QTreeWidget,QTreeWidgetItem,QHeaderView,QMessageBox,QSpinBox,QScrollArea,QInputDialog,QDialog,QDialogButtonBox,QGraphicsOpacityEffect,QProgressBar,QAbstractItemView,QRadioButton)
+from PySide6.QtWidgets import (QApplication,QMainWindow,QWidget,QVBoxLayout,QHBoxLayout,QLabel,QPushButton,QLineEdit,QPlainTextEdit,QFileDialog,QCheckBox,QGroupBox,QFormLayout,QWizard,QWizardPage,QListWidget,QStackedWidget,QTableWidget,QTableWidgetItem,QTreeWidget,QTreeWidgetItem,QHeaderView,QMessageBox,QSpinBox,QScrollArea,QInputDialog,QDialog,QDialogButtonBox,QProgressBar,QAbstractItemView,QRadioButton)
 from musicops.gui.controls import QComboBox
+from musicops.gui.layouts import WrapLayout
 from musicops import __version__
 from musicops.worker.client import WorkerClient
 from musicops.clients.http import redact
@@ -34,6 +35,8 @@ def nav_icon(index):
     elif index==3:
         p.drawRoundedRect(3,3,16,16,3,3)
         for y in (7,11,15):p.drawLine(7,y,8,y);p.drawLine(11,y,16,y)
+    elif index==5:
+        p.drawRoundedRect(2,3,10,12,2,2);p.drawRoundedRect(9,8,11,12,2,2);p.drawLine(11,13,16,13);p.drawLine(14,11,16,13);p.drawLine(14,15,16,13)
     else:p.drawEllipse(3,3,12,12);p.drawLine(13,13,20,20)
     p.end();return QIcon(image)
 
@@ -88,7 +91,10 @@ class SetupWizard(QWizard):
         self.setButtonText(QWizard.NextButton,'继续');self.setButtonText(QWizard.BackButton,'上一步');self.setButtonText(QWizard.FinishButton,'保存并开始使用');self.setButtonText(QWizard.CancelButton,'稍后设置')
         self.setOption(QWizard.HaveCustomButton1,True);self.setButtonText(QWizard.CustomButton1,'跳过本步');self.setOption(QWizard.HaveCustomButton2,True);self.setButtonText(QWizard.CustomButton2,'保存设置');self.customButtonClicked.connect(lambda which:self.accept() if which==QWizard.CustomButton2.value or self.currentId()==self.pageIds()[-1] else self.next())
         self.fields={};self.site_fields={};self.saved_refs=set(getattr(owner,'available_refs',[]))
-        p=self._add_page('音乐放在哪里','选择你希望 Roon / Navidrome 读取的音乐库。下载与整理的临时数据由 MusicOps 自动管理。')
+        p=self._add_page('音乐放在哪里','选择 Roon / Navidrome 读取的音乐库。临时下载、整理和恢复数据放在音乐库同级的 MusicOps 文件夹；入库后清理临时副本。需要持续做种的原始文件保存在 MusicOps/seeding，避免补写标签破坏种子校验。')
+        performance=getattr(owner,'performance',{})
+        scheduling=('已绑定 '+str(performance.get('efficiency_processors'))+' 个小核' if performance.get('mode')=='efficiency' else '由系统选择处理器')+'；后台使用较低优先级，文件校验最多 4 项并行。'
+        p.addRow(label('后台资源：'+scheduling,'hint'))
         p.addRow(button('浏览器验证与内置 FlareSolverr 设置',lambda:self.open_solver_settings()))
         row,self.library=browse_field(self.values.get('paths',{}).get('library',''));p.addRow('音乐库目录',row)
         self.roon=QCheckBox('让 Roon 读取这个目录');self.roon.setChecked(self.values.get('music_servers',{}).get('roon',{}).get('enabled',False));p.addRow(self.roon)
@@ -247,38 +253,37 @@ class SetupWizard(QWizard):
 
 class Workbench(QMainWindow):
     def __init__(self,base,client=None,autostart=True,updates_enabled=False):
-        super().__init__();self.updates_enabled=updates_enabled;self.update_checked=False;self.update_controller=None;self.base=Path(base);self.client=client or WorkerClient(base);self.config={};self.tasks={};self.jobs={};self.targets=[];self.requests=set();self.task_polls=set();self.pool=QThreadPool(self);self.setWindowTitle('MusicOps · 音乐库工作台');self.resize(1260,860);self.setMinimumSize(1040,740);self.setWindowIcon(app_icon())
+        super().__init__();self.updates_enabled=updates_enabled;self.update_checked=False;self.update_controller=None;self.base=Path(base);self.client=client or WorkerClient(base);self.config={};self.tasks={};self.task_failures={};self.jobs={};self.targets=[];self.requests=set();self.task_polls=set();self.pool=QThreadPool(self);self.pool.setMaxThreadCount(8);self.setWindowTitle('MusicOps · 音乐库工作台');self.resize(1260,860);self.setMinimumSize(1040,740);self.setWindowIcon(app_icon())
         if QApplication.instance():QApplication.instance().setWindowIcon(app_icon())
         self.setStyleSheet(STYLE);self.setPalette(dark_palette())
         container=QWidget();self.setCentralWidget(container);layout=QHBoxLayout(container);layout.setContentsMargins(0,0,0,0);layout.setSpacing(0)
         side=QWidget();side.setObjectName('sidebar');side.setFixedWidth(224);s=QVBoxLayout(side);s.setContentsMargins(22,28,20,24)
         logo=QLabel();logo.setObjectName('brandMark');logo.setFixedSize(58,58);logo.setPixmap(app_icon().pixmap(58,58));s.addWidget(logo);s.addSpacing(8);s.addWidget(label('MusicOps','brand'));s.addWidget(label('每一张专辑，井然有序','muted'));s.addSpacing(30);s.addWidget(label('工作台','sectionCaption'))
-        self.nav=QListWidget();self.nav.addItems(['歌单入库','资料补全','音质升级','任务中心','专辑搜索']);self.nav.setSpacing(4);self.nav.setIconSize(QSize(22,22))
+        self.nav=QListWidget();self.nav.addItems(['歌单入库','资料补全','音质升级','任务中心','专辑搜索','去重合并']);self.nav.setSpacing(4);self.nav.setIconSize(QSize(22,22))
         for index in range(self.nav.count()):self.nav.item(index).setIcon(nav_icon(index))
         s.addWidget(self.nav);s.addWidget(button('连接与设置',self.setup));s.addWidget(button('检查更新',lambda:self.check_updates(True)));self.update_note=label('','sidebarFoot');self.update_note.setWordWrap(True);s.addWidget(self.update_note);s.addSpacing(14);s.addWidget(label('MusicOps '+__version__+' · 你的音乐收藏','sidebarFoot'));layout.addWidget(side)
         content=QWidget();content.setObjectName('workspace');c=QVBoxLayout(content);c.setContentsMargins(32,23,32,24);c.setSpacing(16);top=QHBoxLayout();self.connection=label('正在连接后台…','connection');top.addWidget(self.connection,1);self.activity=label('正在连接','activity');top.addWidget(self.activity);c.addLayout(top)
         self.busy_bar=QProgressBar();self.busy_bar.setObjectName('activityProgress');self.busy_bar.setRange(0,0);self.busy_bar.setTextVisible(False);self.busy_bar.setFixedHeight(3);c.addWidget(self.busy_bar)
         self.notice=label('','notice');self.notice.setVisible(False)
         c.addWidget(self.notice);self.stack=QStackedWidget();c.addWidget(self.stack);layout.addWidget(content);self.nav.currentRowChanged.connect(self.switch_page)
-        self._playlist();self._complete();self._upgrade();self._tasks();self._album_search();self.nav.setCurrentRow(0)
+        self._playlist();self._complete();self._upgrade();self._tasks();self._album_search();self._duplicates();self.nav.setCurrentRow(0)
         self.timer=QTimer(self);self.timer.setInterval(2000);self.timer.timeout.connect(self.refresh);self.wizard_shown=False;self.job_offset=0;self.job_total=0;self._page_animation=None;self.update_activity()
         if autostart:self.call('attach',{},lambda r:self.call('enable_online',{},lambda _:self.refresh()))
     def showEvent(self,event):
         super().showEvent(event);QTimer.singleShot(0,lambda:apply_native_titlebar(self))
     def switch_page(self,index):
         if index<0:return
-        if getattr(self,'_page_animation',None):self._page_animation.stop()
-        self.stack.setCurrentIndex(index);page=self.stack.widget(index)
-        if page is None:return
-        effect=page.graphicsEffect()
-        if effect is None:effect=QGraphicsOpacityEffect(page);page.setGraphicsEffect(effect)
-        effect.setOpacity(.35);self._page_animation=QPropertyAnimation(effect,b'opacity',self);self._page_animation.setDuration(180);self._page_animation.setStartValue(.35);self._page_animation.setEndValue(1);self._page_animation.setEasingCurve(QEasingCurve.OutCubic);self._page_animation.start()
+        # Opacity effects cache child surfaces; interrupted transitions could
+        # paint an old page over the task tree. Pages now paint opaquely.
+        self.stack.setCurrentIndex(index)
+        self.stack.update()
+        if index==5 and self.config:self.duplicate_page.load_history()
     def update_activity(self):
         paused=getattr(self,'paused_jobs',0);globally_paused=getattr(self,'pipeline_paused',False);foreground=any(request.command not in ('get_status','list_workflows','get_task') for request in self.requests)
         busy=bool(foreground or (self.tasks or getattr(self,'active_jobs',0)) and not globally_paused and not (paused and not getattr(self,'active_jobs',0)))
         self.activity.setText('●  后台已暂停' if globally_paused else '●  正在处理' if busy else f'●  已暂停 {paused} 项' if paused else '●  后台就绪');self.busy_bar.setRange(0,0) if busy else self.busy_bar.setRange(0,100);self.busy_bar.setValue(0 if busy else 100);self.notice.setVisible(bool(self.notice.text()))
     def page(self,title,subtitle):
-        w=QWidget();box=QVBoxLayout(w);box.setContentsMargins(0,0,0,0);box.setSpacing(18);hero=QWidget();hero.setObjectName('hero');hero_box=QVBoxLayout(hero);hero_box.setContentsMargins(24,22,24,22);hero_box.setSpacing(9);hero_box.addWidget(label(('COLLECTION','METADATA','SOUND QUALITY','ACTIVITY','DISCOVERY')[self.stack.count()],'eyebrow'));hero_box.addWidget(label(title,'title'));hero_box.addWidget(label(subtitle,'subtitle'));box.addWidget(hero);self.stack.addWidget(w);return box
+        w=QWidget();w.setObjectName('workbenchPage');w.setAutoFillBackground(True);box=QVBoxLayout(w);box.setContentsMargins(0,0,0,0);box.setSpacing(18);hero=QWidget();hero.setObjectName('hero');hero_box=QVBoxLayout(hero);hero_box.setContentsMargins(24,22,24,22);hero_box.setSpacing(9);hero_box.addWidget(label(('COLLECTION','METADATA','SOUND QUALITY','ACTIVITY','DISCOVERY','LIBRARY CARE')[self.stack.count()],'eyebrow'));hero_box.addWidget(label(title,'title'));hero_box.addWidget(label(subtitle,'subtitle'));box.addWidget(hero);scroll=QScrollArea();scroll.setObjectName('pageScroll');scroll.setWidgetResizable(True);scroll.setFrameShape(QScrollArea.NoFrame);scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff);scroll.setWidget(w);self.stack.addWidget(scroll);return box
     def steps(self,box,text):
         group=QGroupBox();group.setObjectName('card');layout=QVBoxLayout(group);layout.addWidget(label(text,'steps'));box.addWidget(group)
     def table(self,columns):
@@ -291,7 +296,7 @@ class Workbench(QMainWindow):
         for key,name in PLATFORMS.items():self.playlist_platform.addItem(name,key)
         self.playlist_platform.setMaximumWidth(170);row.addWidget(self.playlist_platform);self.playlist=line('','粘贴歌单链接 / 分享文本；纯 ID 请先选择平台');row.addWidget(self.playlist);row.addWidget(button('解析歌单',self.parse,True));row.addWidget(button('导入文件',self.import_playlist));box.addLayout(row)
         self.playlist_note=label('已在音乐库中的曲目会跳过；找不到的音源可回退网易云。','hint');box.addWidget(self.playlist_note)
-        self.track_table=self.table(['选择','歌曲','艺人','专辑','状态']);box.addWidget(self.track_table)
+        self.track_table=self.table(['选择','歌曲','艺人','专辑','状态']);self.track_table.setMinimumHeight(220);box.addWidget(self.track_table,1)
         row=QHBoxLayout();row.addWidget(button('全选 / 取消',self.select_all));row.addStretch();row.addWidget(button('开始入库',lambda:self.start('playlist'),True));box.addLayout(row)
     def _complete(self):
         box=self.page('补齐音乐库资料','检查专辑、艺人、封面和歌词。可靠匹配自动补齐，资料不明确的项目单独列出。');self.steps(box,'读取标签  →  识别缺失资料  →  查询与匹配  →  写入副本并验证')
@@ -311,12 +316,12 @@ class Workbench(QMainWindow):
         box.setSpacing(12);box.itemAt(0).widget().layout().setContentsMargins(20,14,20,14)
         self.checked_jobs={};self.job_items={};self.job_groups={};self.job_detail_cache={};self.job_detail_notes={};self.job_track_versions={};self.job_detail_requests=set();self.expanded_job_ids=set();self.bulk_pending=False
         self.execution_note=label('正在连接后台…','hint');box.addWidget(self.execution_note);self.task_summary=label('正在读取专辑队列…','hint');box.addWidget(self.task_summary)
-        row=QHBoxLayout();self.task_view=QComboBox();self.task_view.addItem('专辑总览','albums');self.task_view.addItem('阶段记录','steps');self.task_view.currentIndexChanged.connect(self.change_task_view);row.addWidget(self.task_view);row.addWidget(label('状态'));self.task_filter=QComboBox()
+        row=WrapLayout();self.task_view=QComboBox();self.task_view.addItem('专辑总览','albums');self.task_view.addItem('阶段记录','steps');self.task_view.currentIndexChanged.connect(self.change_task_view);row.addWidget(self.task_view);row.addWidget(label('状态'));self.task_filter=QComboBox()
         for name,key in (('进行中 / 等待','active'),('需要核对','review'),('失败','failed'),('已结束','completed'),('全部','all')):self.task_filter.addItem(name,key)
         self.task_filter.currentIndexChanged.connect(self.change_task_filter);row.addWidget(self.task_filter);row.addStretch()
         row.addWidget(button('重试全部失败',lambda:self.all_task_action('retry')));row.addWidget(button('全量 AI 核对',lambda:self.all_task_action('ai')));row.addWidget(button('全部手动核对',lambda:self.all_task_action('manual')));box.addLayout(row)
-        row=QHBoxLayout();self.job_select_page=QCheckBox('勾选本页');self.job_select_page.setTristate(True);self.job_select_page.stateChanged.connect(self.select_job_page);row.addWidget(self.job_select_page);self.job_selection_note=label('已勾选 0 项','hint');row.addWidget(self.job_selection_note);row.addStretch();self.task_query=line('','搜索全部专辑 / 艺人');self.task_query.setMaximumWidth(240);self.task_query.setMaxLength(200);self.task_query_timer=QTimer(self);self.task_query_timer.setSingleShot(True);self.task_query_timer.setInterval(350);self.task_query_timer.timeout.connect(self.change_task_filter);self.task_query.textChanged.connect(lambda _:self.task_query_timer.start());row.addWidget(self.task_query);row.addWidget(button('清空勾选',self.clear_checked_jobs));box.addLayout(row)
-        self.selection_actions=QWidget();row=QHBoxLayout(self.selection_actions);row.setContentsMargins(0,0,0,0);self.bulk_buttons=[]
+        row=WrapLayout();self.job_select_page=QCheckBox('勾选本页');self.job_select_page.setTristate(True);self.job_select_page.stateChanged.connect(self.select_job_page);row.addWidget(self.job_select_page);self.job_selection_note=label('已勾选 0 项','hint');row.addWidget(self.job_selection_note);row.addStretch();self.task_query=line('','搜索全部专辑 / 艺人');self.task_query.setMaximumWidth(240);self.task_query.setMaxLength(200);self.task_query_timer=QTimer(self);self.task_query_timer.setSingleShot(True);self.task_query_timer.setInterval(350);self.task_query_timer.timeout.connect(self.change_task_filter);self.task_query.textChanged.connect(lambda _:self.task_query_timer.start());row.addWidget(self.task_query);row.addWidget(button('清空勾选',self.clear_checked_jobs));box.addLayout(row)
+        self.selection_actions=QWidget();row=WrapLayout(self.selection_actions);row.setContentsMargins(0,0,0,0);self.bulk_buttons=[]
         for text,action in (('暂停勾选','pause'),('继续勾选','resume'),('取消勾选','cancel'),('重试失败勾选','retry'),('删除勾选','delete')):
             action_button=button(text,lambda checked=False,a=action:self.bulk_action(a));self.bulk_buttons.append(action_button);row.addWidget(action_button)
         self.bulk_ai_button=button('AI 辅助勾选',self.explain);row.addWidget(self.bulk_ai_button);row.addStretch();box.addWidget(self.selection_actions)
@@ -324,12 +329,16 @@ class Workbench(QMainWindow):
         header=self.job_table.header();header.setDefaultAlignment(Qt.AlignLeft|Qt.AlignVCenter);header.setSectionResizeMode(0,QHeaderView.Interactive);self.job_table.setColumnWidth(0,270);header.setSectionResizeMode(1,QHeaderView.Interactive);self.job_table.setColumnWidth(1,125)
         for column in (2,3):header.setSectionResizeMode(column,QHeaderView.ResizeToContents)
         header.setSectionResizeMode(4,QHeaderView.Stretch)
-        box.addWidget(self.job_table);self.job_detail=QPlainTextEdit();self.job_detail.setReadOnly(True);self.job_detail.setPlaceholderText('选择一项查看结果；勾选任务后可批量操作。');self.job_detail.setFixedHeight(80);box.addWidget(self.job_detail);self.job_table.itemSelectionChanged.connect(self.show_detail);self.job_table.itemChanged.connect(self.job_check_changed);self.job_table.itemExpanded.connect(self.expand_job);self.job_table.itemCollapsed.connect(self.collapse_job)
-        actions=QHBoxLayout();self.review_current=button('核对当前专辑',self.review);self.retry_current=button('重试当前任务',lambda:self.bulk_action('retry',[self.selected_job()]) if self.selected_job() else None);self.restore_current=button('恢复当前任务原版',self.restore)
+        self.job_table.setMinimumHeight(240);box.addWidget(self.job_table,1);self.job_detail=QPlainTextEdit();self.job_detail.setReadOnly(True);self.job_detail.setPlaceholderText('选择一项查看结果；勾选任务后可批量操作。');self.job_detail.setFixedHeight(80);box.addWidget(self.job_detail);self.job_table.itemSelectionChanged.connect(self.show_detail);self.job_table.itemChanged.connect(self.job_check_changed);self.job_table.itemExpanded.connect(self.expand_job);self.job_table.itemCollapsed.connect(self.collapse_job)
+        actions=WrapLayout();self.review_current=button('核对当前专辑',self.review);self.retry_current=button('重试当前任务',lambda:self.bulk_action('retry',[self.selected_job()]) if self.selected_job() else None);self.restore_current=button('恢复当前任务原版',self.restore)
         for action in (self.review_current,self.retry_current,self.restore_current):action.setEnabled(False);actions.addWidget(action)
         actions.addStretch();actions.addWidget(button('暂停整个后台',lambda:self.call('pause_pipeline',{},lambda _:self.refresh())));actions.addWidget(button('继续整个后台',lambda:self.call('resume_pipeline',{},lambda _:self.refresh())));actions.addWidget(button('退出应用及后台',self.exit_background));box.addLayout(actions)
-        pages=QHBoxLayout();self.job_counts=label('');self.job_counts.setWordWrap(False);pages.addWidget(self.job_counts);pages.addStretch();pages.addWidget(button('上一页',lambda:self.job_page(-200)));pages.addWidget(button('下一页',lambda:self.job_page(200)));box.addLayout(pages)
+        pages=WrapLayout();self.job_counts=label('');self.job_counts.setWordWrap(False);pages.addWidget(self.job_counts);pages.addStretch();pages.addWidget(button('上一页',lambda:self.job_page(-200)));pages.addWidget(button('下一页',lambda:self.job_page(200)));box.addLayout(pages)
         self.update_job_selection()
+    def _duplicates(self):
+        from musicops.gui.duplicates import DuplicatePage
+        box=self.page('去重与合并专辑','扫描重复歌曲和分散的专辑副本。可靠项目自动合并，冲突版本分别保留，旧副本支持恢复。')
+        self.duplicate_page=DuplicatePage(self);box.addWidget(self.duplicate_page,1)
     def check_updates(self,manual=False):
         if not self.updates_enabled:
             if manual:self.update_note.setText('源码或验收运行不启动自动安装；安装版可自动检查更新。')
@@ -399,7 +408,7 @@ class Workbench(QMainWindow):
         if not host:return
         path='/details.php?id='+rid if site=='open.cd' else '/torrents.php?id='+(gid if gid.isdigit() else rid)+'&torrentid='+rid
         QDesktopServices.openUrl(QUrl('https://'+host+path))
-    def call(self,command,payload,done=None,failed=None):
+    def call(self,command,payload,done=None,failed=None,accepted=None):
         if not hasattr(self,'inflight_reads'):self.inflight_reads=set();self.pool.setMaxThreadCount(8)
         read_key=(command,json.dumps(payload,sort_keys=True,ensure_ascii=False)) if command in ('get_status','list_workflows') else None
         if read_key in self.inflight_reads:return
@@ -409,7 +418,8 @@ class Workbench(QMainWindow):
             if read_key:self.inflight_reads.discard(read_key)
             self.requests.discard(request)
             if result.get('accepted') and done:
-                self.tasks[result['task_id']]=done;self.timer.start();QTimer.singleShot(0,self.poll_tasks)
+                self.tasks[result['task_id']]=done;self.task_failures[result['task_id']]=failed;self.timer.start();QTimer.singleShot(0,self.poll_tasks)
+                if accepted:accepted(result)
             elif done:done(result)
             self.update_activity()
         def failure(message):
@@ -419,7 +429,7 @@ class Workbench(QMainWindow):
             else:
                 reconnecting=command in ('attach','get_status','list_workflows','get_task') and (message.startswith(('[Errno ','[WinError ')) or 'IPC_CONNECTION_ERROR' in message or '后台响应超时' in message)
                 self.notice.setText('正在重新连接后台，请稍候…' if reconnecting else '需要处理：'+message)
-                if reconnecting:self._connection_notice=self.notice.text()
+                if reconnecting:self._connection_notice=self.notice.text();self.timer.start()
             self.update_activity()
         request.signals.done.connect(success);request.signals.failed.connect(failure);self.pool.start(request,0 if command in ('get_status','list_workflows','get_task') else 1)
     def poll_tasks(self):
@@ -436,7 +446,9 @@ class Workbench(QMainWindow):
                 callback=self.tasks.pop(task_id,None)
                 result=task.get('result') or {'error':task.get('error','任务未完成')}
                 if task.get('state')!='completed':self.notice.setText('任务未完成：'+str(task.get('error') or result.get('reason') or task.get('state')))
-                if callback:callback(result)
+                error_callback=self.task_failures.pop(task_id,None)
+                if task.get('state')!='completed' and error_callback:error_callback(str(task.get('error') or result.get('reason') or task.get('state')))
+                elif callback:callback(result)
                 self.update_activity()
             def failed(message,task_id=tid):
                 self.task_polls.discard(task_id);self.notice.setText('正在重新连接任务：'+message);self.update_activity()
@@ -454,8 +466,12 @@ class Workbench(QMainWindow):
         if self.notice.text()==getattr(self,'_connection_notice',None):self.notice.clear()
         self._connection_notice=None
         self.pipeline_paused=bool(result.get('paused'));self.config=result['config']['values'];self.available_refs=[r['ref'] if isinstance(r,dict) else r for r in result.get('secret_refs',[])];self.timer.start();connected=[name for key,name,_ in SITES if self.config['providers'][key]['enabled'] and self.config['providers'][key]['credential_ref'] in self.available_refs]
-        executing=result.get('execution') or {};names={'normalize_qbt_tags':'整理 MusicOps 下载标签','index_library':'扫描本地音乐库','advance_workflows':'推进专辑处理','assist_workflows':'AI 辅助核对','refresh_playlist':'读取歌单','start_workflow':'创建专辑队列','browser_solver_preflight':'验证浏览器连接'}
+        executing=result.get('execution') or {};names={'restore_duplicates':'恢复合并副本','scan_duplicates':'校验重复歌曲与专辑','merge_duplicates':'合并专辑副本','normalize_qbt_tags':'整理 MusicOps 下载标签','index_library':'扫描本地音乐库','advance_workflows':'推进专辑处理','assist_workflows':'AI 辅助核对','refresh_playlist':'读取歌单','start_workflow':'创建专辑队列','browser_solver_preflight':'验证浏览器连接'}
         self.execution_note.setText('后台已暂停，请继续后台后处理队列。' if self.pipeline_paused else '后台正在：'+names.get(executing.get('command'),'处理当前任务') if executing else '后台等待下一项可执行任务；失败和待核对专辑可按状态查看。')
+        performance=result.get('performance',{});self.performance=performance
+        scheduling='小核后台' if performance.get('mode')=='efficiency' else '低优先级后台' if performance.get('low_priority') else '系统调度'
+        self.execution_note.setToolTip(scheduling+'；文件校验最多 4 项并行，界面请求最多 8 项；音频解码每项 1 线程。')
+
         catalog=result.get('local_catalog') or {};self.catalog_note.setText('本地专辑资料库：'+str(catalog.get('album_count',0))+' 张专辑 · '+str(catalog.get('matched_track_count',0))+' 首已预匹配'+(' · 扫描时增量更新' if catalog.get('updated_at') else ' · 首次扫描后自动建立'))
         self.connection.setText('音乐库：'+self.config['paths']['library']+'     ·     '+('已配置 '+', '.join(connected) if connected else '尚未连接资源站；可在“连接与设置”添加'))
         if not self.wizard_shown and not self.config['workflow']['setup_done']:
@@ -845,6 +861,8 @@ class Workbench(QMainWindow):
     def closeEvent(self,event):self.timer.stop();self.task_query_timer.stop();event.accept()
 
 STYLE='''
+QWidget#workbenchPage, QScrollArea#pageScroll { background: #0d1523; border: 0; }
+
 QWidget { font-family: "Microsoft YaHei", "PingFang SC", "Segoe UI", "SF Pro Text"; font-size: 13px; color: #e6eef8; }
 QMainWindow,QWizard,QDialog,QMessageBox { background: #0d1523; }
 QWidget#workspace,QStackedWidget,QWizardPage,QScrollArea,QScrollArea > QWidget > QWidget { background: #0d1523; }

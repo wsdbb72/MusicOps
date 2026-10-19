@@ -4,7 +4,7 @@ from musicops.clients.http import PolicyBlocked
 from musicops.state.store import utcnow
 
 RETRY_STAGES = {'identifying', 'snapshotting', 'searching', 'requesting', 'downloading',
-                'fallback', 'metadata', 'enrich', 'validating', 'notifying'}
+                'fallback', 'metadata', 'enrich', 'validating', 'publishing', 'notifying'}
 PATH_KEYS = ('library', 'source', 'work', 'backup', 'quarantine')
 
 

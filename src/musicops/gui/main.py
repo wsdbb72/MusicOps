@@ -22,6 +22,8 @@ def main(argv=None):
         font_path=Path(os.environ.get('SystemRoot','C:/Windows'))/'Fonts'/'msyh.ttc'
         if font_path.is_file():QFontDatabase.addApplicationFont(str(font_path))
         app.setFont(QFont('Microsoft YaHei',10))
+    from musicops.performance import apply_background_policy
+    apply_background_policy()
     app.setStyle('Fusion');app.setStyleSheet(STYLE);window=Workbench(base,updates_enabled=bool(getattr(sys,'frozen',False) and not args.quit_after and not args.screenshot));window.setWindowIcon(app_icon());window.show();apply_native_titlebar(window)
     if args.screenshot:
         screenshot=Path(args.screenshot).resolve();screenshot.parent.mkdir(parents=True,exist_ok=True);QTimer.singleShot(2500,lambda:window.grab().save(str(screenshot)))

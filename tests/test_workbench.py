@@ -28,7 +28,7 @@ def wait(app,condition):
 
 def test_product_has_three_workflows_and_no_mode_or_internal_credential_fields(app,tmp_path):
     window=Workbench(tmp_path,Client(tmp_path),autostart=False);window.status(window.client.call('get_status',{}));window.timer.stop()
-    assert window.nav.count()==5 and [window.nav.item(i).text() for i in range(3)]==['歌单入库','资料补全','音质升级']
+    assert window.nav.count()==6 and [window.nav.item(i).text() for i in range(3)]==['歌单入库','资料补全','音质升级']
     texts=' '.join(w.text() for w in window.findChildren(QLabel)+window.findChildren(QPushButton))
     assert all(term not in texts for term in ('正式联网','演示模式','离线测试','vault://','config_version','事务字段'))
     window.close()

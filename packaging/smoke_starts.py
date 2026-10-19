@@ -23,7 +23,7 @@ def main():
     env=os.environ.copy();env['QT_QPA_PLATFORM']='offscreen'
     for key in ('PYTHONPATH','PYTHONHOME','VIRTUAL_ENV'):env.pop(key,None)
     process=subprocess.Popen([str(bundle/'MusicOps.exe'),'--base',str(base),'--quit-after','20000'],cwd=bundle,env=env,creationflags=0x08000000)
-    client=WorkerClient(base);report={'version':'0.4.8','evidence':'packaged_worker_three_entry_points','external_requests':0,'checks':{}}
+    client=WorkerClient(base);report={'version':'0.4.9','evidence':'packaged_worker_three_entry_points','external_requests':0,'checks':{}}
     try:
         deadline=time.monotonic()+25
         while True:
@@ -105,6 +105,13 @@ def main():
         engine=client.call('engine_control',{'action':'start'})
         cookie=client.call('engine_control',{'action':'cookie','source':'qq','cookie':'synthetic_frozen=synthetic-only'})
         report['checks']['native_managed_engine_cookie']=engine.get('status')=='OK' and cookie.get('saved') is True
+        scheduling=client.call('get_status',{'compact':True}).get('performance',{})
+        report['checks']['native_background_policy']=scheduling.get('low_priority') is True and scheduling.get('mode') in ('system','efficiency')
+        duplicate_scan=completed('scan_duplicates',{})
+        report['checks']['native_empty_duplicate_scan']=duplicate_scan['state']=='completed' and duplicate_scan['result']['groups']==[] and duplicate_scan['result']['music_writes']==0
+        report['checks']['native_duplicate_history']=client.call('duplicate_history',{})['transactions']==[]
+        restore_guard=completed('restore_duplicates',{'tx_id':'unknown-synthetic'})
+        report['checks']['native_duplicate_restore_guard']=restore_guard['state']=='blocked' and restore_guard.get('error_class')=='POLICY_BLOCKED'
         tag_guard=completed('normalize_qbt_tags',{})
         report['checks']['native_tag_cleanup_auth_guard']=tag_guard['state']=='blocked' and tag_guard.get('error_class')=='AUTH_REQUIRED'
         solved=completed('browser_solver_preflight',{'settings':{'managed':True}})

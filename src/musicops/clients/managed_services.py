@@ -44,6 +44,7 @@ class ManagedServices:
         self.owners = {}
         self.sessions = {}
         self.default_tools = lambda: {}
+        self.default_storage = lambda: ''
         self.tool_config = {}
         atexit.register(self.close)
 
@@ -91,6 +92,13 @@ class ManagedServices:
         environment.update(MUSICOPS_SERVICE_TOKEN=token, HOST='127.0.0.1', PORT=str(port),
             LOG_LEVEL='debug' if self.diagnostic_output else 'error', LOG_HTML='false', HEADLESS='true', MUSICOPS_ENGINE_DATA=str(directory),
             MUSIC_DL_CONFIG_DB=str(directory / 'settings.db'), MUSIC_DL_COOKIE_FILE=str(directory / 'unused.json'))
+        storage=self.default_storage()
+        temporary=(Path(storage)/'engine-temp'/name) if storage else directory/'temp'
+        from musicops.library.paths import reject_reparse_chain
+        reject_reparse_chain(temporary);private_directory(temporary)
+        # go-music-dl invokes FFmpeg with temporary input/output audio. Its
+        # os.CreateTemp must inherit the selected library volume as well.
+        environment.update(TEMP=str(temporary),TMP=str(temporary),TMPDIR=str(temporary))
         for key, value in (tools or {}).items():
             if key in ('ffmpeg', 'ffprobe') and value:
                 environment['MUSIC_DL_' + key.upper()] = str(value)
@@ -103,6 +111,8 @@ class ManagedServices:
             stdout=self.diagnostic_output if self.diagnostic_output else subprocess.DEVNULL,
             stderr=subprocess.STDOUT if self.diagnostic_output else subprocess.DEVNULL,
             creationflags=subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0, start_new_session=os.name!='nt')
+        from musicops.performance import configure_child
+        configure_child(process)
         from musicops.clients.process_owner import ProcessOwner
         self.owners[name]=ProcessOwner(process)
         base = f'http://127.0.0.1:{port}' + ('/music' if name == 'go-music-dl' else '')

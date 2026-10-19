@@ -72,7 +72,7 @@ def test_retry_mixed_selection_reports_manual_and_transaction_blocks(controls):
     service = controls
     album(service, 'search', stage='failed', task_type='search', review_kind='error')
     album(service, 'metadata', stage='needs_review', review_kind='metadata')
-    album(service, 'publish', stage='failed', review_kind='error', resume_stage='publishing')
+    album(service, 'publish', stage='failed', review_kind='error', resume_stage='retiring')
     album(service, 'finished', stage='completed')
     result = control(service, 'retry', ['search', 'metadata', 'publish', 'finished', 'missing'])
     assert (result['succeeded'], result['skipped'], result['failed']) == (1, 3, 1)

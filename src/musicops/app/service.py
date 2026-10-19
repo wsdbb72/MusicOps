@@ -24,6 +24,7 @@ class AppService:
         from musicops.clients.managed_services import ManagedServices
         self.engines=ManagedServices(self.base,self.vault,self._managed_checkpoint)
         self.engines.default_tools=lambda:self.config.current()['values']['paths']['tools']
+        self.engines.default_storage=lambda:self.config.current()['values']['paths']['work']
         self.paused=False; self.stop=threading.Event(); self.mutex=threading.RLock()
         self.active=None; self.thread=threading.Thread(target=self._loop,daemon=True,name='MusicOpsQueue')
         for task in self.store.list('tasks'):
@@ -40,7 +41,10 @@ class AppService:
         from musicops.library.catalog import AlbumCatalog
         summary=AlbumCatalog(self.store).summary(cfg['paths']['library'])
         fresh=False
-        try:fresh=summary.get('updated_at') and (dt.datetime.now(dt.timezone.utc)-dt.datetime.fromisoformat(summary['updated_at'])).total_seconds()<300
+        # Reuse the persistent catalogue across normal restarts. Starting a
+        # full disk walk after only five minutes blocks a large user's queue;
+        # playlist/maintenance entry points still perform an incremental scan.
+        try:fresh=summary.get('updated_at') and (dt.datetime.now(dt.timezone.utc)-dt.datetime.fromisoformat(summary['updated_at'])).total_seconds()<86400
         except (ValueError,TypeError):pass
         if fresh and not force:return
         for task in self.store.list('tasks'):
@@ -109,7 +113,8 @@ class AppService:
                 file_rows=c.execute('SELECT payload FROM library_files ORDER BY id LIMIT ?',(0 if payload.get('compact') else 2000,)).fetchall()
             from musicops.library.catalog import AlbumCatalog
             local_catalog=AlbumCatalog(self.store).summary(config['values']['paths']['library'])
-            return dict(execution=execution,local_catalog=local_catalog,schema_version=1,base=str(self.base),offline=offline,paused=self.paused,active=self.active,config=config,tasks=tasks,counts=counts,provider_status={p:('连接未配置' if offline else '已启用' if config['values']['providers'][p]['enabled'] else '来源已停用') for p in config['values']['providers']},roon=self.store.get('evidence','roon-preflight') or 'pending',next_schedule=self.next_schedule(),secret_refs=self.vault.list_refs(),files=[json.loads(r[0]) for r in file_rows],library_file_count=file_count,library_files_truncated=file_count>len(file_rows),candidates=[] if payload.get('compact') else self.store.list('candidates')[-200:],transactions=[] if payload.get('compact') else self.store.list('transactions'),reviews=[] if payload.get('compact') else self.store.list('match_decisions'))
+            from musicops.performance import policy_status
+            return dict(performance=policy_status(),execution=execution,local_catalog=local_catalog,schema_version=1,base=str(self.base),offline=offline,paused=self.paused,active=self.active,config=config,tasks=tasks,counts=counts,provider_status={p:('连接未配置' if offline else '已启用' if config['values']['providers'][p]['enabled'] else '来源已停用') for p in config['values']['providers']},roon=self.store.get('evidence','roon-preflight') or 'pending',next_schedule=self.next_schedule(),secret_refs=self.vault.list_refs(),files=[json.loads(r[0]) for r in file_rows],library_file_count=file_count,library_files_truncated=file_count>len(file_rows),candidates=[] if payload.get('compact') else self.store.list('candidates')[-200:],transactions=[] if payload.get('compact') else self.store.list('transactions'),reviews=[] if payload.get('compact') else self.store.list('match_decisions'))
         if command=='list_library_files':
             offset=payload.get('offset',0);limit=payload.get('limit',200);query=payload.get('query','')
             if type(offset) is not int or offset<0 or type(limit) is not int or not 1<=limit<=500 or not isinstance(query,str) or len(query)>300:raise ValueError('索引分页参数无效')
@@ -121,6 +126,13 @@ class AppService:
                 rows=c.execute('SELECT payload FROM library_files'+where+' ORDER BY id LIMIT ? OFFSET ?',(*params,limit,offset)).fetchall()
             return {'files':[json.loads(r[0]) for r in rows],'total':total,'offset':offset,'limit':limit,'network_used':False}
         if command=='list_tasks': return {'tasks':self.store.list('tasks')}
+        if command=='duplicate_history':
+            history=self.store.get('evidence','duplicate-latest') or {}
+            records=[]
+            for row in history.get('transactions',[]):
+                tx=self.store.get('transactions',row['tx_id']) or {}
+                if tx.get('state')=='COMMITTED':records.append(row)
+            return {'transactions':records}
         if command=='get_task':
             task=self.store.get('tasks',payload['task_id'])
             if task is None:raise KeyError('TASK_NOT_FOUND')
@@ -169,10 +181,13 @@ class AppService:
         if command=='cancel_task':
             task=self.store.get('tasks',payload['task_id'])
             if not task: raise KeyError('TASK_NOT_FOUND')
-            if task['state'] in ('queued','paused'): task['state']='cancelled'
+            if task['state'] in ('queued','paused'):task.update(state='cancelled',cancel_requested=True)
             elif task['state']=='running': task['cancel_requested']=True
             else: return {'task':task,'reason':'终态任务不再取消；已发布内容用回滚'}
-            self.store.put('tasks',task['task_id'],task); return {'task':task,'seeding_unchanged':True}
+            self.store.put('tasks',task['task_id'],task)
+            activity=self.store.get('evidence','workflow:activity:'+task['task_id'])
+            if activity and task['state']=='cancelled':self.workflows.put(activity,stage='cancelled',message='任务已取消，原文件保留')
+            return {'task':task,'seeding_unchanged':True}
         if command=='review_decision':
             identity=payload['identity']; decision={'schema_version':1,'identity':identity,'choice':payload['choice'],'reason':payload.get('reason',''),'reviewer':'current_user','at':utcnow()}
             if payload['choice']=='unlock':
@@ -187,7 +202,7 @@ class AppService:
         if command=='shutdown_worker':
             if self.active: raise RuntimeError('当前任务尚未到安全退出点，请先暂停流水线')
             self.stop.set(); return {'stopped':True,'seeding_unchanged':True}
-        if command in ('normalize_qbt_tags','browser_solver_preflight','assist_workflows','manual_album_search','restore_workflow','start_workflow','advance_workflows','demo','index_library','compare','search','resources','prepare_fill','prepare_resource','prepare_repair','prepare_dedup','submit_plan','request_rollback','export_report','refresh_playlist','submit_download','recover','pt_preflight','qbt_preflight','ai_analyze','ai_plan','ai_test','lyrics_preflight','identify_metadata','resolve_metadata','accept_metadata','validate_selected_file','roon_preflight'):
+        if command in ('scan_duplicates','merge_duplicates','restore_duplicates','normalize_qbt_tags','browser_solver_preflight','assist_workflows','manual_album_search','restore_workflow','start_workflow','advance_workflows','demo','index_library','compare','search','resources','prepare_fill','prepare_resource','prepare_repair','prepare_dedup','submit_plan','request_rollback','export_report','refresh_playlist','submit_download','recover','pt_preflight','qbt_preflight','ai_analyze','ai_plan','ai_test','lyrics_preflight','identify_metadata','resolve_metadata','accept_metadata','validate_selected_file','roon_preflight'):
             return self.enqueue(command,payload,request_id=request_id)
         raise ValueError('UNKNOWN_COMMAND:'+command)
     def enqueue(self,command,args,request_id=None):
@@ -196,9 +211,9 @@ class AppService:
         args=copy.deepcopy(args);batch=None
         if command=='start_workflow':
             batch=self.workflows.queue(args,cfg['values'],task_id);args['_batch_job_id']=batch['job_id']
-        if command in ('assist_workflows','index_library','manual_album_search','identify_metadata','resolve_metadata') and not args.get('_review_queue_id'):
-            group='search' if command=='manual_album_search' and (args.get('mode','literal')=='literal' or args.get('candidate_id')) else 'identify'
-            self.workflows.put({'kind':'workflow','job_kind':'activity','job_id':'activity:'+task_id,'task_group':group,'task_type':'review_assistance' if command=='assist_workflows' else 'library_index' if command=='index_library' else 'manual_search' if group=='search' else 'catalog_identification','start_task_id':task_id,'scene':'playlist','stage':'queued','progress':0,'label':str('AI 辅助核对 · '+str(len(args.get('job_ids',[])))+' 项' if command=='assist_workflows' else '更新本地专辑资料库' if command=='index_library' else args.get('query') or args.get('album') or args.get('title') or '在线资料识别')[:300],'message':'等待检索' if group=='search' else '等待识别','created_at':utcnow(),'target_count':1})
+        if command in ('scan_duplicates','merge_duplicates','restore_duplicates','assist_workflows','index_library','manual_album_search','identify_metadata','resolve_metadata') and not args.get('_review_queue_id'):
+            group='process' if command in ('merge_duplicates','restore_duplicates') else 'search' if command=='manual_album_search' and (args.get('mode','literal')=='literal' or args.get('candidate_id')) else 'identify'
+            self.workflows.put({'kind':'workflow','job_kind':'activity','job_id':'activity:'+task_id,'task_group':group,'task_type':'review_assistance' if command=='assist_workflows' else 'library_index' if command=='index_library' else 'manual_search' if group=='search' else 'library_restore' if command=='restore_duplicates' else 'library_merge' if command=='merge_duplicates' else 'library_dedup' if command=='scan_duplicates' else 'catalog_identification','start_task_id':task_id,'scene':'playlist','stage':'queued','progress':0,'label':str('恢复合并副本' if command=='restore_duplicates' else '合并重复歌曲与专辑' if command=='merge_duplicates' else '扫描重复歌曲与专辑' if command=='scan_duplicates' else 'AI 辅助核对 · '+str(len(args.get('job_ids',[])))+' 项' if command=='assist_workflows' else '更新本地专辑资料库' if command=='index_library' else args.get('query') or args.get('album') or args.get('title') or '在线资料识别')[:300],'message':'等待检索' if group=='search' else '等待识别','created_at':utcnow(),'target_count':1})
         task=dict(schema_version=1,task_id=task_id,command=command,args=copy.deepcopy(args),state='queued',created_at=utcnow(),config_version=cfg['version'],config_snapshot=cfg,progress=0,result=None)
         self.store.put('tasks',task_id,task); self.store.event('task_queued',{'command':command,'config_version':cfg['version']},task_id)
         return {'accepted':True,'task_id':task_id,'state':'queued',**({'job_id':batch['job_id'],'batch_id':batch['batch_id']} if batch else {})}
@@ -243,7 +258,7 @@ class AppService:
                     continue
                 task=json.loads(row[0]); self.active=task['task_id']; task.update(state='running',started_at=utcnow()); self.store.put('tasks',self.active,task)
                 activity=self.store.get('evidence','workflow:activity:'+task['task_id'])
-                if activity:self.workflows.put(activity,stage='running',message='正在独立检索' if activity['task_group']=='search' else '正在识别歌曲与专辑')
+                if activity:self.workflows.put(activity,stage='running',message='正在恢复去重合并副本' if task['command']=='restore_duplicates' else '正在扫描与校验重复候选' if task['command']=='scan_duplicates' else '正在合并已核验的专辑副本' if task['command']=='merge_duplicates' else '正在独立检索' if activity['task_group']=='search' else '正在识别歌曲与专辑')
             try:
                 self._checkpoint('before_execute')
                 result=self._execute(task['command'],task['args'],task['config_snapshot']['values'])
@@ -262,7 +277,7 @@ class AppService:
                 self.workflows.start_failed(task['args']['_batch_job_id'],task.get('error_class',task['state']),task.get('error',''))
             activity=self.store.get('evidence','workflow:activity:'+task['task_id'])
             if activity:
-                result=task.get('result') or {};stage='cancelled' if task.get('cancel_requested') else 'completed' if task['state']=='completed' else 'needs_review' if task['state'] in ('blocked','recovery_required') else 'failed'
+                result=task.get('result') or {};stage='cancelled' if task.get('cancel_requested') or task['state']=='cancelled' else 'completed' if task['state']=='completed' else 'needs_review' if task['state'] in ('blocked','recovery_required') else 'failed'
                 self.workflows.put(activity,stage=stage,progress=100 if stage=='completed' else 0,message=result.get('message') or ('检索完成' if activity['task_group']=='search' else '识别完成') if stage=='completed' else '任务已取消' if stage=='cancelled' else '任务需要检查：'+str(task.get('error_class','')),detail=result.get('reason',''),ai_fallback=result.get('ai_fallback'),source_outcomes=result.get('source_outcomes'),lookup_links=result.get('lookup_links',[]),catalog_choices=result.get('albums') or result.get('candidates',[]),target_count=len(result.get('albums') or result.get('candidates',[])))
             from musicops.app.review_queue import finish
             finish(self,task)
@@ -344,6 +359,15 @@ class AppService:
             result=self._validator(cfg).validate(path);record['validation']=result;record['validation_id']=result.get('validation_id')
             self.store.put('library_files',record['file_id'],record)
             return {'file':record,'validation':result,'music_writes':0}
+        if command=='scan_duplicates':
+            from musicops.app.duplicates import scan
+            return scan(self,cfg)
+        if command=='restore_duplicates':
+            from musicops.app.duplicates import restore
+            return restore(self,cfg,args)
+        if command=='merge_duplicates':
+            from musicops.app.duplicates import merge
+            return merge(self,cfg,args)
         if command=='normalize_qbt_tags':
             if cfg['offline']:raise PolicyBlocked('请先完成真实下载连接设置')
             from musicops.clients.qbt_live import live_client
@@ -405,7 +429,9 @@ class AppService:
             from musicops.domain.identity import match_track
             targets=args.get('targets') or self.store.list('target_tracks'); files=self.store.list('library_files'); results=[]
             for target in targets:
-                decision=match_track(target,files); self.store.put('match_decisions',target['target_id'],decision); results.append(decision)
+                decision=match_track(target,files);results.append(decision)
+            self._checkpoint('compare_commit')
+            self.store.put_many('match_decisions',((r['target_id'],r) for r in results))
             return {'decisions':results,'total':len(results),'counts':dict(collections.Counter(r['main_state'] for r in results)),'roon_state':'pending'}
         if command=='refresh_playlist':
             from musicops.providers.netease import build_snapshot
@@ -513,7 +539,9 @@ class AppService:
         if command=='prepare_dedup':
             from musicops.domain.quality import propose_duplicates
             files=args.get('files') or self.store.list('library_files')
-            for file in files: file['field_locks']=[r['field'] for r in self.store.list('field_locks') if r.get('identity') in (file['file_id'],file['path'])]
+            locks=collections.defaultdict(list)
+            for row in self.store.list('field_locks'):locks[row.get('identity')].append(row['field'])
+            for file in files:file['field_locks']=locks[file['file_id']]+locks[file['path']]
             suggestions=propose_duplicates(files)
             selected=args.get('selected_file_id')
             if not selected: return {'suggestions':suggestions,'policy':'只隔离；保留恢复记录；不动做种源'}
@@ -706,7 +734,9 @@ class AppService:
             for key in {search_text(title),search_text(re.sub(r'\([^)]*\)|\[[^]]*\]','',title))}:
                 for file in by_title.get(key,[]):subset[file['file_id']]=file
             for file in by_source.get((target.get('source','netease'),str(target.get('source_song_id'))),[]):subset[file['file_id']]=file
-            decision=match_track(target,list(subset.values()));self.store.put('match_decisions',target['target_id'],decision);results.append(decision)
+            decision=match_track(target,list(subset.values()));results.append(decision)
+        self._checkpoint('compare_commit')
+        self.store.put_many('match_decisions',((r['target_id'],r) for r in results))
         return {'decisions':results,'total':len(results),'counts':dict(collections.Counter(r['main_state'] for r in results)),'roon_state':'pending','metadata_only':True,'music_writes':0}
     def _real_pt(self,site,cfg):
         if not cfg['providers'][site]['enabled']:raise PolicyBlocked('该PT来源已停用；启用并保存配置后再验证')

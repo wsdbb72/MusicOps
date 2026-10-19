@@ -16,6 +16,7 @@ from musicops.library.paths import reject_reparse_chain
 from musicops.library.transactions import TransactionEngine,durable_copy
 from musicops.media.tags import read_tag_fields,apply_tag_changes,embedded_covers,apply_cover_changes
 from musicops.media.resources import validate_lrc,validate_cover
+from musicops.media.identity_fields import usable,release_pairs
 from musicops.app.search_status import SITE_NAMES,search_site,search_album,edition_conflict,summarize,detail as search_detail
 
 TERMINAL={'completed','failed','needs_review','cancelled','skipped','restored'}
@@ -27,6 +28,18 @@ def segment(text):
     text=re.sub(r'[<>:"/\\|?*\x00-\x1f]','_',str(text)).strip(' .')[:100]
     if not text or re.fullmatch(r'(CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])(?:\..*)?',text,re.I):text='_'+(text or '未命名')
     return text
+
+def compact_segment(text,limit):
+    if limit<14:raise PolicyBlocked('音乐库路径过长，请选择更短的音乐库目录')
+    clean=segment(text)
+    return clean if len(str(text))<=limit and len(clean)<=limit else clean[:limit-9].rstrip(' .')+'~'+hashlib.sha256(str(text).encode('utf-8')).hexdigest()[:8]
+
+PUBLICATION_LIMIT=194  # Leave 46 characters for .<name>.<transaction UUID>.publish.
+
+def release_directory(root,artist,album,total_discs):
+    disc=('CD'+str(total_discs)) if total_discs>1 else ''
+    limit=min(80,(PUBLICATION_LIMIT-len(str(root))-3-len(disc)-(1 if disc else 0)-48)//2)
+    return Path(compact_segment(artist,limit))/compact_segment(album,limit)
 def album_root(row,library):
     path=Path(row['path']).parent
     if re.match(r'^(?:CD|Disc|Disk)\s*\d+(?:\b|\s|[-_])',path.name,re.I):path=path.parent
@@ -111,7 +124,7 @@ class Workflows:
     def next_job(self):
         import time
         with self.store.connection() as c:
-            row=c.execute("SELECT payload FROM evidence AS current WHERE id LIKE 'workflow:%' AND coalesce(json_extract(payload,'$.hidden'),0)=0 AND coalesce(json_extract(payload,'$.job_kind'),'album') NOT IN ('batch','activity') AND coalesce(json_extract(payload,'$.paused'),0)=0 AND json_extract(payload,'$.stage') NOT IN ('completed','failed','needs_review','cancelled','skipped','restored','running') AND (json_extract(payload,'$.identification_job_id') IS NULL OR EXISTS (SELECT 1 FROM evidence AS parent WHERE parent.id='workflow:'||json_extract(current.payload,'$.identification_job_id') AND json_extract(parent.payload,'$.stage')='completed')) AND (json_extract(payload,'$.search_job_id') IS NULL OR coalesce(json_extract(payload,'$.task_type'),'')!='album' OR EXISTS (SELECT 1 FROM evidence AS searched WHERE searched.id='workflow:'||json_extract(current.payload,'$.search_job_id') AND json_extract(searched.payload,'$.stage')='completed')) AND coalesce(json_extract(payload,'$.next_poll'),0)<=? ORDER BY CASE json_extract(payload,'$.stage') WHEN 'notifying' THEN 0 WHEN 'validating' THEN 0 WHEN 'metadata' THEN 1 WHEN 'enrich' THEN 1 WHEN 'downloading' THEN 2 WHEN 'requesting' THEN 3 WHEN 'fallback' THEN 3 WHEN 'searching' THEN 4 ELSE 5 END,updated_at,id LIMIT 1",(time.time(),)).fetchone()
+            row=c.execute("SELECT payload FROM evidence AS current WHERE id LIKE 'workflow:%' AND coalesce(json_extract(payload,'$.hidden'),0)=0 AND coalesce(json_extract(payload,'$.job_kind'),'album') NOT IN ('batch','activity') AND coalesce(json_extract(payload,'$.paused'),0)=0 AND json_extract(payload,'$.stage') NOT IN ('completed','failed','needs_review','cancelled','skipped','restored','running') AND (json_extract(payload,'$.identification_job_id') IS NULL OR EXISTS (SELECT 1 FROM evidence AS parent WHERE parent.id='workflow:'||json_extract(current.payload,'$.identification_job_id') AND json_extract(parent.payload,'$.stage')='completed')) AND (json_extract(payload,'$.search_job_id') IS NULL OR coalesce(json_extract(payload,'$.task_type'),'')!='album' OR EXISTS (SELECT 1 FROM evidence AS searched WHERE searched.id='workflow:'||json_extract(current.payload,'$.search_job_id') AND json_extract(searched.payload,'$.stage')='completed')) AND coalesce(json_extract(payload,'$.next_poll'),0)<=? ORDER BY CASE json_extract(payload,'$.stage') WHEN 'publishing' THEN 0 WHEN 'retiring' THEN 0 WHEN 'notifying' THEN 0 WHEN 'validating' THEN 0 WHEN 'metadata' THEN 1 WHEN 'enrich' THEN 1 WHEN 'downloading' THEN 2 WHEN 'requesting' THEN 3 WHEN 'fallback' THEN 3 WHEN 'searching' THEN 4 ELSE 5 END,updated_at,id LIMIT 1",(time.time(),)).fetchone()
         return json.loads(row[0]) if row else None
     def queue(self,args,cfg,task_id=None):
         """Expose the preparation before the serial worker begins any filesystem IO."""
@@ -187,7 +200,7 @@ class Workflows:
                 recent=True
                 for row in tracks:
                     cached=self.store.get('evidence','resources-checked:'+row['file_id'])
-                    recent=recent and bool(cached and cached.get('version')==[row['size'],row['mtime_ns']] and cached.get('settings')==digest(cfg['lyrics']) and __import__('time').time()-cached.get('checked_at',0)<cfg['lyrics']['negative_ttl'])
+                    recent=recent and bool(cached and cached.get('resource_contract')==2 and cached.get('version')==[row['size'],row['mtime_ns']] and cached.get('settings')==digest(cfg['lyrics']) and __import__('time').time()-cached.get('checked_at',0)<cfg['lyrics']['negative_ttl'])
                 if recent:continue
             job_id=str(uuid.uuid4());first=tracks[0];stage='metadata' if scene=='complete' else 'snapshotting' if scene in ('upgrade','fill') else 'identifying'
             paused=bool((self.store.get('evidence','workflow:'+batch['job_id']) or {}).get('paused'))
@@ -202,6 +215,8 @@ class Workflows:
         self.put(batch,stage='completed',progress=100,album_count=created,message=message,detail='准备完成，专辑任务会在后台依次处理。' if created else '本批次没有需要处理的专辑。可检查曲目是否已在库中，或启用重新检查。')
         return {'status':'OK','batch_id':batch_id,'album_count':created,'message':message}
     def recover(self):
+        from musicops.app.storage_migration import recover_serialization_failures
+        recover_serialization_failures(self)
         # Version 0.3.1 queued starts were invisible while a first scan was
         # running. Do not replay several historical clicks after an upgrade.
         for task in self.store.list('tasks'):
@@ -312,6 +327,8 @@ class Workflows:
             from musicops.config.schema import upgrade_config
             if not isinstance(job.get('config'),dict):raise PolicyBlocked('历史任务缺少配置快照，请重新创建本批次')
             job['config']=upgrade_config(job['config'],self.s.base)
+            from musicops.app.storage_migration import prepare
+            if not prepare(self,job):return {'status':'OK','job_id':job['job_id'],'relocating':True}
             self.checkpoint(job,stage)
             getattr(self,'_'+stage)(job)
         except Exception as exc:
@@ -323,12 +340,12 @@ class Workflows:
             else:
                 category=getattr(exc,'error_class',type(exc).__name__)
                 if category=='TOKEN_APPROVAL_REQUIRED':exc=PolicyBlocked(SITE_NAMES.get((job.get('selected') or {}).get('source'),'资源站')+'：'+str(exc))
-                stage='needs_review' if isinstance(exc,(PolicyBlocked,HttpError)) or category in ('RECOVERY_REQUIRED','CONFLICT') else 'failed'
+                stage='needs_review' if isinstance(exc,(PolicyBlocked,HttpError)) or category in ('RECOVERY_REQUIRED','CONFLICT','PATH_BLOCKED') else 'failed'
                 # Never store exception URLs, credentials, API payloads or remote HTML.
                 import traceback
                 frames=[{'file':Path(f.filename).name,'line':f.lineno,'function':f.name} for f in traceback.extract_tb(exc.__traceback__)[-8:]]
                 self.store.event('workflow_error',{'job_id':job['job_id'],'error_class':category,'stage':job.get('resume_stage'),'frames':frames})
-                message='等待令牌下载确认' if category=='TOKEN_APPROVAL_REQUIRED' else str(exc) if isinstance(exc,(PolicyBlocked,HttpError)) else {'KeyError':'历史任务资料不完整，请核对后继续','AttributeError':'旧任务检查点异常，可选择继续恢复','ValueError':'任务资料格式异常，请核对后重试'}.get(category,'处理未完成：'+category)
+                message='等待令牌下载确认' if category=='TOKEN_APPROVAL_REQUIRED' else str(exc) if isinstance(exc,(PolicyBlocked,HttpError)) or category=='PATH_BLOCKED' else {'KeyError':'历史任务资料不完整，请核对后继续','AttributeError':'旧任务检查点异常，可选择继续恢复','ValueError':'任务资料格式异常，请核对后重试'}.get(category,'处理未完成：'+category)
                 self.put(job,stage=stage,error_class=category,review_kind='token' if category=='TOKEN_APPROVAL_REQUIRED' else 'error',message=message,detail=str(exc) if isinstance(exc,(PolicyBlocked,HttpError)) else '原音源保留；请检查本机工具、文件或磁盘空间。')
         return {'status':'OK','job_id':job['job_id']}
     def provider(self,site,cfg):
@@ -546,7 +563,9 @@ class Workflows:
     def work_paths(self,job):
         cfg=job['config'];library=Path(cfg['paths']['library']).resolve()
         if library==library.parent:raise PolicyBlocked('请选择音乐库子目录，不使用整个磁盘根目录')
-        work=library.parent/('.MusicOps-work-'+hashlib.sha256(str(library).casefold().encode()).hexdigest()[:10])
+        from musicops.library.storage import storage_paths
+        work=Path(storage_paths(library)['work'])
+        if job.get('prepared_root') and job.get('engine_paths'):work=Path(job['engine_paths']['work'])
         for watched in cfg['music_servers']['roon'].get('watched_folders',[]):
             if work.is_relative_to(Path(watched).resolve()):raise PolicyBlocked('整理工作区也被 Roon 监听，请将监听目录限定为音乐库')
         reject_reparse_chain(work);work.mkdir(parents=True,exist_ok=True)
@@ -566,7 +585,7 @@ class Workflows:
                 if not resolved or not resolved.get('tracklist_complete'):continue
                 tracks=resolved.get('tracklist',[])
                 if len(tracks)!=len(rows):continue
-                if collections.Counter(identity(t) for t in tracks)!=collections.Counter(identity(r) for r in rows):continue
+                if not release_pairs(rows,tracks):continue
                 # Titles alone do not prove a live/remaster recording.
                 if any(r.get('duration') and t.get('duration') and abs(r['duration']-t['duration'])>2 for r in rows for t in tracks if identity(r)==identity(t)):continue
                 if first.get('album') and strict_text(first['album'])!=strict_text(resolved.get('album') or resolved.get('title')):continue
@@ -586,7 +605,7 @@ class Workflows:
             complete=True;disc_totals=[];disc_numbers=[]
             for row in job['old_files']:
                 tags=read_tag_fields(row['path']);number=(tags.get('discnumber') or [''])[0]
-                if not all(tags.get(k) for k in ('title','artist','album','albumartist','tracknumber','discnumber')) or '/' not in number:complete=False
+                if not all(tags.get(k) and all(usable(v) for v in tags[k]) for k in ('title','artist','album','albumartist','tracknumber','discnumber')) or '/' not in number:complete=False
                 if '/' in number:
                     n,total=number.split('/',1)
                     if not n.isdigit() or not total.isdigit():complete=False
@@ -597,7 +616,7 @@ class Workflows:
                     for alias in ('totaldiscs','disctotal'):
                         value=(audio.tags or {}).get(alias)
                         if value and list(value)!=[number.split('/',1)[1]]:complete=False
-                if not embedded_covers(row['path']) or not any(c['type']=='lyrics' and validate_lrc(Path(c['path']).read_text('utf-8-sig'),row.get('duration'))['valid'] for c in row.get('companions',[])):complete=False
+                if not embedded_covers(row['path']) or not any(v.strip() for v in tags.get('lyrics',[])) or not any(c['type']=='lyrics' and validate_lrc(Path(c['path']).read_text('utf-8-sig'),row.get('duration'))['valid'] for c in row.get('companions',[])):complete=False
             if complete and disc_numbers and set(disc_numbers)==set(range(1,max(disc_numbers)+1)) and set(disc_totals)=={max(disc_numbers)}:
                 self.put(job,stage='skipped',message='专辑、艺人、封面和同步歌词已齐全');return
         if work.exists():raise PolicyBlocked('已存在未发布的整理副本，请核对后继续')
@@ -620,11 +639,14 @@ class Workflows:
                 if result.get('artwork_base64'):apply_cover_changes(dest,base64.b64decode(result['artwork_base64']),min_side=cfg['lyrics']['min_cover_side'])
             else:durable_copy(source,dest)
             if sha256_file(source)!=original_hash:raise PolicyBlocked('原音源在复制时发生改变，请重新扫描')
-            tags=read_tag_fields(dest);title=(tags.get('title') or [''])[0];artists=tags.get('artist',[]);album=(tags.get('album') or [''])[0]
+            tags=read_tag_fields(dest)
+            for field in ('title','artist','album','albumartist'):tags[field]=[v for v in tags.get(field,[]) if usable(v)]
+            title=(tags.get('title') or [''])[0];artists=tags.get('artist',[]);album=(tags.get('album') or [''])[0]
             # NetEase response identity is an official song ID, not a guessed filename.
             target=next((t for t in job['targets'] if source.stem==str(t.get('download_file_id') or t.get('source_song_id'))),None)
             if target and not (title and artists and album):
-                tags.update(title=[target['raw_title']],artist=target['artists'],album=[target['album']],tracknumber=[target.get('track') or str(i+1)],discnumber=[target.get('disc') or '1'])
+                for field,value in {'title':[target['raw_title']],'artist':target['artists'],'album':[target['album']],'tracknumber':[target.get('track') or str(i+1)],'discnumber':[target.get('disc') or '1']}.items():
+                    if not tags.get(field):tags[field]=value
                 apply_tag_changes(dest,{k:v for k,v in tags.items() if k in ('title','artist','album','tracknumber','discnumber') and v})
             item={**row,'path':str(dest),'original_path':str(source),'original_hash':original_hash,'raw_title':(tags.get('title') or [''])[0],'artists':tags.get('artist',[]),'album':(tags.get('album') or [''])[0],'tags':tags,'sidecars':[],'old_sidecars':{}}
             for companion in row.get('companions',[]):
@@ -643,8 +665,12 @@ class Workflows:
             if not proposal:
                 self.put(job,prepared=prepared,stage='needs_review',review_kind='metadata',message='缺失资料没有唯一发行证据，需要人工识别');return
             album=proposal.get('album') or proposal['title']
-            for row in prepared:
-                changes={'album':album};apply_tag_changes(row['path'],changes);row['album']=album;row['tags']['album']=[album]
+            for row,track in release_pairs(prepared,proposal['tracklist']) or []:
+                changes={'album':album}
+                if not row['artists']:changes['artist']=track['artists'];row['artists']=track['artists']
+                if not row['tags'].get('tracknumber') and track.get('position'):changes['tracknumber']=str(track['position'])
+                if not row['tags'].get('discnumber') and track.get('disc'):changes['discnumber']=str(track['disc'])
+                apply_tag_changes(row['path'],changes);row['album']=album;row['tags']=read_tag_fields(row['path'])
         self._enrich(job,prepared)
     def _enrich(self,job,prepared=None):
         prepared=prepared if prepared is not None else job['prepared']
@@ -661,7 +687,8 @@ class Workflows:
                         apply_tag_changes(row['path'],changes);row['tags']=read_tag_fields(row['path'])
             if any(not r['tags'].get('tracknumber') for r in prepared):
                 self.put(job,prepared=prepared,stage='needs_review',review_kind='numbering',message='缺少可靠曲序，需要核对每碟曲目编号后继续');return
-        album=prepared[0]['album'];albumartists=prepared[0]['tags'].get('albumartist') or sorted(set(a for row in prepared for a in row['artists']))
+        album=prepared[0]['album'];albumartists=[a for a in prepared[0]['tags'].get('albumartist',[]) if usable(a)] or sorted(set(a for row in prepared for a in row['artists'] if usable(a)))
+        if not albumartists or any(not r['artists'] or any(not usable(a) for a in r['artists']) for r in prepared):raise PolicyBlocked('艺人标签缺失或损坏，不能作为 ??? 入库，请先核对发行信息')
         discs=[]
         for row in prepared:
             value=(row['tags'].get('discnumber') or ['1'])[0];match=re.match(r'^([1-9]\d*)',value)
@@ -695,9 +722,9 @@ class Workflows:
                 proposal=self._catalog_fill(job,prepared)
                 if proposal:release_id=proposal.get('release_id') or (proposal.get('source_id') if proposal['source']=='musicbrainz' else None)
             try:
-                if not artwork:artwork=cover(album,albumartists,album_id,release_id,cfg['lyrics']['min_cover_side'])
+                if not artwork:artwork=cover(album,albumartists,album_id,release_id,cfg['lyrics']['min_cover_side'],bool(album_id))
             except (HttpError,PolicyBlocked,__import__('httpx').HTTPError):artwork=None
-        lyric_missing=0;cover_missing=0
+        lyric_missing=0;cover_missing=0;resource_errors=[]
         saved_locks=self.store.list('field_locks')
         for row,disc in zip(prepared,discs):
             self.checkpoint(job,'metadata_resources');changes={'albumartist':albumartists,'discnumber':f'{disc}/{total}'}
@@ -713,10 +740,12 @@ class Workflows:
             if not embedded_covers(row['path']):cover_missing+=1
             # Query only lyrics for automatic writes. Unrelated structurally valid
             # covers from a search service never become an album cover silently.
+            if not row['sidecars']:
+                timed=next((v for v in read_tag_fields(row['path']).get('lyrics',[]) if validate_lrc(v,row.get('duration'))['valid']),None)
+                if timed:
+                    path=Path(row['path']).with_suffix('.lrc');path.write_text(timed,encoding='utf-8');row['sidecars'].append(str(path))
             resources=self.s._real_resources({'title':row['raw_title'],'artist':' / '.join(row['artists']),'album':album,'duration':row.get('duration'),'refresh':job.get('refresh_resources',False)},cfg) if not row['sidecars'] and not job.get('skip_lyrics_service') and '.example.invalid' not in cfg['lyrics']['primary']['base_url'] else {}
             state=resources.get('lyrics',{}).get('state')
-            if state in ('AUTH_REQUIRED','AUTH_FAILED','ACCESS_BLOCKED','NETWORK_ERROR','TRANSIENT_ERROR','RATE_LIMITED'):
-                self.put(job,prepared=prepared,stage='needs_review',review_kind='resources',message='歌词服务未通过：'+state,detail='这不代表歌曲没有歌词。请检查接口地址与鉴权，或明确跳过这次歌词服务。');return
             lyric=next((c for c in resources.get('candidates',[]) if c.get('kind')=='lyrics' and c.get('selected') and c.get('identity_state')=='matched'),None)
             if lyric and not row['sidecars']:
                 path=Path(row['path']).with_suffix('.lrc');path.write_text(lyric['lyrics'],encoding='utf-8');row['sidecars'].append(str(path))
@@ -729,10 +758,24 @@ class Workflows:
                     if text:
                         path=Path(row['path']).with_suffix('.lrc');path.write_text(text,encoding='utf-8');row['sidecars'].append(str(path))
             if not row['sidecars']:lyric_missing+=1
+            if row['sidecars']:
+                from musicops.media.lyrics import embed_sidecar
+                if 'lyrics' in locked and not read_tag_fields(row['path']).get('lyrics'):raise PolicyBlocked('歌词标签已锁定，暂不补写；请先核对字段锁')
+                embed_sidecar(row['path'],row['sidecars'][0],row.get('duration'))
+            elif state in ('AUTH_REQUIRED','AUTH_FAILED','ACCESS_BLOCKED','NETWORK_ERROR','TRANSIENT_ERROR','RATE_LIMITED'):resource_errors.append(state)
+        if resource_errors:
+            self.put(job,prepared=prepared,stage='needs_review',review_kind='resources',message='歌词服务未通过：'+', '.join(sorted(set(resource_errors))),detail='已先尝试歌曲 ID 对应的官方歌词；服务失败不代表歌曲没有歌词。请修复接口后重试，或明确跳过。');return
         self.put(job,prepared=prepared,album=album,albumartists=albumartists,total_discs=total,lyrics_missing=lyric_missing,cover_missing=cover_missing,stage='validating',progress=70,message='资料已整理，检查全部音频')
     def _validating(self,job):
         cfg=job['config'];validator=self.s._validator(cfg);prepared=job['prepared'];rows=[]
+        from musicops.media.lyrics import embed_sidecar
+        locks=self.store.list('field_locks')
         for row in prepared:
+            for sidecar in row.get('sidecars',[]):
+                if not Path(sidecar).is_file():raise PolicyBlocked('整理副本的歌词文件缺失，请重新补全资料')
+                locked='lyrics' in cfg['metadata']['locked_fields'] or any(v.get('identity')==row.get('file_id') and v.get('field')=='lyrics' for v in locks)
+                if locked and not read_tag_fields(row['path']).get('lyrics'):raise PolicyBlocked('歌词标签已锁定，暂不补写；请先核对字段锁')
+                embed_sidecar(row['path'],sidecar,row.get('duration'))
             self.checkpoint(job,'full_decode');validation=validator.validate(row['path'])
             if validation['decode_state']!='passed' or not validation.get('roon_compatible'):raise PolicyBlocked('完整音频校验未通过，原音源保留')
             row['validation']=validation;row['media_info']=validation['media_info'];row['duration']=validation.get('duration');rows.append(row)
@@ -740,6 +783,7 @@ class Workflows:
             for target in job['targets']:
                 matching=[r for r in rows if identity(r)==identity(target) and album_compatible(r.get('album'),target.get('album')) and target.get('duration') and r.get('duration') and abs(target['duration']-r['duration'])<=2]
                 if len(matching)!=1:raise PolicyBlocked('下载内容与歌单录音或完整时长不一致，暂不入库')
+        job['cover_missing']=sum(not embedded_covers(row['path']) for row in rows)
         if job.get('cover_missing') and not job.get('cover_unavailable'):
             self.put(job,prepared=rows,stage='needs_review',review_kind='cover',message='音频通过检查，但缺少可靠封面；请选择已核对的专辑封面，或明确跳过');return
         if job['scene']=='upgrade':
@@ -764,11 +808,15 @@ class Workflows:
             if not better:self.put(job,stage='skipped',message='新版没有实际音质提升，当前音源保留');return
             if not edition and not job.get('edition_approved'):
                 self.put(job,prepared=rows,stage='needs_review',review_kind='edition',message='新版音质较高且曲目完整，但缺少同一发行的 ID，需要核对版本后替换');return
-        self.put(job,prepared=rows,stage='publishing',progress=85,message='全部音频通过，准备入库')
+        self.put(job,prepared=rows,resource_contract=2,stage='publishing',progress=85,message='全部音频通过，准备入库')
     def _publishing(self,job):
+        if job.get('publication_plan'):
+            with self.store.connection() as connection:existing=connection.execute("SELECT 1 FROM transactions WHERE json_extract(payload,'$.plan_id')=? LIMIT 1",(job['publication_plan']['plan_id'],)).fetchone()
+            if existing:return self._commit_publication(job,job['publication_plan'])
+        if job.get('resource_contract')!=2 and not job.get('publication_plan'):return self._validating(job)
         cfg=job['config'];root=Path(cfg['paths']['library']);operations=[];album=job['album'];artist=' & '.join(job['albumartists']);suffix=''
         if job['scene']=='upgrade':suffix=' [升级 '+job['job_id'][:8]+']'
-        release=Path(segment(artist))/segment(album+suffix)
+        release=release_directory(root,artist,album+suffix,job['total_discs'])
         for i,row in enumerate(job['prepared']):
             self.checkpoint(job,'build_publication');src=Path(row['path']);tags=read_tag_fields(src)
             if job['scene']=='fill' or job.get('existing_album_files'):
@@ -782,7 +830,8 @@ class Workflows:
                 release=album_root(preserved[0],root).relative_to(root)
             disc=int((tags.get('discnumber') or ['1'])[0].split('/')[0]);track=(tags.get('tracknumber') or [str(i+1)])[0].split('/')[0]
             folder=release/('CD'+str(disc)) if job['total_discs']>1 else release
-            destination=Path(row['original_path']).relative_to(root) if job['scene']=='complete' else folder/(segment(track.zfill(2)+' '+row['raw_title'])+src.suffix)
+            filename_limit=min(100,PUBLICATION_LIMIT-len(str(root/folder))-1-len(src.suffix))
+            destination=Path(row['original_path']).relative_to(root) if job['scene']=='complete' else folder/(compact_segment(track.zfill(2)+' '+row['raw_title'],filename_limit)+src.suffix)
             old=root/destination;before=row['original_hash'] if job['scene']=='complete' else None
             operations.append({'operation_id':job['job_id']+':audio:'+str(i),'kind':'replace' if before else 'publish','source':str(src),'source_hash':sha256_file(src),'destination':str(destination),'before_hash':before})
             for sidecar in row['sidecars']:
@@ -792,6 +841,9 @@ class Workflows:
         if not operations:
             self.put(job,stage='notifying',progress=95,message='现有歌曲已完整核验，无需重复发布');return
         plan={'schema_version':1,'plan_id':'workflow:'+job['job_id'],'config_hash':digest(cfg),'operations':operations}
+        return self._commit_publication(job,plan)
+    def _commit_publication(self,job,plan):
+        cfg=job['config']
         self.put(job,publication_plan=plan,stage='running',resume_stage='publishing',message='正在提交已经验证的文件')
         engine=TransactionEngine(self.store,job['engine_paths'],validator=self.s._validator(cfg));result=engine.execute(plan)
         if result['state']!='COMMITTED':raise PolicyBlocked('入库事务尚未提交，旧版保留')
@@ -817,12 +869,14 @@ class Workflows:
         self.put(job,retirement_transaction_id=result['tx_id'],stage='notifying',message='旧版已移出监听目录，恢复副本已保存')
     def _notifying(self,job):
         from musicops.clients.navidrome import scan
+        from musicops.app.publication_cleanup import finish
+        if not finish(self,job):return
         library=Path(job['config']['paths']['library'])
         for op in job.get('publication_plan',{}).get('operations',[]):
             destination=library/op['destination']
             if destination.suffix.lower() in AUDIO_EXTENSIONS and destination.is_file():
                 file_id=str(uuid.uuid5(uuid.NAMESPACE_URL,str(destination).casefold()));stat=destination.stat()
-                self.store.put('evidence','resources-checked:'+file_id,{'kind':'resource_check','version':[stat.st_size,stat.st_mtime_ns],'checked_at':__import__('time').time(),'settings':digest(job['config']['lyrics'])})
+                self.store.put('evidence','resources-checked:'+file_id,{'kind':'resource_check','resource_contract':job.get('resource_contract',1),'version':[stat.st_size,stat.st_mtime_ns],'checked_at':__import__('time').time(),'settings':digest(job['config']['lyrics'])})
         try:result=scan(job['config']['music_servers']['navidrome'],self.s.vault.get);message=result['message']
         except (HttpError,PolicyBlocked):message='音乐已入库；Navidrome 扫描未成功，请检查连接设置'
         self.put(job,stage='completed',progress=100,message='已完成 · '+message,detail=f"暂无匹配歌词：{job.get('lyrics_missing',0)} 首；未找到可靠封面：{job.get('cover_missing',0)} 首。恢复副本保存在音乐库外，不影响 Roon 分组。")

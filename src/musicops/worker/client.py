@@ -55,16 +55,25 @@ class WorkerClient:
         if isinstance(result,dict) and 'config' in result: self.config_version=result['config']['version']
         return result
     def ensure_running(self):
-        try: return self.call('attach',{'compact':True})
-        except (OSError,EOFError): pass
-        if getattr(sys,'frozen',False):
-            executable=Path(sys.executable).parent/('MusicOps-worker.exe' if is_windows() else 'MusicOps-worker'); cmd=[str(executable),'--base',str(self.base)]
-        else: cmd=[sys.executable,'-m','musicops.worker.server','--base',str(self.base)]
-        private_directory(self.base)
-        env=os.environ.copy(); env['PYTHONPATH']=str(Path(__file__).resolve().parents[2])
-        subprocess.Popen(cmd,env=env,creationflags=0x08000000 if is_windows() else 0,stdin=subprocess.DEVNULL,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,cwd=self.base)
-        for _ in range(100):
-            time.sleep(.1)
-            try: return self.call('attach',{'compact':True})
-            except (OSError,EOFError): pass
-        raise RuntimeError('后台worker无法启动；检查状态/版本/账户权限')
+        transient=(OSError,EOFError,WorkerConnectionError)
+        try:return self.call('attach',{'compact':True})
+        except transient:pass
+        # A slow existing writer is starting/recovering, not a reason to spawn
+        # another worker. Probe the same lock without touching its task state.
+        probe=WriterLock(self.base);running=False
+        try:probe.acquire()
+        except RuntimeError:running=True
+        finally:probe.release()
+        if not running:
+            if getattr(sys,'frozen',False):
+                executable=Path(sys.executable).parent/('MusicOps-worker.exe' if is_windows() else 'MusicOps-worker');cmd=[str(executable),'--base',str(self.base)]
+            else:cmd=[sys.executable,'-m','musicops.worker.server','--base',str(self.base)]
+            private_directory(self.base)
+            env=os.environ.copy();env['PYTHONPATH']=str(Path(__file__).resolve().parents[2])
+            subprocess.Popen(cmd,env=env,creationflags=0x08000000 if is_windows() else 0,stdin=subprocess.DEVNULL,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,cwd=self.base)
+        deadline=time.monotonic()+90
+        while time.monotonic()<deadline:
+            time.sleep(.2)
+            try:return self.call('attach',{'compact':True})
+            except transient:pass
+        raise WorkerConnectionError('IPC_CONNECTION_ERROR：后台仍在启动或连接繁忙；已有任务保留，请稍后重连并检查后台启动日志。')

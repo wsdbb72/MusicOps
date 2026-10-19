@@ -276,14 +276,14 @@ class AppService:
         return 'completed'
     def _managed_checkpoint(self,phase):
         if self.stop.is_set():raise TaskCancelled('后台正在退出，请在更新完成后重试连接')
-        if threading.current_thread() is self.thread:self._checkpoint(phase)
-    def _checkpoint(self,phase):
+        if threading.current_thread() is self.thread:self._checkpoint(phase,wait_for_resume=phase!='managed_service_start')
+    def _checkpoint(self,phase,*,wait_for_resume=True):
         if not self.active or getattr(self,'_safe_finalizing',False):return
         marked=False
         while True:
             current=self.store.get('tasks',self.active)
             if not current or current.get('cancel_requested') or current['state']=='cancelled' or self.stop.is_set(): raise TaskCancelled('已在安全阶段取消后续步骤；已消费令牌与保种记录保留')
-            if not self.paused:
+            if not self.paused or not wait_for_resume:
                 if marked: current['state']='running';self.store.put('tasks',self.active,current)
                 return
             if not marked:

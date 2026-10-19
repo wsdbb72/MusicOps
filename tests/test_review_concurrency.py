@@ -101,3 +101,40 @@ def test_owned_service_start_honors_worker_shutdown(service):
     from musicops.app.service import TaskCancelled
     assert service.stop.is_set()
     with pytest.raises(TaskCancelled):service._managed_checkpoint('managed_service_start')
+
+
+def test_paused_music_start_releases_engine_lock_before_waiting(service,tmp_path,monkeypatch):
+    from musicops.clients.managed_services import ManagedServices
+    ready=threading.Event();finished=threading.Event();results=[]
+    service.stop.clear();service.paused=True;service.active='engine-start'
+    service.store.put('tasks',service.active,dict(task_id=service.active,state='running'))
+    def checkpoint(phase):
+        if phase=='managed_service_ready' and threading.current_thread() is service.thread:ready.set()
+        service._managed_checkpoint(phase)
+    manager=ManagedServices(tmp_path/'engines-profile',SimpleNamespace(),checkpoint)
+    def starting(*_,**__):
+        manager.checkpoint('managed_service_start')
+        return 'http://127.0.0.1:12345','synthetic-token'
+    monkeypatch.setattr(manager,'_ensure_locked',starting)
+    def music():
+        results.append(manager.ensure('flaresolverr'));finished.set()
+    service.thread=threading.Thread(target=music)
+    try:
+        service.thread.start();assert ready.wait(2)
+        with ThreadPoolExecutor(1) as pool:
+            assert pool.submit(manager.ensure,'flaresolverr').result(timeout=1)[0].startswith('http://127.0.0.1:')
+        assert not finished.is_set(), 'Music must remain paused before using the ready engine'
+        service.paused=False;service.thread.join(3)
+        assert finished.is_set() and len(results)==1
+    finally:
+        service.paused=False;service.thread.join(3);service.stop.set();manager.close()
+
+
+def test_startup_while_paused_still_honors_task_cancellation(service):
+    from musicops.app.service import TaskCancelled
+    service.stop.clear();service.paused=True;service.active='cancelled-engine-start'
+    service.thread=threading.current_thread()
+    service.store.put('tasks',service.active,dict(task_id=service.active,state='running',cancel_requested=True))
+    try:
+        with pytest.raises(TaskCancelled):service._managed_checkpoint('managed_service_start')
+    finally:service.stop.set()

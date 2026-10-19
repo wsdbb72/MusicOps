@@ -60,70 +60,77 @@ class ManagedServices:
         if name not in ('go-music-dl', 'flaresolverr'):
             raise ValueError('未知内置服务')
         with self.start_locks[name]:
-            tools=dict(tools if tools is not None else self.default_tools())
-            previous = self.running.get(name)
-            if previous and previous[0].poll() is None:
-                if name!='go-music-dl' or not restart_if_changed or self.tool_config.get(name)==tools:
-                    return previous[1], previous[2]
-                # The serial workflow calls this between requests. Login UI
-                # calls never restart an engine underneath an active download.
-                self.owners.pop(name).close()
-                self.running.pop(name,None)
-            binary = self.root / name / (name + ('.exe' if os.name == 'nt' else ''))
-            if not binary.is_file():
-                raise HttpError('NOT_CONFIGURED', '此程序包缺少内置服务，请安装完整版本：' + name)
-            directory = self.profile / 'services' / name
-            private_directory(directory)
-            with socket.socket() as listener:
-                listener.bind(('127.0.0.1', 0))
-                port = listener.getsockname()[1]
-            token = secrets.token_hex(32)
-            environment = os.environ.copy()
-            for key in ('PROXY_URL', 'PROXY_USERNAME', 'PROXY_PASSWORD', 'LOG_FILE'):
-                environment.pop(key, None)
-            environment.update(MUSICOPS_SERVICE_TOKEN=token, HOST='127.0.0.1', PORT=str(port),
-                LOG_LEVEL='debug' if self.diagnostic_output else 'error', LOG_HTML='false', HEADLESS='true', MUSICOPS_ENGINE_DATA=str(directory),
-                MUSIC_DL_CONFIG_DB=str(directory / 'settings.db'), MUSIC_DL_COOKIE_FILE=str(directory / 'unused.json'))
-            for key, value in (tools or {}).items():
-                if key in ('ffmpeg', 'ffprobe') and value:
-                    environment['MUSIC_DL_' + key.upper()] = str(value)
-            old_owner=self.owners.pop(name,None)
-            if old_owner:old_owner.close()
-            command = [str(binary)]
-            if name == 'go-music-dl':
-                command += ['web', '--desktop', '--no-browser', '--port', str(port)]
-            process = subprocess.Popen(command, cwd=directory, env=environment, stdin=subprocess.DEVNULL,
-                stdout=self.diagnostic_output if self.diagnostic_output else subprocess.DEVNULL,
-                stderr=subprocess.STDOUT if self.diagnostic_output else subprocess.DEVNULL,
-                creationflags=subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0, start_new_session=os.name!='nt')
-            from musicops.clients.process_owner import ProcessOwner
-            self.owners[name]=ProcessOwner(process)
-            base = f'http://127.0.0.1:{port}' + ('/music' if name == 'go-music-dl' else '')
-            self.running[name] = (process, base, token)
-            self.tool_config[name]=tools
-            try:
-                with httpx.Client(trust_env=False, follow_redirects=False, timeout=2) as client:
-                    deadline = time.monotonic() + 60
-                    while time.monotonic() < deadline:
-                        self.checkpoint('managed_service_start')
-                        if process.poll() is not None:
-                            raise HttpError('SERVICE_START_FAILED', '内置服务启动失败：' + name)
-                        try:
-                            response = client.get(base + ('/healthz' if name == 'go-music-dl' else '/health'), headers={'X-MusicOps-Service': token})
-                            if response.status_code == 200:
-                                if name == 'go-music-dl':
-                                    cookies = self._cookies()
-                                    if cookies:
-                                        response = client.post(base + '/cookies', json=cookies, headers={'X-MusicOps-Service': token})
-                                        response.raise_for_status()
-                                return base, token
-                        except httpx.HTTPError: pass
-                        time.sleep(.2)
-                raise HttpError('SERVICE_START_FAILED', '内置服务启动超时：' + name)
-            except BaseException:
-                self.owners.pop(name).close()
-                self.running.pop(name, None)
-                raise
+            result=self._ensure_locked(name,tools,restart_if_changed=restart_if_changed)
+        # Pausing a music task must never retain the service startup lock.
+        # Wait here before the caller can begin a download or other request.
+        self.checkpoint('managed_service_ready')
+        return result
+
+    def _ensure_locked(self,name,tools,*,restart_if_changed):
+        tools=dict(tools if tools is not None else self.default_tools())
+        previous = self.running.get(name)
+        if previous and previous[0].poll() is None:
+            if name!='go-music-dl' or not restart_if_changed or self.tool_config.get(name)==tools:
+                return previous[1], previous[2]
+            # The serial workflow calls this between requests. Login UI
+            # calls never restart an engine underneath an active download.
+            self.owners.pop(name).close()
+            self.running.pop(name,None)
+        binary = self.root / name / (name + ('.exe' if os.name == 'nt' else ''))
+        if not binary.is_file():
+            raise HttpError('NOT_CONFIGURED', '此程序包缺少内置服务，请安装完整版本：' + name)
+        directory = self.profile / 'services' / name
+        private_directory(directory)
+        with socket.socket() as listener:
+            listener.bind(('127.0.0.1', 0))
+            port = listener.getsockname()[1]
+        token = secrets.token_hex(32)
+        environment = os.environ.copy()
+        for key in ('PROXY_URL', 'PROXY_USERNAME', 'PROXY_PASSWORD', 'LOG_FILE'):
+            environment.pop(key, None)
+        environment.update(MUSICOPS_SERVICE_TOKEN=token, HOST='127.0.0.1', PORT=str(port),
+            LOG_LEVEL='debug' if self.diagnostic_output else 'error', LOG_HTML='false', HEADLESS='true', MUSICOPS_ENGINE_DATA=str(directory),
+            MUSIC_DL_CONFIG_DB=str(directory / 'settings.db'), MUSIC_DL_COOKIE_FILE=str(directory / 'unused.json'))
+        for key, value in (tools or {}).items():
+            if key in ('ffmpeg', 'ffprobe') and value:
+                environment['MUSIC_DL_' + key.upper()] = str(value)
+        old_owner=self.owners.pop(name,None)
+        if old_owner:old_owner.close()
+        command = [str(binary)]
+        if name == 'go-music-dl':
+            command += ['web', '--desktop', '--no-browser', '--port', str(port)]
+        process = subprocess.Popen(command, cwd=directory, env=environment, stdin=subprocess.DEVNULL,
+            stdout=self.diagnostic_output if self.diagnostic_output else subprocess.DEVNULL,
+            stderr=subprocess.STDOUT if self.diagnostic_output else subprocess.DEVNULL,
+            creationflags=subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0, start_new_session=os.name!='nt')
+        from musicops.clients.process_owner import ProcessOwner
+        self.owners[name]=ProcessOwner(process)
+        base = f'http://127.0.0.1:{port}' + ('/music' if name == 'go-music-dl' else '')
+        self.running[name] = (process, base, token)
+        self.tool_config[name]=tools
+        try:
+            with httpx.Client(trust_env=False, follow_redirects=False, timeout=2) as client:
+                deadline = time.monotonic() + 60
+                while time.monotonic() < deadline:
+                    self.checkpoint('managed_service_start')
+                    if process.poll() is not None:
+                        raise HttpError('SERVICE_START_FAILED', '内置服务启动失败：' + name)
+                    try:
+                        response = client.get(base + ('/healthz' if name == 'go-music-dl' else '/health'), headers={'X-MusicOps-Service': token})
+                        if response.status_code == 200:
+                            if name == 'go-music-dl':
+                                cookies = self._cookies()
+                                if cookies:
+                                    response = client.post(base + '/cookies', json=cookies, headers={'X-MusicOps-Service': token})
+                                    response.raise_for_status()
+                            return base, token
+                    except httpx.HTTPError: pass
+                    time.sleep(.2)
+            raise HttpError('SERVICE_START_FAILED', '内置服务启动超时：' + name)
+        except BaseException:
+            self.owners.pop(name).close()
+            self.running.pop(name, None)
+            raise
 
     def _cookies(self):
         result = {}

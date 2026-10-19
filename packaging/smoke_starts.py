@@ -23,7 +23,7 @@ def main():
     env=os.environ.copy();env['QT_QPA_PLATFORM']='offscreen'
     for key in ('PYTHONPATH','PYTHONHOME','VIRTUAL_ENV'):env.pop(key,None)
     process=subprocess.Popen([str(bundle/'MusicOps.exe'),'--base',str(base),'--quit-after','20000'],cwd=bundle,env=env,creationflags=0x08000000)
-    client=WorkerClient(base);report={'version':'0.4.7','evidence':'packaged_worker_three_entry_points','external_requests':0,'checks':{}}
+    client=WorkerClient(base);report={'version':'0.4.8','evidence':'packaged_worker_three_entry_points','external_requests':0,'checks':{}}
     try:
         deadline=time.monotonic()+25
         while True:
@@ -91,6 +91,7 @@ def main():
         report['checks']['native_delete_records_only']=removed['succeeded']==1 and not any(j['job_id']==activity_id for j in client.call('list_workflows')['jobs']) and not any(Path(values['paths']['library']).rglob('*'))
         update_setting=client.call('save_setup',{'updates':{'enabled':False}})
         report['checks']['native_update_setting']=update_setting['config']['values']['updates']['enabled'] is False
+        report['checks']['native_fixed_qbt_tag']=client.call('get_status',{'compact':True})['config']['values']['qbt']['tag_prefix']=='MusicOps'
         solver_guard=completed('browser_solver_preflight',{'settings':{'base_url':'http://192.0.2.1:8191'}})
         report['checks']['native_browser_solver_guard']=solver_guard['state']=='failed' and solver_guard.get('error_class')=='ValueError'
         filtered=client.call('list_workflows',{'state':'completed'})
@@ -104,6 +105,8 @@ def main():
         engine=client.call('engine_control',{'action':'start'})
         cookie=client.call('engine_control',{'action':'cookie','source':'qq','cookie':'synthetic_frozen=synthetic-only'})
         report['checks']['native_managed_engine_cookie']=engine.get('status')=='OK' and cookie.get('saved') is True
+        tag_guard=completed('normalize_qbt_tags',{})
+        report['checks']['native_tag_cleanup_auth_guard']=tag_guard['state']=='blocked' and tag_guard.get('error_class')=='AUTH_REQUIRED'
         solved=completed('browser_solver_preflight',{'settings':{'managed':True}})
         report['checks']['native_managed_solver']=solved['state']=='completed' and solved.get('result',{}).get('status')=='OK'
         client.call('pause_pipeline',{})

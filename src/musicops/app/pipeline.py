@@ -375,7 +375,10 @@ class Workflows:
         if incomplete:
             resolver=self.s._catalog_resolver(job['config']);row=incomplete[0]
             query={'title':row.get('raw_title',''),'artists':row.get('artists',[]),'album':row.get('album',''),'duration':row.get('duration'),'filename_hint':Path(row.get('path') or '').name}
-            found=resolver.identify(query);verified=[];examined=set()
+            from musicops.app.source_identity import is_streaming
+            if is_streaming(row):query['untrusted_metadata']=True
+            found=self.s._recognize_metadata(query,job['config']) if query.get('untrusted_metadata') else resolver.identify(query)
+            verified=[];examined=set()
             def resolve(candidates):
                 for candidate in candidates[:5]:
                     self.checkpoint(job,'identification_catalog')
@@ -391,7 +394,7 @@ class Workflows:
                         mapping.append(same[0])
                     if len(mapping)==len(tracks):verified.append((resolved,mapping))
             resolve(found.get('candidates',[]))
-            if len(verified)!=1:
+            if len(verified)!=1 and not query.get('untrusted_metadata'):
                 found=self.s._recognize_metadata(query,job['config'],found=found,force=True)
                 selected=found.get('selected_candidate');resolve(([selected] if selected else [])+found.get('candidates',[]))
             job['catalog_choices']=found.get('candidates',[]);job['lookup_links']=found.get('lookup_links',[]);job['ai_fallback']=found.get('ai_fallback',{})
@@ -442,6 +445,9 @@ class Workflows:
                 candidates.append({**c,'identity_exact':exact})
         candidates=list({(c['source'],c['candidate_id']):c for c in candidates}.values())
         summary=summarize(outcomes);job['outcomes']=outcomes;job['choices']=candidates;job['search_summary']=summary;job['detail']=search_detail(summary)
+        if not any(c.get('identity_exact') for c in candidates) and (summary['successful_sites'] or not summary['unavailable_sites']):
+            from musicops.app.source_identity import recover
+            if recover(self,job):return
         if not summary['successful_sites'] and not summary['unavailable_sites']:
             if job['scene'] in ('playlist','fill') and cfg['workflow']['netease_fallback']:
                 self._queue_processing(job,'fallback','未启用资源站，按设置使用网易云下载',progress=20)
@@ -510,7 +516,7 @@ class Workflows:
         try:
             content,evidence=self.provider(candidate['source'],cfg).fetch(candidate,self.store,job['batch_id'],budget,cache,**arguments)
             self.checkpoint(job,'before_qbt_add')
-            qbt.transport.prepare(cfg['qbt'],cfg['qbt']['tag_prefix']+job['job_id']);result=qbt.add_stopped(content,job['job_id'],evidence)
+            qbt.transport.prepare(cfg['qbt'],'MusicOps');result=qbt.add_stopped(content,job['job_id'],evidence)
             if result['status'] in ('START_REQUESTED','DOWNLOADING','COMPLETE'):
                 self.put(job,stage='downloading',progress=30,message='已核对已有下载，继续等待完成');return
             if result['status']!='STOPPED':raise PolicyBlocked(result.get('reason','新增下载尚未确认，请在 qBittorrent 核对'))
@@ -881,6 +887,7 @@ class Workflows:
                         except (TypeError,ValueError):raise ValueError('完整时长请填写正数秒数') from None
                         if type(duration) not in (int,float) or not __import__('math').isfinite(duration) or not 0<duration<604800:raise ValueError('请核对并填写完整时长（秒）')
                         row['duration']=duration
+                    if row.get('source'):row.setdefault('source_metadata_original',{k:copy.deepcopy(row.get(k)) for k in ('raw_title','artists','album','duration')})
                     row.update(raw_title=proposal['title'].strip(),artists=[a.strip() for a in proposal['artist'].split(' / ') if a.strip()],album=proposal['album'].strip(),metadata_complete=True)
                 self.put(job,manual_metadata=True)
                 if job.get('task_type')=='identification':self._queue_search(job,'采用用户核对的资料，已创建独立搜索任务')

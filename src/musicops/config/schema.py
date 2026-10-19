@@ -15,7 +15,7 @@ def default_config(base,offline=True):
     return dict(schema_version=1,offline=offline,paths=paths,playlist_ids=[],
       providers={name:dict(enabled=bool(offline and name!='redacted' or name=='netease'),base_url=url,credential_ref='',search_language='auto',concurrency=1,timeout=15,rules_verified=False) for name,url in [('netease','https://music.163.com'),('dicmusic','https://dicmusic.com'),('open.cd','https://www.open.cd'),('orpheus','https://orpheus.network'),('redacted','https://redacted.sh')]},
       token_budget={'dicmusic':3,'orpheus':3,'redacted':3,'safety_margin':1,'balance_ttl':300},
-      qbt=dict(base_url='http://127.0.0.1:8085',credential_ref='vault://qbt/local/credentials',category='MusicOps',tag_prefix='musicops-',poll_seconds=5,auto_tmm=False),
+      qbt=dict(base_url='http://127.0.0.1:8085',credential_ref='vault://qbt/local/credentials',category='MusicOps',tag_prefix='MusicOps',poll_seconds=5,auto_tmm=False),
       lyrics=dict(primary=dict(base_url='https://lyrics.example.invalid',lyrics_path='/lyrics',candidates_path='/jsonapi',cover_path='/cover',auth_mode='raw',auth_header='Authorization',auth_secret_ref='vault://lyrics/default/authorization'),direct_backup=dict(base_url='http://backup.example.invalid',enabled=False,auth_secret_ref='vault://lyrics/default/authorization'),public_fallback=dict(enabled=False,lyrics_url='https://api.lrc.cx/lyrics',cover_url='https://api.lrc.cx/cover',auth_mode='none'),fallback_on_auth_error=False,write_mode='sidecar',overwrite_existing='review',connect_timeout=3,read_timeout=12,max_attempts=2,total_budget=60,concurrency=1,min_cover_side=300,max_response_bytes=10_000_000,cache_ttl=86400,negative_ttl=86400),
       ai=dict(enabled=False,protocol='responses',base_url='https://ai.example.invalid/v1',model='',auth_secret_ref='vault://ai/default/key',timeout=60,max_output_tokens=2048,temperature=0.2,structured_outputs=True,allow_plan_only=True),
       catalog=dict(enabled=True,web_enabled=True,timeout=15,candidate_limit=20,cache_ttl=86400,cache_entries=128,musicbrainz=dict(enabled=True),discogs=dict(enabled=True,credential_ref='vault://catalog/discogs/token')),
@@ -47,6 +47,7 @@ def upgrade_config(values,base):
         if previous and 'managed' not in previous:
             previous['managed']=previous.get('base_url')==defaults[section]['base_url'] and not previous.get('executable')
     merge(fresh,defaults)
+    fresh['qbt']['tag_prefix']='MusicOps'
     return fresh
 
 def validate_config(values):

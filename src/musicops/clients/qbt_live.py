@@ -20,7 +20,7 @@ class QbtSession:
         except (ValueError,TypeError):raise HttpError('AUTH_FAILED','qBittorrent 登录资料格式无效，请在连接与设置中重新填写') from None
         if not isinstance(creds,dict) or any(not isinstance(creds.get(key),str) for key in ('username','password')):
             raise HttpError('AUTH_FAILED','qBittorrent 登录资料缺少用户名或密码，请在连接与设置中重新填写')
-        self.client=httpx.Client(follow_redirects=False,verify=True,timeout=15,headers={'Referer':self.origin+'/'})
+        self.client=httpx.Client(follow_redirects=False,verify=True,trust_env=False,timeout=15,headers={'Referer':self.origin+'/'})
         try:
             r=self.client.post(self.origin+'/api/v2/auth/login',data={'username':creds['username'],'password':creds['password']})
             if r.status_code not in (200,204) or r.status_code==200 and r.text.strip()!='Ok.':raise HttpError('AUTH_FAILED','qBittorrent 登录失败')
@@ -35,7 +35,7 @@ class QbtSession:
         if not url.startswith(self.origin+'/api/v2/'):raise PolicyBlocked('qBittorrent 请求来源改变')
         endpoint=url[len(self.origin+'/api/v2/'):]
         reads={'app/version','torrents/info','torrents/files','torrents/categories','torrents/tags'}
-        writes={'torrents/add','torrents/start','torrents/resume','torrents/createCategory','torrents/createTags'}
+        writes={'torrents/add','torrents/start','torrents/resume','torrents/createCategory','torrents/createTags','torrents/addTags','torrents/removeTags','torrents/deleteTags'}
         if (method=='GET' and endpoint not in reads) or (method=='POST' and endpoint not in writes) or method not in ('GET','POST'):raise PolicyBlocked('未开放该客户端操作')
         try:r=self.client.request(method,url,**kwargs)
         except httpx.HTTPError:raise HttpError('NETWORK_ERROR','qBittorrent 请求失败') from None

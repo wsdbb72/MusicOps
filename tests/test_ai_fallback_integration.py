@@ -164,7 +164,7 @@ def test_known_workflow_identity_creates_separate_search_without_catalog_or_ai(s
 
 def test_unknown_ai_choice_in_identification_never_bypasses_track_verification(service, monkeypatch):
     item = candidate(title='Different Recording')
-    catalog = Catalog(outcome([item]), detail=album_detail('Different Recording'))
+    catalog = Catalog(outcome([item]), outcome(), detail=album_detail('Different Recording'))
     install_providers(service, monkeypatch, catalog, [
         ai_response({'queries': [], 'reason': '核对现有候选'}), ai_response(choice('fabricated-release')),
     ])
@@ -179,7 +179,7 @@ def test_unknown_ai_choice_in_identification_never_bypasses_track_verification(s
 
 def test_ai_recommendation_cannot_invent_missing_target_duration_to_start_download(service, monkeypatch):
     item = candidate()
-    catalog = Catalog(outcome([item]), detail=album_detail())
+    catalog = Catalog(outcome([item]), outcome(), outcome(), detail=album_detail())
     install_providers(service, monkeypatch, catalog, [
         ai_response({'queries': [], 'reason': '核对现有候选'}), ai_response(choice(item['candidate_id'])),
     ])
@@ -237,6 +237,7 @@ def test_ai_alias_retries_real_site_but_does_not_promote_different_identity_to_d
     job = workflow(service, cfg)
     job.update(task_type='search', task_group='search', stage='searching', prefer_24bit=True)
     service.workflows.put(job)
+    job['source_identity_attempted']=True  # This case tests the later keyword-only fallback.
     service.workflows._searching(job)
     assert job['stage'] == 'searching' and job['search_query'] == 'Canonical Artist Canonical Album'
     service.workflows._searching(job)

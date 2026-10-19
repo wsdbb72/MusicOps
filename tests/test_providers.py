@@ -295,7 +295,7 @@ def test_V15_noncanonical_invalid_layer_and_paths_blocked():
 def qbt_row(tmp_path, meta, task_id="task-1", version="5.2.2", state=None):
     path = tmp_path / "source" / task_id
     return {"hash": meta["infohash_v1"] or meta["infohash_v2"][:40], "state": state or ("stoppedDL" if version.startswith("5") else "pausedDL"),
-            "tags": "musicops-" + task_id, "category": "musicops", "auto_tmm": False,
+            "tags": "MusicOps", "category": "musicops", "auto_tmm": False,
             "save_path": str(path), "download_path": str(path / ".incomplete"), "content_path": str(path / "sample.wav"), "progress": 0}
 
 
@@ -506,7 +506,7 @@ def test_T08_T11_gui_workflow_runs_actual_fake_adapters_once(tmp_path):
     assert all(x["state"] == "CONFIRMED" for x in store.list("token_reservations"))
 
 
-def test_T09_T10_config_budget_category_prefix_autoTMM_are_respected(tmp_path):
+def test_T09_T10_config_budget_category_single_tag_autoTMM_are_respected(tmp_path):
     root = tmp_path / "source"
     root.mkdir()
     (root / "02 星河.flac").write_bytes(b"fLaC" + bytes(256))
@@ -522,7 +522,7 @@ def test_T09_T10_config_budget_category_prefix_autoTMM_are_respected(tmp_path):
     outcome = run_offline_download(store, config, orpheus)
     assert outcome["status"] == "REQUIRES_VALIDATION"
     add = next(r for r in outcome["qbt_requests"] if r["endpoint"][-1] == "add")
-    assert add["data"]["category"] == "离线分类" and add["data"]["tags"].startswith("custom:")
+    assert add["data"]["category"] == "离线分类" and add["data"]["tags"] == "MusicOps"
     configured = QbtClient(FakeTransport(), "https://qbt.invalid", root, auto_tmm=True)
     assert configured.capabilities()["status"] == "POLICY_BLOCKED"
     assert configured.transport.requests == []

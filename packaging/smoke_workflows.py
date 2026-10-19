@@ -20,7 +20,7 @@ def main():
     env=os.environ.copy();env['PATH']=str(Path(os.environ['SystemRoot'])/'System32');env['QT_QPA_PLATFORM']='offscreen'
     for key in ('PYTHONPATH','PYTHONHOME','VIRTUAL_ENV'):env.pop(key,None)
     screenshot=Path(args.screenshot).resolve();screenshot.parent.mkdir(parents=True,exist_ok=True)
-    process=subprocess.Popen([str(bundle/'MusicOps.exe'),'--base',str(base),'--screenshot',str(screenshot),'--quit-after','25000'],cwd=bundle,env=env,creationflags=getattr(subprocess,'CREATE_NO_WINDOW',0));client=WorkerClient(base);report={'version':'0.4.7','external_requests':0,'evidence':'packaged_exe_named_pipe_synthetic_media','checks':{}}
+    process=subprocess.Popen([str(bundle/'MusicOps.exe'),'--base',str(base),'--screenshot',str(screenshot),'--quit-after','25000'],cwd=bundle,env=env,creationflags=getattr(subprocess,'CREATE_NO_WINDOW',0));client=WorkerClient(base);report={'version':'0.4.8','external_requests':0,'evidence':'packaged_exe_named_pipe_synthetic_media','checks':{}}
     try:
         deadline=time.monotonic()+20
         while True:

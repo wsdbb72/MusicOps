@@ -130,6 +130,7 @@ class SetupWizard(QWizard):
         cfg=self.values.get('qbt',{});qbt_saved=cfg.get('credential_ref') in self.saved_refs;self.qbt_url=line(cfg.get('base_url','http://127.0.0.1:8080'),'例如 http://127.0.0.1:8080');self.qbt_user=CredentialField('WebUI 用户名',qbt_saved);self.qbt_pass=CredentialField('WebUI 密码',qbt_saved)
         p.addRow('WebUI 地址',self.qbt_url);p.addRow('用户名',self.qbt_user);p.addRow('密码',self.qbt_pass)
         self.qbt_test_button=button('测试已保存的下载连接',self.test_qbt);p.addRow(self.qbt_test_button);self.qbt_test_note=label('修改地址或账号后先保存。测试只读取连接状态，不添加或启动下载。','hint');p.addRow(self.qbt_test_note)
+        self.qbt_tag_button=button('将已有 MusicOps 任务标签统一为 MusicOps',self.normalize_qbt_tags);p.addRow(self.qbt_tag_button)
         p.addRow(label('● 已保存登录信息 · 留空保留；更新时请同时填写用户名与密码。' if qbt_saved else '没有 qBittorrent 时可跳过；资料补全仍可使用。','credentialSaved' if qbt_saved else 'hint'))
         fl_row=QWidget();fl_layout=QHBoxLayout(fl_row);fl_layout.setContentsMargins(0,0,0,0);self.fl_limit=QSpinBox();self.fl_limit.setRange(0,100);self.fl_limit.setValue(self.values.get('workflow',{}).get('fl_per_batch',3));self.fl_limit.setSuffix(' 次 / 批次');self.fl_unlimited=QCheckBox('全部');self.fl_unlimited.setToolTip('不限制本批次使用 FL 的次数；仍仅请求站点确认免费的下载。');self.fl_unlimited.setChecked(self.values.get('workflow',{}).get('fl_unlimited',False));self.fl_limit.setDisabled(self.fl_unlimited.isChecked());self.fl_unlimited.toggled.connect(self.fl_limit.setDisabled);fl_layout.addWidget(self.fl_limit,1);fl_layout.addWidget(self.fl_unlimited);p.addRow('最多使用 FL 免费下载',fl_row)
         p.addRow(label('勾选“全部”后忽略左侧次数，按本批次需要使用 FL。OpenCD 直接获取种子；其他站点仅使用已确认免费的下载，额度不足时等待处理。','hint'))
@@ -218,6 +219,10 @@ class SetupWizard(QWizard):
         self.solver_test_timer.stop();self.solver_test_button.setEnabled(True);self.solver_note.setText(message)
     def open_solver_settings(self):
         self.setStartId(self.solver_page_id);self.restart()
+    def normalize_qbt_tags(self):
+        self.qbt_tag_button.setEnabled(False);self.qbt_test_note.setText('已提交标签整理；后台会核实每项任务的归属，不启动下载。')
+        def finished(message):self.qbt_tag_button.setEnabled(True);self.qbt_test_note.setText(message)
+        self.owner.call('normalize_qbt_tags',{},lambda result:finished(result.get('message') or result.get('error') or '标签整理完成'),finished)
     def test_qbt(self):
         self.qbt_test_button.setEnabled(False);self.qbt_test_note.setText('正在检查已保存的 qBittorrent WebUI 与账号…')
         def finished(message):self.qbt_test_button.setEnabled(True);self.qbt_test_note.setText(message)
@@ -449,7 +454,7 @@ class Workbench(QMainWindow):
         if self.notice.text()==getattr(self,'_connection_notice',None):self.notice.clear()
         self._connection_notice=None
         self.pipeline_paused=bool(result.get('paused'));self.config=result['config']['values'];self.available_refs=[r['ref'] if isinstance(r,dict) else r for r in result.get('secret_refs',[])];self.timer.start();connected=[name for key,name,_ in SITES if self.config['providers'][key]['enabled'] and self.config['providers'][key]['credential_ref'] in self.available_refs]
-        executing=result.get('execution') or {};names={'index_library':'扫描本地音乐库','advance_workflows':'推进专辑处理','assist_workflows':'AI 辅助核对','refresh_playlist':'读取歌单','start_workflow':'创建专辑队列','browser_solver_preflight':'验证浏览器连接'}
+        executing=result.get('execution') or {};names={'normalize_qbt_tags':'整理 MusicOps 下载标签','index_library':'扫描本地音乐库','advance_workflows':'推进专辑处理','assist_workflows':'AI 辅助核对','refresh_playlist':'读取歌单','start_workflow':'创建专辑队列','browser_solver_preflight':'验证浏览器连接'}
         self.execution_note.setText('后台已暂停，请继续后台后处理队列。' if self.pipeline_paused else '后台正在：'+names.get(executing.get('command'),'处理当前任务') if executing else '后台等待下一项可执行任务；失败和待核对专辑可按状态查看。')
         catalog=result.get('local_catalog') or {};self.catalog_note.setText('本地专辑资料库：'+str(catalog.get('album_count',0))+' 张专辑 · '+str(catalog.get('matched_track_count',0))+' 首已预匹配'+(' · 扫描时增量更新' if catalog.get('updated_at') else ' · 首次扫描后自动建立'))
         self.connection.setText('音乐库：'+self.config['paths']['library']+'     ·     '+('已配置 '+', '.join(connected) if connected else '尚未连接资源站；可在“连接与设置”添加'))

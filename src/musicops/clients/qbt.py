@@ -51,6 +51,9 @@ def _result(status, **data):
     return {"schema_version": 1, "status": status, **data}
 
 
+PROJECT_TAG = "MusicOps"
+
+
 class QbtClient:
     def __init__(self, transport, base_url, source_root, version="5.2.2", store=None, category="musicops", tag_prefix="musicops-", auto_tmm=False):
         parts = urlsplit(base_url)
@@ -112,7 +115,7 @@ class QbtClient:
 
     def _check_ownership(self, row, record, require_stopped=False):
         tags = {x.strip() for x in str(row.get("tags", "")).split(",")}
-        if record.get("creation_intent") is not True or record["task_tag"] not in tags or row.get("category") != record.get("category", self.category):
+        if record.get("creation_intent") is not True or not tags.intersection({record["task_tag"], PROJECT_TAG}) or row.get("category") != record.get("category", self.category):
             return "没有本项目创建记录/任务标签/分类，禁止接管"
         expected = Path(record["source_path"]).resolve()
         if not self._bound_path(row.get("save_path"), expected, exact=True):
@@ -130,6 +133,39 @@ class QbtClient:
         if require_stopped and row.get("state") not in stopped:
             return "新增任务未确认处于停止状态"
         return None
+
+    def normalize_tags(self, task_id, record=None, row=None):
+        """Rename only an authenticated, hash/path-bound task's generated tag."""
+        record = record or self._get(task_id)
+        if not record:return _result('POLICY_BLOCKED', changed=False)
+        try:
+            row = row or self._query(record)
+            if self._check_ownership(row or {}, record):return _result('POLICY_BLOCKED', changed=False)
+            old = record.get('legacy_task_tag') or record['task_tag']
+            if record['task_tag'] != PROJECT_TAG:
+                response = self._request('POST', 'torrents/addTags', data={'hashes':record['client_id'],'tags':PROJECT_TAG})
+                if response.status_code != 200:return _result('WAITING', changed=False)
+                row = self._query(record)
+                proposed = {**record, 'task_tag':PROJECT_TAG}
+                if self._check_ownership(row or {}, proposed):return _result('WAITING', changed=False)
+                record.update(task_tag=PROJECT_TAG, legacy_task_tag=old)
+                self._put(task_id, record)
+            if old != PROJECT_TAG:
+                if old in {t.strip() for t in str(row.get('tags','')).split(',')}:
+                    response = self._request('POST','torrents/removeTags',data={'hashes':record['client_id'],'tags':old})
+                    if response.status_code != 200:return _result('WAITING', changed=True)
+                # A label is deleted globally only after it is confirmed unused.
+                response = self._request('GET','torrents/info',params={'tag':old})
+                rows = response.json() if response.status_code == 200 else None
+                if not isinstance(rows,list):return _result('WAITING', changed=True)
+                if not rows:
+                    response = self._request('POST','torrents/deleteTags',data={'tags':old})
+                    if response.status_code != 200:return _result('WAITING', changed=True)
+                record.pop('legacy_task_tag',None);self._put(task_id,record)
+            return _result('OK',changed=old!=PROJECT_TAG)
+        except Exception:
+            # Tag maintenance never retries an add/start or changes seeding.
+            return _result('WAITING',changed=False)
 
     def _free_matches(self,evidence, meta,task_id=None):
         hashes = {x for x in (meta.get("infohash_v1"), meta.get("infohash_v2")) if x}
@@ -161,7 +197,7 @@ class QbtClient:
             return _result("POLICY_BLOCKED", error_class="POLICY_BLOCKED", reason="任务目录越界")
         record = {"schema_version": 1, "task_id": task_id, "client_id": meta["infohash_v1"] or meta["infohash_v2"][:40],
                   "infohash_v1": meta["infohash_v1"], "infohash_v2": meta["infohash_v2"],
-                  "source_path": str(source), "task_tag": self.tag_prefix + task_id, "category": self.category,
+                  "source_path": str(source), "task_tag": PROJECT_TAG, "category": self.category,
                   "metainfo_sha256": meta["metainfo_sha256"], "metainfo": meta, "creation_intent": False,
                   "free_evidence": free_evidence, "state": "PRECHECK"}
         try:
@@ -204,6 +240,7 @@ class QbtClient:
             problem = self._check_ownership(row, record, require_stopped=record["state"] not in ("START_REQUESTED", "DOWNLOADING", "COMPLETE"))
             if problem:
                 return _result("POLICY_BLOCKED", error_class="POLICY_BLOCKED", reason=problem, record=record)
+            if record["task_tag"] != PROJECT_TAG or record.get("legacy_task_tag"):self.normalize_tags(task_id,record,row)
             record["state"] = "STOPPED" if record["state"] not in ("START_REQUESTED", "DOWNLOADING", "COMPLETE") else record["state"]
             self._put(task_id, record)
             return _result(record["state"], record=record, client_state=row.get("state"))
@@ -240,6 +277,7 @@ class QbtClient:
             problem = self._check_ownership(row or {}, record)
             if problem:
                 return _result("POLICY_BLOCKED", error_class="POLICY_BLOCKED", reason=problem)
+            if record["task_tag"] != PROJECT_TAG or record.get("legacy_task_tag"):self.normalize_tags(task_id,record,row)
             state = row.get("state")
             if state in {"checkingUP", "checkingDL", "checkingResumeData", "moving", "error", "missingFiles", "unknown"}:
                 return _result("WAITING" if state.startswith("checking") or state == "moving" else "BLOCKED", client_state=state, complete=False)

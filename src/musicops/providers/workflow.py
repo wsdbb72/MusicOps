@@ -58,6 +58,7 @@ class _QbtFixture:
         self.requests = []
         self.task_id, self.meta, self.root = task_id, meta, root
         self.category, self.tag_prefix = category, tag_prefix
+        self.existing_tag = (existing_record or {}).get("task_tag")
         self.added = bool(existing_record)
         self.started = bool(existing_record and existing_record.get("state") in ("START_REQUESTED", "DOWNLOADING", "COMPLETE"))
 
@@ -73,7 +74,7 @@ class _QbtFixture:
             rows = []
             if self.added:
                 rows = [{"hash": self.meta["infohash_v1"], "infohash_v1": self.meta["infohash_v1"], "state": "uploading" if self.started else "stoppedDL",
-                         "tags": self.tag_prefix + self.task_id, "category": self.category, "auto_tmm": False,
+                         "tags": (self.existing_tag or "MusicOps"), "category": self.category, "auto_tmm": False,
                          "save_path": str(self.root / self.task_id), "download_path": str(self.root / self.task_id / ".incomplete"),
                          "content_path": str(self.root / self.task_id / self.meta["name"]), "progress": 1 if self.started else 0}]
             return Response(200, json.dumps(rows).encode())

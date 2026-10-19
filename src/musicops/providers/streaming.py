@@ -59,9 +59,17 @@ class StreamingProvider:
         if response.status_code in (401,403) or 300<=response.status_code<400:raise HttpError('AUTH_REQUIRED','流媒体服务需要登录；请在向导填写服务 Cookie')
         if response.status_code!=200:raise HttpError('SOURCE_UNAVAILABLE','流媒体服务暂不可用')
     def search(self,platform,target):
+        terms=list(dict.fromkeys([(' '.join(target.get('artists',[]))+' '+target.get('raw_title','')).strip(),target.get('raw_title','').strip()]))
+        for term in terms:
+            if not term:continue
+            try:return self._search_query(platform,target,term)
+            except HttpError as exc:
+                if exc.error_class!='NO_MATCH':raise
+        raise HttpError('NO_MATCH','未找到经艺人、专辑和完整时长核实的唯一音源；仅歌名检索不能直接确认身份')
+    def _search_query(self,platform,target,term):
         if platform not in SOURCES:raise ValueError('未知流媒体来源')
         with self._session() as client:
-            with client.stream('GET',self.base+'/search',params={'q':' '.join(target.get('artists',[]))+' '+target.get('raw_title',''),'sources':SOURCES[platform],'type':'song'},headers=self.headers) as response:
+            with client.stream('GET',self.base+'/search',params={'q':term,'sources':SOURCES[platform],'type':'song'},headers=self.headers) as response:
                 self._ok(response);data=bytearray()
                 for block in response.iter_bytes():
                     data.extend(block)

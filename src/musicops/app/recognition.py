@@ -44,6 +44,7 @@ class RecognitionFallback:
         if duration is not None and (type(duration) not in (int, float) or not math.isfinite(duration) or not 0 <= duration <= 604800):
             raise ValueError('时长字段无效')
         clean['duration'] = duration
+        if query.get('untrusted_metadata') is True:clean['untrusted_metadata']=True
         # Only a basename can be used as a hint; never send a library directory.
         filename = query.get('filename_hint') or ''
         if not isinstance(filename, str):
@@ -75,6 +76,45 @@ class RecognitionFallback:
                 continue
             exact.append(candidate)
         return len(exact) == 1
+
+    @staticmethod
+    def matching_recordings(query, candidates):
+        """A title-only result is a lead, never an automatic artist correction."""
+        if not query.get('title') or not query.get('artists') or not query.get('duration'):return {}
+        exact={c['candidate_id']:c for c in candidates if c.get('entity_kind')=='recording'
+            and c.get('release_id') and strict_text(c.get('title'))==strict_text(query['title'])
+            and {strict_text(a) for a in c.get('artists',[])}=={strict_text(a) for a in query['artists']}
+            and c.get('duration') and abs(c['duration']-query['duration'])<=2}
+        return exact
+
+    @staticmethod
+    def unique_recording(query,candidates):
+        exact=RecognitionFallback.matching_recordings(query,candidates)
+        return next(iter(exact.values())) if len(exact)==1 else None
+
+    def _relaxed_api(self,query,result):
+        if not query.get('untrusted_metadata') or not query.get('title'):return
+        if result.get('status') not in ('OK','NO_RESOURCE','PARTIAL'):return
+        if self.matching_recordings(query,result['candidates']):return
+        seen={(query['title'],tuple(query['artists']),query['album'])}
+        variants=[{**self._catalog_query(query),'album':''},{**self._catalog_query(query),'album':'','artists':[]}]
+        for variant in variants:
+            key=(variant['title'],tuple(variant['artists']),variant['album'])
+            if key in seen:continue
+            seen.add(key);self.checkpoint('catalog_relaxed_identity')
+            outcome=self.resolver.identify(variant)
+            result.setdefault('identity_lookup_attempts',[]).append({'query':variant,'status':outcome.get('status')})
+            merged={c['candidate_id']:c for c in result['candidates']}
+            for candidate in outcome.get('candidates',[]):
+                merged.setdefault(candidate['candidate_id'],{**candidate,'retrieval_mode':'title_artist' if variant['artists'] else 'title_only'})
+            result['candidates']=list(merged.values())[:50]
+            result['sources'].extend(outcome.get('sources',[]))
+            links={r['url']:r for r in result['lookup_links']}
+            links.update({r['url']:r for r in outcome.get('lookup_links',[])})
+            result['lookup_links']=list(links.values())[:24]
+            if outcome.get('candidates'):result['status']='OK'
+            if self.matching_recordings(query,result['candidates']):break
+            if outcome.get('status') not in ('OK','NO_RESOURCE','PARTIAL'):break
 
     @staticmethod
     def _context_candidate(candidate):
@@ -145,11 +185,20 @@ class RecognitionFallback:
         report = {'status': 'NOT_NEEDED', 'calls': 0, 'queries': [], 'reason': ''}
         result['ai_fallback'] = report
         result['recognition_stages'] = [{'stage': 'api', 'status': found.get('status')}]
+        self._relaxed_api(query,result)
+        if query.get('untrusted_metadata'):
+            selected=self.unique_recording(query,result['candidates'])
+            if selected:
+                result['selected_candidate']=copy.deepcopy(selected)
+                result['selected_candidate']['recognition_basis']='title_artist_duration'
+                return result
         if not force and self._has_unique_exact(query, result['candidates']):
             return result
         if not self.config.get('offline') and hasattr(self.resolver, 'web_identify'):
             self.checkpoint('recognition_websites')
-            websites = self.resolver.web_identify(catalog_query)
+            website_query={**catalog_query,'album':''} if query.get('untrusted_metadata') and query['title'] else catalog_query
+            if result.get('identity_lookup_attempts') and not self.matching_recordings(query,result['candidates']):website_query={**website_query,'artists':[]}
+            websites = self.resolver.web_identify(website_query)
             result['sources'].extend(websites.get('sources', []))
             combined = {c['candidate_id']: c for c in result['candidates']}
             combined.update({c['candidate_id']: c for c in websites.get('candidates', [])})

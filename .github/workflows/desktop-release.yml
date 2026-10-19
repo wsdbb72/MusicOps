@@ -138,7 +138,7 @@ jobs:
           root = pathlib.Path('release-assets'); bundle = pathlib.Path('dist/MusicOps-Windows')
           report = json.loads(pathlib.Path('dist/windows/reports/packaged-starts.json').read_text('utf-8'))
           installed = json.loads(pathlib.Path('dist/windows/reports/full-installer-smoke.json').read_text('utf-8'))
-          required = {'native_qbt_independent_test','native_solver_independent_test','native_album_overview','native_concurrent_polling','native_managed_engine_cookie','native_managed_solver','native_durable_ai_registration','native_task_status_filter','native_full_queue_selection','native_streaming_and_edition_settings','native_full_album_preparation','identification_and_search_are_separate', 'native_bulk_cancel_review_tasks', 'native_manual_search_readonly', 'native_search_activity_visible', 'gui_exit_zero'}
+          required = {'native_tag_cleanup_auth_guard','native_fixed_qbt_tag','native_qbt_independent_test','native_solver_independent_test','native_album_overview','native_concurrent_polling','native_managed_engine_cookie','native_managed_solver','native_durable_ai_registration','native_task_status_filter','native_full_queue_selection','native_streaming_and_edition_settings','native_full_album_preparation','identification_and_search_are_separate', 'native_bulk_cancel_review_tasks', 'native_manual_search_readonly', 'native_search_activity_visible', 'gui_exit_zero'}
           if report['version'] != version or report.get('passed') is not True or report.get('external_requests') != 0 or not required.issubset(report['checks']) or not all(report['checks'].values()):
               raise SystemExit('Packaged acceptance evidence is incomplete')
           if installed.get('version') != version or installed.get('passed') is not True or len(installed.get('checks', {})) != 9 or not all(installed['checks'].values()):
@@ -314,7 +314,7 @@ jobs:
               if obj['type'] != 'commit' or obj['sha'] != commit:
                   raise SystemExit('The existing tag does not identify the tested source')
           notes = pathlib.Path('release-notes.md')
-          notes.write_text('修复下载与入库阶段被旧识别、搜索队列压后的调度问题，优先推进已有音源；补齐历史任务快照的新增配置字段，解决旧流媒体回退任务的 KeyError。任务中心默认按专辑合并显示当前阶段，下载与入库置前，可切换阶段记录或搜索全部专辑，勾选后显示批量操作，实际错误不会再被 AI 排队提示遮盖。FlareSolverr 全部移入连接与设置，测试独立于音乐队列并显示耗时与失败原因；设置中新增已保存的 qBittorrent 连接测试。补充全模块代码审阅与验证说明，修复 AI 写回与删除任务的并发覆盖，拆分内置引擎启动锁，并优化数据库连接清理和队列索引。\n\n提供 Windows 安装包与便携 ZIP、macOS Apple Silicon ARM 原生 PKG 与应用 ZIP、同一提交源码及校验文件。内置 FlareSolverr、浏览器与 go-music-dl，保留历史 Intel 附件。Mac 使用 ad-hoc 完整性签名，尚无 Developer ID 签名与 Apple 公证。\n\n本机真实只读歌单、已配置资源站、AI 与内置浏览器已检查；qBittorrent 与 Roon 授权结果据本机实际状态报告。自动验收使用隔离档案，不下载真实音乐或消费 PT 令牌。更新前请退出应用及后台。\n\nSource commit: '+commit+'\n', 'utf-8')
+          notes.write_text('qBittorrent 新任务统一只打 MusicOps 标签；旧任务按创建记录、种子哈希、分类与目录验证归属后整理历史任务标签，保留其他手动标签和做种。设置中新增已有任务标签整理入口。流媒体来源的专辑、歌手资料作为可纠正提示，正常识别失败时依次尝试歌名加歌手、仅歌名检索；优先复用目录证据与缓存，唯一的歌名、歌手和时长可核实发行，否则由 AI 核对真实候选与曲目表，仍有歧义时人工确认。修正资料保留原始字段可追溯；同名、翻唱、现场和不同版本不能直接混同。\n\n提供 Windows 安装包与便携 ZIP、macOS Apple Silicon ARM 原生 PKG 与应用 ZIP、同一提交源码及校验文件。内置 FlareSolverr、浏览器与 go-music-dl，保留历史 Intel 附件。Mac 使用 ad-hoc 完整性签名，尚无 Developer ID 签名与 Apple 公证。\n\n本机真实只读歌单、已配置资源站、AI 与内置浏览器已检查；qBittorrent 与 Roon 授权结果据本机实际状态报告。自动验收使用隔离档案，不下载真实音乐或消费 PT 令牌。更新前请退出应用及后台。\n\nSource commit: '+commit+'\n', 'utf-8')
           def gh(*arguments):
               subprocess.run(['gh', *arguments], check=True)
           gh('release', 'create', tag, '--verify-tag', '--target', commit, '--draft', '--title', 'MusicOps '+version, '--notes-file', str(notes))

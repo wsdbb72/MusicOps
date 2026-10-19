@@ -101,7 +101,7 @@ def retry(workflows, job, *, query=None, sites=None, allow_review_search=False,a
                    retry_count=int(job.get('retry_count', 0)) + 1, message='已重新排队，先核对既有状态后重试')
     if allow_legacy:changes.update(legacy_batch_requires_review=False)
     if stage == 'searching':
-        changes.update(choices=[], outcomes={}, search_summary={}, ai_search_attempted=False,progress=0)
+        changes.update(choices=[], outcomes={}, search_summary={}, ai_search_attempted=False,source_identity_attempted=False,progress=0)
         if query is not None:
             changes['search_query'] = validate_query(query)
         if sites is not None:

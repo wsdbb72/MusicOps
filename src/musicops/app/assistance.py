@@ -1,6 +1,7 @@
 """Grounded AI proposals for an explicit, editable review. Never apply on generation."""
 import json
 from musicops.app.recognition import RecognitionFallback
+from musicops.app.source_identity import is_streaming
 from musicops.app.workflow_actions import selection
 from musicops.config.schema import digest
 from musicops.domain.identity import strict_text
@@ -24,7 +25,8 @@ def _metadata(service, job, cfg, provider=None):
     if not rows: return {'status': 'NEEDS_INPUT', 'message': '没有曲目资料，请手动填写或重新识别'}
     first = rows[0]
     found = service._recognize_metadata({'title': first.get('raw_title', ''), 'artists': first.get('artists', []),
-        'album': first.get('album', ''), 'duration': first.get('duration'), 'filename_hint': str(first.get('path') or '').replace('\\','/').rsplit('/',1)[-1]}, cfg, force=True)
+        'album': first.get('album', ''), 'duration': first.get('duration'), 'filename_hint': str(first.get('path') or '').replace('\\','/').rsplit('/',1)[-1],
+        'untrusted_metadata':is_streaming(first)}, cfg, force=True)
     selected = found.get('selected_candidate')
     if not selected and len(found.get('candidates',[]))==1:
         candidate=found['candidates'][0]
@@ -131,7 +133,7 @@ def assist_workflows(service, args, cfg):
                 proposal = _metadata(service, job, cfg, provider)
             elif kind=='search' or job.get('task_type')=='search' and (kind in {'error','interrupted'} or job['stage'] in {'failed','skipped'}):
                 rows = job.get('targets') or job.get('old_files') or []; first = rows[0] if rows else {}
-                found = service._recognize_metadata({'title': '', 'artists': first.get('artists', []), 'album': first.get('album', '')}, cfg, force=True)
+                found = service._recognize_metadata({'title': first.get('raw_title',''), 'artists': first.get('artists', []), 'album': first.get('album', ''),'duration':first.get('duration'),'untrusted_metadata':True}, cfg, force=True)
                 selected = found.get('selected_candidate')
                 query = (' '.join(selected.get('artists', [])) + ' ' + str(selected.get('album') or selected.get('title') or '')).strip() if selected else ''
                 current_query=job.get('search_query') or (' '.join(first.get('artists',[]))+' '+first.get('album',''))

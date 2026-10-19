@@ -18,7 +18,7 @@ from musicops.platforms import ipc_family,prepare_ipc_socket,secure_ipc_socket,p
 
 READ_COMMANDS = {'list_library_albums','attach', 'get_status', 'get_task', 'list_tasks', 'get_playlist_targets', 'list_library_files', 'events', 'parse_playlist','list_workflows','get_workflow'}
 QUEUED_COMMANDS = {'demo', 'index_library', 'compare', 'search', 'resources', 'prepare_fill', 'prepare_resource', 'prepare_repair', 'prepare_dedup', 'submit_plan', 'request_rollback', 'export_report', 'refresh_playlist', 'submit_download', 'recover', 'pt_preflight', 'qbt_preflight', 'ai_analyze', 'ai_plan', 'ai_test', 'lyrics_preflight','identify_metadata','resolve_metadata','accept_metadata','validate_selected_file','roon_preflight'}
-QUEUED_COMMANDS.update({'queue_ai_reviews','browser_solver_preflight','assist_workflows','start_workflow','advance_workflows','restore_workflow','manual_album_search'})
+QUEUED_COMMANDS.update({'normalize_qbt_tags','queue_ai_reviews','browser_solver_preflight','assist_workflows','start_workflow','advance_workflows','restore_workflow','manual_album_search'})
 
 
 def request_signature(command, payload, key):

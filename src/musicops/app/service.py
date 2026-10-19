@@ -187,7 +187,7 @@ class AppService:
         if command=='shutdown_worker':
             if self.active: raise RuntimeError('当前任务尚未到安全退出点，请先暂停流水线')
             self.stop.set(); return {'stopped':True,'seeding_unchanged':True}
-        if command in ('browser_solver_preflight','assist_workflows','manual_album_search','restore_workflow','start_workflow','advance_workflows','demo','index_library','compare','search','resources','prepare_fill','prepare_resource','prepare_repair','prepare_dedup','submit_plan','request_rollback','export_report','refresh_playlist','submit_download','recover','pt_preflight','qbt_preflight','ai_analyze','ai_plan','ai_test','lyrics_preflight','identify_metadata','resolve_metadata','accept_metadata','validate_selected_file','roon_preflight'):
+        if command in ('normalize_qbt_tags','browser_solver_preflight','assist_workflows','manual_album_search','restore_workflow','start_workflow','advance_workflows','demo','index_library','compare','search','resources','prepare_fill','prepare_resource','prepare_repair','prepare_dedup','submit_plan','request_rollback','export_report','refresh_playlist','submit_download','recover','pt_preflight','qbt_preflight','ai_analyze','ai_plan','ai_test','lyrics_preflight','identify_metadata','resolve_metadata','accept_metadata','validate_selected_file','roon_preflight'):
             return self.enqueue(command,payload,request_id=request_id)
         raise ValueError('UNKNOWN_COMMAND:'+command)
     def enqueue(self,command,args,request_id=None):
@@ -344,6 +344,20 @@ class AppService:
             result=self._validator(cfg).validate(path);record['validation']=result;record['validation_id']=result.get('validation_id')
             self.store.put('library_files',record['file_id'],record)
             return {'file':record,'validation':result,'music_writes':0}
+        if command=='normalize_qbt_tags':
+            if cfg['offline']:raise PolicyBlocked('请先完成真实下载连接设置')
+            from musicops.clients.qbt_live import live_client
+            counts={'updated':0,'unchanged':0,'waiting':0,'skipped':0}
+            client=live_client(cfg['qbt'],cfg['paths']['source'],self.store,self.vault.get)
+            try:
+                for row in self.store.list('download_tasks'):
+                    if not row.get('creation_intent') or not row.get('task_tag') or not row.get('task_id'):continue
+                    self._checkpoint('qbt_normalize_tags')
+                    result=client.normalize_tags(row['task_id'])
+                    key='updated' if result['status']=='OK' and result.get('changed') else 'unchanged' if result['status']=='OK' else 'waiting' if result['status']=='WAITING' else 'skipped'
+                    counts[key]+=1
+            finally:client.transport.close()
+            return {'status':'OK',**counts,'message':f"标签已整理：更新 {counts['updated']} 项，已统一 {counts['unchanged']} 项，待连接重试 {counts['waiting']} 项，未通过归属检查 {counts['skipped']} 项。",'music_writes':0,'torrent_starts':0}
         if command in ('qbt_preflight','test_qbt_connection'):
             if cfg['offline']:raise PolicyBlocked('离线模式不访问真实qBittorrent')
             from musicops.clients.qbt import readonly_preflight
@@ -586,7 +600,7 @@ class AppService:
         return self._catalog_clients[key]
     def _recognize_metadata(self,query,cfg,found=None,force=False):
         from musicops.app.recognition import RecognitionFallback
-        key='recognition-cache:'+digest({'query':query,'found':found,'force':force,'ai':cfg['ai'],'credential_revision':self.vault.revision(cfg['ai'].get('auth_secret_ref','')),'catalog':cfg['catalog']})
+        key='recognition-cache-v2:'+digest({'query':query,'found':found,'force':force,'ai':cfg['ai'],'credential_revision':self.vault.revision(cfg['ai'].get('auth_secret_ref','')),'catalog':cfg['catalog']})
         cached=self.store.get('evidence',key)
         if cached and time.time()-cached.get('at',0)<3600:return copy.deepcopy(cached['result'])
         result=RecognitionFallback(cfg,self._catalog_resolver(cfg),self.vault.get,self._checkpoint).identify(query,found=found,force=force)

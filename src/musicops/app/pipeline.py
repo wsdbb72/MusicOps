@@ -133,8 +133,9 @@ class Workflows:
         return row
     def next_job(self):
         import time
+        search_turn=getattr(self,'_fallback_turns',0)>=3
         with self.store.connection() as c:
-            row=c.execute("SELECT payload FROM evidence AS current WHERE id LIKE 'workflow:%' AND coalesce(json_extract(payload,'$.hidden'),0)=0 AND coalesce(json_extract(payload,'$.job_kind'),'album') NOT IN ('batch','activity') AND coalesce(json_extract(payload,'$.paused'),0)=0 AND json_extract(payload,'$.stage') NOT IN ('completed','failed','needs_review','cancelled','skipped','restored','running') AND (json_extract(payload,'$.identification_job_id') IS NULL OR EXISTS (SELECT 1 FROM evidence AS parent WHERE parent.id='workflow:'||json_extract(current.payload,'$.identification_job_id') AND json_extract(parent.payload,'$.stage')='completed')) AND (json_extract(payload,'$.search_job_id') IS NULL OR coalesce(json_extract(payload,'$.task_type'),'')!='album' OR EXISTS (SELECT 1 FROM evidence AS searched WHERE searched.id='workflow:'||json_extract(current.payload,'$.search_job_id') AND json_extract(searched.payload,'$.stage')='completed')) AND coalesce(json_extract(payload,'$.next_poll'),0)<=? ORDER BY CASE json_extract(payload,'$.stage') WHEN 'publishing' THEN 0 WHEN 'retiring' THEN 0 WHEN 'notifying' THEN 0 WHEN 'validating' THEN 0 WHEN 'metadata' THEN 1 WHEN 'enrich' THEN 1 WHEN 'downloading' THEN 2 WHEN 'requesting' THEN 3 WHEN 'fallback' THEN 3 WHEN 'searching' THEN 4 ELSE 5 END,updated_at,id LIMIT 1",(time.time(),)).fetchone()
+            row=c.execute("SELECT payload FROM evidence AS current WHERE id LIKE 'workflow:%' AND coalesce(json_extract(payload,'$.hidden'),0)=0 AND coalesce(json_extract(payload,'$.job_kind'),'album') NOT IN ('batch','activity') AND coalesce(json_extract(payload,'$.paused'),0)=0 AND json_extract(payload,'$.stage') NOT IN ('completed','failed','needs_review','cancelled','skipped','restored','running') AND (json_extract(payload,'$.identification_job_id') IS NULL OR EXISTS (SELECT 1 FROM evidence AS parent WHERE parent.id='workflow:'||json_extract(current.payload,'$.identification_job_id') AND json_extract(parent.payload,'$.stage')='completed')) AND (json_extract(payload,'$.search_job_id') IS NULL OR coalesce(json_extract(payload,'$.task_type'),'')!='album' OR EXISTS (SELECT 1 FROM evidence AS searched WHERE searched.id='workflow:'||json_extract(current.payload,'$.search_job_id') AND json_extract(searched.payload,'$.stage')='completed')) AND coalesce(json_extract(payload,'$.next_poll'),0)<=? ORDER BY CASE json_extract(payload,'$.stage') WHEN 'publishing' THEN 0 WHEN 'retiring' THEN 0 WHEN 'notifying' THEN 0 WHEN 'validating' THEN 0 WHEN 'metadata' THEN 1 WHEN 'enrich' THEN 1 WHEN 'downloading' THEN 2 WHEN 'requesting' THEN 3 WHEN 'fallback' THEN CASE WHEN ? THEN 4 ELSE 3 END WHEN 'searching' THEN CASE WHEN ? THEN 3 ELSE 4 END ELSE CASE WHEN ? THEN 3 ELSE 5 END END,updated_at,id LIMIT 1",(time.time(),search_turn,search_turn,search_turn)).fetchone()
         return json.loads(row[0]) if row else None
     def queue(self,args,cfg,task_id=None):
         """Expose the preparation before the serial worker begins any filesystem IO."""
@@ -331,7 +332,10 @@ class Workflows:
         with self.s.mutex:
             job=self.next_job()
             if not job:return {'status':'OK','idle':True}
-            stage=job['stage'];self.put(job,stage='running',resume_stage=stage)
+            stage=job['stage']
+            if stage=='fallback':self._fallback_turns=getattr(self,'_fallback_turns',0)+1
+            elif stage in ('searching','identifying','snapshotting','queued'):self._fallback_turns=0
+            self.put(job,stage='running',resume_stage=stage)
         try:
             # Snapshot defaults evolve independently of the current profile.
             from musicops.config.schema import upgrade_config
@@ -456,7 +460,7 @@ class Workflows:
         for site in cfg['workflow']['source_order']:
             settings=cfg['providers'][site]
             if not settings['enabled'] or job.get('search_sites') is not None and site not in job['search_sites']:outcomes[site]={'status':'DISABLED'};continue
-            self.checkpoint(job,'search_'+site);result=search_album(lambda:self.provider(site,cfg),job.get('search_query') or ' '.join(artists)+' '+album,album='' if job.get('search_query') else album,checkpoint=lambda:self.checkpoint(job,'search_'+site))
+            self.checkpoint(job,'search_'+site);result=search_album(lambda:self.provider(site,cfg),job.get('search_query') or ' '.join(artists)+' '+album,album=album,checkpoint=lambda:self.checkpoint(job,'search_'+site))
             outcomes[site]={k:v for k,v in result.items() if k not in ('candidates','reason')}
             for c in result.get('candidates',[]):
                 exact=strict_text(c['title'])==strict_text(album) and artist_key(c['artists'])==artist_key(artists)
@@ -471,7 +475,7 @@ class Workflows:
                 if edition_conflict(c['title'],' '.join(artists)+' '+album) and not compatible(c['title'],album):exact=False
                 candidates.append({**c,'identity_exact':exact})
         candidates=list({(c['source'],c['candidate_id']):c for c in candidates}.values())
-        summary=summarize(outcomes);job['outcomes']=outcomes;job['choices']=candidates;job['search_summary']=summary;job['detail']=search_detail(summary)
+        summary=summarize(outcomes);job['pt_search_contract']=2;job['outcomes']=outcomes;job['choices']=candidates;job['search_summary']=summary;job['detail']=search_detail(summary)
         if not any(c.get('identity_exact') for c in candidates) and (summary['successful_sites'] or not summary['unavailable_sites']):
             from musicops.app.source_identity import recover
             if recover(self,job):return
@@ -572,6 +576,13 @@ class Workflows:
             self.put(job,stage='downloading',next_poll=__import__('time').time()+cfg['qbt']['poll_seconds'],message='等待整张发行下载完成')
         else:raise PolicyBlocked('下载归属、文件清单或完成状态未通过，请在 qBittorrent 检查')
     def _fallback(self,job):
+        # Old recovery restored a downloader checkpoint, bypassing newer PT
+        # search logic and settings. Recheck once without deleting audio/cache.
+        if job.get('fallback_serialization_recovered') and job.get('pt_search_contract',0)<2:
+            from musicops.app.workflow_actions import current_config
+            current=current_config(self,job)
+            self.put(job,config=current,stage='searching',resume_stage='searching',next_poll=0,message='旧回退任务保留缓存，先按当前站点设置重新检索 PT 音源')
+            return
         from musicops.app.streaming_fallback import run
         return run(self,job)
     def work_paths(self,job):

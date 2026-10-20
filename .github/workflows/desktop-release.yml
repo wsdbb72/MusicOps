@@ -314,7 +314,7 @@ jobs:
               if obj['type'] != 'commit' or obj['sha'] != commit:
                   raise SystemExit('The existing tag does not identify the tested source')
           notes = pathlib.Path('release-notes.md')
-          notes.write_text('修复大型歌单含少量无专辑单曲时界面不加载列表的问题，支持歌单解析独立快车道、实时批次进度展示与 HTTPS 连接池复用加速。\n\n新增自定义合辑：检索本地专辑并多选，先校验预览再执行，逐曲原艺人、歌名及音频保留，原件可恢复。普通版和特殊版支持选择一版或几版，同版比较各站音源；单曲最低优先，已有版本保留。\n\n修复新入库目录缓存未及时更新、歌词及封面混入歌曲计数。补全支持艺人-专辑命名的封面并保留来源摘要，冲突需要选择；已确认中文优先简体，保留日文及未知语言原文。部分本地专辑可按唯一曲目证据补资料，不冒充完整发行。修复 Navidrome 异常响应的错误处理。\n\n提供 Windows 安装包及便携 ZIP、macOS Apple Silicon 原生 PKG 及应用 ZIP、同一提交源码和校验文件。内置服务保留，历史 Intel 附件不删除。macOS 采用 ad-hoc 完整性签名，尚无 Developer ID 签名及公证。\n\n自动验收使用独立档案和合成音频，覆盖合辑艺人保留、多版选择、目录刷新、资源计数及恢复；不为验收下载真实音乐或消耗 PT 令牌。\n\nSource commit: '+commit+'\n', 'utf-8')
+          notes.write_text('修复从旧保存异常恢复的任务绕过 PT 检索直接回退：保留已验证缓存，按当前站点配置重新检索一次。AI 或手工长搜索词无结果时仍按专辑名检索；鉴权和网络故障不会误判为无资源。\n\n修复大量流媒体回退任务挤占检索队列，每三次回退给等待中的识别或检索一次调度机会，已验证入库仍优先。候选继续核对艺人、发行和版本，不因同名直接下载。保留 0.4.11 大型歌单解析兼容和独立调度改进。\n\n提供 Windows 安装包及便携 ZIP、macOS Apple Silicon 原生 PKG 及应用 ZIP、同一提交源码和校验文件。macOS 采用 ad-hoc 完整性签名，尚无 Developer ID 签名及公证。\n\n回归和打包验收使用独立档案；本机另做三站已登录只读检索，确认合作艺人长关键词可能漏检。验收不下载真实音乐或消耗 PT 令牌。\n\nSource commit: '+commit+'\n', 'utf-8')
           def gh(*arguments):
               subprocess.run(['gh', *arguments], check=True)
           gh('release', 'create', tag, '--verify-tag', '--target', commit, '--draft', '--title', 'MusicOps '+version, '--notes-file', str(notes))

@@ -209,3 +209,29 @@ def test_busy_background_prevents_exit_and_does_not_cancel_tasks(app,tmp_path):
     assert window.isVisible() and window.timer.isActive() and '取消对应任务' in window.notice.text()
     assert not any(command in ('cancel_task','cancel_workflow') for command,payload in client.calls)
     window.close()
+
+def test_incomplete_playlist_snapshot_with_targets_loads_table_and_updates_progress(app,tmp_path):
+    class PlaylistTaskClient(Client):
+        def __init__(self,base):
+            super().__init__(base);self.polls=0
+        def call(self,command,payload):
+            self.calls.append((command,copy.deepcopy(payload)))
+            if command=='refresh_playlist':return {'accepted':True,'task_id':'playlist-590536461'}
+            if command=='get_task':
+                self.polls+=1
+                if self.polls==1:
+                    return {'task':{'task_id':'playlist-590536461','command':'refresh_playlist','state':'running','progress':40,'step':'正在读取歌单《wsdbb72喜欢的音乐》：已读取 1500 / 4062 首…'}}
+                targets=[{'target_id':'netease:'+str(i),'source':'netease','raw_title':'Song '+str(i),'artists':['Artist'],'album':'' if i<8 else 'Album','metadata_complete':i>=8} for i in range(4062)]
+                return {'task':{'task_id':'playlist-590536461','command':'refresh_playlist','state':'blocked','error_class':'SNAPSHOT_INCOMPLETE','error':'可见曲目已逐曲取详情；清单计数或详情存在未对账项，不能驱动下载','result':{'status':'SNAPSHOT_INCOMPLETE','complete':False,'targets':targets,'reason':'可见曲目已逐曲取详情；清单计数或详情存在未对账项，不能驱动下载'}}}
+            return super().call(command,payload)
+    client=PlaylistTaskClient(tmp_path);window=Workbench(tmp_path,client,autostart=False);window.config=client.config
+    window.playlist.setText('https://music.163.com/playlist?id=590536461&uct2=U2FsdGVkX1/m/zc/A/fa+KUSmvea2dfAVwl/quYKth4=')
+    window.parse()
+    wait(app,lambda:'1500 / 4062' in window.playlist_note.text() or window.track_table.rowCount()==4062)
+    if window.track_table.rowCount()==0:
+        window.poll_tasks()
+        wait(app,lambda:window.track_table.rowCount()==4062)
+    assert window.track_table.rowCount()==4062
+    assert '已载入 4062 首' in window.playlist_note.text() and '含 8 首待识别专辑资料' in window.playlist_note.text()
+    assert '任务未完成' not in window.notice.text()
+    window.close()

@@ -12,8 +12,9 @@ def identifier(value):
     return str(value)
 
 class NetEaseReadOnlyProvider:
-    def __init__(self,transport,config=None,secret_getter=None,checkpoint=None):
-        self.transport=transport;self.config=config or {};self.secret_getter=secret_getter;self.checkpoint=checkpoint or (lambda *_:None)
+    def __init__(self,transport,config=None,secret_getter=None,checkpoint=None,progress=None):
+        self.transport=transport;self.config=config or {};self.secret_getter=secret_getter;self.checkpoint=checkpoint or (lambda *_:None);self.progress=progress or (lambda *_:None)
+        self._batch_index=0;self._fetched_ids=0;self._total_ids=0;self._playlist_name=''
         u=urlsplit(self.config.get('base_url','https://music.163.com'))
         if u.scheme!='https' or u.hostname!='music.163.com' or u.port not in (None,443) or u.username or u.password or u.path not in ('','/') or u.query or u.fragment:raise PolicyBlocked('真实网易云只允许已验证origin')
     def _get(self,path,params):
@@ -85,7 +86,8 @@ class NetEaseReadOnlyProvider:
                 'evidence_level':'live_readonly','download_eligibility':'UNKNOWN','metadata_complete':not missing,'metadata_missing_fields':missing}
     def _batch(self,ids):
         self.checkpoint('netease_batch')
-        if not getattr(self.transport,'is_fake',False):time.sleep(.35)
+        if self._batch_index>0 and not getattr(self.transport,'is_fake',False):time.sleep(.03)
+        self._batch_index+=1
         data=self._get('/api/v3/song/detail',{'c':json.dumps([{'id':int(s),'v':0} for s in ids],separators=(',',':'))})
         if data.get('error_class'):return data
         songs=data.get('songs')
@@ -94,11 +96,18 @@ class NetEaseReadOnlyProvider:
         for index,song in enumerate(songs):
             try:normalized.append(self.normalize_song(song))
             except (ValueError,KeyError,TypeError):item_errors.append({'item_index':index})
+        self._fetched_ids+=len(normalized)
+        if self._total_ids>0:
+            done=min(self._total_ids,self._fetched_ids)
+            pct=min(95,5+int(90*done/max(1,self._total_ids)))
+            self.progress(pct,f"正在读取歌单《{self._playlist_name}》：已读取 {done} / {self._total_ids} 首…")
         return {'songs':normalized,'item_errors':item_errors}
     def refresh(self,playlist_id,batch_size=150):
         pid=identifier(playlist_id)
         try:
             self.checkpoint('netease_manifest');first=self._manifest(pid)
+            self._batch_index=0;self._fetched_ids=0;self._total_ids=len(first['ordered_ids']);self._playlist_name=first.get('name') or pid
+            if self._total_ids>0:self.progress(5,f"正在读取歌单《{self._playlist_name}》：共 {self._total_ids} 首，正在拉取曲目详情…")
             snapshot=build_snapshot(pid,first['ordered_ids'],self._batch,batch_size=batch_size)
             details_complete=snapshot['complete'] and all(s.get('metadata_complete') for s in snapshot['songs']);warnings=[]
             incomplete_metadata=[{'song_id':s['id'],'fields':s['metadata_missing_fields']} for s in snapshot['songs'] if not s.get('metadata_complete')]

@@ -70,3 +70,28 @@ def test_incomplete_refresh_does_not_replace_saved_complete_target(tmp_path,monk
         assert not service.store.list('playlist_snapshots')
         assert service.dispatch('get_playlist_targets')['network_used'] is False
     finally:service.stop.set();service.thread.join(2)
+
+def test_refresh_playlist_fastlane_bypasses_busy_workflow_advance(tmp_path,monkeypatch):
+    import threading,time
+    service=AppService(tmp_path);cfg=copy.deepcopy(service.config.current()['values']);cfg['offline']=False
+    current=service.config.current();service.config.save(cfg,current['version'])
+    snapshot={'snapshot_id':'netease:590536461:partial','complete':False,'songs':[NetEaseReadOnlyProvider.normalize_song({**song(1),'al':{'id':0,'name':''}}),NetEaseReadOnlyProvider.normalize_song(song(2))],'warnings':[{'error_class':'INCOMPLETE_SONG_METADATA'}]}
+    def fake_refresh(self,pid,batch_size=150):
+        self.progress(50,'正在读取歌单《测试》：已读取 1 / 2 首…')
+        return {'status':'SNAPSHOT_INCOMPLETE','snapshot':snapshot}
+    monkeypatch.setattr(NetEaseReadOnlyProvider,'refresh',fake_refresh)
+    try:
+        busy_id='busy-advance-task'
+        service.store.put('tasks',busy_id,{'task_id':busy_id,'command':'advance_workflows','state':'running'})
+        service.active=busy_id
+        accepted=service.dispatch('refresh_playlist',{'playlist_input':'https://music.163.com/playlist?id=590536461&uct2=U2FsdGVkX1/m/zc/A/fa+KUSmvea2dfAVwl/quYKth4='})
+        tid=accepted['task_id']
+        deadline=time.monotonic()+5
+        while time.monotonic()<deadline:
+            t=service.store.get('tasks',tid)
+            if t and t.get('state') in ('completed','blocked'):break
+            time.sleep(.02)
+        t=service.store.get('tasks',tid)
+        assert t and t['state']=='blocked' and len(t['result']['targets'])==2
+    finally:
+        service.active=None;service.stop.set();service.thread.join(2)

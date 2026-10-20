@@ -443,12 +443,16 @@ class Workbench(QMainWindow):
             self.task_polls.add(tid)
             def received(response,task_id=tid):
                 self.task_polls.discard(task_id);task=response.get('task',{})
-                if task.get('state') not in ('completed','failed','blocked','cancelled','recovery_required'):return
+                if task.get('state') not in ('completed','failed','blocked','cancelled','recovery_required'):
+                    if task.get('command')=='refresh_playlist' and task.get('step'):self.playlist_note.setText(str(task['step']))
+                    return
                 callback=self.tasks.pop(task_id,None)
-                result=task.get('result') or {'error':task.get('error','任务未完成')}
-                if task.get('state')!='completed':self.notice.setText('任务未完成：'+str(task.get('error') or result.get('reason') or task.get('state')))
+                raw_result=task.get('result')
+                result=raw_result if isinstance(raw_result,dict) and raw_result else {'error':task.get('error','任务未完成')}
+                has_playlist_targets=task.get('command')=='refresh_playlist' and isinstance(raw_result,dict) and bool(raw_result.get('targets'))
+                if task.get('state')!='completed' and not has_playlist_targets:self.notice.setText('任务未完成：'+str(task.get('error') or result.get('reason') or task.get('state')))
                 error_callback=self.task_failures.pop(task_id,None)
-                if task.get('state')!='completed' and error_callback:error_callback(str(task.get('error') or result.get('reason') or task.get('state')))
+                if task.get('state')!='completed' and not has_playlist_targets and error_callback:error_callback(str(task.get('error') or result.get('reason') or task.get('state')))
                 elif callback:callback(result)
                 self.update_activity()
             def failed(message,task_id=tid):
@@ -498,7 +502,7 @@ class Workbench(QMainWindow):
             if not result.get('targets') and result.get('complete') is not True:
                 self.playlist_note.setText(result.get('reason') or '歌单未读取成功；请检查平台授权，或导入导出的歌单文件。');return
             self.loaded_tracks(result)
-            if result.get('reason'):self.playlist_note.setText(self.playlist_note.text()+' '+result['reason'])
+            if result.get('reason') and not result.get('targets'):self.playlist_note.setText(self.playlist_note.text()+' '+result['reason'])
         self.call('refresh_playlist',payload,parsed,lambda error:self.playlist_note.setText('读取未完成：'+error))
     def loaded_tracks(self,result):
         self.targets=result['targets'];self.track_table.setRowCount(len(self.targets))
@@ -509,10 +513,14 @@ class Workbench(QMainWindow):
             if target.get('source'):state=PLATFORMS.get(target['source'],target['source'])+' · '+state
             for j,value in enumerate((target['raw_title'],' / '.join(target['artists']),target.get('album') or '待识别',state),1):self.track_table.setItem(i,j,QTableWidgetItem(value))
         self.track_table.setUpdatesEnabled(True)
-        self.playlist_note.setText(f'已载入 {len(self.targets)} 首；选择需要入库的曲目。任务会按专辑去重。'+(' 来源清单未完全对账，仅处理你明确选择的可见曲目。' if not result.get('complete',True) else ''))
+        incomplete_count=sum(not t.get('metadata_complete',True) for t in self.targets)
+        suffix=(f'（含 {incomplete_count} 首待识别专辑资料）' if incomplete_count else '')+(' 来源清单未完全对账，仅处理你明确选择的可见曲目。' if not result.get('complete',True) else '')
+        self.playlist_note.setText(f'已载入 {len(self.targets)} 首；选择需要入库的曲目。任务会按专辑去重。'+suffix)
     def select_all(self):
         checked=not all(self.track_table.item(i,0).checkState()==Qt.Checked for i in range(self.track_table.rowCount()))
+        self.track_table.setUpdatesEnabled(False)
         for i in range(self.track_table.rowCount()):self.track_table.item(i,0).setCheckState(Qt.Checked if checked else Qt.Unchecked)
+        self.track_table.setUpdatesEnabled(True)
     def start(self,scene,refresh_resources=False):
         if not self.config.get('workflow',{}).get('setup_done'):self.setup();return
         targets=[self.track_table.item(i,0).data(Qt.UserRole) for i in range(self.track_table.rowCount()) if self.track_table.item(i,0).checkState()==Qt.Checked] if scene=='playlist' else []

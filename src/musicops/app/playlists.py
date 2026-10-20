@@ -19,7 +19,7 @@ def reader(service,platform,cfg):
     if platform=='netease':
         from musicops.providers.netease_readonly import NetEaseReadOnlyProvider
         if not cfg['providers']['netease']['enabled']:raise PolicyBlocked('网易云歌单来源已关闭，请在设置中启用')
-        return NetEaseReadOnlyProvider(SafeHttpTransport(INPUT_HOSTS['netease'],offline=False),cfg['providers']['netease'],service.vault.get,service._checkpoint)
+        return NetEaseReadOnlyProvider(SafeHttpTransport(INPUT_HOSTS['netease'],offline=False),cfg['providers']['netease'],service.vault.get,service._checkpoint,getattr(service,'_update_task_progress',None))
     settings=cfg['playlist_sources'][platform]
     if platform in ('qqmusic','qishui','kugou','kuwo','migu'):
         from musicops.providers.playlist_domestic import DomesticPlaylistProvider,DOMESTIC_HOSTS

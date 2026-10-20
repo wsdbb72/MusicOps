@@ -26,7 +26,7 @@ class AppService:
         self.engines.default_tools=lambda:self.config.current()['values']['paths']['tools']
         self.engines.default_storage=lambda:self.config.current()['values']['paths']['work']
         self.paused=False; self.stop=threading.Event(); self.mutex=threading.RLock()
-        self.active=None; self.thread=threading.Thread(target=self._loop,daemon=True,name='MusicOpsQueue')
+        self.active=None; self._playlist_active=None; self._task_local=threading.local(); self.thread=threading.Thread(target=self._loop,daemon=True,name='MusicOpsQueue')
         for task in self.store.list('tasks'):
             if task['state']=='running' or task['state']=='paused' and task.get('started_at'): task.update(state='recovery_required',error='上次进程中断；先核对事务/请求，不能盲重试'); self.store.put('tasks',task['task_id'],task)
         from musicops.app.pipeline import Workflows
@@ -203,7 +203,7 @@ class AppService:
             for field in payload.get('fields',[]): self.store.put('field_locks',identity+':'+field,dict(identity=identity,field=field,reason=decision['reason']))
             return {'decision':decision}
         if command=='shutdown_worker':
-            if self.active: raise RuntimeError('当前任务尚未到安全退出点，请先暂停流水线')
+            if self.active or getattr(self,'_playlist_active',None): raise RuntimeError('当前任务尚未到安全退出点，请先暂停流水线')
             self.stop.set(); return {'stopped':True,'seeding_unchanged':True}
         if command in ('preview_compilation','merge_compilation','scan_duplicates','merge_duplicates','restore_duplicates','normalize_qbt_tags','browser_solver_preflight','assist_workflows','manual_album_search','restore_workflow','start_workflow','advance_workflows','demo','index_library','compare','search','resources','prepare_fill','prepare_resource','prepare_repair','prepare_dedup','submit_plan','request_rollback','export_report','refresh_playlist','submit_download','recover','pt_preflight','qbt_preflight','ai_analyze','ai_plan','ai_test','lyrics_preflight','identify_metadata','resolve_metadata','accept_metadata','validate_selected_file','roon_preflight'):
             return self.enqueue(command,payload,request_id=request_id)
@@ -219,7 +219,39 @@ class AppService:
             self.workflows.put({'kind':'workflow','job_kind':'activity','job_id':'activity:'+task_id,'task_group':group,'task_type':'review_assistance' if command=='assist_workflows' else 'library_index' if command=='index_library' else 'manual_search' if group=='search' else 'library_restore' if command=='restore_duplicates' else 'library_merge' if command in ('merge_duplicates','merge_compilation') else 'compilation_preview' if command=='preview_compilation' else 'library_dedup' if command=='scan_duplicates' else 'catalog_identification','start_task_id':task_id,'scene':'playlist','stage':'queued','progress':0,'label':str('合并自定义合辑' if command=='merge_compilation' else '校验合辑预览' if command=='preview_compilation' else '恢复合并副本' if command=='restore_duplicates' else '合并重复歌曲与专辑' if command=='merge_duplicates' else '扫描重复歌曲与专辑' if command=='scan_duplicates' else 'AI 辅助核对 · '+str(len(args.get('job_ids',[])))+' 项' if command=='assist_workflows' else '更新本地专辑资料库' if command=='index_library' else args.get('query') or args.get('album') or args.get('title') or '在线资料识别')[:300],'message':'等待检索' if group=='search' else '等待识别','created_at':utcnow(),'target_count':1})
         task=dict(schema_version=1,task_id=task_id,command=command,args=copy.deepcopy(args),state='queued',created_at=utcnow(),config_version=cfg['version'],config_snapshot=cfg,progress=0,result=None)
         self.store.put('tasks',task_id,task); self.store.event('task_queued',{'command':command,'config_version':cfg['version']},task_id)
-        return {'accepted':True,'task_id':task_id,'state':'queued',**({'job_id':batch['job_id'],'batch_id':batch['batch_id']} if batch else {})}
+        if command=='refresh_playlist' and not self.paused and self.active and not getattr(self,'_playlist_active',None):
+            active_task=self.store.get('tasks',self.active)
+            if active_task and active_task.get('command') in ('advance_workflows','assist_workflows'):
+                task.update(state='running',started_at=utcnow(),step='正在连接歌单来源…')
+                self.store.put('tasks',task_id,task); self._playlist_active=task_id
+                threading.Thread(target=self._run_playlist_fastlane,args=(task,),daemon=True,name='MusicOpsPlaylist').start()
+        return {'accepted':True,'task_id':task_id,'state':task['state'],**({'job_id':batch['job_id'],'batch_id':batch['batch_id']} if batch else {})}
+    def _update_task_progress(self,progress,step):
+        tid=getattr(getattr(self,'_task_local',None),'task_id',None) or self.active
+        if not tid:return
+        current=self.store.get('tasks',tid)
+        if not current or current.get('state')!='running':return
+        current.update(progress=int(progress),step=str(step))
+        self.store.put('tasks',tid,current)
+    def _run_playlist_fastlane(self,task):
+        self._task_local.task_id=task['task_id']
+        try:
+            self._checkpoint('before_execute')
+            result=self._execute(task['command'],task['args'],task['config_snapshot']['values'])
+            state=result.get('state',result.get('status','')) if isinstance(result,dict) else ''
+            mapped=self._task_state(state)
+            task.update(state=mapped,progress=100 if mapped=='completed' else 0,result=redact(result),finished_at=utcnow())
+            if mapped!='completed': task.update(error=result.get('reason',result.get('error',state)),error_class=result.get('error_class',state))
+        except Exception as e:
+            error_class=getattr(e,'error_class',type(e).__name__)
+            state=self._task_state(error_class)
+            if state=='completed':state='failed'
+            task.update(state=state,error=redact(str(e)),error_class=error_class,finished_at=utcnow())
+        finally:
+            saved=self.store.get('tasks',task['task_id'])
+            if saved and saved.get('cancel_requested'): task['cancel_requested']=True; task['cancel_result']='任务已到安全点，未自动回滚或停种'
+            self.store.put('tasks',task['task_id'],task); self.store.event('task_'+task['state'],{'command':task['command'],'error':task.get('error'),'result':task.get('result')},task['task_id'])
+            self._playlist_active=None; self._task_local.task_id=None
     def _loop(self):
         # Finalization/scheduler errors must not silently kill the only queue
         # thread while leaving a healthy-looking IPC server and active task.
@@ -248,7 +280,7 @@ class AppService:
         while not self.stop.wait(.1):
             with self.mutex:
                 if self.paused: continue
-                with self.store.connection() as c:row=c.execute("SELECT payload FROM tasks WHERE json_extract(payload,'$.state')='queued' ORDER BY updated_at,id LIMIT 1").fetchone()
+                with self.store.connection() as c:row=c.execute("SELECT payload FROM tasks WHERE json_extract(payload,'$.state')='queued' ORDER BY CASE json_extract(payload,'$.command') WHEN 'refresh_playlist' THEN 0 WHEN 'manual_album_search' THEN 1 WHEN 'identify_metadata' THEN 1 WHEN 'resolve_metadata' THEN 1 WHEN 'accept_metadata' THEN 1 WHEN 'assist_workflows' THEN 3 WHEN 'advance_workflows' THEN 4 ELSE 2 END,updated_at,id LIMIT 1").fetchone()
                 if row is None:
                     # A large AI backlog must not prevent already-resolved
                     # albums from searching, downloading and reaching validation.
@@ -296,16 +328,17 @@ class AppService:
         if self.stop.is_set():raise TaskCancelled('后台正在退出，请在更新完成后重试连接')
         if threading.current_thread() is self.thread:self._checkpoint(phase,wait_for_resume=phase!='managed_service_start')
     def _checkpoint(self,phase,*,wait_for_resume=True):
-        if not self.active or getattr(self,'_safe_finalizing',False):return
+        task_id=getattr(getattr(self,'_task_local',None),'task_id',None) or self.active
+        if not task_id or getattr(self,'_safe_finalizing',False):return
         marked=False
         while True:
-            current=self.store.get('tasks',self.active)
+            current=self.store.get('tasks',task_id)
             if not current or current.get('cancel_requested') or current['state']=='cancelled' or self.stop.is_set(): raise TaskCancelled('已在安全阶段取消后续步骤；已消费令牌与保种记录保留')
             if not self.paused or not wait_for_resume:
-                if marked: current['state']='running';self.store.put('tasks',self.active,current)
+                if marked: current['state']='running';self.store.put('tasks',task_id,current)
                 return
             if not marked:
-                current.update(state='paused',safe_phase=phase);self.store.put('tasks',self.active,current);self.store.event('task_safe_paused',{'phase':phase,'seeding_unchanged':True},self.active);marked=True
+                current.update(state='paused',safe_phase=phase);self.store.put('tasks',task_id,current);self.store.event('task_safe_paused',{'phase':phase,'seeding_unchanged':True},task_id);marked=True
             self.stop.wait(.1)
     def _validator(self,cfg):
         from musicops.media.validation import MediaValidator
@@ -774,7 +807,7 @@ class AppService:
             if parsed['status']!='OK':raise ValueError('请输入有效的网易云歌单 ID 或链接')
             ids=parsed['playlist_ids']
         if not ids:raise PolicyBlocked('请先保存真实歌单ID或链接')
-        provider=NetEaseReadOnlyProvider(SafeHttpTransport(['music.163.com'],offline=False),cfg['providers']['netease'],self.vault.get,self._checkpoint)
+        provider=NetEaseReadOnlyProvider(SafeHttpTransport(['music.163.com'],offline=False),cfg['providers']['netease'],self.vault.get,self._checkpoint,self._update_task_progress)
         summaries=[];targets={};all_complete=True;complete_ids=set()
         for pid in ids:
             outcome=provider.refresh(pid,batch_size=cfg['netease']['batch_size']);snapshot=outcome.get('snapshot')
@@ -794,6 +827,9 @@ class AppService:
         membership=self._persist_playlist_targets(targets,complete_ids)
         return {'status':'OK' if all_complete else 'SNAPSHOT_INCOMPLETE','complete':all_complete,'snapshots':summaries,'targets':list(targets.values()),**membership,'read_only':True,'reason':'' if all_complete else '可见曲目已逐曲取详情；清单计数或详情存在未对账项，不能驱动下载'}
     def _persist_playlist_targets(self,targets,complete_ids):
+        with self.mutex:
+            return self._persist_playlist_targets_locked(targets,complete_ids)
+    def _persist_playlist_targets_locked(self,targets,complete_ids):
         # Reconcile only fully refreshed playlists. Unrefreshed memberships and
         # previous complete evidence survive an incomplete/network-failed refresh.
         existing={t['target_id']:t for t in self.store.list('target_tracks')}

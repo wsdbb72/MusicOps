@@ -14,7 +14,10 @@ def scan(config,secret_getter):
     try:
         with httpx.Client(verify=True,follow_redirects=False,timeout=15) as client:
             r=client.get(config['url'].rstrip('/')+'/rest/startScan',params={'u':config['username'],'t':token,'s':salt,'v':'1.16.1','c':'MusicOps','f':'json'})
-        response=r.json().get('subsonic-response',{})
+        try:
+            payload=r.json();response=payload.get('subsonic-response',{}) if isinstance(payload,dict) else {}
+            if not isinstance(response,dict):raise ValueError()
+        except (ValueError,TypeError):raise HttpError('INVALID_PAYLOAD','Navidrome 返回无效扫描结果；音乐已入库，可在修复连接后重试通知') from None
         if r.status_code!=200 or response.get('status')!='ok':raise HttpError('ACCESS_BLOCKED','Navidrome 扫描未通过，请确认账号具有扫描权限')
         return {'state':'requested','message':'已请求 Navidrome 扫描；Roon 由监听目录自动扫描'}
     except httpx.HTTPError:raise HttpError('NETWORK_ERROR','Navidrome 扫描请求失败') from None

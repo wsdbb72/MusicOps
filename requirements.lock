@@ -10,6 +10,7 @@ httpx==0.28.1
 idna==3.20
 iniconfig==2.3.1
 mutagen==1.48.1
+opencc-python-reimplemented==0.1.7
 packaging==26.3
 pefile==2024.8.26
 pillow==12.3.0

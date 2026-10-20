@@ -23,9 +23,12 @@ def finish(workflows,job):
         if result['status']!='OK':raise PolicyBlocked(result.get('reason','做种目录迁移未通过，临时文件保留'))
         job['source_path']=result['source_path'];job['seeding_path']=result['source_path']
     # Publication targets must still match their committed hashes before cleanup.
-    for op in job.get('publication_plan',{}).get('operations',[]):
+    for op in (job.get('publication_plan') or {}).get('operations',[]):
         target=Path(cfg['paths']['library'])/op['destination'];reject_reparse_chain(target)
         if not target.is_file() or sha256_file(target)!=op['source_hash']:raise PolicyBlocked('入库文件已改变，暂不清理原始下载')
+    for rel,expected_hash in (job.get('verified_destinations') or {}).items():
+        target=Path(cfg['paths']['library'])/rel;reject_reparse_chain(target)
+        if not target.is_file() or sha256_file(target)!=expected_hash:raise PolicyBlocked('已核验现有文件发生改变，暂不清理临时副本')
     manifest=job.get('temporary_cleanup')
     if manifest is None:
         manifest={}

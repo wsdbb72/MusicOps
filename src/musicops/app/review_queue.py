@@ -10,7 +10,7 @@ def register(service, job, apply_verified=True, retry=False):
     if job.get('hidden') or job.get('job_kind') in ('batch', 'activity') or job.get('stage') not in ('needs_review', 'failed', 'skipped'):
         return False
     # Spending without a personal FL token always requires the human's choice.
-    if job.get('review_kind') == 'token':
+    if job.get('review_kind') == 'token' or job.get('version_choice'):
         return False
     if not retry:
         with service.store.connection() as connection:
@@ -43,7 +43,7 @@ def submit(service, args):
         rounds=collections.Counter(row['job_id'] for row in previous.values())
         connection.execute('BEGIN IMMEDIATE')
         for job in jobs:
-            if not job or job.get('hidden') or job.get('job_kind') in ('batch','activity') or job.get('stage') not in ('needs_review','failed','skipped') or job.get('review_kind')=='token':continue
+            if not job or job.get('hidden') or job.get('job_kind') in ('batch','activity') or job.get('stage') not in ('needs_review','failed','skipped') or job.get('review_kind')=='token' or job.get('version_choice'):continue
             revision=review_revision(job);key='ai-review:'+digest({'job':job['job_id'],'revision':revision})
             existing=previous.get(key)
             retry_entry=retry or bool(existing and (existing['state'] in ('failed','blocked','recovery_required') or (job.get('ai_assistance') or {}).get('status')=='FAILED'))

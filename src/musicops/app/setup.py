@@ -68,6 +68,7 @@ def save_setup(service,payload):
         if not isinstance(settings,dict) or set(settings)-{'managed','enabled','base_url','timeout','executable','auto_start'}:raise ValueError('浏览器验证设置无效')
         values['browser_solver'].update(settings)
     if 'catalog_web' in payload:values['catalog']['web_enabled']=bool(payload['catalog_web'])
+    if 'prefer_simplified' in payload:values['metadata']['prefer_simplified']=bool(payload['prefer_simplified'])
     if payload.get('discogs_token'):secret('discogs','https://api.discogs.com',payload['discogs_token'],('catalog','discogs','credential_ref'))
     server=payload.get('servers',{})
     roon=values['music_servers']['roon'];roon['enabled']=bool(server.get('roon',roon['enabled']))

@@ -18,6 +18,7 @@ from musicops.media.validation import MediaValidator,_run
 from musicops.media.resources import validate_cover,validate_lrc
 from musicops.media.tags import read_tag_fields,apply_tag_changes,embedded_covers,apply_cover_changes
 from musicops.performance import bounded_map
+from musicops.media.chinese import alias_key
 
 
 def _release_key(row):
@@ -33,12 +34,12 @@ def _release_key(row):
     return ('' if proposal.get('source')=='musicbrainz' else str(proposal.get('source'))+':')+str(proposal['release_id'])
 
 def _album(row):
-    return (_release_key(row),strict_text(row.get('album')),tuple(sorted(strict_text(a) for a in (row.get('albumartist') or row.get('artists',[])))),strict_text(row.get('edition')),strict_text(row.get('catalogue')))
+    return (_release_key(row),alias_key(row.get('album')),tuple(sorted(alias_key(a) for a in (row.get('albumartist') or row.get('artists',[])))),strict_text(row.get('edition')),strict_text(row.get('catalogue')))
 
 def _slot(row):
     disc=str(row.get('disc') or '1').split('/')[0];track=str(row.get('track') or '').split('/')[0]
     if disc.isdigit() and track.isdigit() and int(track)>0:return (str(int(disc)),str(int(track)))
-    return ('title',strict_text(row.get('raw_title')),tuple(sorted(strict_text(a) for a in row.get('artists',[]))))
+    return ('title',alias_key(row.get('raw_title')),tuple(sorted(alias_key(a) for a in row.get('artists',[]))))
 
 def _rank(row,preferences=None):
     info=row.get('media_info',{});codec=str(info.get('codec_name',info.get('codec','')))
@@ -85,11 +86,14 @@ def scan(service,cfg):
     root=Path(cfg['paths']['library']).resolve()
     # Use the incremental index, not a full-library decode/hash pass.
     service._index_real_library({'lightweight':True},cfg)
+    from musicops.app.library_safety import seeding_roots
+    seed_roots=seeding_roots(service,cfg)
     groups=collections.defaultdict(list)
     locked={r.get('identity') for r in service.store.list('field_locks')}|{r.get('identity') for r in service.store.list('suppressions') if r.get('active')}
     for row in service.store.list('library_files'):
         path=Path(row.get('path',''))
         if row.get('location_state','library')!='library' or row.get('read_error') or not path.is_relative_to(root):continue
+        if any(path==p or path.is_relative_to(p) for p in seed_roots):continue
         key=_album(row)
         if not key[1] or not key[2] or not row.get('raw_title') or not row.get('duration'):continue
         groups[key].append(row)
@@ -169,7 +173,11 @@ def _prepare(service,cfg,rows,confirmed_release):
         operations.append({'operation_id':plan_id+':p:'+str(len(operations)),'kind':'replace' if replace_hash else 'publish','source':str(stage),'source_hash':content_hash,'destination':relative,'before_hash':replace_hash})
     for slot,versions in slots.items():
         first=versions[0]
-        if any(not identities_same(first,r) for r in versions[1:]):raise Conflict('同曲号存在歌名、歌手、时长或版本冲突')
+        def spelling(row):
+            return {**row,'raw_title':alias_key(row.get('raw_title')),'artists':[alias_key(a) for a in row.get('artists',[])],'album':alias_key(row.get('album')),'albumartist':[alias_key(a) for a in row.get('albumartist',[])]}
+        if any(not identities_same(spelling(first),spelling(r)) for r in versions[1:]):raise Conflict('同曲号存在歌名、歌手、时长或版本冲突')
+        dsd={str(r['media_info'].get('codec_name','')).startswith('dsd') for r in versions}
+        if len(dsd)>1:raise Conflict('DSD 与 PCM 音源保留为独立版本，不自动替换')
         if len({str(r.get('media_info',{}).get('channels')) for r in versions})>1:raise Conflict('不同声道版本分别保留')
         if len({str(r.get('media_info',{}).get('codec_name','')).startswith('dsd') for r in versions})>1:raise Conflict('DSD 与 PCM 版本分别保留')
         if not confirmed_release and len({r['sha256'] for r in versions})>1:
@@ -247,8 +255,11 @@ def merge(service,cfg,args):
                 reject_reparse_chain(path,Path(cfg['paths']['library']))
                 if sha256_file(path)!=(item.get('before_hash') or item['sha256']):raise Conflict('保留版本发生变化，请重新扫描')
             elif not any(op['kind'] in ('publish','replace') and Path(cfg['paths']['library'])/op['destination']==path for op in plan['operations']):raise Conflict('保留版本已丢失，拒绝移出重复文件')
+        from musicops.app.library_safety import protect_seeding
+        protect_seeding(service,cfg,[op['source'] for op in plan['operations'] if op['kind']=='quarantine']+[r['path'] for r in plan['keep_files']])
         plan=copy.deepcopy(plan);plan['reviewed']=True
         tx=service._engine(cfg).execute(plan);transactions.append({'tx_id':tx['tx_id'],'state':tx['state'],'group_id':ident})
+        if tx['state']=='COMMITTED':_cleanup_work(cfg,plan['plan_id'])
         service.store.put('evidence','duplicate-latest',{'kind':'duplicate_merge_history','scan_id':args['scan_id'],'transactions':transactions})
     service._post_transaction(cfg)
     return {'status':'OK','transactions':transactions,'merged_groups':len(transactions),'message':'合并完成，旧副本已进入可恢复隔离区；下载和做种源未改动。'}
@@ -257,8 +268,23 @@ def restore(service,cfg,args):
     from musicops.library.transactions import digest as plan_digest
     tx=service.store.get('transactions',str(args.get('tx_id')))
     plan=service.store.get('change_plans',tx['plan_id']) if tx else None
-    if not tx or not plan or not str(plan.get('plan_id','')).startswith('merge-') or plan.get('preview',{}).get('kind') not in ('album_merge','song_dedup'):
+    if not tx or not plan or not str(plan.get('plan_id','')).startswith('merge-') or plan.get('preview',{}).get('kind') not in ('album_merge','song_dedup','manual_compilation'):
         raise PolicyBlocked('只能通过此入口恢复 MusicOps 去重合并事务')
     reviewed=copy.deepcopy(plan);reviewed['reviewed']=True
     if plan_digest(reviewed)!=tx.get('plan_hash'):raise Conflict('合并记录与事务不一致，未恢复文件')
     result=service._engine(cfg).rollback(tx['tx_id']);service._post_transaction(cfg);return result
+
+def _cleanup_work(cfg,plan_id):
+    if not str(plan_id).startswith('merge-'):return
+    work=Path(cfg['paths']['work'])/plan_id
+    if not work.exists():return
+    reject_reparse_chain(work,Path(cfg['paths']['work']))
+    for sub in ('prepared','metadata'):
+        folder=work/sub
+        if not folder.is_dir():continue
+        reject_reparse_chain(folder,work)
+        for item in list(folder.iterdir()):
+            reject_reparse_chain(item,folder)
+            if item.is_file():item.unlink()
+        if not any(folder.iterdir()):folder.rmdir()
+    if work.is_dir() and not any(work.iterdir()):work.rmdir()

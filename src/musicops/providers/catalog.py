@@ -555,6 +555,8 @@ class CatalogResolver:
                                     duration=_duration(data.get('length'), True),
                                     identity_evidence=[{'kind': 'official_api_detail', 'source': 'musicbrainz', 'entity_id': ident}])
         relations = self._relations(data)
+        representation=data.get('text-representation')
+        if isinstance(representation,dict) and isinstance(representation.get('language'),str):candidate['language']=representation['language']
         group = data.get('release-group')
         if isinstance(group, dict):
             relations.extend(self._relations(group))

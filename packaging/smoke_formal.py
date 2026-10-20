@@ -9,8 +9,8 @@ def main():
     bundle=Path(args.bundle).resolve();base=Path(args.profile).resolve();base.mkdir(parents=True,exist_ok=True);Path(args.screenshot).parent.mkdir(parents=True,exist_ok=True)
     env=os.environ.copy();env['PATH']=str(Path(os.environ['SystemRoot'])/'System32');env['QT_QPA_PLATFORM']='offscreen'
     for key in ('PYTHONPATH','PYTHONHOME','VIRTUAL_ENV'):env.pop(key,None)
-    process=subprocess.Popen([str(bundle/'MusicOps.exe'),'--base',str(base),'--screenshot',args.screenshot,'--quit-after','10000'],cwd=bundle,env=env,creationflags=0x08000000)
-    client=WorkerClient(base);report={'evidence':'public_packaged_exe_real_named_pipe','version':'0.4.9','checks':{},'external_requests':0,'music_writes':0}
+    process=subprocess.Popen([str(bundle/'MusicOps.exe'),'--base',str(base),'--screenshot',args.screenshot,'--quit-after','180000'],cwd=bundle,env=env,creationflags=0x08000000)
+    client=WorkerClient(base);report={'evidence':'public_packaged_exe_real_named_pipe','version':__import__('musicops').__version__,'checks':{},'external_requests':0,'music_writes':0}
     def task(command,payload):
         accepted=client.call(command,payload);deadline=time.monotonic()+30
         while time.monotonic()<deadline:
@@ -19,7 +19,7 @@ def main():
             time.sleep(.05)
         raise TimeoutError(command)
     try:
-        deadline=time.monotonic()+20
+        deadline=time.monotonic()+90
         while True:
             try:initial=client.call('get_status',{'compact':True});break
             except (OSError,EOFError):
@@ -42,7 +42,7 @@ def main():
         state=client.call('get_status',{'compact':True});report['checks']['native_dpapi_credential_editing']=any(r['ref']=='vault://catalog/discogs/token' for r in state['secret_refs'])
         report['checks']['configured_secret_not_in_status']='virtual-native-token' not in json.dumps(state)
         invalid=task('refresh_playlist',{'playlist_id':'0'});report['checks']['netease_guard_before_network']=invalid.get('error_class')=='ValueError'
-        process.wait(timeout=20);report['checks']['gui_exit_zero']=process.returncode==0
+        process.wait(timeout=195);report['checks']['gui_exit_zero']=process.returncode==0
         report['checks']['formal_startup_screenshot']=Path(args.screenshot).is_file() and Path(args.screenshot).stat().st_size>1000
         report['passed']=all(report['checks'].values())
     except Exception as exc:report.update(passed=False,error_class=type(exc).__name__,error=str(exc))

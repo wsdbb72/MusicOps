@@ -120,7 +120,9 @@ class ManagedServices:
         self.tool_config[name]=tools
         try:
             with httpx.Client(trust_env=False, follow_redirects=False, timeout=2) as client:
-                deadline = time.monotonic() + 60
+                # A first Chromium launch can exceed a minute on efficiency
+                # cores while Windows verifies the freshly installed binaries.
+                deadline = time.monotonic() + (120 if name=='flaresolverr' else 60)
                 while time.monotonic() < deadline:
                     self.checkpoint('managed_service_start')
                     if process.poll() is not None:

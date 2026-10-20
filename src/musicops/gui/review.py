@@ -41,7 +41,7 @@ class ReviewDialog(QDialog):
         self.tabs.addTab(page, '曲目资料')
         page = QWidget(); form = QVBoxLayout(page)
         form.addWidget(QLabel('选择实际需要的音源；最终仍会核对下载音频、曲目和发行。'))
-        self.candidates = QTableWidget(0, 6); self.candidates.setHorizontalHeaderLabels(['专辑 / 资源', '艺人', '站点', '格式 / 编码', '做种', '匹配']); self.candidates.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch); self.candidates.verticalHeader().setVisible(False); self.candidates.verticalHeader().setDefaultSectionSize(44); self.candidates.setAlternatingRowColors(True); self.candidates.setSelectionBehavior(QAbstractItemView.SelectRows); self.candidates.setSelectionMode(QAbstractItemView.SingleSelection); self.candidates.setEditTriggers(QAbstractItemView.NoEditTriggers); form.addWidget(self.candidates)
+        self.candidates = QTableWidget(0, 6); self.candidates.setHorizontalHeaderLabels(['专辑 / 资源', '艺人', '站点', '格式 / 编码', '做种', '匹配']); self.candidates.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch); self.candidates.verticalHeader().setVisible(False); self.candidates.verticalHeader().setDefaultSectionSize(44); self.candidates.setAlternatingRowColors(True); self.candidates.setSelectionBehavior(QAbstractItemView.SelectRows); self.candidates.setSelectionMode(QAbstractItemView.SingleSelection); self.candidates.setEditTriggers(QAbstractItemView.NoEditTriggers); self.candidates.itemChanged.connect(self.candidate_item_changed); form.addWidget(self.candidates)
         self.candidate_use = QPushButton('采用所选音源并继续'); self.candidate_use.clicked.connect(self.submit_candidate); form.addWidget(self.candidate_use); self.tabs.addTab(page, '候选音源')
         page = QWidget(); form = QVBoxLayout(page)
         form.addWidget(QLabel('搜索词可自行调整；只在勾选的已启用站点重新检索。'))
@@ -86,12 +86,32 @@ class ReviewDialog(QDialog):
             self.catalog.addItem(' · '.join([str(candidate.get('source', '')), str(candidate.get('title', '')), ' / '.join(candidate.get('artists', [])), str(candidate.get('album') or '')]))
         self.catalog_use.setEnabled(bool(self.catalog_rows and rows)); self.catalog.setEnabled(bool(self.catalog_rows))
         self.complete_release.setVisible(job.get('scene')=='fill' and job.get('review_kind')=='metadata');self.complete_release.setEnabled(bool(self.catalog_rows))
-        choices = job.get('choices') or []; self.candidates.setRowCount(len(choices)); self.candidates.clearSelection()
-        for i, candidate in enumerate(choices):
-            media = candidate.get('media') or {}; recommended = valid and proposal.get('candidate_id') == candidate.get('candidate_id')
-            for j, value in enumerate([candidate.get('title', ''), ' / '.join(candidate.get('artists', [])), SITE_NAMES.get(candidate.get('source'), candidate.get('source', '')), str(media.get('format') or '') + ' / ' + str(media.get('encoding') or ''), str(candidate.get('seeders') or 0), 'AI 推荐' if recommended else '精准匹配' if candidate.get('identity_exact') else '需人工核对']):
-                item = QTableWidgetItem(value); item.setToolTip(value); self.candidates.setItem(i, j, item)
-            if recommended: self.candidates.selectRow(i)
+        from musicops.domain.editions import describe
+        choices=list(job.get('choices') or []);groups={}
+        for c in choices:groups.setdefault(describe(c)['group_id'],len(groups)+1)
+        if job.get('version_choice'):choices.sort(key=lambda c:groups[describe(c)['group_id']])
+        self.candidate_choices=choices;self.candidate_groups=[describe(c)['group_id'] for c in choices]
+        self.candidates.blockSignals(True)
+        try:
+            self.candidates.setRowCount(len(choices));self.candidates.clearSelection()
+            for i, candidate in enumerate(choices):
+                media = candidate.get('media') or {}; recommended = valid and proposal.get('candidate_id') == candidate.get('candidate_id')
+                for j, value in enumerate([candidate.get('title', ''), ' / '.join(candidate.get('artists', [])), SITE_NAMES.get(candidate.get('source'), candidate.get('source', '')), str(media.get('format') or '') + ' / ' + str(media.get('encoding') or ''), str(candidate.get('seeders') or 0), 'AI 推荐' if recommended else '精准匹配' if candidate.get('identity_exact') else '需人工核对']):
+                    item = QTableWidgetItem(value); item.setToolTip(value); self.candidates.setItem(i, j, item)
+                version=describe(candidate)
+                text=version['label']+' · '+str(version['year'] or '年份待确认')+' · '+str(version['catalogue'] or '目录号待确认')+' · '+str(version['medium'] or '介质待确认')
+                self.candidates.item(i,0).setToolTip(candidate.get('title','')+'\n版本分组线索（非已确认发行）：'+text)
+                if job.get('version_choice'):
+                    self.candidates.item(i,0).setText(candidate.get('title','')+'\n'+version['label']+' · '+str(version['year'] or '年份未知'))
+                    self.candidates.item(i,5).setText('版本组 '+str(groups[version['group_id']])+'\n'+self.candidates.item(i,5).text())
+                    self.candidates.item(i,0).setFlags(self.candidates.item(i,0).flags()|Qt.ItemIsUserCheckable)
+                    self.candidates.item(i,0).setCheckState(Qt.Unchecked)
+                    self.candidates.setRowHeight(i,68)
+                if recommended:self.candidates.selectRow(i)
+        finally:
+            self.candidates.blockSignals(False)
+        if job.get('version_choice'):
+            self.candidates.horizontalHeader().setSectionResizeMode(0,QHeaderView.Interactive);self.candidates.setColumnWidth(0,260)
         first = rows[0] if rows else {}; query = proposal.get('search_query') if valid else None
         self.query.setText(query or job.get('search_query') or (' '.join(first.get('artists', [])) + ' ' + first.get('album', '')).strip())
         outcomes = job.get('outcomes') or job.get('source_outcomes') or {}
@@ -99,6 +119,7 @@ class ReviewDialog(QDialog):
         waiting = job.get('stage') in {'needs_review', 'failed', 'skipped'}
         self.save_metadata.setEnabled(waiting and bool(rows) and (job.get('review_kind') == 'metadata' or job.get('task_type') in {'identification', 'search'}))
         self.candidate_use.setEnabled(job.get('stage') == 'needs_review' and job.get('review_kind') == 'candidate' and bool(choices))
+        self.update_candidate_button()
         self.research.setEnabled(waiting and (job.get('task_type') == 'search' or job.get('review_kind') == 'search' or job.get('task_type') == 'manual_search'))
         self.ai_button.setEnabled(waiting)
         self.fallback_button.setVisible(job.get('review_kind')=='search' and job.get('scene') in ('playlist','fill'))
@@ -133,8 +154,35 @@ class ReviewDialog(QDialog):
         rows = [{key: self.metadata.item(i, j).text() for j, key in enumerate(('title', 'artist', 'album', 'duration'))} for i in range(self.metadata.rowCount())]
         self.send({'choice': 'edit_metadata', 'metadata': rows})
 
+    def candidate_item_changed(self, item):
+        if not self.job.get('version_choice') or item.column() != 0: return
+        if item.checkState() == Qt.Checked:
+            row = item.row()
+            if 0 <= row < len(getattr(self, 'candidate_groups', [])):
+                gid = self.candidate_groups[row]
+                self.candidates.blockSignals(True)
+                try:
+                    for i, other_gid in enumerate(self.candidate_groups):
+                        if i != row and other_gid == gid and self.candidates.item(i, 0) and self.candidates.item(i, 0).checkState() == Qt.Checked:
+                            self.candidates.item(i, 0).setCheckState(Qt.Unchecked)
+                            self.result.setText('同一版本组只需选择一个站点，已自动切换为当前勾选站点')
+                finally:
+                    self.candidates.blockSignals(False)
+        self.update_candidate_button()
+
+    def update_candidate_button(self):
+        if not self.job.get('version_choice'):
+            self.candidate_use.setText('采用所选音源并继续'); return
+        checked = sum(1 for i in range(self.candidates.rowCount()) if self.candidates.item(i, 0) and self.candidates.item(i, 0).checkState() == Qt.Checked)
+        self.candidate_use.setText(f'采用勾选的 {checked} 个版本（每版选一个站点）' if checked else '采用勾选的一个或几个版本（每版选一个站点）')
+
     def submit_candidate(self):
-        row = self.candidates.currentRow(); choices = self.job.get('choices') or []
+        if self.job.get('version_choice'):
+            choices=self.candidate_choices
+            selected=[c['candidate_id'] for i,c in enumerate(choices) if self.candidates.item(i,0).checkState()==Qt.Checked]
+            if not selected:self.result.setText('请勾选要保留的版本，每个版本只选一个站点音源');return
+            self.send({'choice':selected});return
+        row = self.candidates.currentRow(); choices = self.candidate_choices
         if row < 0 or row >= len(choices): self.result.setText('请选择需要的音源'); return
         self.send({'choice': choices[row]['candidate_id']})
     def submit_complete_release(self):

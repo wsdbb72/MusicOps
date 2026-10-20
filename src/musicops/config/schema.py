@@ -20,7 +20,7 @@ def default_config(base,offline=True):
       ai=dict(enabled=False,protocol='responses',base_url='https://ai.example.invalid/v1',model='',auth_secret_ref='vault://ai/default/key',timeout=60,max_output_tokens=2048,temperature=0.2,structured_outputs=True,allow_plan_only=True),
       catalog=dict(enabled=True,web_enabled=True,timeout=15,candidate_limit=20,cache_ttl=86400,cache_entries=128,musicbrainz=dict(enabled=True),discogs=dict(enabled=True,credential_ref='vault://catalog/discogs/token')),
       quality=dict(lossless_first=True,format_order=['flac','alac','wav','aiff','mp3','aac'],prefer_24bit=False,dsd_policy='preserve',multichannel='separate',upgrade_suggestions=True),
-      metadata=dict(preserve_multivalue=True,directory_template='{albumartist}/{album} [{edition}]/CD{disc}/{track} {title}',track_padding=2,preserve_unknown=True,overwrite='review',locked_fields=[]),
+      metadata=dict(prefer_simplified=True,preserve_multivalue=True,directory_template='{albumartist}/{album} [{edition}]/CD{disc}/{track} {title}',track_padding=2,preserve_unknown=True,overwrite='review',locked_fields=[]),
       repair=dict(mode='report',fields=['album','albumartist','artist','title','date','tracknumber','discnumber'],backup_retention_days=90),
       dedup=dict(mode='report',same_release_required=True,permanent_delete=False),
       scheduler=dict(enabled=False,mode='report',timezone='Asia/Shanghai',playlist_time='06:30',health_weekday=6,health_time='07:00',missed='report_once',notify='meaningful_changes'),

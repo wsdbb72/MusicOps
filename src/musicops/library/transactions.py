@@ -138,8 +138,8 @@ class TransactionEngine:
             self._check_hash(source, operation['before_hash'])
             self._check_hash(destination, None)
             reason = operation.get('quarantine_reason')
-            if reason not in {'duplicate', 'corrupt', 'manual_suppression'}:
-                raise ValidationFailed('隔离原因须明确duplicate/corrupt/manual_suppression')
+            if reason not in {'duplicate', 'corrupt', 'manual_suppression', 'compilation_merge'}:
+                raise ValidationFailed('隔离原因须明确duplicate/corrupt/manual_suppression/compilation_merge')
         else:
             if not any(within(source, self.roots[key]) for key in ['source', 'work']):
                 raise PathBlocked('发布来源必须位于来源或工作根目录')
@@ -418,7 +418,7 @@ class TransactionEngine:
                    'location_state': 'quarantine' if op['kind'] == 'quarantine' else 'library', 'validation': op['validation'],
                    'roon_state': 'pending', 'quarantine_path': op['destination'] if op['kind'] == 'quarantine' else None,
                    'quarantine_reason': op.get('quarantine_reason')}
-            self.store.put('library_files', file_id, row)
+            self._store_audio(file_id, row)
             self.store.put('transaction_files', op['operation_id'], {**op, 'tx_id': tx['tx_id'], 'state': 'COMMITTED'})
             if op['kind'] == 'quarantine':
                 self.store.put('suppressions', op['operation_id'], {'schema_version': 1, 'identity': file_id, 'reason': op['quarantine_reason'], 'location_state': 'quarantine', 'tx_id': tx['tx_id'], 'active': True, 'created_at': now()})
@@ -432,6 +432,14 @@ class TransactionEngine:
             raise
         self._write(tx, database=False)
         self._event('transaction_committed', tx)
+
+    def _store_audio(self, file_id, row):
+        # Companion files remain in transaction history, never in the song index.
+        if Path(row.get('path','')).suffix.casefold() in AUDIO_EXTENSIONS:
+            self.store.put('library_files', file_id, row)
+        else:
+            with self.store.connection() as connection:
+                connection.execute('DELETE FROM library_files WHERE id=?',(file_id,))
 
     def _load(self, tx_id):
         path = self._manifest_path(tx_id)
@@ -577,13 +585,13 @@ class TransactionEngine:
             self._event('file_rollback_verified', tx, {'operation_id': op['operation_id'], 'before_path': op['source'] if op['kind'] == 'quarantine' else op['destination'], 'restored_hash': op['before_hash']})
         old_ids = {item['file_id'] for item in tx['state_before'] if item.get('file_id')}
         for item in tx['state_before']:
-            self.store.put('library_files', item.get('file_id') or item['id'], item)
+            self._store_audio(item.get('file_id') or item['id'], item)
         for op in tx['operations']:
             file_path = op['source'] if op['kind'] == 'quarantine' else op['destination']
             file_id = op.get('file_id') or str(uuid.uuid5(uuid.NAMESPACE_URL, str(file_path).casefold()))
             if file_id not in old_ids:
                 # A tombstone is explicit; never misrepresent a deleted new publication as healthy.
-                self.store.put('library_files', file_id, {'schema_version': 1, 'file_id': file_id, 'path': file_path, 'location_state': 'library' if op['before_hash'] else 'rolled_back', 'sha256': op['before_hash'], 'read_error': 'RESTORED_REINDEX_REQUIRED' if op['before_hash'] else None, 'tx_id': tx['tx_id'], 'roon_state': 'pending'})
+                self._store_audio(file_id, {'schema_version': 1, 'file_id': file_id, 'path': file_path, 'location_state': 'library' if op['before_hash'] else 'rolled_back', 'sha256': op['before_hash'], 'read_error': 'RESTORED_REINDEX_REQUIRED' if op['before_hash'] else None, 'tx_id': tx['tx_id'], 'roon_state': 'pending'})
             self.store.put('transaction_files', op['operation_id'], {**op, 'tx_id': tx['tx_id'], 'state': 'ROLLED_BACK'})
             if op['kind'] == 'quarantine':
                 self.store.put('suppressions', op['operation_id'], {'schema_version': 1, 'identity': file_id, 'reason': op['quarantine_reason'], 'tx_id': tx['tx_id'], 'active': False, 'rolled_back_at': now()})

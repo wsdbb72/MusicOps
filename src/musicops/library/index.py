@@ -153,7 +153,7 @@ def _metadata_relations(path, sidecars):
     return companions
 
 
-def _index_metadata(root, excluded, checkpoint, cached=None, progress=None):
+def _index_metadata(root, excluded, checkpoint, cached=None, progress=None, selected=None):
     records = []
     reused = 0
     cached = cached or {}
@@ -163,12 +163,13 @@ def _index_metadata(root, excluded, checkpoint, cached=None, progress=None):
         directory = Path(directory)
         # Recheck the directory: it can have been replaced since os.walk listed it.
         reject_reparse_chain(directory, root)
-        dirs[:] = [d for d in dirs if not reparse(directory / d) and not any(within(directory / d, e) for e in excluded)]
+        dirs[:] = [d for d in dirs if not reparse(directory / d) and not any(within(directory / d, e) for e in excluded) and (selected is None or any(p.is_relative_to(directory/d) for p in selected))]
         if progress:
             progress({'scanned_count': len(records), 'cached_count': reused, 'current_directory': str(directory.relative_to(root)), 'phase': 'scanning'})
         sidecars = None
         for name in sorted(names):
             path = directory / name
+            if selected is not None and path not in selected:continue
             if path.suffix.casefold() not in AUDIO_EXTENSIONS or reparse(path) or any(within(path, e) for e in excluded):
                 continue
             file_id = str(uuid.uuid5(uuid.NAMESPACE_URL, str(path).casefold()))
@@ -285,14 +286,21 @@ def _index_metadata(root, excluded, checkpoint, cached=None, progress=None):
     return sorted(records, key=lambda x: x['path'].casefold())
 
 
-def index_library(root, validator=None, exclusions=None, metadata_only=False, checkpoint=None, cached=None, progress=None):
+def index_library(root, validator=None, exclusions=None, metadata_only=False, checkpoint=None, cached=None, progress=None, selected_paths=None):
     root = Path(root).absolute()
     reject_reparse_chain(root)
     if not root.is_dir():
         raise FileNotFoundError('扫描根不存在')
     excluded = [Path(p).resolve() for p in (exclusions or [])]
+    selected=None
+    if selected_paths is not None:
+        if not metadata_only:raise ValueError('按文件刷新仅用于元数据索引')
+        selected={Path(p).absolute() for p in selected_paths}
+        for path in selected:
+            reject_reparse_chain(path,root)
+            if not path.is_relative_to(root):raise PathBlocked('索引文件越过音乐库目录')
     if metadata_only:
-        return _index_metadata(root, excluded, checkpoint, cached=cached, progress=progress)
+        return _index_metadata(root, excluded, checkpoint, cached=cached, progress=progress,selected=selected)
     records = []
     if checkpoint:
         checkpoint()

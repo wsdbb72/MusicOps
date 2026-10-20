@@ -126,6 +126,9 @@ class AppService:
                 rows=c.execute('SELECT payload FROM library_files'+where+' ORDER BY id LIMIT ? OFFSET ?',(*params,limit,offset)).fetchall()
             return {'files':[json.loads(r[0]) for r in rows],'total':total,'offset':offset,'limit':limit,'network_used':False}
         if command=='list_tasks': return {'tasks':self.store.list('tasks')}
+        if command=='compilation_albums':
+            from musicops.app.compilations import albums
+            return albums(self,self.config.current()['values'],payload)
         if command=='duplicate_history':
             history=self.store.get('evidence','duplicate-latest') or {}
             records=[]
@@ -202,7 +205,7 @@ class AppService:
         if command=='shutdown_worker':
             if self.active: raise RuntimeError('当前任务尚未到安全退出点，请先暂停流水线')
             self.stop.set(); return {'stopped':True,'seeding_unchanged':True}
-        if command in ('scan_duplicates','merge_duplicates','restore_duplicates','normalize_qbt_tags','browser_solver_preflight','assist_workflows','manual_album_search','restore_workflow','start_workflow','advance_workflows','demo','index_library','compare','search','resources','prepare_fill','prepare_resource','prepare_repair','prepare_dedup','submit_plan','request_rollback','export_report','refresh_playlist','submit_download','recover','pt_preflight','qbt_preflight','ai_analyze','ai_plan','ai_test','lyrics_preflight','identify_metadata','resolve_metadata','accept_metadata','validate_selected_file','roon_preflight'):
+        if command in ('preview_compilation','merge_compilation','scan_duplicates','merge_duplicates','restore_duplicates','normalize_qbt_tags','browser_solver_preflight','assist_workflows','manual_album_search','restore_workflow','start_workflow','advance_workflows','demo','index_library','compare','search','resources','prepare_fill','prepare_resource','prepare_repair','prepare_dedup','submit_plan','request_rollback','export_report','refresh_playlist','submit_download','recover','pt_preflight','qbt_preflight','ai_analyze','ai_plan','ai_test','lyrics_preflight','identify_metadata','resolve_metadata','accept_metadata','validate_selected_file','roon_preflight'):
             return self.enqueue(command,payload,request_id=request_id)
         raise ValueError('UNKNOWN_COMMAND:'+command)
     def enqueue(self,command,args,request_id=None):
@@ -211,9 +214,9 @@ class AppService:
         args=copy.deepcopy(args);batch=None
         if command=='start_workflow':
             batch=self.workflows.queue(args,cfg['values'],task_id);args['_batch_job_id']=batch['job_id']
-        if command in ('scan_duplicates','merge_duplicates','restore_duplicates','assist_workflows','index_library','manual_album_search','identify_metadata','resolve_metadata') and not args.get('_review_queue_id'):
-            group='process' if command in ('merge_duplicates','restore_duplicates') else 'search' if command=='manual_album_search' and (args.get('mode','literal')=='literal' or args.get('candidate_id')) else 'identify'
-            self.workflows.put({'kind':'workflow','job_kind':'activity','job_id':'activity:'+task_id,'task_group':group,'task_type':'review_assistance' if command=='assist_workflows' else 'library_index' if command=='index_library' else 'manual_search' if group=='search' else 'library_restore' if command=='restore_duplicates' else 'library_merge' if command=='merge_duplicates' else 'library_dedup' if command=='scan_duplicates' else 'catalog_identification','start_task_id':task_id,'scene':'playlist','stage':'queued','progress':0,'label':str('恢复合并副本' if command=='restore_duplicates' else '合并重复歌曲与专辑' if command=='merge_duplicates' else '扫描重复歌曲与专辑' if command=='scan_duplicates' else 'AI 辅助核对 · '+str(len(args.get('job_ids',[])))+' 项' if command=='assist_workflows' else '更新本地专辑资料库' if command=='index_library' else args.get('query') or args.get('album') or args.get('title') or '在线资料识别')[:300],'message':'等待检索' if group=='search' else '等待识别','created_at':utcnow(),'target_count':1})
+        if command in ('preview_compilation','merge_compilation','scan_duplicates','merge_duplicates','restore_duplicates','assist_workflows','index_library','manual_album_search','identify_metadata','resolve_metadata') and not args.get('_review_queue_id'):
+            group='process' if command in ('merge_compilation','preview_compilation','merge_duplicates','restore_duplicates') else 'search' if command=='manual_album_search' and (args.get('mode','literal')=='literal' or args.get('candidate_id')) else 'identify'
+            self.workflows.put({'kind':'workflow','job_kind':'activity','job_id':'activity:'+task_id,'task_group':group,'task_type':'review_assistance' if command=='assist_workflows' else 'library_index' if command=='index_library' else 'manual_search' if group=='search' else 'library_restore' if command=='restore_duplicates' else 'library_merge' if command in ('merge_duplicates','merge_compilation') else 'compilation_preview' if command=='preview_compilation' else 'library_dedup' if command=='scan_duplicates' else 'catalog_identification','start_task_id':task_id,'scene':'playlist','stage':'queued','progress':0,'label':str('合并自定义合辑' if command=='merge_compilation' else '校验合辑预览' if command=='preview_compilation' else '恢复合并副本' if command=='restore_duplicates' else '合并重复歌曲与专辑' if command=='merge_duplicates' else '扫描重复歌曲与专辑' if command=='scan_duplicates' else 'AI 辅助核对 · '+str(len(args.get('job_ids',[])))+' 项' if command=='assist_workflows' else '更新本地专辑资料库' if command=='index_library' else args.get('query') or args.get('album') or args.get('title') or '在线资料识别')[:300],'message':'等待检索' if group=='search' else '等待识别','created_at':utcnow(),'target_count':1})
         task=dict(schema_version=1,task_id=task_id,command=command,args=copy.deepcopy(args),state='queued',created_at=utcnow(),config_version=cfg['version'],config_snapshot=cfg,progress=0,result=None)
         self.store.put('tasks',task_id,task); self.store.event('task_queued',{'command':command,'config_version':cfg['version']},task_id)
         return {'accepted':True,'task_id':task_id,'state':'queued',**({'job_id':batch['job_id'],'batch_id':batch['batch_id']} if batch else {})}
@@ -258,7 +261,7 @@ class AppService:
                     continue
                 task=json.loads(row[0]); self.active=task['task_id']; task.update(state='running',started_at=utcnow()); self.store.put('tasks',self.active,task)
                 activity=self.store.get('evidence','workflow:activity:'+task['task_id'])
-                if activity:self.workflows.put(activity,stage='running',message='正在恢复去重合并副本' if task['command']=='restore_duplicates' else '正在扫描与校验重复候选' if task['command']=='scan_duplicates' else '正在合并已核验的专辑副本' if task['command']=='merge_duplicates' else '正在独立检索' if activity['task_group']=='search' else '正在识别歌曲与专辑')
+                if activity:self.workflows.put(activity,stage='running',message='正在校验合辑副本并保留原艺人' if task['command']=='preview_compilation' else '正在合并合辑并保留逐曲原艺人' if task['command']=='merge_compilation' else '正在恢复去重合并副本' if task['command']=='restore_duplicates' else '正在扫描与校验重复候选' if task['command']=='scan_duplicates' else '正在合并已核验的专辑副本' if task['command']=='merge_duplicates' else '正在独立检索' if activity['task_group']=='search' else '正在识别歌曲与专辑')
             try:
                 self._checkpoint('before_execute')
                 result=self._execute(task['command'],task['args'],task['config_snapshot']['values'])
@@ -359,6 +362,9 @@ class AppService:
             result=self._validator(cfg).validate(path);record['validation']=result;record['validation_id']=result.get('validation_id')
             self.store.put('library_files',record['file_id'],record)
             return {'file':record,'validation':result,'music_writes':0}
+        if command in ('preview_compilation','merge_compilation'):
+            from musicops.app.compilations import preview,execute
+            return (preview if command=='preview_compilation' else execute)(self,cfg,args)
         if command=='scan_duplicates':
             from musicops.app.duplicates import scan
             return scan(self,cfg)
@@ -692,7 +698,7 @@ class AppService:
         self.store.event('catalog_manual_accept',{'target_id':target_id,'candidate_id':candidate_id,'source':candidate['source'],'music_writes':0})
         return result
     def _index_real_library(self,args,cfg,progress=None):
-        from musicops.library.index import index_library
+        from musicops.library.index import index_library,AUDIO_EXTENSIONS
         from musicops.library.paths import reject_reparse_chain
         root=Path(args.get('root') or cfg['paths']['library']).absolute();reject_reparse_chain(root)
         if not args.get('lightweight',True):raise PolicyBlocked('请选择轻量索引；完整解码仅针对明确选中的文件')
@@ -713,6 +719,8 @@ class AppService:
             live={item['file_id'] for item in files}
             for row in c.execute('SELECT id,payload FROM library_files').fetchall():
                 old=json.loads(row['payload'])
+                if Path(old.get('path','')).suffix.casefold() in ('.lrc','.jpg','.jpeg','.png','.webp','.bmp','.cue','.log','.txt','.nfo','.m3u','.m3u8') and Path(old.get('path','')).absolute().is_relative_to(root):
+                    c.execute('DELETE FROM library_files WHERE id=?',(row['id'],));continue
                 if row['id'] not in live and Path(old.get('path','')).resolve().is_relative_to(root_resolved) and not Path(old['path']).exists():
                     old.update(location_state='externally_missing',read_error='文件已移出索引目录');c.execute('UPDATE library_files SET payload=?,updated_at=? WHERE id=?',(json.dumps(old,ensure_ascii=False),utcnow(),row['id']))
         from musicops.library.catalog import AlbumCatalog

@@ -97,6 +97,33 @@ def embedded_covers(path) -> list[bytes]:
             except Exception:continue
     return result
 
+
+def mark_local_compilation(copy_path):
+    """Withdraw original release identity on an independent compilation copy.
+
+    Recording identifiers, titles and track artists deliberately remain intact.
+    """
+    path=Path(copy_path)
+    if path.stat().st_nlink!=1:raise ValueError('HARDLINK_EDIT_FORBIDDEN')
+    obj=mutagen.File(path)
+    if obj is None:raise ValueError('UNSUPPORTED_TAG_FORMAT')
+    if obj.tags is None:obj.add_tags()
+    names={'musicbrainz_albumid','musicbrainz_releasegroupid','musicbrainz_albumartistid','musicbrainz_albumtype','musicbrainz_albumstatus','musicbrainz_albumreleasecountry','releasecountry','releasestatus','releasetype','catalognumber','cataloguenumber','barcode','label','publisher','totaltracks','tracktotal','totaldiscs','disctotal'}
+    if isinstance(obj.tags,ID3):
+        from mutagen.id3 import TCMP
+        for frame in list(obj.tags.getall('TXXX')):
+            if frame.desc.casefold().replace(' ','_') in names:obj.tags.delall(frame.HashKey)
+        obj.tags.delall('TPUB');obj.tags.delall('TCMP');obj.tags.add(TCMP(encoding=3,text=['1']))
+    elif obj.__class__.__name__=='MP4':
+        for key in list(obj.tags.keys()):
+            if key.rsplit(':',1)[-1].casefold() in names:del obj.tags[key]
+        obj.tags['cpil']=True
+    else:
+        for key in list(obj.tags.keys()):
+            if key.casefold() in names:del obj.tags[key]
+        obj.tags['compilation']=['1']
+    obj.save()
+
 def apply_cover_changes(copy_path,content,min_side=300) -> dict:
     """Replace front cover only on a work copy; preserve other/unknown pictures."""
     path=Path(copy_path)

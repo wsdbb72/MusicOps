@@ -20,9 +20,9 @@ def main():
     env=os.environ.copy();env['PATH']=str(Path(os.environ['SystemRoot'])/'System32');env['QT_QPA_PLATFORM']='offscreen'
     for key in ('PYTHONPATH','PYTHONHOME','VIRTUAL_ENV'):env.pop(key,None)
     screenshot=Path(args.screenshot).resolve();screenshot.parent.mkdir(parents=True,exist_ok=True)
-    process=subprocess.Popen([str(bundle/'MusicOps.exe'),'--base',str(base),'--screenshot',str(screenshot),'--quit-after','25000'],cwd=bundle,env=env,creationflags=getattr(subprocess,'CREATE_NO_WINDOW',0));client=WorkerClient(base);report={'version':'0.4.9','external_requests':0,'evidence':'packaged_exe_named_pipe_synthetic_media','checks':{}}
+    process=subprocess.Popen([str(bundle/'MusicOps.exe'),'--base',str(base),'--screenshot',str(screenshot),'--quit-after','180000'],cwd=bundle,env=env,creationflags=getattr(subprocess,'CREATE_NO_WINDOW',0));client=WorkerClient(base);report={'version':__import__('musicops').__version__,'external_requests':0,'evidence':'packaged_exe_named_pipe_synthetic_media','checks':{}}
     try:
-        deadline=time.monotonic()+20
+        deadline=time.monotonic()+90
         while True:
             try:status=client.call('get_status',{'compact':True});break
             except (OSError,EOFError):
@@ -48,7 +48,7 @@ def main():
         report['checks']['same_name_synchronized_lyrics_preserved']=all(Path(path).with_suffix('.lrc').read_text('utf-8').startswith('[00:00.00]') for path in original)
         transactions=client.call('get_status',{'compact':True})['transactions'];report['checks']['native_transaction_committed']=any(t['state']=='COMMITTED' for t in transactions)
         report['checks']['original_backups_verified']=all(hashlib.sha256(Path(b['backup']).read_bytes()).hexdigest()==original[b['path']] for t in transactions for b in t['backup_manifest'] if b['path'] in original)
-        process.wait(35);report['checks']['gui_exit_zero']=process.returncode==0;report['checks']['gui_screenshot_created']=screenshot.is_file()
+        process.wait(195);report['checks']['gui_exit_zero']=process.returncode==0;report['checks']['gui_screenshot_created']=screenshot.is_file()
         report['checks']['no_demo_cli_entry']=subprocess.run([str(bundle/'MusicOps.exe'),'--demo','--base',str(base)],capture_output=True,timeout=10).returncode==2
         report['checks']['brand_assets_shipped']=(bundle/'_internal/musicops/assets/musicops.ico').is_file()
         report['passed']=all(report['checks'].values())

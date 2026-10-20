@@ -180,7 +180,7 @@ class PTReadOnlyProvider:
             else:artists=[html.unescape(artist)] if artist else []
             c=self._base_candidate(torrent.get('torrentId'),group.get('groupName'),artists)
             c.update(group_id=group_id,release={'album':c['title'],'year':group.get('groupYear'),'edition':html.unescape(str(torrent.get('remasterTitle') or 'unknown')),
-                     'remaster_year':torrent.get('remasterYear'),'catalogue_number':torrent.get('remasterCatalogueNumber'),'complete_tracklist':False},
+                     'remaster_year':torrent.get('remasterYear'),'catalogue_number':torrent.get('remasterCatalogueNumber'),'record_label':torrent.get('remasterRecordLabel'),'remastered':torrent.get('remastered'),'release_type':group.get('releaseType'),'release_type_name':group.get('releaseTypeName') or {'1':'Album','3':'Soundtrack','5':'EP','6':'Anthology','7':'Compilation','8':'Sampler','9':'Single','10':'Demo','11':'Live album','12':'Split','13':'Remix','14':'Bootleg','15':'Interview','16':'Mixtape','17':'DJ Mix','18':'Concert recording','21':'Unknown'}.get(str(group.get('releaseType')),''),'complete_tracklist':False},
                      media={k:torrent.get(k) for k in ('format','encoding','media','fileCount','size')},seeders=torrent.get('seeders',0),
                      site_flags={k:torrent.get(k) for k in ('isFreeleech','isPersonalFreeleech','isNeutralLeech','canUseToken')})
             # Site flags are visible hints, not authorization or free-download proof.

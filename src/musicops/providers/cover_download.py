@@ -3,8 +3,12 @@ import re
 from urllib.parse import urlsplit,urljoin
 import httpx
 from musicops.clients.http import HttpError,PolicyBlocked
-from musicops.domain.identity import strict_text
 from musicops.media.resources import validate_cover
+from musicops.media.chinese import alias_key
+
+class Artwork(bytes):
+    def __new__(cls,data,**provenance):
+        item=super().__new__(cls,data);item.provenance=provenance;return item
 
 def _image(url,min_side,allowed):
     with httpx.Client(verify=True,follow_redirects=False,timeout=15) as client:
@@ -34,7 +38,7 @@ def cover(album,artists,album_id=None,release_id=None,min_side=300,verified_albu
                 data=response.json();matches={}
                 for item in data.get('result',{}).get('albums',[]):
                     names=item.get('artists') or [item.get('artist',{})]
-                    if (strict_text(item.get('name'))==strict_text(album) and {strict_text(a) for a in artists}=={strict_text(a.get('name')) for a in names}
+                    if (alias_key(item.get('name'))==alias_key(album) and {alias_key(a) for a in artists}=={alias_key(a.get('name')) for a in names}
                         and re.fullmatch(r'[1-9]\d{0,18}',str(item.get('id','')))):matches[str(item['id'])]=item
                 if len(matches)==1:album_id=next(iter(matches))
         except (httpx.HTTPError,ValueError,TypeError,AttributeError):pass
@@ -46,12 +50,14 @@ def cover(album,artists,album_id=None,release_id=None,min_side=300,verified_albu
                 data=r.json().get('album',{});names=[a.get('name') for a in data.get('artists',[])] or [data.get('artist',{}).get('name')]
                 # Official song->album IDs remain valid when a guest vocalist
                 # differs from the release artist (soundtracks/compilations).
-                if strict_text(data.get('name'))==strict_text(album) and (verified_album_id or {strict_text(a) for a in artists}=={strict_text(a) for a in names}):
+                if alias_key(data.get('name'))==alias_key(album) and (verified_album_id or {alias_key(a) for a in artists}=={alias_key(a) for a in names}):
                     url=data.get('picUrl','')
                     if url.startswith('http://'):url='https://'+url[7:]
                     artwork=_image(url,min_side,lambda h:h.endswith('.music.126.net') or h.endswith('.music.163.com'))
-                    if artwork:return artwork
+                    if artwork:return Artwork(artwork,provider='netease',album_id=str(album_id),album=data.get('name'),artists=names,url=url)
         except (httpx.HTTPError,HttpError,PolicyBlocked,ValueError,TypeError,AttributeError):pass
     if release_id and re.fullmatch(r'[0-9a-fA-F-]{36}',str(release_id)):
-        return _image('https://coverartarchive.org/release/'+str(release_id)+'/front',min_side,lambda h:h in ('coverartarchive.org','archive.org') or h.endswith('.archive.org'))
+        url='https://coverartarchive.org/release/'+str(release_id)+'/front'
+        data=_image(url,min_side,lambda h:h in ('coverartarchive.org','archive.org') or h.endswith('.archive.org'))
+        return Artwork(data,provider='coverartarchive',release_id=str(release_id),url=url) if data else None
     return None

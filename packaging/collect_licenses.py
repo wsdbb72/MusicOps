@@ -15,7 +15,7 @@ python_license=Path(sys.base_prefix)/'LICENSE.txt'
 if python_license.is_file():
     python_target=out/'Python';python_target.mkdir(exist_ok=True)
     shutil.copy2(python_license,python_target/'LICENSE.txt')
-for name in ('PySide6','PySide6_Essentials','PySide6_Addons','shiboken6','mutagen','Pillow','cryptography','httpx','httpcore','certifi','h11','anyio','idna','cffi','pycparser','PyInstaller','qrcode','bottle','waitress','selenium','func-timeout','prometheus-client','requests','urllib3','websockets','packaging','xvfbwrapper','pefile','trio','trio-websocket','sortedcontainers','sniffio','outcome','attrs','PySocks','wsproto'):
+for name in ('opencc-python-reimplemented','PySide6','PySide6_Essentials','PySide6_Addons','shiboken6','mutagen','Pillow','cryptography','httpx','httpcore','certifi','h11','anyio','idna','cffi','pycparser','PyInstaller','qrcode','bottle','waitress','selenium','func-timeout','prometheus-client','requests','urllib3','websockets','packaging','xvfbwrapper','pefile','trio','trio-websocket','sortedcontainers','sniffio','outcome','attrs','PySocks','wsproto'):
     try:dist=metadata.distribution(name)
     except metadata.PackageNotFoundError:continue
     target=out/name;target.mkdir(exist_ok=True)

@@ -496,7 +496,7 @@ CI 使用锁定依赖、临时目录、合成音频和模拟服务验证行为�
 
 更多说明：[用户操作](docs/用户操作说明.md) · [运行档案与恢复](docs/运维与恢复说明.md) · [开发与验证](docs/开发与验证.md) · [国际平台与参考项目](docs/references/global-playlists.md)。
 
-感谢 [Playlist Out](https://github.com/LengxiQwQ/playlistout)、[PlaylistAggregatorLite](https://github.com/BabaBoyGegeBoy/PlaylistAggregatorLite)、[GoMusic](https://github.com/Bistutu/GoMusic)、[Spotifylist-to-gkl](https://github.com/zhangolve/Spotifylist-to-gkl)、[XueshiQiao 的网易云导出示例](https://gist.github.com/XueshiQiao/858974dbf86bc91030fbf49f9c6daf43) 与 [superjodash 的 YouTube 表格示例](https://gist.github.com/superjodash/6f82f50418576dd982b48ae33cf962f2) 提供的协议、格式与思路参考。具体参考范围与许可见 [参考记录](docs/references/global-playlists.md#参考项目与许可证)。
+感谢 Anthropic、OpenAI、Antigravity、Cursor、Grok、[Playlist Out](https://github.com/LengxiQwQ/playlistout)、[PlaylistAggregatorLite](https://github.com/BabaBoyGegeBoy/PlaylistAggregatorLite)、[GoMusic](https://github.com/Bistutu/GoMusic)、[Spotifylist-to-gkl](https://github.com/zhangolve/Spotifylist-to-gkl)、[XueshiQiao 的网易云导出示例](https://gist.github.com/XueshiQiao/858974dbf86bc91030fbf49f9c6daf43) 与 [superjodash 的 YouTube 表格示例](https://gist.github.com/superjodash/6f82f50418576dd982b48ae33cf962f2) 提供的协议、格式与思路参考。具体参考范围与许可见 [参考记录](docs/references/global-playlists.md#参考项目与许可证)。
 
 源码使用 [MIT 许可证](LICENSE)。第三方依赖见 [许可说明](packaging/THIRD-PARTY-NOTICES.md)。
 

@@ -284,7 +284,7 @@ class AppService:
                 if row is None:
                     # A large AI backlog must not prevent already-resolved
                     # albums from searching, downloading and reaching validation.
-                    if time.monotonic()-self._last_workflow_tick>=3:
+                    if time.monotonic()-self._last_workflow_tick>=.5:
                         self._last_workflow_tick=time.monotonic()
                         if self.workflows.next_job():
                             self.enqueue('advance_workflows',{});continue
@@ -326,7 +326,7 @@ class AppService:
         return 'completed'
     def _managed_checkpoint(self,phase):
         if self.stop.is_set():raise TaskCancelled('后台正在退出，请在更新完成后重试连接')
-        if threading.current_thread() is self.thread:self._checkpoint(phase,wait_for_resume=phase!='managed_service_start')
+        if threading.current_thread() is self.thread or getattr(self._task_local,'task_id',None):self._checkpoint(phase,wait_for_resume=phase!='managed_service_start')
     def _checkpoint(self,phase,*,wait_for_resume=True):
         task_id=getattr(getattr(self,'_task_local',None),'task_id',None) or self.active
         if not task_id or getattr(self,'_safe_finalizing',False):return
@@ -658,13 +658,14 @@ class AppService:
         from musicops.providers.workflow import offline_search
         return offline_search(self.store,cfg,args.get('query',''))
     def _catalog_resolver(self,cfg):
-        from musicops.providers.catalog import CatalogResolver
-        key=digest({'catalog':cfg['catalog'],'offline':cfg['offline'],'browser_solver':cfg.get('browser_solver',{})})
-        if not hasattr(self,'_catalog_clients'):self._catalog_clients={}
-        if key not in self._catalog_clients:
-            if len(self._catalog_clients)>=4:self._catalog_clients.pop(next(iter(self._catalog_clients)))
-            self._catalog_clients[key]=CatalogResolver(cfg,secret_getter=self.vault.get,checkpoint=self._checkpoint)
-        return self._catalog_clients[key]
+        with self.mutex:
+            from musicops.providers.catalog import CatalogResolver
+            key=digest({'catalog':cfg['catalog'],'offline':cfg['offline'],'browser_solver':cfg.get('browser_solver',{})})
+            if not hasattr(self,'_catalog_clients'):self._catalog_clients={}
+            if key not in self._catalog_clients:
+                if len(self._catalog_clients)>=4:self._catalog_clients.pop(next(iter(self._catalog_clients)))
+                self._catalog_clients[key]=CatalogResolver(cfg,secret_getter=self.vault.get,checkpoint=self._checkpoint)
+            return self._catalog_clients[key]
     def _recognize_metadata(self,query,cfg,found=None,force=False):
         from musicops.app.recognition import RecognitionFallback
         key='recognition-cache-v2:'+digest({'query':query,'found':found,'force':force,'ai':cfg['ai'],'credential_revision':self.vault.revision(cfg['ai'].get('auth_secret_ref','')),'catalog':cfg['catalog']})
@@ -784,16 +785,17 @@ class AppService:
         from musicops.providers.pt_readonly import PTReadOnlyProvider,HOSTS
         return PTReadOnlyProvider(site,cfg['providers'][site],self._pt_transport(site,cfg),self.vault.get)
     def _pt_transport(self,site,cfg):
-        from musicops.providers.pt_readonly import HOSTS
-        from musicops.clients.browser_solver import browser_transport
-        settings=cfg.get('browser_solver') or self.config.current()['values']['browser_solver']
-        key=digest([site,settings,cfg['providers'][site].get('credential_ref')])
-        if not hasattr(self,'_pt_transports'):self._pt_transports={}
-        if key not in self._pt_transports:
-            if len(self._pt_transports)>=8:self._pt_transports.pop(next(iter(self._pt_transports)))
-            from musicops.clients.managed_services import ManagedSolver
-            self._pt_transports[key]=browser_transport(settings,[HOSTS[site]],checkpoint=self._checkpoint,solver=ManagedSolver(self.engines,settings) if settings.get('managed') else None)
-        return self._pt_transports[key]
+        with self.mutex:
+            from musicops.providers.pt_readonly import HOSTS
+            from musicops.clients.browser_solver import browser_transport
+            settings=cfg.get('browser_solver') or self.config.current()['values']['browser_solver']
+            key=digest([site,settings,cfg['providers'][site].get('credential_ref')])
+            if not hasattr(self,'_pt_transports'):self._pt_transports={}
+            if key not in self._pt_transports:
+                if len(self._pt_transports)>=8:self._pt_transports.pop(next(iter(self._pt_transports)))
+                from musicops.clients.managed_services import ManagedSolver
+                self._pt_transports[key]=browser_transport(settings,[HOSTS[site]],checkpoint=self._checkpoint,solver=ManagedSolver(self.engines,settings) if settings.get('managed') else None)
+            return self._pt_transports[key]
     def _refresh_real_playlists(self,args,cfg):
         from musicops.app.playlists import use_platform_reader,refresh_platform_playlists
         if use_platform_reader(args):return refresh_platform_playlists(self,args,cfg)

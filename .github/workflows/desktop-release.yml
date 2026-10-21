@@ -112,6 +112,10 @@ jobs:
         run: |
           python packaging/smoke_starts.py --bundle dist/MusicOps-Windows --profile "$env:RUNNER_TEMP/musicops-release-profile" --report dist/windows/reports/packaged-starts.json
           if ($LASTEXITCODE -ne 0) { throw 'Packaged application acceptance failed' }
+      - name: Verify bounded parallel waves in the frozen worker
+        run: |
+          python packaging/smoke_parallel.py --bundle dist/MusicOps-Windows --profile "$env:RUNNER_TEMP/musicops-parallel-profile" --report dist/windows/reports/parallel-albums.json
+          if ($LASTEXITCODE -ne 0) { throw 'Frozen parallel acceptance failed' }
       - name: Install and upgrade the complete frozen payload in an isolated AppId
         run: |
           python packaging/smoke_windows_installer.py --bundle dist/MusicOps-Windows --compiler "$env:INNO_ISCC" --work "$env:RUNNER_TEMP/musicops-installer" --report dist/windows/reports/full-installer-smoke.json
@@ -314,7 +318,7 @@ jobs:
               if obj['type'] != 'commit' or obj['sha'] != commit:
                   raise SystemExit('The existing tag does not identify the tested source')
           notes = pathlib.Path('release-notes.md')
-          notes.write_text('修复从旧保存异常恢复的任务绕过 PT 检索直接回退：保留已验证缓存，按当前站点配置重新检索一次。AI 或手工长搜索词无结果时仍按专辑名检索；鉴权和网络故障不会误判为无资源。\n\n修复大量流媒体回退任务挤占检索队列，每三次回退给等待中的识别或检索一次调度机会，已验证入库仍优先。候选继续核对艺人、发行和版本，不因同名直接下载。保留 0.4.11 大型歌单解析兼容和独立调度改进。\n\n提供 Windows 安装包及便携 ZIP、macOS Apple Silicon 原生 PKG 及应用 ZIP、同一提交源码和校验文件。macOS 采用 ad-hoc 完整性签名，尚无 Developer ID 签名及公证。\n\n回归和打包验收使用独立档案；本机另做三站已登录只读检索，确认合作艺人长关键词可能漏检。验收不下载真实音乐或消耗 PT 令牌。\n\nSource commit: '+commit+'\n', 'utf-8')
+          notes.write_text('专辑任务并行处理：最多 4 项识别、PT 检索或流媒体回退，流媒体下载最多 2 项；按可用核心自动采用 2–4 项。同一 PT 站点检索互斥，保留目录接口速率限制、小核优先、低优先级与 EcoQoS。\n\nFL 消费、qBittorrent 提交、标签写入和入库事务保持逐项执行；旧缓存迁移串行核验。线程继承暂停和取消上下文，单项失败隔离，安全退出等待整波任务完成。缩短短任务调度等待，保留此前 PT 检索与回退修复。\n\n提供 Windows 安装包及便携 ZIP、macOS Apple Silicon 原生 PKG 及应用 ZIP、同一提交源码和校验文件。macOS 采用 ad-hoc 完整性签名，尚无 Developer ID 签名及公证。\n\n并发回归与实际打包程序验收使用独立档案及合成资料；不下载真实音乐或消耗 PT 令牌，实际速度取决于站点和接口限流。\n\nSource commit: '+commit+'\n', 'utf-8')
           def gh(*arguments):
               subprocess.run(['gh', *arguments], check=True)
           gh('release', 'create', tag, '--verify-tag', '--target', commit, '--draft', '--title', 'MusicOps '+version, '--notes-file', str(notes))

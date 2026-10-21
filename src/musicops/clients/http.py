@@ -1,5 +1,5 @@
 from __future__ import annotations
-import json,re
+import json,re,threading
 from dataclasses import dataclass,field
 from urllib.parse import urlparse
 
@@ -52,20 +52,22 @@ class SafeHttpTransport:
     is_fake=False
     def __init__(self,allowed_hosts,offline=True):
         self.allowed_hosts={h.lower() for h in allowed_hosts if isinstance(h,str)}; self.offline=offline
-        self._client=None; self._client_cls=None
+        self._client=None; self._client_cls=None; self._client_lock=threading.RLock()
     def _shared_client(self,httpx):
-        if self._client is None or self._client_cls is not httpx.Client:
+        with self._client_lock:
+            if self._client is None or self._client_cls is not httpx.Client:
+                if self._client is not None and hasattr(self._client,'close'):
+                    try:self._client.close()
+                    except Exception:pass
+                self._client_cls=httpx.Client
+                self._client=httpx.Client(verify=True,follow_redirects=False,timeout=15)
+            return self._client
+    def close(self):
+        with self._client_lock:
             if self._client is not None and hasattr(self._client,'close'):
                 try:self._client.close()
                 except Exception:pass
-            self._client_cls=httpx.Client
-            self._client=httpx.Client(verify=True,follow_redirects=False,timeout=15)
-        return self._client
-    def close(self):
-        if self._client is not None and hasattr(self._client,'close'):
-            try:self._client.close()
-            except Exception:pass
-        self._client=None
+            self._client=None
     def request(self,method,url,params=None,headers=None,content=None,timeout=None,**kwargs):
         if self.offline: raise PolicyBlocked('离线阶段禁止真实服务')
         parts=urlparse(url)

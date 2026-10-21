@@ -82,6 +82,7 @@ def package(args):
     if 'Signature=adhoc' not in signature or 'Authority=Developer ID' in signature:raise RuntimeError('Unexpected signing identity; review the release policy')
     reports=output/'reports';reports.mkdir(exist_ok=True)
     run(sys.executable,ROOT/'packaging/smoke_engines.py','--root',app/'Contents/Resources/tools/services','--profile',output/'engine-smoke-profile','--report',reports/(stem+'-engines.json'),cwd=ROOT,env=env)
+    run(sys.executable,ROOT/'packaging/smoke_parallel.py','--bundle',app/'Contents/MacOS','--profile',output/'parallel-smoke-profile','--report',reports/(stem+'-parallel.json'),cwd=ROOT,env=env)
     run(sys.executable,ROOT/'packaging/smoke_macos.py','--app',app,'--work',output/'smoke','--report',reports/(stem+'-smoke.json'),'--expected-arch',args.arch,cwd=ROOT,env=env)
     audit_bundle(app)
     stage=output/'package'/stem;stage.mkdir(parents=True,exist_ok=True)

@@ -1,10 +1,10 @@
 """Durable album workflows. Download source and watched library are separate.
 
-One bounded stage runs per queued advance. Every network mutation has an intent;
+Independent stages run in bounded parallel waves. Every network mutation has an intent;
 process interruption becomes review instead of replaying an ambiguous request.
 """
 from __future__ import annotations
-import base64,collections,copy,hashlib,json,re,shutil,uuid
+import base64,collections,copy,hashlib,json,re,shutil,threading,uuid
 from pathlib import Path
 from musicops.state.store import utcnow
 from musicops.config.schema import digest
@@ -76,7 +76,11 @@ def no_downgrade(old,new):
     return a['codec']==b['codec'] and b['bitrate']>=a['bitrate']*.95
 
 class Workflows:
-    def __init__(self,service):self.s=service;self.store=service.store
+    def __init__(self,service):
+        self.s=service;self.store=service.store
+        self._advance_lock=threading.Lock()
+        self._migration_lock=threading.Lock()
+        self._site_locks={site:threading.Lock() for site in SITE_NAMES}
     def rows(self,include_batches=False):
         where=" AND coalesce(json_extract(payload,'$.hidden'),0)=0" + ('' if include_batches else " AND coalesce(json_extract(payload,'$.job_kind'),'album')!='batch'")
         with self.store.connection() as c:rows=c.execute("SELECT payload FROM evidence WHERE id LIKE 'workflow:%'"+where+" ORDER BY updated_at DESC,id").fetchall()
@@ -131,11 +135,13 @@ class Workflows:
             pending=bool(task and task['state']=='running')
         row.update(task_group=j.get('task_group') or ('identify' if j.get('job_kind')=='batch' or j['stage'] in ('identifying','snapshotting','metadata','enrich','planning') else 'search' if j['stage'] in ('searching','requesting') else 'process'),paused=bool(j.get('paused')),pause_pending=pending)
         return row
-    def next_job(self):
+    def next_job(self,*,network_only=False,include_fallback=False):
         import time
         search_turn=getattr(self,'_fallback_turns',0)>=3
+        fallback_clause=" OR json_extract(payload,'$.stage')='fallback'" if include_fallback else ""
+        network_clause=" AND (json_extract(payload,'$.stage')='searching' OR (json_extract(payload,'$.stage')='identifying' AND json_extract(payload,'$.scene')!='fill')"+fallback_clause+")" if network_only else ''
         with self.store.connection() as c:
-            row=c.execute("SELECT payload FROM evidence AS current WHERE id LIKE 'workflow:%' AND coalesce(json_extract(payload,'$.hidden'),0)=0 AND coalesce(json_extract(payload,'$.job_kind'),'album') NOT IN ('batch','activity') AND coalesce(json_extract(payload,'$.paused'),0)=0 AND json_extract(payload,'$.stage') NOT IN ('completed','failed','needs_review','cancelled','skipped','restored','running') AND (json_extract(payload,'$.identification_job_id') IS NULL OR EXISTS (SELECT 1 FROM evidence AS parent WHERE parent.id='workflow:'||json_extract(current.payload,'$.identification_job_id') AND json_extract(parent.payload,'$.stage')='completed')) AND (json_extract(payload,'$.search_job_id') IS NULL OR coalesce(json_extract(payload,'$.task_type'),'')!='album' OR EXISTS (SELECT 1 FROM evidence AS searched WHERE searched.id='workflow:'||json_extract(current.payload,'$.search_job_id') AND json_extract(searched.payload,'$.stage')='completed')) AND coalesce(json_extract(payload,'$.next_poll'),0)<=? ORDER BY CASE json_extract(payload,'$.stage') WHEN 'publishing' THEN 0 WHEN 'retiring' THEN 0 WHEN 'notifying' THEN 0 WHEN 'validating' THEN 0 WHEN 'metadata' THEN 1 WHEN 'enrich' THEN 1 WHEN 'downloading' THEN 2 WHEN 'requesting' THEN 3 WHEN 'fallback' THEN CASE WHEN ? THEN 4 ELSE 3 END WHEN 'searching' THEN CASE WHEN ? THEN 3 ELSE 4 END ELSE CASE WHEN ? THEN 3 ELSE 5 END END,updated_at,id LIMIT 1",(time.time(),search_turn,search_turn,search_turn)).fetchone()
+            row=c.execute("SELECT payload FROM evidence AS current WHERE id LIKE 'workflow:%' AND coalesce(json_extract(payload,'$.hidden'),0)=0 AND coalesce(json_extract(payload,'$.job_kind'),'album') NOT IN ('batch','activity') AND coalesce(json_extract(payload,'$.paused'),0)=0 AND json_extract(payload,'$.stage') NOT IN ('completed','failed','needs_review','cancelled','skipped','restored','running') AND (json_extract(payload,'$.identification_job_id') IS NULL OR EXISTS (SELECT 1 FROM evidence AS parent WHERE parent.id='workflow:'||json_extract(current.payload,'$.identification_job_id') AND json_extract(parent.payload,'$.stage')='completed')) AND (json_extract(payload,'$.search_job_id') IS NULL OR coalesce(json_extract(payload,'$.task_type'),'')!='album' OR EXISTS (SELECT 1 FROM evidence AS searched WHERE searched.id='workflow:'||json_extract(current.payload,'$.search_job_id') AND json_extract(searched.payload,'$.stage')='completed')) AND coalesce(json_extract(payload,'$.next_poll'),0)<=?"+network_clause+" ORDER BY CASE json_extract(payload,'$.stage') WHEN 'publishing' THEN 0 WHEN 'retiring' THEN 0 WHEN 'notifying' THEN 0 WHEN 'validating' THEN 0 WHEN 'metadata' THEN 1 WHEN 'enrich' THEN 1 WHEN 'downloading' THEN 2 WHEN 'requesting' THEN 3 WHEN 'fallback' THEN CASE WHEN ? THEN 4 ELSE 3 END WHEN 'searching' THEN CASE WHEN ? THEN 3 ELSE 4 END ELSE CASE WHEN ? THEN 3 ELSE 5 END END,updated_at,id LIMIT 1",(time.time(),search_turn,search_turn,search_turn)).fetchone()
         return json.loads(row[0]) if row else None
     def queue(self,args,cfg,task_id=None):
         """Expose the preparation before the serial worker begins any filesystem IO."""
@@ -328,21 +334,63 @@ class Workflows:
         if current and current.get('cancel_requested'):
             from musicops.app.service import TaskCancelled
             raise TaskCancelled('已取消专辑任务')
+    @staticmethod
+    def parallel_limit():
+        from musicops.performance import io_workers
+        return min(4,io_workers())
+    def _parallel_job(self,job):
+        if job['stage']=='fallback':
+            # An old snapshot must not restart a managed engine beneath a peer.
+            return job.get('config',{}).get('paths',{}).get('tools')==self.s.config.current()['values']['paths']['tools']
+        return job['stage']=='searching' or job['stage']=='identifying' and job.get('scene')!='fill'
     def advance(self):
-        with self.s.mutex:
-            job=self.next_job()
-            if not job:return {'status':'OK','idle':True}
-            stage=job['stage']
-            if stage=='fallback':self._fallback_turns=getattr(self,'_fallback_turns',0)+1
-            elif stage in ('searching','identifying','snapshotting','queued'):self._fallback_turns=0
-            self.put(job,stage='running',resume_stage=stage)
+        # Keep one coordinator, and retain the existing task/safe-shutdown contract.
+        # File publication and token consumption stay exclusive; streaming uses
+        # separate job directories, with at most two albums fetching audio.
+        from concurrent.futures import ThreadPoolExecutor
+        with self._advance_lock:
+            with self.s.mutex:
+                job=self.next_job()
+                if not job:return {'status':'OK','idle':True}
+                parallel=self._parallel_job(job)
+                jobs=[job];stage=job['stage']
+                if stage=='fallback':self._fallback_turns=getattr(self,'_fallback_turns',0)+1
+                elif stage in ('searching','identifying','snapshotting','queued'):self._fallback_turns=0
+                self.put(job,stage='running',resume_stage=stage)
+                if parallel:
+                    for _ in range(self.parallel_limit()-1):
+                        fallback_count=sum(row['resume_stage']=='fallback' for row in jobs)
+                        peer=self.next_job(network_only=True,include_fallback=fallback_count<2)
+                        if peer and not self._parallel_job(peer):peer=self.next_job(network_only=True)
+                        if not peer:break
+                        if peer['stage']=='fallback':self._fallback_turns=getattr(self,'_fallback_turns',0)+1
+                        self.put(peer,stage='running',resume_stage=peer['stage']);jobs.append(peer)
+            task_id=getattr(self.s._task_local,'task_id',None) or self.s.active
+            if len(jobs)==1:return self._advance_job(job,task_id)
+            with ThreadPoolExecutor(max_workers=len(jobs),thread_name_prefix='MusicOpsAlbums') as pool:
+                futures=[pool.submit(self._advance_job,row,task_id) for row in jobs]
+                results=[future.result() for future in futures]
+            return {'status':'OK','job_id':job['job_id'],'job_ids':[r['job_id'] for r in results],'parallel_count':len(jobs)}
+    def _advance_job(self,job,task_id):
+        previous=getattr(self.s._task_local,'task_id',None)
+        self.s._task_local.task_id=task_id
+        try:return self._run_stage(job,job['resume_stage'])
+        finally:self.s._task_local.task_id=previous
+    def _run_stage(self,job,stage):
         try:
+            self.checkpoint(job,'before_parallel_stage')
+            current=self.store.get('evidence','workflow:'+job['job_id'])
+            if current and current.get('paused'):
+                self.put(job,stage=stage)
+                return {'status':'OK','job_id':job['job_id'],'paused':True}
             # Snapshot defaults evolve independently of the current profile.
             from musicops.config.schema import upgrade_config
             if not isinstance(job.get('config'),dict):raise PolicyBlocked('历史任务缺少配置快照，请重新创建本批次')
             job['config']=upgrade_config(job['config'],self.s.base)
             from musicops.app.storage_migration import prepare
-            if not prepare(self,job):return {'status':'OK','job_id':job['job_id'],'relocating':True}
+            # Older snapshots may move cached files or torrent locations.
+            with self._migration_lock:
+                if not prepare(self,job):return {'status':'OK','job_id':job['job_id'],'relocating':True}
             self.checkpoint(job,stage)
             getattr(self,'_'+stage)(job)
         except Exception as exc:
@@ -350,7 +398,7 @@ class Workflows:
             # A failed stage may have partially mutated its in-memory dict
             # (including a cyclic provider payload). Recover the durable copy.
             job=current or job
-            if job.get('cancel_requested'):self.put(job,stage='cancelled',message='已取消；已有下载和原音源保留')
+            if job.get('cancel_requested') or getattr(exc,'error_class',None)=='CANCELLED':self.put(job,stage='cancelled',message='已取消；已有下载和原音源保留')
             else:
                 category=getattr(exc,'error_class',type(exc).__name__)
                 if category=='TOKEN_APPROVAL_REQUIRED':exc=PolicyBlocked(SITE_NAMES.get((job.get('selected') or {}).get('source'),'资源站')+'：'+str(exc))
@@ -460,7 +508,12 @@ class Workflows:
         for site in cfg['workflow']['source_order']:
             settings=cfg['providers'][site]
             if not settings['enabled'] or job.get('search_sites') is not None and site not in job['search_sites']:outcomes[site]={'status':'DISABLED'};continue
-            self.checkpoint(job,'search_'+site);result=search_album(lambda:self.provider(site,cfg),job.get('search_query') or ' '.join(artists)+' '+album,album=album,checkpoint=lambda:self.checkpoint(job,'search_'+site))
+            lock=self._site_locks[site]
+            while not lock.acquire(timeout=.1):self.checkpoint(job,'search_wait_'+site)
+            try:
+                self.checkpoint(job,'search_'+site)
+                result=search_album(lambda:self.provider(site,cfg),job.get('search_query') or ' '.join(artists)+' '+album,album=album,checkpoint=lambda:self.checkpoint(job,'search_'+site))
+            finally:lock.release()
             outcomes[site]={k:v for k,v in result.items() if k not in ('candidates','reason')}
             for c in result.get('candidates',[]):
                 exact=strict_text(c['title'])==strict_text(album) and artist_key(c['artists'])==artist_key(artists)

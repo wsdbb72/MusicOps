@@ -154,3 +154,17 @@ def test_coordinator_cancellation_cancels_each_claim_before_provider(service,mon
     monkeypatch.setattr(flows,'_identifying',lambda job:(_ for _ in ()).throw(AssertionError('cancelled stage executed')))
     assert flows.advance()['parallel_count']==4
     assert {job['stage'] for job in flows.rows()}=={'cancelled'}
+
+
+def test_metadata_copies_use_two_slots_and_allow_network_peers(service,monkeypatch):
+    flows=service.workflows;seed(service,5,stage='metadata')
+    row=copy.deepcopy(flows.rows()[0]);row.update(job_id='waiting-search',stage='searching');flows.put(row)
+    monkeypatch.setattr(flows,'parallel_limit',lambda:4)
+    monkeypatch.setattr(service,'_checkpoint',lambda phase:None)
+    seen=[];barrier=threading.Barrier(3)
+    def stage(job):
+        seen.append(job['resume_stage']);barrier.wait(5);flows.put(job,stage='completed')
+    monkeypatch.setattr(flows,'_metadata',stage);monkeypatch.setattr(flows,'_searching',stage)
+    assert flows.advance()['parallel_count']==3
+    assert sorted(seen)==['metadata','metadata','searching']
+    assert sum(j['stage']=='metadata' for j in flows.rows())==3

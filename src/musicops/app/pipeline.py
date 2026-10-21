@@ -135,11 +135,12 @@ class Workflows:
             pending=bool(task and task['state']=='running')
         row.update(task_group=j.get('task_group') or ('identify' if j.get('job_kind')=='batch' or j['stage'] in ('identifying','snapshotting','metadata','enrich','planning') else 'search' if j['stage'] in ('searching','requesting') else 'process'),paused=bool(j.get('paused')),pause_pending=pending)
         return row
-    def next_job(self,*,network_only=False,include_fallback=False):
+    def next_job(self,*,network_only=False,include_fallback=False,include_metadata=False):
         import time
         search_turn=getattr(self,'_fallback_turns',0)>=3
         fallback_clause=" OR json_extract(payload,'$.stage')='fallback'" if include_fallback else ""
-        network_clause=" AND (json_extract(payload,'$.stage')='searching' OR (json_extract(payload,'$.stage')='identifying' AND json_extract(payload,'$.scene')!='fill')"+fallback_clause+")" if network_only else ''
+        metadata_clause=" OR json_extract(payload,'$.stage')='metadata'" if include_metadata else ''
+        network_clause=" AND (json_extract(payload,'$.stage')='searching' OR (json_extract(payload,'$.stage')='identifying' AND json_extract(payload,'$.scene')!='fill')"+fallback_clause+metadata_clause+")" if network_only else ''
         with self.store.connection() as c:
             row=c.execute("SELECT payload FROM evidence AS current WHERE id LIKE 'workflow:%' AND coalesce(json_extract(payload,'$.hidden'),0)=0 AND coalesce(json_extract(payload,'$.job_kind'),'album') NOT IN ('batch','activity') AND coalesce(json_extract(payload,'$.paused'),0)=0 AND json_extract(payload,'$.stage') NOT IN ('completed','failed','needs_review','cancelled','skipped','restored','running') AND (json_extract(payload,'$.identification_job_id') IS NULL OR EXISTS (SELECT 1 FROM evidence AS parent WHERE parent.id='workflow:'||json_extract(current.payload,'$.identification_job_id') AND json_extract(parent.payload,'$.stage')='completed')) AND (json_extract(payload,'$.search_job_id') IS NULL OR coalesce(json_extract(payload,'$.task_type'),'')!='album' OR EXISTS (SELECT 1 FROM evidence AS searched WHERE searched.id='workflow:'||json_extract(current.payload,'$.search_job_id') AND json_extract(searched.payload,'$.stage')='completed')) AND coalesce(json_extract(payload,'$.next_poll'),0)<=?"+network_clause+" ORDER BY CASE json_extract(payload,'$.stage') WHEN 'publishing' THEN 0 WHEN 'retiring' THEN 0 WHEN 'notifying' THEN 0 WHEN 'validating' THEN 0 WHEN 'metadata' THEN 1 WHEN 'enrich' THEN 1 WHEN 'downloading' THEN 2 WHEN 'requesting' THEN 3 WHEN 'fallback' THEN CASE WHEN ? THEN 4 ELSE 3 END WHEN 'searching' THEN CASE WHEN ? THEN 3 ELSE 4 END ELSE CASE WHEN ? THEN 3 ELSE 5 END END,updated_at,id LIMIT 1",(time.time(),search_turn,search_turn,search_turn)).fetchone()
         return json.loads(row[0]) if row else None
@@ -342,11 +343,12 @@ class Workflows:
         if job['stage']=='fallback':
             # An old snapshot must not restart a managed engine beneath a peer.
             return job.get('config',{}).get('paths',{}).get('tools')==self.s.config.current()['values']['paths']['tools']
-        return job['stage']=='searching' or job['stage']=='identifying' and job.get('scene')!='fill'
+        return job['stage'] in ('searching','metadata') or job['stage']=='identifying' and job.get('scene')!='fill'
     def advance(self):
         # Keep one coordinator, and retain the existing task/safe-shutdown contract.
         # File publication and token consumption stay exclusive; streaming uses
-        # separate job directories, with at most two albums fetching audio.
+        # separate job directories, with at most two albums fetching audio
+        # and at most two albums preparing their private metadata copies.
         from concurrent.futures import ThreadPoolExecutor
         with self._advance_lock:
             with self.s.mutex:
@@ -360,7 +362,8 @@ class Workflows:
                 if parallel:
                     for _ in range(self.parallel_limit()-1):
                         fallback_count=sum(row['resume_stage']=='fallback' for row in jobs)
-                        peer=self.next_job(network_only=True,include_fallback=fallback_count<2)
+                        metadata_count=sum(row['resume_stage']=='metadata' for row in jobs)
+                        peer=self.next_job(network_only=True,include_fallback=fallback_count<2,include_metadata=metadata_count<2)
                         if peer and not self._parallel_job(peer):peer=self.next_job(network_only=True)
                         if not peer:break
                         if peer['stage']=='fallback':self._fallback_turns=getattr(self,'_fallback_turns',0)+1

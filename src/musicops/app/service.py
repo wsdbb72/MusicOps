@@ -140,7 +140,9 @@ class AppService:
             task=self.store.get('tasks',payload['task_id'])
             if task is None:raise KeyError('TASK_NOT_FOUND')
             return {'task':task}
-        if command=='get_playlist_targets':return {'targets':self.store.list('target_tracks'),'network_used':False}
+        if command=='get_playlist_targets':
+            targets=self.store.list('target_tracks')
+            return {'targets':targets,'complete':bool(targets) and all(t.get('snapshot_complete') for t in targets),'from_cache':True,'network_used':False}
         if command=='events': return {'events':self.store.events(payload.get('after',0))}
         if command=='update_config': return {'config':self.config.save(payload['values'],payload['expected_version'])}
         if command=='export_config':
@@ -827,7 +829,7 @@ class AppService:
                     old=targets[target['target_id']];target['snapshot_ids']=old['snapshot_ids']+[sid];target['playlist_ids']=old['playlist_ids']+[str(pid)];target['snapshot_complete']=complete and old['snapshot_complete']
                 targets[target['target_id']]=target
         membership=self._persist_playlist_targets(targets,complete_ids)
-        return {'status':'OK' if all_complete else 'SNAPSHOT_INCOMPLETE','complete':all_complete,'snapshots':summaries,'targets':list(targets.values()),**membership,'read_only':True,'reason':'' if all_complete else '可见曲目已逐曲取详情；清单计数或详情存在未对账项，不能驱动下载'}
+        return {'status':'OK' if all_complete else 'SNAPSHOT_INCOMPLETE','complete':all_complete,'snapshots':summaries,'targets':list(targets.values()),**membership,'read_only':True,'reason':'' if all_complete else '来源清单数量或资料尚未完全对账；可手动选择已显示曲目入库，未返回的曲目不会被猜测补入'}
     def _persist_playlist_targets(self,targets,complete_ids):
         with self.mutex:
             return self._persist_playlist_targets_locked(targets,complete_ids)

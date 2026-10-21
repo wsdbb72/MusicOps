@@ -17,6 +17,9 @@ store=StateStore(base/'state/musicops.sqlite');manager=ConfigManager(store,base,
 current=manager.current();cfg=current['values'];cfg['workflow'].update(setup_done=True,netease_fallback=False);cfg['catalog']['enabled']=False;cfg['ai']['enabled']=False
 for settings in cfg['providers'].values():settings['enabled']=False
 manager.save(cfg,current['version'])
+Path(cfg['paths']['library']).mkdir(parents=True,exist_ok=True)
+store.put('target_tracks','selected-cache-song',{'target_id':'selected-cache-song','raw_title':'Synthetic Song','artists':['Synthetic Artist'],'album':'Synthetic Album','duration':120,'source':'local','snapshot_complete':False})
+store.put('evidence','workflow:paused-local-repair',{'batch_id':'synthetic-batch','job_id':'paused-local-repair','kind':'workflow','scene':'complete','task_type':'album','task_group':'identify','stage':'metadata','paused':True,'config':copy.deepcopy(cfg),'targets':[],'old_files':[]})
 store.put('evidence','workflow:batch:synthetic-batch',{'job_id':'batch:synthetic-batch','job_kind':'batch','batch_id':'synthetic-batch','stage':'completed','scene':'playlist'})
 for i in range(8):
  row={'batch_id':'synthetic-batch','job_id':'parallel-'+str(i),'kind':'workflow','task_type':'identification','scene':'playlist','stage':'identifying','config':copy.deepcopy(cfg),'targets':[{'raw_title':'Synthetic Song','album':'Synthetic Album','artists':['Synthetic Artist'],'duration':120,'source':'local'}],'old_files':[],'created_at':'2026-01-01T00:00:00+00:00'}
@@ -31,12 +34,18 @@ try:
   try:
    client.call('get_status',{'compact':True})
    jobs=[store.get('evidence','workflow:parallel-'+str(i)) for i in range(8)]
-   if all(job['stage']=='completed' for job in jobs):break
+   if all(job['stage']=='completed' and (store.get('evidence','workflow:'+job.get('search_job_id','')) or {}).get('stage')=='needs_review' for job in jobs):break
   except (OSError,EOFError):pass
   time.sleep(.2)
  else:raise TimeoutError('Frozen parallel wave did not complete')
  tasks=store.list('tasks');waves=[task.get('result',{}).get('parallel_count',1) for task in tasks if task['command']=='advance_workflows' and task.get('result')]
  checks={'actual_worker_running':process.poll() is None,'eight_identifications_completed':all(job['stage']=='completed' for job in jobs),'unique_search_children':len({job.get('search_job_id') for job in jobs})==8,'parallel_waves_observed':max(waves,default=0)>=2,'bounded_at_four':max(waves,default=0)<=4,'no_downloads_or_tokens':not store.list('download_tasks') and not store.list('token_reservations')}
+ accepted=client.call('start_workflow',{'scene':'playlist','target_ids':['selected-cache-song']})
+ checks['repair_allows_selected_playlist_batch']=accepted.get('accepted') is True
+ repair=next(row for row in client.call('list_workflows',{})['jobs'] if row['job_id']=='paused-local-repair')
+ checks['legacy_repair_group_is_repair']=repair['task_group']=='repair'
+ cached=client.call('get_playlist_targets',{})
+ checks['partial_cache_remains_partial']=cached['from_cache'] and cached['complete'] is False and len(cached['targets'])==1
  report={'passed':all(checks.values()),'checks':checks,'observed_wave_sizes':waves,'synthetic_only':True,'external_requests':0}
  report_path.write_text(json.dumps(report,indent=2),'utf-8');print(json.dumps(report));assert report['passed']
 finally:

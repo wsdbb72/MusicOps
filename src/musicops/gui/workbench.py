@@ -18,7 +18,7 @@ from musicops.providers.playlist_access import HELP as PLAYLIST_AUTH_HELP
 SITES=[('open.cd','OpenCD','www.open.cd'),('dicmusic','DicMusic','dicmusic.com'),('orpheus','Orpheus','orpheus.network'),('redacted','RED','redacted.sh')]
 SCENES={'playlist':'歌单入库','complete':'资料补全','upgrade':'音质升级','fill':'补全整张专辑'}
 STAGES={'preparing':'检查本地库并准备任务','identifying':'识别歌曲与专辑','snapshotting':'核对原音源','queued':'已排队','restored':'已恢复原版','enrich':'补全资料','planning':'分析曲目','searching':'寻找音源','requesting':'获取下载资源','downloading':'下载中','fallback':'流媒体完整音源回退','metadata':'整理专辑资料','validating':'检查完整音频','publishing':'写入音乐库','retiring':'移出旧版','notifying':'通知音乐服务器','running':'正在处理','completed':'已完成','needs_review':'需要核对','failed':'未完成','cancelled':'已取消','skipped':'已跳过','waiting':'等待处理'}
-TASK_GROUPS=(('identify','识别任务'),('search','搜索任务'),('process','下载与入库'))
+TASK_GROUPS=(('identify','识别任务'),('search','搜索任务'),('repair','本地资料补全'),('process','下载与入库'))
 
 def eye_icon():
     image=QPixmap(20,20);image.fill(Qt.transparent);painter=QPainter(image);painter.setRenderHint(QPainter.Antialiasing);painter.setPen(QPen(QColor('#91a7c2'),1.6));painter.drawEllipse(2,5,16,10);painter.drawEllipse(8,8,4,4);painter.end();return QIcon(image)
@@ -284,7 +284,7 @@ class Workbench(QMainWindow):
         busy=bool(foreground or (self.tasks or getattr(self,'active_jobs',0)) and not globally_paused and not (paused and not getattr(self,'active_jobs',0)))
         self.activity.setText('●  后台已暂停' if globally_paused else '●  正在处理' if busy else f'●  已暂停 {paused} 项' if paused else '●  后台就绪');self.busy_bar.setRange(0,0) if busy else self.busy_bar.setRange(0,100);self.busy_bar.setValue(0 if busy else 100);self.notice.setVisible(bool(self.notice.text()))
     def page(self,title,subtitle):
-        w=QWidget();w.setObjectName('workbenchPage');w.setAutoFillBackground(True);box=QVBoxLayout(w);box.setContentsMargins(0,0,0,0);box.setSpacing(18);hero=QWidget();hero.setObjectName('hero');hero_box=QVBoxLayout(hero);hero_box.setContentsMargins(24,22,24,22);hero_box.setSpacing(9);hero_box.addWidget(label(('COLLECTION','METADATA','SOUND QUALITY','ACTIVITY','DISCOVERY','LIBRARY CARE')[self.stack.count()],'eyebrow'));hero_box.addWidget(label(title,'title'));hero_box.addWidget(label(subtitle,'subtitle'));box.addWidget(hero);scroll=QScrollArea();scroll.setObjectName('pageScroll');scroll.setWidgetResizable(True);scroll.setFrameShape(QScrollArea.NoFrame);scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff);scroll.setWidget(w);self.stack.addWidget(scroll);return box
+        w=QWidget();w.setObjectName('workbenchPage');w.setAutoFillBackground(True);box=QVBoxLayout(w);box.setContentsMargins(0,0,0,0);box.setSpacing(18);hero=QWidget();hero.setObjectName('hero');hero_box=QVBoxLayout(hero);hero_box.setContentsMargins(24,22,24,22);hero_box.setSpacing(9);hero_box.addWidget(label(('歌单入库流程','本地资料整理','音源质量比较','后台任务与进度','手动检索音源','音乐库维护')[self.stack.count()],'eyebrow'));hero_box.addWidget(label(title,'title'));hero_box.addWidget(label(subtitle,'subtitle'));box.addWidget(hero);scroll=QScrollArea();scroll.setObjectName('pageScroll');scroll.setWidgetResizable(True);scroll.setFrameShape(QScrollArea.NoFrame);scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff);scroll.setWidget(w);self.stack.addWidget(scroll);return box
     def steps(self,box,text):
         group=QGroupBox();group.setObjectName('card');layout=QVBoxLayout(group);layout.addWidget(label(text,'steps'));box.addWidget(group)
     def table(self,columns):
@@ -292,40 +292,41 @@ class Workbench(QMainWindow):
         if columns[0]=='选择':table.horizontalHeader().setSectionResizeMode(0,QHeaderView.ResizeToContents)
         return table
     def _playlist(self):
-        box=self.page('把歌单带进音乐库','粘贴主流平台的歌单链接或导入歌单文件，自动查找缺少的音乐、整理资料，并交给 Roon / Navidrome。');self.steps(box,'解析歌单  →  四站检索  →  下载  →  补齐资料与校验  →  入库')
+        box=self.page('把歌单带进音乐库','粘贴主流平台的歌单链接或导入歌单文件，自动查找缺少的音乐、整理资料，并交给 Roon / Navidrome。');self.steps(box,'读取歌单  →  对比本地音乐库  →  识别缺失专辑  →  搜索与下载  →  校验入库')
         row=QHBoxLayout();self.playlist_platform=QComboBox();self.playlist_platform.addItem('自动识别平台','auto')
         for key,name in PLATFORMS.items():self.playlist_platform.addItem(name,key)
         self.playlist_platform.setMaximumWidth(170);row.addWidget(self.playlist_platform);self.playlist=line('','粘贴歌单链接 / 分享文本；纯 ID 请先选择平台');row.addWidget(self.playlist);row.addWidget(button('解析歌单',self.parse,True));row.addWidget(button('导入文件',self.import_playlist));box.addLayout(row)
         self.playlist_note=label('已在音乐库中的曲目会跳过；找不到的音源可回退网易云。','hint');box.addWidget(self.playlist_note)
         self.track_table=self.table(['选择','歌曲','艺人','专辑','状态']);self.track_table.setMinimumHeight(220);box.addWidget(self.track_table,1)
-        row=QHBoxLayout();row.addWidget(button('全选 / 取消',self.select_all));row.addStretch();row.addWidget(button('开始入库',lambda:self.start('playlist'),True));box.addLayout(row)
+        row=QHBoxLayout();row.addWidget(button('全选 / 取消',self.select_all));row.addWidget(button('恢复已解析曲目',self.load_cached_playlist));row.addStretch();row.addWidget(button('开始入库',lambda:self.start('playlist'),True));box.addLayout(row)
     def _complete(self):
         box=self.page('补齐音乐库资料','检查专辑、艺人、封面和歌词。可靠匹配自动补齐，资料不明确的项目单独列出。');self.steps(box,'读取标签  →  识别缺失资料  →  查询与匹配  →  写入副本并验证')
         card=QGroupBox('将补齐的内容');card.setObjectName('card');form=QVBoxLayout(card)
         for text in ('专辑名、艺人和专辑艺人','封面图片','同名 .lrc 歌词（有匹配时）','多碟编号与目录结构'):
             form.addWidget(label('✓  '+text))
         box.addWidget(card);self.catalog_note=label('本地专辑资料库：尚未建立','hint');box.addWidget(self.catalog_note)
-        box.addWidget(button('检查并补全整张专辑（补缺曲，保留现有音频）',lambda:self.start('fill')))
+        box.addWidget(label('需要补缺曲？这会核对完整曲目表，再搜索、下载缺失歌曲；已在库中的音频保留。','hint'))
+        box.addWidget(button('查找并下载专辑缺失的歌曲',lambda:self.start('fill')))
         catalog_actions=QHBoxLayout();catalog_actions.addWidget(button('更新本地资料库',self.refresh_catalog));catalog_actions.addWidget(button('查看专辑资料库',self.browse_catalog));catalog_actions.addStretch();box.addLayout(catalog_actions)
-        box.addWidget(label('保留已有可靠资料；有冲突时等待核对。暂无资料的结果缓存一天，避免重复查询。','hint'));box.addStretch();row=QHBoxLayout();row.addWidget(button('重新查询暂无资料',lambda:self.start('complete',True)));row.addStretch();row.addWidget(button('检查并自动补全',lambda:self.start('complete'),True));box.addLayout(row)
+        box.addWidget(label('下面的“补齐已有歌曲资料”只补标签、封面和歌词，不下载音源。保留可靠资料，有冲突时等待核对。未找到的资料缓存一天。','hint'));box.addStretch();row=QHBoxLayout();row.addWidget(button('重新查询之前未找到的资料',lambda:self.start('complete',True)));row.addStretch();row.addWidget(button('补齐已有歌曲资料',lambda:self.start('complete'),True));box.addLayout(row)
     def _upgrade(self):
         box=self.page('寻找更好的音源','比较同一录音、同一发行的音源，验证新版完整后，再将旧版移出音乐库。');self.steps(box,'识别现有音质  →  四站寻找更好版本  →  下载与补齐  →  完整验证  →  替换旧版')
         card=QGroupBox('升级偏好');card.setObjectName('card');form=QVBoxLayout(card);self.prefer24=QCheckBox('同一录音优先选择无损 24 bit');self.prefer24.setChecked(True);form.addWidget(self.prefer24);form.addWidget(label('有损格式比较有效码率；无损格式比较位深、采样率和实际编码，不按文件大小判断。','hint'));box.addWidget(card)
         box.addWidget(label('替换前核对曲目、发行和全部音频。旧版移出音乐库后保留短期恢复副本；下载与做种源不改动。','hint'));box.addStretch();box.addWidget(button('检查并自动升级',lambda:self.start('upgrade'),True))
     def _tasks(self):
-        box=self.page('任务中心','每张专辑显示当前阶段。识别和搜索完成后继续下载与入库，历史步骤可切换至阶段记录。')
+        box=self.page('任务中心','歌单任务依次识别、搜索、下载入库；本地资料补全独立显示，不下载音源。专辑总览显示当前步骤，阶段记录可追溯历史。')
         box.setSpacing(12);box.itemAt(0).widget().layout().setContentsMargins(20,14,20,14)
         self.checked_jobs={};self.job_items={};self.job_groups={};self.job_detail_cache={};self.job_detail_notes={};self.job_track_versions={};self.job_detail_requests=set();self.expanded_job_ids=set();self.bulk_pending=False
         self.execution_note=label('正在连接后台…','hint');box.addWidget(self.execution_note);self.task_summary=label('正在读取专辑队列…','hint');box.addWidget(self.task_summary)
         row=WrapLayout();self.task_view=QComboBox();self.task_view.addItem('专辑总览','albums');self.task_view.addItem('阶段记录','steps');self.task_view.currentIndexChanged.connect(self.change_task_view);row.addWidget(self.task_view);row.addWidget(label('状态'));self.task_filter=QComboBox()
         for name,key in (('进行中 / 等待','active'),('需要核对','review'),('失败','failed'),('已结束','completed'),('全部','all')):self.task_filter.addItem(name,key)
         self.task_filter.currentIndexChanged.connect(self.change_task_filter);row.addWidget(self.task_filter);row.addStretch()
-        row.addWidget(button('重试全部失败',lambda:self.all_task_action('retry')));row.addWidget(button('全量 AI 核对',lambda:self.all_task_action('ai')));row.addWidget(button('全部手动核对',lambda:self.all_task_action('manual')));box.addLayout(row)
+        row.addWidget(button('重试全部失败',lambda:self.all_task_action('retry')));row.addWidget(button('AI 核对全部待核对任务',lambda:self.all_task_action('ai')));row.addWidget(button('逐项人工核对',lambda:self.all_task_action('manual')));box.addLayout(row)
         row=WrapLayout();self.job_select_page=QCheckBox('勾选本页');self.job_select_page.setTristate(True);self.job_select_page.stateChanged.connect(self.select_job_page);row.addWidget(self.job_select_page);self.job_selection_note=label('已勾选 0 项','hint');row.addWidget(self.job_selection_note);row.addStretch();self.task_query=line('','搜索全部专辑 / 艺人');self.task_query.setMaximumWidth(240);self.task_query.setMaxLength(200);self.task_query_timer=QTimer(self);self.task_query_timer.setSingleShot(True);self.task_query_timer.setInterval(350);self.task_query_timer.timeout.connect(self.change_task_filter);self.task_query.textChanged.connect(lambda _:self.task_query_timer.start());row.addWidget(self.task_query);row.addWidget(button('清空勾选',self.clear_checked_jobs));box.addLayout(row)
         self.selection_actions=QWidget();row=WrapLayout(self.selection_actions);row.setContentsMargins(0,0,0,0);self.bulk_buttons=[]
-        for text,action in (('暂停勾选','pause'),('继续勾选','resume'),('取消勾选','cancel'),('重试失败勾选','retry'),('删除勾选','delete')):
+        for text,action in (('暂停选中任务','pause'),('恢复选中任务','resume'),('取消选中任务','cancel'),('重试选中失败任务','retry'),('删除选中记录','delete')):
             action_button=button(text,lambda checked=False,a=action:self.bulk_action(a));self.bulk_buttons.append(action_button);row.addWidget(action_button)
-        self.bulk_ai_button=button('AI 辅助勾选',self.explain);row.addWidget(self.bulk_ai_button);row.addStretch();box.addWidget(self.selection_actions)
+        self.bulk_ai_button=button('AI 核对选中任务',self.explain);row.addWidget(self.bulk_ai_button);row.addStretch();box.addWidget(self.selection_actions)
         self.job_table=QTreeWidget();self.job_table.setColumnCount(5);self.job_table.setHeaderLabels(['任务 / 专辑 / 歌曲','类型 / 艺人','当前步骤 / 专辑','进度','结果']);self.job_table.setAlternatingRowColors(True);self.job_table.setSelectionMode(QAbstractItemView.SingleSelection);self.job_table.setEditTriggers(QAbstractItemView.NoEditTriggers);self.job_table.setUniformRowHeights(True);self.job_table.setIndentation(20);self.job_table.setRootIsDecorated(True)
         header=self.job_table.header();header.setDefaultAlignment(Qt.AlignLeft|Qt.AlignVCenter);header.setSectionResizeMode(0,QHeaderView.Interactive);self.job_table.setColumnWidth(0,270);header.setSectionResizeMode(1,QHeaderView.Interactive);self.job_table.setColumnWidth(1,125)
         for column in (2,3):header.setSectionResizeMode(column,QHeaderView.ResizeToContents)
@@ -504,6 +505,12 @@ class Workbench(QMainWindow):
             self.loaded_tracks(result)
             if result.get('reason') and not result.get('targets'):self.playlist_note.setText(self.playlist_note.text()+' '+result['reason'])
         self.call('refresh_playlist',payload,parsed,lambda error:self.playlist_note.setText('读取未完成：'+error))
+    def load_cached_playlist(self):
+        def loaded(result):
+            if not result.get('targets'):
+                self.playlist_note.setText('本机还没有歌单缓存，请先解析歌单或导入文件。');return
+            self.loaded_tracks(result)
+        self.call('get_playlist_targets',{},loaded,lambda error:self.playlist_note.setText('缓存读取未完成：'+error))
     def loaded_tracks(self,result):
         self.targets=result['targets'];self.track_table.setRowCount(len(self.targets))
         self.track_table.setUpdatesEnabled(False)
@@ -515,7 +522,7 @@ class Workbench(QMainWindow):
         self.track_table.setUpdatesEnabled(True)
         incomplete_count=sum(not t.get('metadata_complete',True) for t in self.targets)
         suffix=(f'（含 {incomplete_count} 首待识别专辑资料）' if incomplete_count else '')+(' 来源清单未完全对账，仅处理你明确选择的可见曲目。' if not result.get('complete',True) else '')
-        self.playlist_note.setText(f'已载入 {len(self.targets)} 首；选择需要入库的曲目。任务会按专辑去重。'+suffix)
+        self.playlist_note.setText(('已载入本机缓存，尚未重新联网核实。' if result.get('from_cache') else '')+f'已载入 {len(self.targets)} 首；选择需要入库的曲目。任务会按专辑去重。'+suffix)
     def select_all(self):
         checked=not all(self.track_table.item(i,0).checkState()==Qt.Checked for i in range(self.track_table.rowCount()))
         self.track_table.setUpdatesEnabled(False)
@@ -532,7 +539,10 @@ class Workbench(QMainWindow):
             self.refresh()
         self.call('start_workflow',{'scene':scene,'target_ids':targets,'prefer_24bit':self.prefer24.isChecked(),'refresh_resources':refresh_resources},started)
     def show_jobs(self,result):
-        counts=result.get('stage_counts',{});self.task_summary.setText(('后台已暂停 · 点击“继续整个后台”推进队列。 ' if getattr(self,'pipeline_paused',False) else '后台按专辑推进，下载与入库优先。 ')+f"识别 / 搜索 {sum(counts.get(k,0) for k in ('identifying','snapshotting','searching'))} · 等待下载 {counts.get('requesting',0)+counts.get('fallback',0)} · 下载中 {counts.get('downloading',0)} · 整理 / 入库 {sum(counts.get(k,0) for k in ('metadata','enrich','validating','notifying'))} · 待核对 {counts.get('needs_review',0)} · 失败 {counts.get('failed',0)}" if result.get('view')=='albums' else '阶段记录：识别 / 搜索完成表示该步骤结束；请切换“专辑总览”查看后续下载与入库。')
+        scene_counts=result.get('scene_active_counts',{})
+        scene_note='当前仅有本地资料补全，不会搜索或下载音源。 ' if scene_counts.get('complete') and not any(scene_counts.get(k) for k in ('playlist','upgrade','fill')) else ''
+        scene_note+=f"歌单入库 {scene_counts.get('playlist',0)} 项 · 本地资料补全 {scene_counts.get('complete',0)} 项。 " if scene_counts else ''
+        counts=result.get('stage_counts',{});self.task_summary.setText(('后台已暂停 · 点击“继续整个后台”推进队列。 ' if getattr(self,'pipeline_paused',False) else scene_note+'后台按专辑推进，下载与入库优先。 ')+f"识别 / 搜索 {sum(counts.get(k,0) for k in ('identifying','snapshotting','searching'))} · 等待下载 {counts.get('requesting',0)+counts.get('fallback',0)} · 下载中 {counts.get('downloading',0)} · 整理 / 入库 {sum(counts.get(k,0) for k in ('metadata','enrich','validating','notifying'))} · 待核对 {counts.get('needs_review',0)} · 失败 {counts.get('failed',0)}" if result.get('view')=='albums' else '阶段记录：识别 / 搜索完成表示该步骤结束；请切换“专辑总览”查看后续下载与入库。')
         self.job_total=result.get('total',0);self.active_jobs=result.get('active',0);self.paused_jobs=result.get('paused_count',0);self.job_counts.setText(f"共 {self.job_total} 项 · 待处理 {self.active_jobs} · 暂停 {self.paused_jobs} · 完成 {result.get('finished',0)} · 第 {self.job_offset//200+1} 页")
         selected=self.selected_job();jobs=result.get('jobs',[]);collapsed={key for key,item in self.job_groups.items() if not item.isExpanded()};scroll=self.job_table.verticalScrollBar().value();anchor=self.scroll_anchor()
         groups=tuple(reversed(TASK_GROUPS)) if result.get('view')=='albums' else TASK_GROUPS
@@ -579,6 +589,7 @@ class Workbench(QMainWindow):
             if job_id not in self.job_detail_cache:self.expand_job(self.job_items[job_id])
     @staticmethod
     def job_group(job):
+        if job.get('scene')=='complete' and job.get('job_kind') not in ('batch','activity'):return 'repair'
         if job.get('task_group') in dict(TASK_GROUPS):return job['task_group']
         if job.get('job_kind')=='batch' or job.get('task_type')=='identification' or job.get('stage') in ('identifying','preparing','planning','enrich','metadata'):return 'identify'
         if job.get('stage') in ('searching','requesting') or job.get('identification_job_id'):return 'search'

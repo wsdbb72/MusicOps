@@ -133,25 +133,28 @@ class Workflows:
         if j.get('paused') and j.get('job_kind')=='batch' and j['stage']=='preparing':
             task=self.store.get('tasks',j.get('start_task_id'))
             pending=bool(task and task['state']=='running')
-        row.update(task_group=j.get('task_group') or ('identify' if j.get('job_kind')=='batch' or j['stage'] in ('identifying','snapshotting','metadata','enrich','planning') else 'search' if j['stage'] in ('searching','requesting') else 'process'),paused=bool(j.get('paused')),pause_pending=pending)
+        group='repair' if j.get('scene')=='complete' and j.get('job_kind') not in ('batch','activity') else j.get('task_group')
+        row.update(task_group=group or ('identify' if j.get('job_kind')=='batch' or j['stage'] in ('identifying','snapshotting','metadata','enrich','planning') else 'search' if j['stage'] in ('searching','requesting') else 'process'),paused=bool(j.get('paused')),pause_pending=pending)
         return row
     def next_job(self,*,network_only=False,include_fallback=False,include_metadata=False):
         import time
         search_turn=getattr(self,'_fallback_turns',0)>=3
+        io_turn=getattr(self,'_io_turns',0)>=3
         fallback_clause=" OR json_extract(payload,'$.stage')='fallback'" if include_fallback else ""
         metadata_clause=" OR json_extract(payload,'$.stage')='metadata'" if include_metadata else ''
         network_clause=" AND (json_extract(payload,'$.stage')='searching' OR (json_extract(payload,'$.stage')='identifying' AND json_extract(payload,'$.scene')!='fill')"+fallback_clause+metadata_clause+")" if network_only else ''
         with self.store.connection() as c:
-            row=c.execute("SELECT payload FROM evidence AS current WHERE id LIKE 'workflow:%' AND coalesce(json_extract(payload,'$.hidden'),0)=0 AND coalesce(json_extract(payload,'$.job_kind'),'album') NOT IN ('batch','activity') AND coalesce(json_extract(payload,'$.paused'),0)=0 AND json_extract(payload,'$.stage') NOT IN ('completed','failed','needs_review','cancelled','skipped','restored','running') AND (json_extract(payload,'$.identification_job_id') IS NULL OR EXISTS (SELECT 1 FROM evidence AS parent WHERE parent.id='workflow:'||json_extract(current.payload,'$.identification_job_id') AND json_extract(parent.payload,'$.stage')='completed')) AND (json_extract(payload,'$.search_job_id') IS NULL OR coalesce(json_extract(payload,'$.task_type'),'')!='album' OR EXISTS (SELECT 1 FROM evidence AS searched WHERE searched.id='workflow:'||json_extract(current.payload,'$.search_job_id') AND json_extract(searched.payload,'$.stage')='completed')) AND coalesce(json_extract(payload,'$.next_poll'),0)<=?"+network_clause+" ORDER BY CASE json_extract(payload,'$.stage') WHEN 'publishing' THEN 0 WHEN 'retiring' THEN 0 WHEN 'notifying' THEN 0 WHEN 'validating' THEN 0 WHEN 'metadata' THEN 1 WHEN 'enrich' THEN 1 WHEN 'downloading' THEN 2 WHEN 'requesting' THEN 3 WHEN 'fallback' THEN CASE WHEN ? THEN 4 ELSE 3 END WHEN 'searching' THEN CASE WHEN ? THEN 3 ELSE 4 END ELSE CASE WHEN ? THEN 3 ELSE 5 END END,updated_at,id LIMIT 1",(time.time(),search_turn,search_turn,search_turn)).fetchone()
+            row=c.execute("SELECT payload FROM evidence AS current WHERE id LIKE 'workflow:%' AND coalesce(json_extract(payload,'$.hidden'),0)=0 AND coalesce(json_extract(payload,'$.job_kind'),'album') NOT IN ('batch','activity') AND coalesce(json_extract(payload,'$.paused'),0)=0 AND json_extract(payload,'$.stage') NOT IN ('completed','failed','needs_review','cancelled','skipped','restored','running') AND (json_extract(payload,'$.identification_job_id') IS NULL OR EXISTS (SELECT 1 FROM evidence AS parent WHERE parent.id='workflow:'||json_extract(current.payload,'$.identification_job_id') AND json_extract(parent.payload,'$.stage')='completed')) AND (json_extract(payload,'$.search_job_id') IS NULL OR coalesce(json_extract(payload,'$.task_type'),'')!='album' OR EXISTS (SELECT 1 FROM evidence AS searched WHERE searched.id='workflow:'||json_extract(current.payload,'$.search_job_id') AND json_extract(searched.payload,'$.stage')='completed')) AND coalesce(json_extract(payload,'$.next_poll'),0)<=?"+network_clause+" ORDER BY CASE json_extract(payload,'$.stage') WHEN 'publishing' THEN 0 WHEN 'retiring' THEN 0 WHEN 'notifying' THEN 0 WHEN 'validating' THEN 0 WHEN 'downloading' THEN CASE WHEN ? THEN 3 ELSE 1 END WHEN 'requesting' THEN CASE WHEN ? THEN 3 ELSE 1 END WHEN 'metadata' THEN 2 WHEN 'enrich' THEN 2 WHEN 'fallback' THEN CASE WHEN ? THEN 4 ELSE 3 END WHEN 'searching' THEN CASE WHEN ? THEN 3 ELSE 4 END ELSE CASE WHEN ? THEN 3 ELSE 5 END END,updated_at,id LIMIT 1",(time.time(),io_turn,io_turn,search_turn,search_turn,search_turn)).fetchone()
         return json.loads(row[0]) if row else None
     def queue(self,args,cfg,task_id=None):
         """Expose the preparation before the serial worker begins any filesystem IO."""
         scene=args.get('scene')
         if scene not in SCENES:raise ValueError('请选择歌单入库、资料补全或音质升级')
         if cfg['offline']:raise PolicyBlocked('请先在连接向导完成设置')
-        # Prevent two live batches from modifying the same album or issuing duplicate FL.
+        # Keep scans and replacement batches exclusive. A local-only repair
+        # must not prevent an independently selected playlist import.
         with self.store.connection() as c:
-            active=c.execute("SELECT 1 FROM evidence WHERE id LIKE 'workflow:%' AND coalesce(json_extract(payload,'$.hidden'),0)=0 AND coalesce(json_extract(payload,'$.job_kind'),'album')!='activity' AND json_extract(payload,'$.stage') NOT IN ('completed','failed','needs_review','cancelled','skipped','restored') LIMIT 1").fetchone()
+            active=c.execute("SELECT 1 FROM evidence WHERE id LIKE 'workflow:%' AND coalesce(json_extract(payload,'$.hidden'),0)=0 AND coalesce(json_extract(payload,'$.job_kind'),'album')!='activity' AND json_extract(payload,'$.stage') NOT IN ('completed','failed','needs_review','cancelled','skipped','restored') AND (json_extract(payload,'$.stage')='preparing' OR coalesce(json_extract(payload,'$.scene'),'')=? OR coalesce(json_extract(payload,'$.scene'),'') NOT IN ('playlist','complete') OR ? NOT IN ('playlist','complete')) LIMIT 1",(scene,scene)).fetchone()
         if active:raise PolicyBlocked('已有任务正在准备或运行，请等待完成或取消后再开始下一批')
         root=Path(cfg['paths']['library']);reject_reparse_chain(root)
         if not root.is_dir():raise ValueError('音乐库目录不存在，请在设置中选择已有目录')
@@ -222,7 +225,7 @@ class Workflows:
                 if recent:continue
             job_id=str(uuid.uuid4());first=tracks[0];stage='metadata' if scene=='complete' else 'snapshotting' if scene in ('upgrade','fill') else 'identifying'
             paused=bool((self.store.get('evidence','workflow:'+batch['job_id']) or {}).get('paused'))
-            job={'kind':'workflow','job_id':job_id,'batch_id':batch_id,'scene':scene,'config':copy.deepcopy(cfg),'targets':tracks if scene=='playlist' else [],'old_files':tracks if scene!='playlist' else [],'stage':stage,'task_group':'identify','task_type':'album' if scene=='complete' else 'identification','target_count':len(tracks),'paused':paused,'progress':0,'created_at':utcnow(),'message':'等待识别' if scene=='playlist' else '等待处理','detail':'','label':(first.get('album') or '待识别专辑')+' · '+' / '.join(first.get('albumartist') or first.get('artists',[])),'prefer_24bit':args.get('prefer_24bit',cfg['workflow']['prefer_24bit']),'refresh_resources':bool(args.get('refresh_resources'))}
+            job={'kind':'workflow','job_id':job_id,'batch_id':batch_id,'scene':scene,'config':copy.deepcopy(cfg),'targets':tracks if scene=='playlist' else [],'old_files':tracks if scene!='playlist' else [],'stage':stage,'task_group':'repair' if scene=='complete' else 'identify','task_type':'album' if scene=='complete' else 'identification','target_count':len(tracks),'paused':paused,'progress':0,'created_at':utcnow(),'message':'等待识别' if scene=='playlist' else '等待处理','detail':'','label':(first.get('album') or '待识别专辑')+' · '+' / '.join(first.get('albumartist') or first.get('artists',[])),'prefer_24bit':args.get('prefer_24bit',cfg['workflow']['prefer_24bit']),'refresh_resources':bool(args.get('refresh_resources'))}
             if scene=='playlist':
                 local=local_groups.get((strict_text(first.get('album')),artist_key(first.get('albumartist') or first.get('artists',[]))),[])
                 if len({str(album_root(f,root)) for f in local})==1:job['existing_album_files']=local
@@ -230,6 +233,7 @@ class Workflows:
             created+=1
             if created%25==0:self.put(batch,progress=90,album_count=created,message=f'正在创建专辑任务：已创建 {created} / {len(groups)} 项')
         message=f'已创建 {created} 个专辑任务；已经存在的歌单曲目和近期检查过的专辑已跳过'
+        if scene=='complete':message=f'已创建 {created} 个本地资料补全任务；只整理现有音源，不触发 PT 搜索或音源下载。歌单入库可另外提交。'
         self.put(batch,stage='completed',progress=100,album_count=created,message=message,detail='准备完成，专辑任务会在后台依次处理。' if created else '本批次没有需要处理的专辑。可检查曲目是否已在库中，或启用重新检查。')
         return {'status':'OK','batch_id':batch_id,'album_count':created,'message':message}
     def recover(self):
@@ -356,6 +360,8 @@ class Workflows:
                 if not job:return {'status':'OK','idle':True}
                 parallel=self._parallel_job(job)
                 jobs=[job];stage=job['stage']
+                if stage in ('downloading','requesting'):self._io_turns=getattr(self,'_io_turns',0)+1
+                elif stage in ('metadata','enrich'):self._io_turns=0
                 if stage=='fallback':self._fallback_turns=getattr(self,'_fallback_turns',0)+1
                 elif stage in ('searching','identifying','snapshotting','queued'):self._fallback_turns=0
                 self.put(job,stage='running',resume_stage=stage)
@@ -363,7 +369,8 @@ class Workflows:
                     for _ in range(self.parallel_limit()-1):
                         fallback_count=sum(row['resume_stage']=='fallback' for row in jobs)
                         metadata_count=sum(row['resume_stage']=='metadata' for row in jobs)
-                        peer=self.next_job(network_only=True,include_fallback=fallback_count<2,include_metadata=metadata_count<2)
+                        peer=self.next_job(network_only=True) if len(jobs)==1 and stage in ('metadata','fallback') else None
+                        if not peer:peer=self.next_job(network_only=True,include_fallback=fallback_count<2,include_metadata=metadata_count<2)
                         if peer and not self._parallel_job(peer):peer=self.next_job(network_only=True)
                         if not peer:break
                         if peer['stage']=='fallback':self._fallback_turns=getattr(self,'_fallback_turns',0)+1

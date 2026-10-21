@@ -12,6 +12,7 @@ def listing(workflows, offset, state, selection, query=''):
             json_extract(payload,'$.job_id') AS job_id,
             coalesce(nullif(json_extract(payload,'$.identification_job_id'),''),json_extract(payload,'$.job_id')) AS root_id,
             json_extract(payload,'$.stage') AS stage,
+            json_extract(payload,'$.scene') AS scene,
             json_extract(payload,'$.task_type') AS task_type,
             coalesce(json_extract(payload,'$.label'),'') AS label,
             json_extract(payload,'$.job_kind') AS job_kind,
@@ -31,7 +32,7 @@ def listing(workflows, offset, state, selection, query=''):
         # Prerequisites without successors are stage history, never an import.
         current = [r for r in current if not r['hidden'] and not (r['stage']=='completed' and (r['task_type'] in ('identification','search') or r['job_kind']=='batch'))]
         current.sort(key=lambda r: (r['created_at'], r['id']), reverse=True)
-        order={'running':0,'downloading':0,'validating':0,'notifying':0,'metadata':1,'enrich':1,'requesting':2,'fallback':2,'searching':3,'identifying':4,'snapshotting':4}
+        order={'running':0,'downloading':0,'validating':0,'publishing':0,'retiring':0,'notifying':0,'requesting':1,'fallback':1,'searching':2,'identifying':3,'snapshotting':3,'metadata':4,'enrich':4}
         current.sort(key=lambda r: (bool(r['paused']),order.get(r['stage'],5)))
         if query.strip():current=[r for r in current if query.strip().casefold() in r['label'].casefold()]
         def matches(row):
@@ -61,4 +62,5 @@ def listing(workflows, offset, state, selection, query=''):
             'all_total': len(current), 'active': sum(not r['paused'] for r in active),
             'paused_count': sum(bool(r['paused']) for r in active), 'total_active': len(active),
             'finished': counts['completed'], 'preparing_count': counts['preparing'],
+            'scene_active_counts':dict(collections.Counter(row['scene'] for row in active)),
             'stage_counts': dict(counts), 'token_prompts': [r['job_id'] for r in current if r['stage']=='needs_review' and r['review_kind']=='token'][:100]}

@@ -208,9 +208,14 @@ jobs:
     with:
       ref: ${{ github.sha }}
 
+  linux:
+    name: Linux amd64 browser desktop
+    uses: ./.github/workflows/docker-release.yml
+    secrets: inherit
+
   publish:
     name: Publish only the complete verified desktop release
-    needs: [windows, macos]
+    needs: [windows, macos, linux]
     runs-on: ubuntu-latest
     timeout-minutes: 20
     permissions:
@@ -318,7 +323,7 @@ jobs:
               if obj['type'] != 'commit' or obj['sha'] != commit:
                   raise SystemExit('The existing tag does not identify the tested source')
           notes = pathlib.Path('release-notes.md')
-          notes.write_text('修复本地资料补全占住整个队列，无法另行提交歌单入库的问题。同场景重复批次、并行索引准备和原件替换继续互斥；历史资料补全正确归入独立的本地资料补全分组，不再全显示为识别。\n\n下载准备和轮询优先推进，并保留资料整理的公平调度；两线程时也给歌单识别和检索留位置。歌单页面新增“恢复已解析曲目”，不联网、不自动勾选，不把部分清单标成完整歌单。选择已显示曲目后再提交入库。\n\n提供 Windows 安装包及便携 ZIP、macOS Apple Silicon 原生 PKG 及应用 ZIP、同一提交源码和校验文件。macOS 为 ad-hoc 完整性签名，尚无 Developer ID 签名及公证。\n\n回归与冻结程序验收使用独立档案和合成资料，不下载真实音乐或消耗 FL 令牌。\n\nSource commit: '+commit+'\n', 'utf-8')
+          notes.write_text('新增 Linux amd64 Docker 镜像 wsdbb72/muiscops，浏览器访问完整 MusicOps 界面；配置、任务和 Linux AES-GCM 凭据持久化。内置 FFmpeg、go-music-dl、FlareSolverr 和 Chromium。部署指南见仓库 docs/Docker部署.md。\n\n提供同一提交的 Windows 安装版、便携版及 macOS ARM 原生 PKG 与 ZIP。macOS 为 ad-hoc 完整性签名，尚无 Developer ID 签名及公证。\n\n全部验收使用合成资料，不下载真实音乐或消费 FL。\n\nSource commit: '+commit+'\n', 'utf-8')
           def gh(*arguments):
               subprocess.run(['gh', *arguments], check=True)
           gh('release', 'create', tag, '--verify-tag', '--target', commit, '--draft', '--title', 'MusicOps '+version, '--notes-file', str(notes))
@@ -344,3 +349,21 @@ jobs:
           if result['draft'] or result['name'] != 'MusicOps '+version:
               raise SystemExit('Published release state did not match the verified draft')
           print('Published '+result['html_url'])
+
+  docker_latest:
+    name: Advance Docker latest after the complete release
+    needs: [publish, linux]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: docker/setup-buildx-action@v4
+      - uses: docker/login-action@v4
+        with:
+          username: wsdbb72
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+      - name: Promote the exact tested immutable image digest
+        env:
+          IMAGE_DIGEST: ${{ needs.linux.outputs.digest }}
+        run: |
+          set -euo pipefail
+          [[ "$IMAGE_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
+          docker buildx imagetools create --prefer-index=false --tag wsdbb72/muiscops:latest "wsdbb72/muiscops@$IMAGE_DIGEST"

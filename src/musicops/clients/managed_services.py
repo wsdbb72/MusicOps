@@ -24,6 +24,7 @@ COOKIE_HOSTS={'netease':'music.163.com','qq':'y.qq.com','kuwo':'www.kuwo.cn','ku
 
 
 def engine_root():
+    if os.environ.get('MUSICOPS_ENGINE_ROOT'):return Path(os.environ['MUSICOPS_ENGINE_ROOT'])
     if getattr(sys, 'frozen', False):
         root = Path(sys.executable).resolve().parent
         if sys.platform == 'darwin':

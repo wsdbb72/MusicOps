@@ -1,0 +1,16 @@
+services:
+  musicops:
+    image: wsdbb72/muiscops:0.4.15
+    platform: linux/amd64
+    container_name: musicops
+    restart: unless-stopped
+    user: "${PUID:-1000}:${PGID:-1000}"
+    ports:
+      - "${MUSICOPS_BIND:-127.0.0.1}:8080:8080"
+    volumes:
+      - ${MUSICOPS_CONFIG:-./config}:/config
+      - ${MUSICOPS_MEDIA:-/srv/music-storage}:/media
+    shm_size: 1gb
+    stop_grace_period: 120s
+    environment:
+      TZ: ${TZ:-Asia/Shanghai}

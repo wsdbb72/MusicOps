@@ -31,6 +31,11 @@ utils.PATCHED_DRIVER_PATH = str(driver)
 utils.FLARESOLVERR_VERSION = '3.5.2'
 utils.CHROME_MAJOR_VERSION = '155'
 utils.CHROME_EXE_PATH = str(root / 'browser' / ('chrome.exe' if os.name == 'nt' else 'Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing'))
+if sys.platform=='linux':
+    import subprocess,re
+    utils.CHROME_EXE_PATH=str(root/'browser/chrome')
+    utils.CHROME_MAJOR_VERSION=re.search(r'\d+',subprocess.check_output([utils.CHROME_EXE_PATH,'--version'],text=True)).group()
+    utils.start_xvfb_display=lambda:None
 if sys.platform == 'darwin':
     # macOS has native headless Chrome and no X11/Xvfb dependency.
     utils.start_xvfb_display = lambda: None

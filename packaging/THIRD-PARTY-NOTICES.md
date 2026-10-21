@@ -9,6 +9,8 @@ PySide6／Qt 使用其开源许可选项，运行时采用动态库。PyInstalle
 远程网站、音乐资料与歌词接口通过独立适配器接入；本仓库不包含其服务器源码、账户凭据或完整资料数据库。使用远程服务时应遵守各服务的访问规则与内容许可。
 ## Playlist Out
 
+Linux Docker 镜像从 Debian 软件源安装 FFmpeg、Chromium、noVNC、x11vnc、Nginx 等系统包，保留 `/usr/share/doc` 中的版权说明。可根据 `dpkg-query -W` 获取的精确版本从对应 Debian 软件源获取源码并重建。上面的“不分发 FFmpeg”说明仅适用于 Windows/macOS 桌面发行包。Docker 的引擎对应源码和 Python 依赖许可另见 `/opt/musicops/engines/licenses` 与 `/opt/musicops/licenses`。
+
 Kugou public-playlist request formatting/signature material is adapted from
 LengxiQwQ/playlistout, Copyright (c) 2026 LengxiQwQ, under the MIT License.
 Its complete notice is included in `licenses/PlaylistOut/LICENSE.txt` in the

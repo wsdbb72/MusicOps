@@ -1,0 +1,14 @@
+**
+!pyproject.toml
+!src/
+!src/**
+!packaging/
+!packaging/**
+!docs/
+!docs/references/
+!docs/references/**
+!docker/
+!docker/**
+**/__pycache__
+**/*.pyc
+docker/.env*

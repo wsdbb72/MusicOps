@@ -8,6 +8,8 @@ def digest(value): return hashlib.sha256(json.dumps(value,ensure_ascii=False,sor
 def default_config(base,offline=True):
     base=Path(base).resolve()
     paths={key:str((base/'demo' if offline else base)/key) for key in ('library','source','work','backup','quarantine','reports')}
+    if os.environ.get('MUSICOPS_CONTAINER')=='1' and not offline:
+        paths.update(library='/media/music',**{key:'/media/MusicOps/'+('downloads' if key=='source' else key) for key in ('source','work','backup','quarantine','reports')})
     tool_roots=[Path(getattr(sys,'_MEIPASS',Path(__file__).resolve().parents[3]))/'tools',Path(sys.executable).parent/'tools']
     if sys.platform=='darwin':tool_roots.extend([Path(sys.executable).parent.parent/'Resources/tools',Path.home()/'.local/bin',Path('/opt/homebrew/bin'),Path('/usr/local/bin')])
     suffix='.exe' if os.name=='nt' else ''

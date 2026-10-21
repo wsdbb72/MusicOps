@@ -75,7 +75,7 @@ def browser(cache, output, part):
 
 
 def build(output, cache):
-    if os.name != 'nt' and sys.platform != 'darwin': raise RuntimeError('Native Windows/macOS build required')
+    if os.name != 'nt' and sys.platform not in ('darwin','linux'): raise RuntimeError('Native Windows/macOS/Linux build required')
     output.mkdir(parents=True, exist_ok=True); cache.mkdir(parents=True, exist_ok=True)
     go = source('go-music-dl', cache)
     # Platform cookies live only in the engine's memory; MusicOps owns encrypted persistence.
@@ -103,8 +103,15 @@ def build(output, cache):
         ROOT / 'packaging/flare_entry.py')
     run(python,ROOT/'packaging/collect_licenses.py',output/'flaresolverr')
     hashes = {}
-    hashes['chrome'] = browser(cache, output / 'flaresolverr/browser', 'chrome')
-    hashes['chromedriver'] = browser(cache, output / 'flaresolverr/driver', 'chromedriver')
+    if sys.platform=='linux':
+        browser_dir=output/'flaresolverr/browser';browser_dir.mkdir(exist_ok=True)
+        (browser_dir/'chrome').symlink_to('/usr/bin/chromium')
+        driver_dir=output/'flaresolverr/driver';driver_dir.mkdir(exist_ok=True)
+        shutil.copy2('/usr/bin/chromedriver',driver_dir/'chromedriver')
+        hashes={'chrome':'distribution-package','chromedriver':hashlib.sha256((driver_dir/'chromedriver').read_bytes()).hexdigest()}
+    else:
+        hashes['chrome'] = browser(cache, output / 'flaresolverr/browser', 'chrome')
+        hashes['chromedriver'] = browser(cache, output / 'flaresolverr/driver', 'chromedriver')
     if sys.platform=='darwin':
         # ARM macOS validates executable signatures. Patch before signing the
         # shipped driver, so UC sees an already-patched private runtime copy.

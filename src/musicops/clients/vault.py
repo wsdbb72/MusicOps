@@ -52,7 +52,9 @@ class Blob(ctypes.Structure):
     _fields_=[('cbData',wintypes.DWORD),('pbData',ctypes.POINTER(ctypes.c_byte))]
 def protect(data:bytes, decrypt=False):
     if is_macos():return _mac_protect(data,decrypt)
-    if not is_windows():raise RuntimeError('凭据保护仅支持 Windows DPAPI 或 macOS Keychain')
+    if not is_windows():
+        from musicops.clients.linux_vault import protect_linux
+        return protect_linux(data,decrypt)
     buf=ctypes.create_string_buffer(data); inp=Blob(len(data),ctypes.cast(buf,ctypes.POINTER(ctypes.c_byte))); out=Blob()
     crypt=ctypes.WinDLL('crypt32',use_last_error=True)
     crypt.CryptProtectData.argtypes=[ctypes.POINTER(Blob),wintypes.LPCWSTR,ctypes.POINTER(Blob),ctypes.c_void_p,ctypes.c_void_p,wintypes.DWORD,ctypes.POINTER(Blob)]
@@ -69,7 +71,7 @@ def protect(data:bytes, decrypt=False):
 class Vault:
     _locks={};_locks_guard=threading.Lock()
     def __init__(self,base):
-        self.path=Path(base)/'vault'/('secrets.keychain' if is_macos() else 'secrets.dpapi');private_directory(self.path.parent)
+        self.path=Path(base)/'vault'/('secrets.keychain' if is_macos() else 'secrets.dpapi' if is_windows() else 'secrets.aesgcm');private_directory(self.path.parent)
     @contextlib.contextmanager
     def _locked(self):
         key=os.path.normcase(str(self.path.resolve()))

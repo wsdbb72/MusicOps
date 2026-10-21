@@ -19,7 +19,7 @@ class WorkerConnectionError(RuntimeError):
 
 def pipe_address(base):return ipc_address(base)
 def auth_key(base):
-    path=Path(base)/'vault'/('ipc.keychain' if is_macos() else 'ipc.dpapi');private_directory(path.parent)
+    path=Path(base)/'vault'/('ipc.keychain' if is_macos() else 'ipc.dpapi' if is_windows() else 'ipc.aesgcm');private_directory(path.parent)
     if path.exists(): return protect(path.read_bytes(),True)
     deadline=time.monotonic()+5;lock=WriterLock(Path(base)/'ipc-init')
     while True:

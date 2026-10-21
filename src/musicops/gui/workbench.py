@@ -262,7 +262,7 @@ class Workbench(QMainWindow):
         logo=QLabel();logo.setObjectName('brandMark');logo.setFixedSize(58,58);logo.setPixmap(app_icon().pixmap(58,58));s.addWidget(logo);s.addSpacing(8);s.addWidget(label('MusicOps','brand'));s.addWidget(label('每一张专辑，井然有序','muted'));s.addSpacing(30);s.addWidget(label('工作台','sectionCaption'))
         self.nav=QListWidget();self.nav.addItems(['歌单入库','资料补全','音质升级','任务中心','专辑搜索','去重合并']);self.nav.setSpacing(4);self.nav.setIconSize(QSize(22,22))
         for index in range(self.nav.count()):self.nav.item(index).setIcon(nav_icon(index))
-        s.addWidget(self.nav);s.addWidget(button('连接与设置',self.setup));s.addWidget(button('检查更新',lambda:self.check_updates(True)));self.update_note=label('','sidebarFoot');self.update_note.setWordWrap(True);s.addWidget(self.update_note);s.addSpacing(14);s.addWidget(label('MusicOps '+__version__+' · 你的音乐收藏','sidebarFoot'));layout.addWidget(side)
+        s.addWidget(self.nav);s.addWidget(button('连接与设置',self.setup));s.addWidget(button('镜像更新说明' if os.environ.get('MUSICOPS_CONTAINER')=='1' else '检查更新',lambda:self.check_updates(True)));self.update_note=label('','sidebarFoot');self.update_note.setWordWrap(True);s.addWidget(self.update_note);s.addSpacing(14);s.addWidget(label('MusicOps '+__version__+' · 你的音乐收藏','sidebarFoot'));layout.addWidget(side)
         content=QWidget();content.setObjectName('workspace');c=QVBoxLayout(content);c.setContentsMargins(32,23,32,24);c.setSpacing(16);top=QHBoxLayout();self.connection=label('正在连接后台…','connection');top.addWidget(self.connection,1);self.activity=label('正在连接','activity');top.addWidget(self.activity);c.addLayout(top)
         self.busy_bar=QProgressBar();self.busy_bar.setObjectName('activityProgress');self.busy_bar.setRange(0,0);self.busy_bar.setTextVisible(False);self.busy_bar.setFixedHeight(3);c.addWidget(self.busy_bar)
         self.notice=label('','notice');self.notice.setVisible(False)
@@ -342,6 +342,9 @@ class Workbench(QMainWindow):
         box=self.page('去重与合并专辑','扫描重复歌曲和分散的专辑副本。可靠项目自动合并，冲突版本分别保留，旧副本支持恢复。')
         self.duplicate_page=DuplicatePage(self);box.addWidget(self.duplicate_page,1)
     def check_updates(self,manual=False):
+        if os.environ.get('MUSICOPS_CONTAINER')=='1':
+            if manual:self.update_note.setText('Docker 更新：在宿主机运行 docker compose pull && docker compose up -d；配置和任务保留在持久卷。')
+            return
         if not self.updates_enabled:
             if manual:self.update_note.setText('源码或验收运行不启动自动安装；安装版可自动检查更新。')
             return

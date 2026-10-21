@@ -30,12 +30,15 @@ def main():
     (runtime/'htpasswd').write_text('musicops:'+hashed+'\n')
     (runtime/'nginx.conf').write_text('''
 pid /tmp/musicops-web/nginx.pid;
-error_log /dev/stderr warn;
+error_log stderr warn;
 events { worker_connections 128; }
 http {
   access_log off;
   client_body_temp_path /tmp/musicops-web/body;
   proxy_temp_path /tmp/musicops-web/proxy;
+  fastcgi_temp_path /tmp/musicops-web/fastcgi;
+  uwsgi_temp_path /tmp/musicops-web/uwsgi;
+  scgi_temp_path /tmp/musicops-web/scgi;
   server {
     listen 8080;
     auth_basic "MusicOps";
@@ -54,6 +57,7 @@ http {
   }
 }
 ''')
+    subprocess.run(['nginx','-t','-p',str(runtime)+'/','-c',str(runtime/'nginx.conf')],check=True)
     children=[];stopping=False
     def stop(*_):
         nonlocal stopping
@@ -72,7 +76,7 @@ http {
         launch('window-manager',['openbox','--sm-disable'])
         launch('vnc',['x11vnc','-display',':99','-forever','-shared','-localhost','-rfbport','5900','-nopw','-quiet','-noxdamage'])
         launch('websocket',['websockify','--web=/usr/share/novnc','127.0.0.1:6080','127.0.0.1:5900'])
-        launch('http',['nginx','-c',str(runtime/'nginx.conf'),'-g','daemon off;'])
+        launch('http',['nginx','-p',str(runtime)+'/','-c',str(runtime/'nginx.conf'),'-g','daemon off;'])
         launch('MusicOps',[sys.executable,'-m','musicops.gui.main','--base','/config/profile'])
         print('MusicOps browser interface: port 8080; profile: /config/profile; library: /media/music',flush=True)
         while not stopping:

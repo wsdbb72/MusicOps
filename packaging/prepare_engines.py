@@ -141,7 +141,8 @@ def build(output, cache):
                     archive.write(item,'go-dependencies/'+module_id+'/'+item.relative_to(module).as_posix())
         for name in ('prepare_engines.py', 'flare_entry.py'):
             archive.write(ROOT / 'packaging' / name, 'MusicOps-build/' + name)
-    (output / 'engines.json').write_text(json.dumps({'sources': PINS, 'chrome_version': CHROME, 'browser_sha256': hashes}, indent=2), 'utf-8')
+    browser_version=subprocess.check_output(['/usr/bin/chromium','--version'],text=True).strip() if sys.platform=='linux' else CHROME
+    (output / 'engines.json').write_text(json.dumps({'sources': PINS, 'chrome_version': browser_version, 'browser_sha256': hashes}, indent=2), 'utf-8')
 
 
 if __name__ == '__main__':

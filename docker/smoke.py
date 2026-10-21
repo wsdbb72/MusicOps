@@ -22,7 +22,9 @@ def wait_healthy():
     deadline=time.monotonic()+150
     while time.monotonic()<deadline:
         status=json.loads(docker('inspect',name))[0]['State']
-        if not status['Running']:raise RuntimeError('Container exited: '+docker('logs',name))
+        if not status['Running']:
+            logged=subprocess.run(['docker','logs',name],capture_output=True,text=True)
+            raise RuntimeError('Container exited: '+logged.stdout+logged.stderr)
         if status.get('Health',{}).get('Status')=='healthy':return
         time.sleep(2)
     raise RuntimeError('Container did not become healthy: '+docker('logs',name))
@@ -67,7 +69,8 @@ try:
     result={'passed':all(checks.values()),'checks':checks,'synthetic_only':True,'real_downloads':0,'real_account_login':False}
     report.write_text(json.dumps(result,indent=2));print(json.dumps(result));assert result['passed']
 finally:
-    logs=subprocess.run(['docker','logs',name],capture_output=True,text=True).stdout
+    logged=subprocess.run(['docker','logs',name],capture_output=True,text=True)
+    logs=logged.stdout+logged.stderr
     (report.parent/'container.log').write_text(logs.replace(password,'[MASKED]'))
     subprocess.run(['docker','rm','-f',name],capture_output=True)
     for volume in volumes:subprocess.run(['docker','volume','rm',volume],capture_output=True)

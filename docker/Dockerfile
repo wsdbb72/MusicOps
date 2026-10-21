@@ -15,11 +15,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends git gcc libc6-d
 WORKDIR /build
 COPY docker/requirements.txt /build/requirements.txt
 RUN pip install --no-cache-dir -r requirements.txt
-COPY pyproject.toml /build/
-COPY src /build/src
 COPY packaging /build/packaging
 COPY docs/references /build/docs/references
 RUN python packaging/prepare_engines.py --output /engines --cache /engine-build
+COPY pyproject.toml /build/
+COPY src /build/src
 RUN pip wheel --no-deps --wheel-dir /wheels . && python packaging/collect_licenses.py /licenses
 FROM system AS runtime
 ARG VERSION=0.4.15

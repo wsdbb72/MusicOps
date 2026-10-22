@@ -74,9 +74,11 @@ def test_native_web_auth_static_and_csrf(web):
     assert client.get('/../../vault',auth=auth).status_code==404
     csrf=client.get('/api/bootstrap',auth=auth).json()['csrf']
     payload={'command':'get_status','payload':{'compact':True}}
+    assert client.post('/api/command',json=payload).status_code==401
     assert client.post('/api/command',auth=auth,json=payload).status_code==403
     headers={'X-MusicOps-CSRF':csrf}
-    assert client.post('/api/command',auth=auth,json=payload,headers={**headers,'Origin':'https://attacker.invalid'}).status_code==403
+    for _ in range(10):
+        assert client.post('/api/command',auth=auth,json=payload,headers={**headers,'Origin':'https://attacker.invalid'}).status_code==403
     response=client.post('/api/command',auth=auth,json=payload,headers=headers)
     assert response.json()['result']['command']=='get_status'
     assert client.post('/api/command',auth=auth,json={'command':'shutdown_worker'},headers=headers).status_code==400

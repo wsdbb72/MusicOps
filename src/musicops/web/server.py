@@ -83,22 +83,26 @@ class Handler(BaseHTTPRequestHandler):
         return self.respond(404,{'error':'页面不存在'})
 
     def do_POST(self):
-        if not self.authenticated():return self.respond(401,{'error':'请登录'})
-        origin=self.headers.get('Origin')
-        if origin and urlsplit(origin).netloc!=self.headers.get('Host'):
-            return self.respond(403,{'error':'请求来源不匹配'})
-        if not hmac.compare_digest(self.headers.get('X-MusicOps-CSRF',''),self.server.csrf):
-            return self.respond(403,{'error':'会话已更新，请刷新页面','error_class':'CSRF_EXPIRED'})
         endpoint=urlsplit(self.path).path
-        if endpoint not in ('/api/command','/api/upload'):return self.respond(404,{'error':'接口不存在'})
-        if self.headers.get('Content-Type','').split(';')[0]!='application/json':return self.respond(415,{'error':'需要 JSON 请求'})
         try:size=int(self.headers.get('Content-Length','0'))
         except ValueError:return self.respond(400,{'error':'长度无效'})
         limit=15_000_000 if endpoint=='/api/upload' else 1_000_000
         if not 0<size<=limit:return self.respond(413,{'error':'请求过大，请分批处理'})
         if not self.server.slots.acquire(blocking=False):return self.respond(429,{'error':'请求繁忙，请稍后重试'})
         try:
-            body=json.loads(self.rfile.read(size))
+            # Consume the bounded body before rejecting a request. Closing a
+            # socket with unread POST bytes can reset Windows connections and
+            # hide the actual 401/403 response from the browser.
+            raw=self.rfile.read(size)
+            if not self.authenticated():return self.respond(401,{'error':'请登录'})
+            origin=self.headers.get('Origin')
+            if origin and urlsplit(origin).netloc!=self.headers.get('Host'):
+                return self.respond(403,{'error':'请求来源不匹配'})
+            if not hmac.compare_digest(self.headers.get('X-MusicOps-CSRF',''),self.server.csrf):
+                return self.respond(403,{'error':'会话已更新，请刷新页面','error_class':'CSRF_EXPIRED'})
+            if endpoint not in ('/api/command','/api/upload'):return self.respond(404,{'error':'接口不存在'})
+            if self.headers.get('Content-Type','').split(';')[0]!='application/json':return self.respond(415,{'error':'需要 JSON 请求'})
+            body=json.loads(raw)
             if not isinstance(body,dict):raise ValueError('请求须为 JSON 对象')
             if endpoint=='/api/upload':
                 kind=body.get('kind');suffix=Path(str(body.get('filename',''))).suffix.lower()

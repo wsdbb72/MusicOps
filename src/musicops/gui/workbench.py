@@ -232,7 +232,7 @@ class SetupWizard(QWizard):
         p.addRow('AI 地址',self.ai_url);p.addRow('模型名称',self.ai_model);p.addRow('API Key',self.ai_key)
         p.addRow(button('测试当前 AI 地址、密钥与模型',lambda:self.test_connection('ai')));self.ai_test_note=label('连接测试仅发送一条简短请求。','hint');p.addRow(self.ai_test_note)
         p.addRow(label('顺序：识别 API → 公开资料网站 → AI 联网搜索。AI 地址和模型必须支持 Responses web_search；不支持时会显示原因并等待手动核对，不会伪装联网成功。网站限制访问时可打开来源人工核对。','hint'))
-        p=self._add_page('连接 Plex / Navidrome（可选）','程序完成入库后会触发 Navidrome 扫描。若只使用 Roon，可直接保存。')
+        p=self._add_page('连接 Plex / Navidrome（可选）','程序完成入库后会通知已启用的音乐服务扫描。若只使用 Roon，可直接保存。')
         nav=self.values.get('music_servers',{}).get('navidrome',{});self.nav_enabled=QCheckBox('启用 Navidrome');self.nav_enabled.setChecked(nav.get('enabled',False));p.addRow(self.nav_enabled)
         self.nav_url=line(nav.get('url',''),'例如 http://127.0.0.1:4533');self.nav_user=line(nav.get('username',''),'具有扫描权限的账号');self.nav_pass=CredentialField('Navidrome 账号密码',nav.get('password_ref') in self.saved_refs)
         p.addRow('服务地址',self.nav_url);p.addRow('用户名',self.nav_user);p.addRow('密码',self.nav_pass)

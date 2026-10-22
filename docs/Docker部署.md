@@ -1,6 +1,6 @@
 # Linux amd64 Docker 部署
 
-镜像：`wsdbb72/muiscops:0.4.15`（仓库名按最初提供的 **MuiscOps** 转为小写，注意拼写）。仅提供 `linux/amd64`，适合 Intel / AMD 64 位 Linux 设备。
+镜像：`wsdbb72/muiscops:latest`（仓库名按最初提供的 **MuiscOps** 转为小写，注意拼写）。仅提供 `linux/amd64`，适合 Intel / AMD 64 位 Linux 设备。
 
 容器通过浏览器显示完整 MusicOps 桌面界面，使用 noVNC；功能与桌面版共用同一套后端和任务数据库。浏览器断开不会停止任务。不是重新开发的移动端网页，建议电脑浏览器使用。
 
@@ -57,7 +57,7 @@ docker compose start
 
 ## 更新与日志
 
-`0.4.15` 为固定版本，`latest` 跟随已通过完整发布验收的新版。使用固定版本时，修改 Compose 的版本后更新：
+Compose 默认使用 `latest`，跟随已通过完整发布验收的新版。需要锁定版本时，可把 image 改为 `wsdbb72/muiscops:0.4.16`。保留原来的配置和媒体挂载，执行以下命令更新：
 
 ```bash
 docker compose pull

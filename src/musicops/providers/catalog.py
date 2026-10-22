@@ -561,6 +561,8 @@ class CatalogResolver:
         if isinstance(group, dict):
             relations.extend(self._relations(group))
             candidate['release_group_id'] = _mbid(group['id'])
+            candidate['release_type']=group.get('primary-type') if isinstance(group.get('primary-type'),str) else ''
+            candidate['release_secondary_types']=[t for t in group.get('secondary-types',[]) if isinstance(t,str)] if isinstance(group.get('secondary-types',[]),list) else []
         if kind == 'recording':
             releases = data.get('releases', [])
             if not isinstance(releases, list) or len(releases) > 100:

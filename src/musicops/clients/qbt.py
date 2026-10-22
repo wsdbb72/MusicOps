@@ -7,6 +7,7 @@ from __future__ import annotations
 
 from pathlib import Path
 import re
+import time
 from urllib.parse import urlsplit
 
 from musicops.clients.metainfo import parse_metainfo
@@ -237,11 +238,19 @@ class QbtClient:
             row = self._query(record)
             if not row:
                 return _result("ADD_UNKNOWN", error_class="POLICY_BLOCKED", record=record, reason="异步加种未确认；保留意图，禁止再次加种")
-            problem = self._check_ownership(row, record, require_stopped=record["state"] not in ("START_REQUESTED", "DOWNLOADING", "COMPLETE"))
+            waiting=row.get('state') in ('checkingUP','checkingDL','checkingResumeData','moving')
+            problem = self._check_ownership(row, record, require_stopped=not waiting and not(record.get('start_requested_at') or record['state'] in ('START_REQUESTED','DOWNLOADING','COMPLETE')))
             if problem:
                 return _result("POLICY_BLOCKED", error_class="POLICY_BLOCKED", reason=problem, record=record)
             if record["task_tag"] != PROJECT_TAG or record.get("legacy_task_tag"):self.normalize_tags(task_id,record,row)
-            record["state"] = "STOPPED" if record["state"] not in ("START_REQUESTED", "DOWNLOADING", "COMPLETE") else record["state"]
+            state=row.get('state')
+            if state in ('checkingUP','checkingDL','checkingResumeData','moving'):
+                return _result('WAITING',record=record,client_state=state)
+            if state in ('error','missingFiles','unknown'):return _result('POLICY_BLOCKED',record=record,reason='客户端文件或存储状态异常')
+            if state in ('stoppedDL','stoppedUP','pausedDL','pausedUP'):record['state']='STOPPED'
+            elif state in ('downloading','stalledDL','queuedDL','forcedDL','metaDL','forcedMetaDL','uploading','stalledUP','queuedUP','forcedUP'):
+                record.update(state='DOWNLOADING',start_attempts=0)
+            else:return _result('WAITING',record=record,client_state=state)
             self._put(task_id, record)
             return _result(record["state"], record=record, client_state=row.get("state"))
         except Exception:
@@ -258,7 +267,10 @@ class QbtClient:
             problem = self._check_ownership(row or {}, record, require_stopped=True)
             if problem:
                 return _result("POLICY_BLOCKED", error_class="POLICY_BLOCKED", reason=problem)
-            record["state"] = "START_REQUESTED"
+            attempts=record.get('start_attempts',0)
+            if attempts>=3:return _result('START_FAILED',record=record,reason='qBittorrent 连续三次未开始，请检查客户端停止规则后重试')
+            if attempts and time.time()-record.get('start_requested_at',0)<10:return _result('WAITING',record=record,reason='等待客户端执行自动开始请求')
+            record.update(state='START_REQUESTED',start_attempts=attempts+1,start_requested_at=time.time())
             self._put(task_id, record)
             endpoint = "torrents/start" if self.version_tuple >= (5, 0, 0) else "torrents/resume"
             response = self._request("POST", endpoint, data={"hashes": record["client_id"]})
@@ -279,6 +291,10 @@ class QbtClient:
                 return _result("POLICY_BLOCKED", error_class="POLICY_BLOCKED", reason=problem)
             if record["task_tag"] != PROJECT_TAG or record.get("legacy_task_tag"):self.normalize_tags(task_id,record,row)
             state = row.get("state")
+            if state in ('stoppedDL','pausedDL') and row.get('progress',0)<1:
+                return _result('CLIENT_STOPPED',client_state=state,complete=False,reason='客户端任务已停止，请在 MusicOps 继续此任务以重新开始')
+            if state not in ('stoppedDL','stoppedUP','pausedDL','pausedUP','error','missingFiles','unknown'):
+                record.update(state='DOWNLOADING',start_attempts=0);self._put(task_id,record)
             if state in {"checkingUP", "checkingDL", "checkingResumeData", "moving", "error", "missingFiles", "unknown"}:
                 return _result("WAITING" if state.startswith("checking") or state == "moving" else "BLOCKED", client_state=state, complete=False)
             finished_states = {"uploading", "stalledUP", "queuedUP", "forcedUP", "stoppedUP", "pausedUP"}

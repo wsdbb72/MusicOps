@@ -81,6 +81,8 @@ def main():
         report['checks']['native_multiplatform_file_import']=imported['state']=='completed' and len(imported['result'].get('targets',[]))==1 and imported['result']['targets'][0]['source']=='spotify'
         searched=completed('manual_album_search',{'mode':'literal','query':'Synthetic Album'})
         report['checks']['native_manual_search_readonly']=searched['state']=='blocked' and searched['result']['status']=='NOT_CONFIGURED' and searched['result']['music_writes']==0
+        artist=completed('manual_album_search',{'mode':'artist','query':'Synthetic Artist'})
+        report['checks']['native_artist_discography_readonly']=artist['state']=='completed' and artist['result']['mode']=='artist' and artist['result']['albums']==[] and artist['result']['music_writes']==0 and artist['result']['complete'] is False
         report['checks']['native_search_activity_visible']=any(j.get('job_kind')=='activity' and j.get('task_group')=='search' for j in client.call('list_workflows')['jobs'])
         album_db=client.call('list_library_albums',{})
         report['checks']['native_local_album_database']=album_db['total']==0 and album_db['summary']['updated_at'] is not None
@@ -102,6 +104,10 @@ def main():
         report['checks']['native_streaming_and_edition_settings']=streaming['streaming']['order']==['netease','qqmusic'] and streaming['streaming']['enabled'] is False and streaming['workflow']['edition_policy']=='complete'
         fill=completed('start_workflow',{'scene':'fill'})
         report['checks']['native_full_album_preparation']=fill['state']=='completed' and fill.get('result',{}).get('album_count')==0
+        try:
+            client.call('start_workflow',{'scene':'expand','album_id':'0'*64})
+            report['checks']['native_single_expansion_selection_guard']=False
+        except RuntimeError as exc:report['checks']['native_single_expansion_selection_guard']='专辑不存在' in str(exc)
         engine=client.call('engine_control',{'action':'start'})
         cookie=client.call('engine_control',{'action':'cookie','source':'qq','cookie':'synthetic_frozen=synthetic-only'})
         report['checks']['native_managed_engine_cookie']=engine.get('status')=='OK' and cookie.get('saved') is True

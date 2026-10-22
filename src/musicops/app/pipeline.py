@@ -20,7 +20,7 @@ from musicops.media.identity_fields import usable,release_pairs
 from musicops.app.search_status import SITE_NAMES,search_site,search_album,edition_conflict,summarize,detail as search_detail
 
 TERMINAL={'completed','failed','needs_review','cancelled','skipped','restored'}
-SCENES={'playlist':'歌单入库','complete':'资料补全','upgrade':'音质升级','fill':'补全整张专辑'}
+SCENES={'playlist':'歌单入库','complete':'资料补全','upgrade':'音质升级','fill':'补全整张专辑','expand':'单曲升级完整专辑'}
 
 def artist_key(artists):return tuple(sorted(strict_text(a) for a in artists if a))
 def identity(row):return (strict_text(row.get('raw_title',row.get('title',''))),artist_key(row.get('artists',[])))
@@ -158,6 +158,15 @@ class Workflows:
         if active:raise PolicyBlocked('已有任务正在准备或运行，请等待完成或取消后再开始下一批')
         root=Path(cfg['paths']['library']);reject_reparse_chain(root)
         if not root.is_dir():raise ValueError('音乐库目录不存在，请在设置中选择已有目录')
+        if scene=='expand':
+            if type(args.get('retire_single',False)) is not bool:raise ValueError('原单曲保留选项须为勾选状态')
+            selected=args.get('album_id')
+            if not isinstance(selected,str) or len(selected)!=64 or not all(ch in '0123456789abcdef' for ch in selected):raise ValueError('请先选择库内的单曲专辑')
+            from musicops.library.catalog import root_key
+            with self.store.connection() as connection:
+                row=connection.execute('SELECT payload FROM library_albums WHERE root_key=? AND album_id=?',(root_key(root),selected)).fetchone()
+            if not row:raise ValueError('所选本地专辑不存在，请刷新专辑资料库')
+            args['_single_file_ids']=json.loads(row[0])['file_ids']
         if scene=='playlist':
             tids=args.get('target_ids')
             if not isinstance(tids,list) or not tids or len(tids)>50000 or any(not isinstance(t,str) or not t for t in tids) or len(set(tids))!=len(tids):raise ValueError('请选择有效且不重复的歌单曲目')
@@ -189,6 +198,10 @@ class Workflows:
         self.s._index_real_library({'root':str(root),'lightweight':True},cfg,progress=scan_progress)
         self.checkpoint(batch,'grouping_albums');self.put(batch,progress=85,progress_phase='matching',message='本地音乐库扫描完成，正在对比并按专辑整理任务')
         files=[f for f in self.store.list('library_files') if f.get('location_state')=='library' and Path(f['path']).suffix.lower() in AUDIO_EXTENSIONS and Path(f['path']).is_relative_to(root)]
+        if scene=='expand':
+            selected=set(args.get('_single_file_ids',[]))
+            files=[f for f in files if f['file_id'] in selected]
+            if not files or {f['file_id'] for f in files}!=selected:raise ValueError('所选单曲专辑在扫描后改变，请重新选择')
         groups=collections.defaultdict(list);batch_id=batch['batch_id']
         if scene=='playlist':
             tids=args.get('target_ids')
@@ -210,7 +223,7 @@ class Workflows:
                 groups[key].append(t)
         else:
             for f in files:
-                groups[(str(album_root(f,root)),strict_text(f.get('album')),artist_key(f.get('albumartist') or f.get('artists',[])))].append(f)
+                groups[(str(album_root(f,root)),strict_text(f.get('album')),() if scene=='expand' else artist_key(f.get('albumartist') or f.get('artists',[])))].append(f)
         local_groups=collections.defaultdict(list)
         if scene=='playlist':
             for f in files:local_groups[(strict_text(f.get('album')),artist_key(f.get('albumartist') or f.get('artists',[])))].append(f)
@@ -223,9 +236,9 @@ class Workflows:
                     cached=self.store.get('evidence','resources-checked:'+row['file_id'])
                     recent=recent and bool(cached and cached.get('resource_contract')==2 and cached.get('version')==[row['size'],row['mtime_ns']] and cached.get('settings')==digest(cfg['lyrics']) and __import__('time').time()-cached.get('checked_at',0)<cfg['lyrics']['negative_ttl'])
                 if recent:continue
-            job_id=str(uuid.uuid4());first=tracks[0];stage='metadata' if scene=='complete' else 'snapshotting' if scene in ('upgrade','fill') else 'identifying'
+            job_id=str(uuid.uuid4());first=tracks[0];stage='metadata' if scene=='complete' else 'snapshotting' if scene in ('upgrade','fill','expand') else 'identifying'
             paused=bool((self.store.get('evidence','workflow:'+batch['job_id']) or {}).get('paused'))
-            job={'kind':'workflow','job_id':job_id,'batch_id':batch_id,'scene':scene,'config':copy.deepcopy(cfg),'targets':tracks if scene=='playlist' else [],'old_files':tracks if scene!='playlist' else [],'stage':stage,'task_group':'repair' if scene=='complete' else 'identify','task_type':'album' if scene=='complete' else 'identification','target_count':len(tracks),'paused':paused,'progress':0,'created_at':utcnow(),'message':'等待识别' if scene=='playlist' else '等待处理','detail':'','label':(first.get('album') or '待识别专辑')+' · '+' / '.join(first.get('albumartist') or first.get('artists',[])),'prefer_24bit':args.get('prefer_24bit',cfg['workflow']['prefer_24bit']),'refresh_resources':bool(args.get('refresh_resources'))}
+            job={'kind':'workflow','job_id':job_id,'batch_id':batch_id,'scene':scene,'config':copy.deepcopy(cfg),'targets':tracks if scene=='playlist' else [],'old_files':tracks if scene!='playlist' else [],'stage':stage,'task_group':'repair' if scene=='complete' else 'identify','task_type':'album' if scene=='complete' else 'identification','target_count':len(tracks),'paused':paused,'progress':0,'created_at':utcnow(),'message':'等待识别' if scene=='playlist' else '等待处理','detail':'','label':(first.get('album') or '待识别专辑')+' · '+' / '.join(first.get('albumartist') or first.get('artists',[])),'prefer_24bit':args.get('prefer_24bit',cfg['workflow']['prefer_24bit']),'refresh_resources':bool(args.get('refresh_resources')),'retire_single_requested':bool(args.get('retire_single'))}
             if scene=='playlist':
                 local=local_groups.get((strict_text(first.get('album')),artist_key(first.get('albumartist') or first.get('artists',[]))),[])
                 if len({str(album_root(f,root)) for f in local})==1:job['existing_album_files']=local
@@ -438,7 +451,7 @@ class Workflows:
             row['companion_hashes']={c['path']:sha256_file(c['path']) for c in row.get('companions',[]) if c['type']=='lyrics'}
             self.put(job,message=f'正在核对本专辑原音源：{i+1} / {len(tracks)} 首')
         self.checkpoint(job,'upgrade_original_hash_finished')
-        if job['scene']=='fill':return self._identifying(job)
+        if job['scene'] in ('fill','expand'):return self._identifying(job)
         if job.get('task_type')=='identification':self._queue_search(job,'原音源已核对，已创建独立搜索任务')
         else:self.put(job,stage='searching',message='原音源已核对，等待搜索更高音质发行')
     def _queue_search(self,job,message='识别完成，已创建独立搜索任务'):
@@ -456,6 +469,9 @@ class Workflows:
                 self.put(child)
             self.put(job,stage='completed',progress=100,search_job_id=search_id,message=message)
     def _identifying(self,job):
+        if job['scene']=='expand':
+            from musicops.app.single_upgrade import identify
+            return identify(self,job)
         if job['scene']=='fill':
             from musicops.app.album_completion import manifest
             return manifest(self,job)
@@ -612,13 +628,27 @@ class Workflows:
         # Verify that the receiving client is reachable before spending FL.
         qbt=live_client(cfg['qbt'],cfg['paths']['source'],self.store,self.s.vault.get)
         try:
-            content,evidence=self.provider(candidate['source'],cfg).fetch(candidate,self.store,job['batch_id'],budget,cache,**arguments)
-            self.checkpoint(job,'before_qbt_add')
-            qbt.transport.prepare(cfg['qbt'],'MusicOps');result=qbt.add_stopped(content,job['job_id'],evidence)
-            if result['status'] in ('START_REQUESTED','DOWNLOADING','COMPLETE'):
+            receipt=self.store.get('download_tasks','qbt:'+job['job_id'])
+            if receipt:
+                evidence=receipt.get('free_evidence') or {}
+                if evidence.get('source') not in (None,candidate['source']) or str(evidence.get('resource_id',candidate['resource_id']))!=str(candidate['resource_id']):raise PolicyBlocked('已有下载记录与所选资源不同，请核对；不会再次使用令牌')
+                result=qbt.reconcile_add(job['job_id'])
+            else:
+                content,evidence=self.provider(candidate['source'],cfg).fetch(candidate,self.store,job['batch_id'],budget,cache,**arguments)
+                self.checkpoint(job,'before_qbt_add')
+                qbt.transport.prepare(cfg['qbt'],'MusicOps');result=qbt.add_stopped(content,job['job_id'],evidence)
+            if result['status'] in ('ADD_UNKNOWN','WAITING'):
+                if result['status']=='ADD_UNKNOWN':
+                    job['add_unknown_polls']=job.get('add_unknown_polls',0)+1
+                    if job['add_unknown_polls']>=24:raise PolicyBlocked('多次查询仍未确认客户端任务，请检查 qBittorrent 连接后重试；不会重复加种或使用令牌')
+                self.put(job,stage='requesting',next_poll=__import__('time').time()+cfg['qbt']['poll_seconds'],message='已提交客户端，正在核对任务并等待自动开始；不会重复加种或使用令牌');return
+            job['add_unknown_polls']=0
+            if result['status'] in ('DOWNLOADING','COMPLETE'):
                 self.put(job,stage='downloading',progress=30,message='已核对已有下载，继续等待完成');return
             if result['status']!='STOPPED':raise PolicyBlocked(result.get('reason','新增下载尚未确认，请在 qBittorrent 核对'))
             result=qbt.start_download(job['job_id'],evidence)
+            if result['status'] in ('WAITING','START_UNKNOWN'):
+                self.put(job,stage='requesting',next_poll=__import__('time').time()+cfg['qbt']['poll_seconds'],message='正在等待 qBittorrent 开始下载；后台将核对客户端状态');return
             if result['status']!='START_REQUESTED':raise PolicyBlocked(result.get('reason','下载启动状态未知，请核对后继续'))
         finally:qbt.transport.close()
         method=evidence.get('download_method');cost=evidence.get('token_cost',0)
@@ -627,12 +657,14 @@ class Workflows:
                      'FL 令牌请求已核验，记录用量 '+str(cost)+' 枚' if method=='fl-token' else
                      '已核验个人免费；本次未重复使用令牌' if method=='personal-free' else '已核验站点免费状态')
         if evidence.get('reconciled_previous_request'):free_detail+='；已恢复此前待对账请求'
-        self.put(job,stage='downloading',progress=30,message='qBittorrent 正在下载，下载完成后自动整理',detail=free_detail)
+        self.put(job,stage='requesting',next_poll=__import__('time').time()+cfg['qbt']['poll_seconds'],progress=25,message='已自动发送开始下载，等待客户端确认运行状态',detail=free_detail)
     def _downloading(self,job):
         from musicops.clients.qbt_live import live_client
         cfg=job['config'];qbt=live_client(cfg['qbt'],cfg['paths']['source'],self.store,self.s.vault.get)
         try:result=qbt.poll(job['job_id'])
         finally:qbt.transport.close()
+        if result['status']=='CLIENT_STOPPED':
+            self.put(job,stage='needs_review',review_kind='error',resume_stage='requesting',message=result['reason'],detail='继续本任务后会重新核对归属和路径并启动，不重复下载种子或使用 FL 令牌。');return
         if result.get('complete'):
             self.put(job,source_path=result['source_path'],stage='metadata',progress=55,message='下载完整，开始整理资料')
         elif result['status'] in ('DOWNLOADING','WAITING','PARTIAL_DOWNLOAD'):
@@ -892,6 +924,9 @@ class Workflows:
         job['cover_missing']=sum(not embedded_covers(row['path']) for row in rows)
         if job.get('cover_missing') and not job.get('cover_unavailable'):
             self.put(job,prepared=rows,stage='needs_review',review_kind='cover',message='音频通过检查，但缺少可靠封面；请选择已核对的专辑封面，或明确跳过');return
+        if job['scene']=='expand':
+            from musicops.app.single_upgrade import validate
+            validate(job,rows,validator)
         if job['scene']=='upgrade':
             old=job['old_files'];by_id=collections.defaultdict(list)
             for row in rows:by_id[identity(row)].append(row)
@@ -921,7 +956,7 @@ class Workflows:
             if existing:return self._commit_publication(job,job['publication_plan'])
         if job.get('resource_contract')!=2 and not job.get('publication_plan'):return self._validating(job)
         cfg=job['config'];root=Path(cfg['paths']['library']);operations=[];verified={};album=job['album'];artist=' & '.join(job['albumartists']);suffix=''
-        if job['scene']=='upgrade':suffix=' [升级 '+job['job_id'][:8]+']'
+        if job['scene'] in ('upgrade','expand'):suffix=' [升级 '+job['job_id'][:8]+']'
         elif job.get('selected_edition'):
             from musicops.domain.editions import describe
             version=describe(job['selected']);suffix=' ['+compact_segment(str(version['year'] or '')+' '+version['label'],40)+' '+job['job_id'][:8]+']'
@@ -962,7 +997,7 @@ class Workflows:
         self.put(job,publication_plan=plan,stage='running',resume_stage='publishing',message='正在提交已经验证的文件')
         engine=TransactionEngine(self.store,job['engine_paths'],validator=self.s._validator(cfg));result=engine.execute(plan)
         if result['state']!='COMMITTED':raise PolicyBlocked('入库事务尚未提交，旧版保留')
-        job['transaction_id']=result['tx_id'];self.put(job,stage='retiring' if job['scene']=='upgrade' else 'notifying',progress=95,message='新文件入库完成')
+        job['transaction_id']=result['tx_id'];self.put(job,stage='retiring' if job['scene']=='upgrade' or job['scene']=='expand' and job.get('retire_single') else 'notifying',progress=95,message='新文件入库完成')
     def _retiring(self,job):
         # New publication must still verify before touching old files.
         cfg=job['config'];engine=TransactionEngine(self.store,job['engine_paths'],validator=self.s._validator(cfg));new=engine.execute(job['publication_plan'])
@@ -1022,10 +1057,11 @@ class Workflows:
             from musicops.app.workflow_actions import retry
             return {'status':'OK',**retry(self,job,query=query,sites=sites,allow_review_search=choice=='research')}
         if not job or job['stage']!='needs_review' and not (choice=='edit_metadata' and job['stage'] in ('failed','skipped') and job.get('task_type') in ('identification','search')):raise ValueError('该任务不需要核对')
-        if isinstance(choice,str) and choice.startswith('completion_release:') and job['scene']=='fill' and job.get('review_kind')=='metadata':
+        if isinstance(choice,str) and choice.startswith('completion_release:') and job['scene'] in ('fill','expand') and job.get('review_kind')=='metadata':
             candidate_id=choice[len('completion_release:'):];selected=next((c for c in job.get('catalog_choices',[]) if c.get('candidate_id')==candidate_id),None)
             if not selected:raise ValueError('请先选择目录中的实际发行')
             self.put(job,completion_choice=copy.deepcopy(selected),stage='identifying',review_kind=None,message='已选择完整发行，重新核对原音源与曲目表');return {'status':'OK'}
+        if job['scene']=='expand' and job.get('review_kind')=='metadata' and metadata:raise PolicyBlocked('请选择已核验的完整专辑发行，不能通过改标签绕过发行核对')
         if job.get('review_kind')=='numbering' and metadata:
             prepared=job['prepared']
             if len(metadata)!=len(prepared):raise ValueError('请逐曲核对曲序')
@@ -1103,6 +1139,9 @@ class Workflows:
         if any(ident not in choices for ident in ids):raise ValueError('所选音源已变化，请重新核对')
         selected=[choices[ident] for ident in ids]
         if len({describe(c)['group_id'] for c in selected})!=len(selected):raise ValueError('同一版本分组只需选择一个站点音源，避免重复下载和消耗令牌')
+        if job['scene']=='expand':
+            if len(selected)!=1:raise ValueError('本次单曲升级只采用一个完整发行；其他版本可另建任务并保留原版')
+            self._queue_processing(job,'requesting','已选择完整专辑音源，下载后核验全部曲目',selected=selected[0]);return {'status':'OK'}
         if len(selected)==1 and not job.get('version_choice'):
             self._queue_processing(job,'requesting','用户确认候选，准备下载',selected=selected[0]);return {'status':'OK'}
         created=[]

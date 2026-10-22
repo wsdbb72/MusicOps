@@ -21,6 +21,8 @@ def review_revision(job):
 
 
 def _metadata(service, job, cfg, provider=None):
+    if job.get('scene')=='expand':
+        return {'status':'NEEDS_INPUT','kind':'metadata','message':'请在完整发行列表确认专辑、年份和版本后继续；不能仅改标签替代完整发行核对','catalog_choices':job.get('catalog_choices',[]),'lookup_links':job.get('lookup_links',[])}
     rows = job.get('prepared') or job.get('targets') or job.get('old_files') or []
     if not rows: return {'status': 'NEEDS_INPUT', 'message': '没有曲目资料，请手动填写或重新识别'}
     first = rows[0]

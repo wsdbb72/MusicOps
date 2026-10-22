@@ -89,7 +89,7 @@ def retry(workflows, job, *, query=None, sites=None, allow_review_search=False,a
             stage='downloading' if workflows.store.get('download_tasks','qbt:'+job['job_id']) else 'requesting'
         elif job.get('prepared'):stage='validating'
         elif job.get('scene')=='playlist' and job.get('targets'):stage='identifying'
-        elif job.get('scene') in ('upgrade','fill') and job.get('old_files'):stage='snapshotting'
+        elif job.get('scene') in ('upgrade','fill','expand') and job.get('old_files'):stage='snapshotting'
         elif job.get('scene')=='complete' and job.get('old_files'):stage='metadata'
     if not stage and job.get('task_type') == 'identification':
         stage = 'identifying' if job['scene'] == 'playlist' else 'snapshotting'
@@ -100,6 +100,12 @@ def retry(workflows, job, *, query=None, sites=None, allow_review_search=False,a
                    review_kind=None, detail='', error_class=None, ai_assistance=None,
                    retry_count=int(job.get('retry_count', 0)) + 1, message='已重新排队，先核对既有状态后重试')
     if allow_legacy:changes.update(legacy_batch_requires_review=False)
+    if stage=='requesting':
+        changes['add_unknown_polls']=0
+        receipt=workflows.store.get('download_tasks','qbt:'+job['job_id'])
+        if receipt and receipt.get('start_attempts',0)>=3:
+            receipt.update(start_attempts=0,start_requested_at=0)
+            workflows.store.put('download_tasks','qbt:'+job['job_id'],receipt)
     if stage == 'searching':
         changes.update(choices=[], outcomes={}, search_summary={}, ai_search_attempted=False,source_identity_attempted=False,progress=0)
         if query is not None:

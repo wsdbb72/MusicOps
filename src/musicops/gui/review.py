@@ -83,9 +83,10 @@ class ReviewDialog(QDialog):
         self.source_links.setText('网站核对：'+' · '.join(anchors) if anchors else '')
         self.catalog.clear()
         for candidate in self.catalog_rows:
-            self.catalog.addItem(' · '.join([str(candidate.get('source', '')), str(candidate.get('title', '')), ' / '.join(candidate.get('artists', [])), str(candidate.get('album') or '')]))
+            self.catalog.addItem(' · '.join([str(candidate.get('source', '')), str(candidate.get('title', '')), ' / '.join(candidate.get('artists', [])), str(candidate.get('album') or ''),str(candidate.get('date') or candidate.get('year') or ''),('曲目 '+str(len(candidate['tracklist']))) if candidate.get('tracklist_complete') else '', ' / '.join(candidate.get('release_secondary_types',[]))]))
         self.catalog_use.setEnabled(bool(self.catalog_rows and rows)); self.catalog.setEnabled(bool(self.catalog_rows))
-        self.complete_release.setVisible(job.get('scene')=='fill' and job.get('review_kind')=='metadata');self.complete_release.setEnabled(bool(self.catalog_rows))
+        self.complete_release.setVisible(job.get('scene') in ('fill','expand') and job.get('review_kind')=='metadata');self.complete_release.setEnabled(bool(self.catalog_rows))
+        self.complete_release.setText('确认所选完整专辑，开始检索与入库' if job.get('scene')=='expand' else '采用所选完整发行并继续补缺曲')
         from musicops.domain.editions import describe
         choices=list(job.get('choices') or []);groups={}
         for c in choices:groups.setdefault(describe(c)['group_id'],len(groups)+1)
@@ -118,6 +119,7 @@ class ReviewDialog(QDialog):
         self.site_detail.setPlainText('\n'.join(SITE_NAMES.get(site, site) + '：' + str(outcome.get('message') or outcome.get('status') or '') for site, outcome in outcomes.items()) or '尚未保存站点检索结果；重试将重新读取当前连接设置。')
         waiting = job.get('stage') in {'needs_review', 'failed', 'skipped'}
         self.save_metadata.setEnabled(waiting and bool(rows) and (job.get('review_kind') == 'metadata' or job.get('task_type') in {'identification', 'search'}))
+        if job.get('scene')=='expand':self.save_metadata.setEnabled(False);self.catalog_use.setEnabled(False)
         self.candidate_use.setEnabled(job.get('stage') == 'needs_review' and job.get('review_kind') == 'candidate' and bool(choices))
         self.update_candidate_button()
         self.research.setEnabled(waiting and (job.get('task_type') == 'search' or job.get('review_kind') == 'search' or job.get('task_type') == 'manual_search'))

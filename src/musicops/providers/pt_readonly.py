@@ -33,9 +33,10 @@ def token_balance(account,profile=None,page=''):
 class NexusRows(HTMLParser):
     """Extract detail-link identity and visible metadata, never download links."""
     def __init__(self):
-        super().__init__();self.rows=[];self.frames=[];self.anchor=None
+        super().__init__();self.rows=[];self.frames=[];self.anchor=None;self.page_links=[]
     def handle_starttag(self,tag,attrs):
         a=dict(attrs)
+        if tag=='a':self.page_links.append(a.get('href',''))
         if tag=='tr':
             if len(self.frames)>=64:raise ValueError('表格嵌套超过解析上限')
             self.frames.append({'titles':[],'parts':[]})
@@ -73,7 +74,7 @@ class PTReadOnlyProvider:
                 'token_required':self.site!='open.cd','reason':'只读登录/检索已接入；令牌成本、免费生效与保种规则仍须确认'}
     def _get(self,path,params=None):
         # Explicit endpoint and action allowlist: a GET alone does not prove safety.
-        allowed=(path=='/torrents.php' and self.site=='open.cd' and set(params or {})<= {'search','search_area','search_mode'}) or (path=='/ajax.php' and self.site!='open.cd' and (params or {}).get('action') in ('index','browse') and set(params or {})<= {'action','searchstr','page'})
+        allowed=(path=='/torrents.php' and self.site=='open.cd' and set(params or {})<= {'search','search_area','search_mode','page'}) or (path=='/ajax.php' and self.site!='open.cd' and (params or {}).get('action') in ('index','browse') and set(params or {})<= {'action','searchstr','page','artistname'})
         if getattr(self,'_download_contract',False):allowed=allowed or self._contract_allows(path,params or {})
         if not allowed:raise PolicyBlocked('端点不在只读白名单')
         if self._blocked_until.get(self.site,0)>time.monotonic():raise HttpError('RATE_LIMITED','站点仍在Retry-After等待期')
@@ -133,26 +134,42 @@ class PTReadOnlyProvider:
                 balance=token_balance(payload)
             return {'status':'OK','source':self.site,'authenticated':True,'token_balance':balance,'observed_at':datetime.now(timezone.utc).isoformat(),'download_status':'POLICY_BLOCKED','capabilities':self.capabilities()}
         except Exception as exc:return self._failure(exc)
-    def search(self,query):
+    def search_artist(self,query,page=1):return self.search(query,page=page,artist=True)
+    def search(self,query,page=1,artist=False):
         if not isinstance(query,str) or not query.strip() or len(query)>300:return {'status':'INVALID_INPUT','source':self.site,'candidates':[]}
+        if type(page) is not int or not 1<=page<=1000:return {'status':'INVALID_INPUT','candidates':[]}
+        requested=page
         try:
             if self.site=='open.cd':
-                text=self._html(self._get('/torrents.php',{'search':query.strip(),'search_area':'0','search_mode':'0'}))
+                params={'search':query.strip(),'search_area':'0','search_mode':'0'}
+                if page>1:params['page']=str(page-1)
+                text=self._html(self._get('/torrents.php',params))
                 parser=NexusRows();parser.feed(text)
                 if not parser.rows and not re.search(r'(没有种子|没有找到|沒有種子|没有匹配|no torrents|no results|nothing found)',text,re.I):raise ValueError('无法确认空结果结构')
                 candidates=[self._nexus(row) for row in parser.rows]
                 unique={c['candidate_id']:c for c in candidates};candidates=list(unique.values())
-                page=1;pages=1 if not candidates else None
+                page=requested;pages=page if not candidates else None
+                if artist:
+                    linked=[]
+                    for link in parser.page_links:
+                        u=urlsplit(link);q=parse_qs(u.query)
+                        if u.netloc not in ('',self.host) or u.path not in ('','/torrents.php','torrents.php'):continue
+                        if q.get('search',[query.strip()])[0]!=query.strip():continue
+                        raw=q.get('page',[''])[0]
+                        if raw.isdigit() and 0<=int(raw)<1000:linked.append(int(raw)+1)
+                    if linked:pages=max(page,max(linked))
             else:
-                data=self._gazelle(self._get('/ajax.php',{'action':'browse','searchstr':query.strip(),'page':'1'}))
+                params={'action':'browse','searchstr':'' if artist else query.strip(),'page':str(requested)}
+                if artist:params['artistname']=query.strip()
+                data=self._gazelle(self._get('/ajax.php',params))
                 if not isinstance(data.get('results'),list):raise ValueError('缺少results数组')
                 candidates=[]
                 for group in data['results']:candidates.extend(self._group(group))
                 page=data.get('currentPage',1);pages=data.get('pages')
                 if not data['results'] and page in (None,1) and pages in (None,0):page,pages=1,1
-                if type(page) is not int or page!=1 or pages is not None and (type(pages) is not int or pages<1):raise ValueError('分页结构改变')
+                if type(page) is not int or page!=requested or pages is not None and (type(pages) is not int or pages<page):raise ValueError('分页结构改变')
             return {'status':'OK' if candidates else 'NO_RESOURCE','source':self.site,'candidates':candidates,
-                    'page':page,'pages':pages,'search_complete':pages==1,'read_only':True,'download_status':'POLICY_BLOCKED'}
+                    'page':page,'pages':pages,'search_complete':pages==page,'read_only':True,'download_status':'POLICY_BLOCKED'}
         except Exception as exc:return {**self._failure(exc),'candidates':[]}
     def _base_candidate(self,id,title,artists):
         id=positive_id(id)

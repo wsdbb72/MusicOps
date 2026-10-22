@@ -23,6 +23,9 @@ def exact_album(candidate,album,artists):
 def manual_album_search(service,args,cfg):
     if cfg['offline']:raise PolicyBlocked('请完成连接设置后检索站点')
     mode=args.get('mode','literal');query=args.get('query','')
+    if mode=='artist':
+        from musicops.app.artist_search import search
+        return search(service,args,cfg)
     if mode not in ('literal','precise') or not isinstance(query,str) or not query.strip() or len(query)>300:raise ValueError('请输入不超过 300 字符的专辑搜索内容')
     album=None;artists=[];identity=None
     if mode=='precise':

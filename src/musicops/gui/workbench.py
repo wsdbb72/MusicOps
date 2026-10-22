@@ -5,7 +5,7 @@ from pathlib import Path
 from PySide6.QtCore import QObject,QRunnable,QThreadPool,QTimer,Qt,Signal,QSize
 from PySide6.QtGui import QFont,QDesktopServices,QIcon,QPixmap,QPainter,QPen,QColor,QPalette
 from PySide6.QtCore import QUrl
-from PySide6.QtWidgets import (QApplication,QMainWindow,QWidget,QVBoxLayout,QHBoxLayout,QLabel,QPushButton,QLineEdit,QPlainTextEdit,QFileDialog,QCheckBox,QGroupBox,QFormLayout,QWizard,QWizardPage,QListWidget,QStackedWidget,QTableWidget,QTableWidgetItem,QTreeWidget,QTreeWidgetItem,QHeaderView,QMessageBox,QSpinBox,QScrollArea,QInputDialog,QDialog,QDialogButtonBox,QProgressBar,QAbstractItemView,QRadioButton)
+from PySide6.QtWidgets import (QApplication,QMainWindow,QWidget,QVBoxLayout,QHBoxLayout,QLabel,QPushButton,QLineEdit,QPlainTextEdit,QFileDialog,QCheckBox,QGroupBox,QFormLayout,QWizard,QWizardPage,QListWidget,QStackedWidget,QTableWidget,QTableWidgetItem,QTreeWidget,QTreeWidgetItem,QHeaderView,QMessageBox,QSpinBox,QScrollArea,QInputDialog,QDialog,QDialogButtonBox,QProgressBar,QAbstractItemView,QRadioButton,QTreeWidgetItemIterator)
 from musicops.gui.controls import QComboBox
 from musicops.gui.layouts import WrapLayout
 from musicops import __version__
@@ -260,7 +260,7 @@ class Workbench(QMainWindow):
         container=QWidget();self.setCentralWidget(container);layout=QHBoxLayout(container);layout.setContentsMargins(0,0,0,0);layout.setSpacing(0)
         side=QWidget();side.setObjectName('sidebar');side.setFixedWidth(224);s=QVBoxLayout(side);s.setContentsMargins(22,28,20,24)
         logo=QLabel();logo.setObjectName('brandMark');logo.setFixedSize(58,58);logo.setPixmap(app_icon().pixmap(58,58));s.addWidget(logo);s.addSpacing(8);s.addWidget(label('MusicOps','brand'));s.addWidget(label('每一张专辑，井然有序','muted'));s.addSpacing(30);s.addWidget(label('工作台','sectionCaption'))
-        self.nav=QListWidget();self.nav.addItems(['歌单入库','资料补全','音质升级','任务中心','专辑搜索','去重合并']);self.nav.setSpacing(4);self.nav.setIconSize(QSize(22,22))
+        self.nav=QListWidget();self.nav.addItems(['歌单入库','资料补全','音质升级','任务中心','歌手 / 专辑搜索','去重合并']);self.nav.setSpacing(4);self.nav.setIconSize(QSize(22,22))
         for index in range(self.nav.count()):self.nav.item(index).setIcon(nav_icon(index))
         s.addWidget(self.nav);s.addWidget(button('连接与设置',self.setup));s.addWidget(button('镜像更新说明' if os.environ.get('MUSICOPS_CONTAINER')=='1' else '检查更新',lambda:self.check_updates(True)));self.update_note=label('','sidebarFoot');self.update_note.setWordWrap(True);s.addWidget(self.update_note);s.addSpacing(14);s.addWidget(label('MusicOps '+__version__+' · 你的音乐收藏','sidebarFoot'));layout.addWidget(side)
         content=QWidget();content.setObjectName('workspace');c=QVBoxLayout(content);c.setContentsMargins(32,23,32,24);c.setSpacing(16);top=QHBoxLayout();self.connection=label('正在连接后台…','connection');top.addWidget(self.connection,1);self.activity=label('正在连接','activity');top.addWidget(self.activity);c.addLayout(top)
@@ -312,7 +312,11 @@ class Workbench(QMainWindow):
     def _upgrade(self):
         box=self.page('寻找更好的音源','比较同一录音、同一发行的音源，验证新版完整后，再将旧版移出音乐库。');self.steps(box,'识别现有音质  →  四站寻找更好版本  →  下载与补齐  →  完整验证  →  替换旧版')
         card=QGroupBox('升级偏好');card.setObjectName('card');form=QVBoxLayout(card);self.prefer24=QCheckBox('同一录音优先选择无损 24 bit');self.prefer24.setChecked(True);form.addWidget(self.prefer24);form.addWidget(label('有损格式比较有效码率；无损格式比较位深、采样率和实际编码，不按文件大小判断。','hint'));box.addWidget(card)
-        box.addWidget(label('替换前核对曲目、发行和全部音频。旧版移出音乐库后保留短期恢复副本；下载与做种源不改动。','hint'));box.addStretch();box.addWidget(button('检查并自动升级',lambda:self.start('upgrade'),True))
+        box.addWidget(label('单曲也可升级为它收录到的完整专辑：先选择原单曲，再确认完整专辑的年份与版本；允许同音质扩展，但不降低原歌曲音质。默认保留原单曲，未收录的 B 面和特别录音始终保留。','hint'));box.addWidget(button('选择单曲，升级为完整专辑',self.choose_single_upgrade))
+        box.addWidget(label('替换前核对曲目、发行和全部音频。旧版移出音乐库后保留短期恢复副本；下载与做种源不改动。','hint'));box.addStretch();box.addWidget(button('检查并自动升级音质',lambda:self.start('upgrade'),True))
+    def choose_single_upgrade(self):
+        from musicops.gui.catalog import LibraryCatalogDialog
+        self.catalog_window=LibraryCatalogDialog(self,single_upgrade=True);self.catalog_window.open()
     def _tasks(self):
         box=self.page('任务中心','歌单任务依次识别、搜索、下载入库；本地资料补全独立显示，不下载音源。专辑总览显示当前步骤，阶段记录可追溯历史。')
         box.setSpacing(12);box.itemAt(0).widget().layout().setContentsMargins(20,14,20,14)
@@ -372,19 +376,33 @@ class Workbench(QMainWindow):
             self.timer.start();self.update_activity()
         self.call('shutdown_worker',{},stopped,failed)
     def _album_search(self):
-        box=self.page('手动寻找一张专辑','同时检索 OpenCD、DicMusic、Orpheus 和 RED。已配置并启用的站点会参与检索。')
-        modes=QHBoxLayout();self.album_literal=QRadioButton('原样搜索输入内容');self.album_precise=QRadioButton('识别专辑后精准搜索');self.album_literal.setChecked(True);modes.addWidget(self.album_literal);modes.addWidget(self.album_precise);modes.addStretch();box.addLayout(modes)
+        box=self.page('按歌手浏览，或寻找指定专辑','同时检索 OpenCD、DicMusic、Orpheus 和 RED。歌手模式按专辑、发行版本及站点音源逐层展开。')
+        modes=QHBoxLayout();self.album_literal=QRadioButton('原样搜索输入内容');self.album_precise=QRadioButton('识别专辑后精准搜索');self.artist_mode=QRadioButton('按歌手检索全部专辑');self.album_literal.setChecked(True);modes.addWidget(self.album_literal);modes.addWidget(self.album_precise);modes.addWidget(self.artist_mode);modes.addStretch();box.addLayout(modes)
         row=QHBoxLayout();self.album_query=line('','输入专辑名，或 艺人 - 专辑名');row.addWidget(self.album_query,2);self.album_artist=line('','艺人（精准识别时可选）');self.album_artist.setEnabled(False);self.album_precise.toggled.connect(self.album_artist.setEnabled);row.addWidget(self.album_artist,1);row.addWidget(button('搜索四站',self.search_album,True));box.addLayout(row)
         self.album_query.setMaxLength(300)
         self.album_note=label('原样模式保留输入内容（最多 300 字符）。精准模式先列出专辑资料，由你确认对应发行，再按规范艺人和专辑名检索。','hint');box.addWidget(self.album_note)
         self.album_results=self.table(['站点','专辑 / 资源','艺人','音质','做种','匹配']);self.album_results.horizontalHeader().setSectionResizeMode(0,QHeaderView.ResizeToContents);self.album_results.horizontalHeader().setSectionResizeMode(4,QHeaderView.ResizeToContents);box.addWidget(self.album_results)
-        row=QHBoxLayout();row.addWidget(label('结果显示站点当前返回页；更多资源可以在站点查看。','hint'));row.addStretch();row.addWidget(button('打开选中资源详情',self.open_album_result));box.addLayout(row);self.manual_candidates={}
+        self.artist_tree=QTreeWidget();self.artist_tree.setColumnCount(5);self.artist_tree.setHeaderLabels(['歌手 / 专辑 / 版本 / 音源','年份 / 音质','站点','做种','分组依据']);self.artist_tree.setUniformRowHeights(True);self.artist_tree.header().setSectionResizeMode(0,QHeaderView.Stretch);self.artist_tree.setColumnWidth(1,190);self.artist_tree.setVisible(False);box.addWidget(self.artist_tree,1)
+        controls=WrapLayout();self.artist_stop=button('停止继续读取',lambda:setattr(self,'artist_autoload',False));self.artist_ai=button('AI 辅助识别分组',lambda:self.artist_more(force_ai=True));self.artist_fix=button('修正所选音源的专辑分组',self.fix_artist_group);self.artist_retry=button('重试未完成的站点',lambda:self.artist_more(retry_sites=True))
+        self.artist_continue=button('继续读取剩余页',self.continue_artist)
+        self.artist_controls=(self.artist_stop,self.artist_continue,self.artist_ai,self.artist_fix,self.artist_retry)
+        for control in self.artist_controls:controls.addWidget(control);control.setVisible(False)
+        box.addLayout(controls);self.artist_result=None;self.artist_autoload=False;self.artist_generation=0;self.artist_busy=False
+        row=QHBoxLayout();row.addWidget(label('歌手模式按站点可用分页继续读取；结果按专辑和版本展开，分组线索不等于录音身份已确认。','hint'));row.addStretch();row.addWidget(button('打开选中资源详情',self.open_album_result));box.addLayout(row);self.manual_candidates={}
     def search_album(self):
         query=self.album_query.text()
+        self.artist_generation+=1
+        artist_mode=self.artist_mode.isChecked();self.artist_tree.setVisible(artist_mode);self.album_results.setVisible(not artist_mode)
+        for control in self.artist_controls:control.setVisible(artist_mode)
+        self.artist_busy=False;self.artist_autoload=False
+        if artist_mode:
+            self.artist_result=None;self.artist_autoload=True;self.artist_fetch({'mode':'artist','query':query});return
         if not query.strip():self.album_note.setText('请先输入要检索的专辑或内容。');return
         self.album_results.setRowCount(0);self.manual_candidates={};self.album_note.setText('检索已提交；后台有其他任务时会排队，请稍候…')
         payload={'mode':'precise' if self.album_precise.isChecked() else 'literal','query':query,'artist':self.album_artist.text()}
+        generation=self.artist_generation
         def received(result):
+            if generation!=self.artist_generation:return
             if result.get('error'):self.album_note.setText('搜索未完成：'+str(result['error']));return
             if result.get('status')=='NEEDS_CHOICE':
                 albums=result.get('albums',[]);texts=[str(c.get('album') or c.get('title'))+' · '+' / '.join(c.get('artists',[]))+' · '+str(c.get('date') or c.get('year') or '')+' · '+c.get('source','') for c in albums]
@@ -402,11 +420,65 @@ class Workbench(QMainWindow):
                 for j,text in enumerate(values):item=QTableWidgetItem(text);item.setData(Qt.UserRole,candidate['candidate_id']);item.setToolTip(text);self.album_results.setItem(i,j,item)
             if rows:self.album_results.selectRow(0)
         self.call('manual_album_search',payload,received,lambda error:self.album_note.setText('搜索未完成：'+error))
+    def artist_fetch(self,payload):
+        if self.artist_busy:return
+        self.artist_busy=True
+        for control in (self.artist_continue,self.artist_ai,self.artist_fix,self.artist_retry):control.setEnabled(False)
+        generation=self.artist_generation
+        self.album_note.setText('正在按歌手读取站点专辑及发行版本…')
+        def finished():
+            self.artist_busy=False
+            for control in (self.artist_continue,self.artist_ai,self.artist_fix,self.artist_retry):control.setEnabled(True)
+        def failed(error):
+            if generation!=self.artist_generation:return
+            finished();self.album_note.setText('歌手检索未完成：'+str(error))
+        def received(result):
+            if generation!=self.artist_generation:return
+            finished()
+            if result.get('error'):self.album_note.setText('歌手检索未完成：'+str(result['error']));return
+            self.artist_result=result;self.show_artist_results(result)
+            if result.get('has_more') and self.artist_autoload:QTimer.singleShot(300,lambda:self.artist_more() if self.artist_autoload and generation==self.artist_generation else None)
+        self.call('manual_album_search',payload,received,failed)
+    def continue_artist(self):
+        if not self.artist_result or not self.artist_result.get('has_more'):return
+        self.artist_autoload=True;self.artist_more()
+    def artist_more(self,**options):
+        if not self.artist_result or self.artist_busy:return
+        self.artist_fetch({'mode':'artist','query':self.artist_result['query'],'artist_result_id':self.artist_result['artist_result_id'],**options})
+    def show_artist_results(self,result):
+        expanded=set()
+        iterator=QTreeWidgetItemIterator(self.artist_tree)
+        while iterator.value():
+            item=iterator.value()
+            if item.isExpanded():expanded.add(item.data(0,Qt.UserRole+1))
+            iterator+=1
+        scroll=self.artist_tree.verticalScrollBar().value();self.artist_tree.setUpdatesEnabled(False);self.artist_tree.clear();self.manual_candidates={}
+        root=QTreeWidgetItem(self.artist_tree,[result['query']]);root.setData(0,Qt.UserRole+1,'artist');root.setExpanded(True)
+        for album in result.get('albums',[]):
+            parent=QTreeWidgetItem(root,[album['title'],str(album.get('year') or ''),'','','艺人归属 / 专辑待核对' if album.get('uncertain') else '跨站分组线索']);parent.setData(0,Qt.UserRole+1,album['group_id']);parent.setExpanded(album['group_id'] in expanded)
+            for version in album['versions']:
+                item=QTreeWidgetItem(parent,[version['label'],str(version.get('year') or ''),'','','目录号 '+str(version.get('catalogue') or '未知')]);item.setData(0,Qt.UserRole+1,version['group_id']);item.setExpanded(version['group_id'] in expanded)
+                for candidate in version['candidates']:
+                    media=candidate.get('media') or {};quality=' '.join(str(media.get(k) or '') for k in ('format','encoding','media'));source=dict((key,name) for key,name,_ in SITES).get(candidate['source'],candidate['source'])
+                    leaf=QTreeWidgetItem(item,[candidate['title'],quality,source,str(candidate.get('seeders') or 0),'手动核对' if candidate.get('manual_grouping') else 'AI 分组线索' if candidate.get('ai_grouping') else '站点分组 '+str(candidate.get('group_id') or ' / 标题解析')]);leaf.setData(0,Qt.UserRole,candidate['candidate_id']);leaf.setToolTip(0,candidate['title']);self.manual_candidates[candidate['candidate_id']]=candidate
+        self.artist_tree.setUpdatesEnabled(True);self.artist_tree.verticalScrollBar().setValue(scroll);self.album_note.setText(result.get('message','')+(' 正在继续读取剩余页…' if result.get('has_more') and self.artist_autoload else '')+'\n'+'；'.join(value.get('message',key) for key,value in result.get('source_outcomes',{}).items()))
+    def fix_artist_group(self):
+        item=self.artist_tree.currentItem();candidate=self.manual_candidates.get(item.data(0,Qt.UserRole)) if item else None
+        if not candidate:self.album_note.setText('请展开专辑和版本，选择一条具体音源再修正分组。');return
+        self.artist_autoload=False
+        title,ok=QInputDialog.getText(self,'核对专辑分组','确认属于当前检索歌手后填写专辑名；现场、混音、重录等版本仍分别显示。',text=candidate.get('manual_album_label') or candidate.get('album_label') or candidate['title'])
+        if ok:self.artist_more(group_override={'candidate_id':candidate['candidate_id'],'album':title})
     def open_album_result(self):
+        if self.artist_mode.isChecked():
+            item=self.artist_tree.currentItem();candidate=self.manual_candidates.get(item.data(0,Qt.UserRole)) if item else None
+            if candidate:self.open_candidate_page(candidate)
+            return
         row=self.album_results.currentRow()
         if row<0:return
         candidate=self.manual_candidates.get(self.album_results.item(row,0).data(Qt.UserRole))
         if not candidate:return
+        self.open_candidate_page(candidate)
+    def open_candidate_page(self,candidate):
         rid=str(candidate.get('resource_id',''));site=candidate['source'];gid=str(candidate.get('group_id',''))
         if not rid.isdigit():return
         host=next((host for key,_,host in SITES if key==site),None)
@@ -531,7 +603,7 @@ class Workbench(QMainWindow):
         self.track_table.setUpdatesEnabled(False)
         for i in range(self.track_table.rowCount()):self.track_table.item(i,0).setCheckState(Qt.Checked if checked else Qt.Unchecked)
         self.track_table.setUpdatesEnabled(True)
-    def start(self,scene,refresh_resources=False):
+    def start(self,scene,refresh_resources=False,**options):
         if not self.config.get('workflow',{}).get('setup_done'):self.setup();return
         targets=[self.track_table.item(i,0).data(Qt.UserRole) for i in range(self.track_table.rowCount()) if self.track_table.item(i,0).checkState()==Qt.Checked] if scene=='playlist' else []
         if scene=='playlist' and not targets:self.playlist_note.setText('请先选择要入库的曲目。');return
@@ -540,10 +612,10 @@ class Workbench(QMainWindow):
             if result.get('error'):self.notice.setText('任务未创建：'+result['error'])
             else:self.notice.setText(result.get('message','任务已创建'))
             self.refresh()
-        self.call('start_workflow',{'scene':scene,'target_ids':targets,'prefer_24bit':self.prefer24.isChecked(),'refresh_resources':refresh_resources},started)
+        self.call('start_workflow',{'scene':scene,'target_ids':targets,'prefer_24bit':self.prefer24.isChecked(),'refresh_resources':refresh_resources,**options},started)
     def show_jobs(self,result):
         scene_counts=result.get('scene_active_counts',{})
-        scene_note='当前仅有本地资料补全，不会搜索或下载音源。 ' if scene_counts.get('complete') and not any(scene_counts.get(k) for k in ('playlist','upgrade','fill')) else ''
+        scene_note='当前仅有本地资料补全，不会搜索或下载音源。 ' if scene_counts.get('complete') and not any(scene_counts.get(k) for k in ('playlist','upgrade','fill','expand')) else ''
         scene_note+=f"歌单入库 {scene_counts.get('playlist',0)} 项 · 本地资料补全 {scene_counts.get('complete',0)} 项。 " if scene_counts else ''
         counts=result.get('stage_counts',{});self.task_summary.setText(('后台已暂停 · 点击“继续整个后台”推进队列。 ' if getattr(self,'pipeline_paused',False) else scene_note+'后台按专辑推进，下载与入库优先。 ')+f"识别 / 搜索 {sum(counts.get(k,0) for k in ('identifying','snapshotting','searching'))} · 等待下载 {counts.get('requesting',0)+counts.get('fallback',0)} · 下载中 {counts.get('downloading',0)} · 整理 / 入库 {sum(counts.get(k,0) for k in ('metadata','enrich','validating','notifying'))} · 待核对 {counts.get('needs_review',0)} · 失败 {counts.get('failed',0)}" if result.get('view')=='albums' else '阶段记录：识别 / 搜索完成表示该步骤结束；请切换“专辑总览”查看后续下载与入库。')
         self.job_total=result.get('total',0);self.active_jobs=result.get('active',0);self.paused_jobs=result.get('paused_count',0);self.job_counts.setText(f"共 {self.job_total} 项 · 待处理 {self.active_jobs} · 暂停 {self.paused_jobs} · 完成 {result.get('finished',0)} · 第 {self.job_offset//200+1} 页")

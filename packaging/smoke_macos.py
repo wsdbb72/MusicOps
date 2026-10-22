@@ -19,6 +19,7 @@ REQUIRED_CHECKS=frozenset({
     'native_managed_engine_cookie','native_managed_solver','native_durable_ai_registration',
     'native_task_status_filter','native_full_queue_selection','native_streaming_and_edition_settings','native_full_album_preparation',
     'native_multiplatform_file_import','native_manual_search_readonly','native_search_activity_visible',
+    'native_artist_discography_readonly','native_single_expansion_selection_guard',
     'configuration_roundtrip','native_cocoa_window_exit_zero','native_window_rendered',
     'frozen_worker_restart_keeps_credentials','configuration_persisted_after_restart',
     'offscreen_gui_rendered','worker_clean_shutdown','app_bundle_unchanged_after_use','no_profile_inside_app',
@@ -151,6 +152,12 @@ def main():
         checks['native_streaming_and_edition_settings']=streaming['streaming']['order']==['netease','qqmusic'] and streaming['streaming']['enabled'] is False and streaming['workflow']['edition_policy']=='complete'
         fill=completed('start_workflow',{'scene':'fill'})
         checks['native_full_album_preparation']=fill['state']=='completed' and fill.get('result',{}).get('album_count')==0
+        artist=completed('manual_album_search',{'mode':'artist','query':'Synthetic Artist'})
+        checks['native_artist_discography_readonly']=artist['state']=='completed' and artist['result']['mode']=='artist' and artist['result']['albums']==[] and artist['result']['music_writes']==0 and artist['result']['complete'] is False
+        try:
+            client.call('start_workflow',{'scene':'expand','album_id':'0'*64})
+            checks['native_single_expansion_selection_guard']=False
+        except RuntimeError as exc:checks['native_single_expansion_selection_guard']='专辑不存在' in str(exc)
         engine=client.call('engine_control',{'action':'start'})
         cookie=client.call('engine_control',{'action':'cookie','source':'qq','cookie':'synthetic_frozen=synthetic-only'})
         checks['native_managed_engine_cookie']=engine.get('status')=='OK' and cookie.get('saved') is True

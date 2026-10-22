@@ -1,6 +1,6 @@
 services:
   musicops:
-    image: wsdbb72/muiscops:0.4.15
+    image: wsdbb72/muiscops:latest
     platform: linux/amd64
     container_name: musicops
     restart: unless-stopped

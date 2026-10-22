@@ -17,9 +17,9 @@ class TaskCancelled(RuntimeError):
 
 class AppService:
     """Single worker owns state. Every long command is a durable queued task."""
-    def __init__(self,base,offline=True):
+    def __init__(self,base,offline=True,progress=None):
         self.base=Path(base).resolve(); self.base.mkdir(parents=True,exist_ok=True)
-        self.offline=offline; self.store=StateStore(self.base/'state'/'musicops.sqlite')
+        self.offline=offline; self.store=StateStore(self.base/'state'/'musicops.sqlite',progress=progress)
         self.config=ConfigManager(self.store,self.base,initial_offline=offline); self.vault=Vault(self.base)
         from musicops.clients.managed_services import ManagedServices
         self.engines=ManagedServices(self.base,self.vault,self._managed_checkpoint)
@@ -27,7 +27,8 @@ class AppService:
         self.engines.default_storage=lambda:self.config.current()['values']['paths']['work']
         self.paused=False; self.stop=threading.Event(); self.mutex=threading.RLock()
         self.active=None; self._playlist_active=None; self._task_local=threading.local(); self.thread=threading.Thread(target=self._loop,daemon=True,name='MusicOpsQueue')
-        for task in self.store.list('tasks'):
+        if progress:progress('正在恢复任务安全状态；不会重放结果未知的下载或令牌请求')
+        for task in self._pending_tasks():
             if task['state']=='running' or task['state']=='paused' and task.get('started_at'): task.update(state='recovery_required',error='上次进程中断；先核对事务/请求，不能盲重试'); self.store.put('tasks',task['task_id'],task)
         from musicops.app.pipeline import Workflows
         self.workflows=Workflows(self);self.workflows.recover();self._last_workflow_tick=0
@@ -35,6 +36,10 @@ class AppService:
         recover(self)
         self.prepare_local_catalog()
         self.thread.start()
+    def _pending_tasks(self):
+        with self.store.connection() as connection:
+            rows=connection.execute("SELECT payload FROM tasks WHERE json_extract(payload,'$.state') IN ('queued','running','paused','recovery_required')").fetchall()
+        return [json.loads(row[0]) for row in rows]
     def prepare_local_catalog(self,force=False):
         cfg=self.config.current()['values']
         if cfg['offline'] or not cfg['workflow']['setup_done'] or not Path(cfg['paths']['library']).is_dir():return
@@ -47,7 +52,7 @@ class AppService:
         try:fresh=summary.get('updated_at') and (dt.datetime.now(dt.timezone.utc)-dt.datetime.fromisoformat(summary['updated_at'])).total_seconds()<86400
         except (ValueError,TypeError):pass
         if fresh and not force:return
-        for task in self.store.list('tasks'):
+        for task in self._pending_tasks():
             if task.get('command')=='index_library' and task.get('state') in ('queued','running','paused') and task.get('args',{}).get('root')==cfg['paths']['library']:return
         self.enqueue('index_library',{'root':cfg['paths']['library'],'lightweight':True})
     def _safe_path(self,value):
@@ -63,7 +68,9 @@ class AppService:
             if parent.exists() and (parent.is_symlink() or getattr(parent,'is_junction',lambda:False)()): raise PolicyBlocked('拒绝重解析路径')
         return p
     def dispatch(self,command,payload=None,request_id=None):
-        if command in ('engine_control','test_browser_solver','test_qbt_connection'):return self._execute(command,payload or {},self.config.current()['values'])
+        if command in ('engine_control','test_browser_solver','test_qbt_connection','test_connection'):return self._execute(command,payload or {},self.config.current()['values'])
+        if command in ('attach','get_status','list_workflows','get_workflow','get_task','list_library_albums','list_library_files','events','get_playlist_targets'):
+            return self._dispatch(command,payload,request_id)
         with self.mutex:return self._dispatch(command,payload,request_id)
     def _dispatch(self,command,payload=None,request_id=None):
         payload=payload or {}
@@ -78,7 +85,7 @@ class AppService:
             job=self.store.get('evidence','workflow:'+payload['job_id'])
             if not job or job.get('hidden'):raise ValueError('任务不存在或已删除')
             from musicops.app.assistance import review_revision
-            public={k:job.get(k) for k in ('job_id','job_kind','task_type','task_group','scene','stage','label','message','detail','review_kind','choices','lookup_links','catalog_choices','paused','pause_pending','ai_fallback','search_summary','outcomes','source_outcomes','target_count','identification_job_id','search_job_id','ai_assistance','retry_job_id','search_query','search_sites')}
+            public={k:job.get(k) for k in ('job_id','job_kind','task_type','task_group','scene','stage','label','message','detail','review_kind','choices','lookup_links','catalog_choices','paused','pause_pending','version_choice','ai_fallback','search_summary','outcomes','source_outcomes','target_count','identification_job_id','search_job_id','ai_assistance','retry_job_id','search_query','search_sites')}
             public['review_revision']=review_revision(job)
             public['prepared']=[{**{k:r.get(k) for k in ('raw_title','artists','album','duration')},'track':(r.get('tags',{}).get('tracknumber') or [r.get('track','')])[0],'disc':(r.get('tags',{}).get('discnumber') or [r.get('disc','1')])[0]} for r in job.get('prepared',[]) or job.get('targets',[]) or job.get('old_files',[])]
             return {'job':public}
@@ -350,10 +357,17 @@ class AppService:
         for key in ('library','source','work','backup','quarantine'): self._safe_path(cfg['paths'][key])
         return TransactionEngine(self.store,cfg['paths'],validator=self._validator(cfg))
     def _execute(self,command,args,cfg):
+        if command=='test_connection':
+            from musicops.app.connection_tests import run
+            return run(self,args,cfg)
         if command=='engine_control':
             action=args.get('action');source=args.get('source')
-            if action=='cookie':return self.engines.save_cookie(source,args.get('cookie',''))
-            if action in ('create','poll'):return self.engines.login(action,source,args.get('session_id'))
+            if action in ('cookie','create','poll'):
+                result=self.engines.save_cookie(source,args.get('cookie','')) if action=='cookie' else self.engines.login(action,source,args.get('session_id'))
+                if result.get('saved'):
+                    from musicops.app.platform_credentials import engine_login_shared
+                    engine_login_shared(self,source)
+                return result
             if action=='start':
                 self.engines.ensure('go-music-dl',cfg['paths']['tools']);return {'status':'OK','message':'内置引擎已启动'}
             raise ValueError('未知引擎操作')
@@ -896,7 +910,7 @@ class AppService:
             self._lrc_clients[key]=LrcApiClient(settings,{'private':SafeHttpTransport([host],offline=False),'public':SafeHttpTransport(public_hosts,offline=not settings['public_fallback']['enabled'])},self.vault.get)
         client=self._lrc_clients[key];title=args.get('title','');artist=args.get('artist','');album=args.get('album','');query=dict(duration=args.get('duration'),refresh=args.get('refresh',False))
         self._checkpoint('before_real_lyrics');lyrics=client.candidates(title,artist,album,**query)
-        self._checkpoint('before_real_cover');cover=client.cover(title,artist,album,**query)
+        self._checkpoint('before_real_cover');cover=client.cover(title,artist,album,**query) if args.get('include_cover',True) else {'state':'SKIPPED','candidates':[],'errors':[]}
         candidates=[];cover_preview=None
         for candidate in lyrics.get('candidates',[])+cover.get('candidates',[]):
             candidate=copy.deepcopy(candidate);content=candidate.pop('content_bytes',None)
@@ -906,7 +920,7 @@ class AppService:
                 candidate['path']=str(path);cover_preview=str(path)
             candidate['evidence_level']='live_readonly';candidate['query_context']={'title':title,'artist':artist,'album':album,'duration':args.get('duration')};self.store.put('resource_candidates',candidate['resource_id'],candidate);candidates.append(candidate)
         errors=lyrics.get('errors',[])+cover.get('errors',[])
-        states=[lyrics['state'],cover['state']]
+        states=[s for s in (lyrics['state'],cover['state']) if s!='SKIPPED']
         state='OK' if all(s=='VALID_PAYLOAD' for s in states) else 'PARTIAL' if 'VALID_PAYLOAD' in states else states[0]
         return {'status':state,'lyrics':{k:v for k,v in lyrics.items() if k!='candidates'},'cover':{k:v for k,v in cover.items() if k!='candidates'},'candidates':candidates,'cover_preview':cover_preview,
                 'lrc_text':next((c.get('lyrics','') for c in candidates if c.get('kind')=='lyrics' and c.get('selected')),''),'errors':errors,'read_only':True,'music_writes':0}

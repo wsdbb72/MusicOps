@@ -6,6 +6,7 @@ root=Path(SPECPATH).parent
 pyside_data=collect_data_files('PySide6',includes=['Qt/plugins/imageformats/*','Qt/translations/qtbase_zh_CN.qm'])
 pyside_data += [(str(root/'src/musicops/assets'), 'musicops/assets')]
 pyside_data += collect_data_files('opencc')
+pyside_data += [(str(root/'src/musicops/providers/musicdl_runner.py'),'musicops/providers')]
 pyside_binaries=[]
 pyside_hidden=[]
 common_hidden=['musicops.gui.main','musicops.worker.server','musicops.app.service','musicops.providers.lrcapi','musicops.providers.netease','musicops.providers.pt','musicops.providers.workflow','musicops.media.ncm','musicops.media.tags','musicops.media.resources','musicops.media.validation','musicops.library.index','musicops.library.transactions','mutagen.flac','mutagen.wave','mutagen.mp3','mutagen.mp4','mutagen.oggvorbis','mutagen.oggopus','PIL.Image','PIL.JpegImagePlugin','PIL.PngImagePlugin','PIL.WebPImagePlugin']

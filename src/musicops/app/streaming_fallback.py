@@ -7,9 +7,23 @@ from musicops.library.index import sha256_file
 from musicops.library.paths import reject_reparse_chain
 from musicops.library.transactions import durable_copy
 from musicops.providers.streaming import StreamingProvider,NAMES
+from musicops.providers.musicdl_bridge import CLIENTS as EXTERNAL_SOURCES
 MESSAGES={'NO_MATCH':'没有唯一完整匹配','AMBIGUOUS':'有多个无法区分的音源','AUTH_REQUIRED':'服务需要登录','AUTH_FAILED':'登录状态失效',
+          'NOT_CONFIGURED':'此来源尚未配置引擎或授权','NOT_INSTALLED':'指定 Python 尚未安装 musicdl',
           'INCOMPLETE_AUDIO':'试听或音频不完整','SOURCE_UNAVAILABLE':'来源暂不可用','API_CONTRACT_ERROR':'返回结构改变','IDENTITY_CONFLICT':'音源身份不一致',
           'POLICY_BLOCKED':'身份或配置未通过核对','NETWORK_ERROR':'连接失败','ValueError':'资料或格式不支持','OSError':'本机文件或工具异常'}
+
+
+def effective_order(cfg):
+    settings=cfg.get('streaming',{})
+    order=settings.get('order',[]) if settings.get('enabled') else ['netease']
+    return [source for source in order if
+            (source!='netease' or cfg['workflow'].get('netease_fallback')) and
+            (source not in EXTERNAL_SOURCES or settings.get('musicdl',{}).get('enabled'))]
+
+
+def available(cfg):
+    return bool(effective_order(cfg))
 
 def run(workflows,job):
     from musicops.providers.netease_download import download_track,import_match
@@ -44,7 +58,8 @@ def run(workflows,job):
             raise PolicyBlocked('此前已完成曲目发生变化，请先核对文件；不会静默覆盖')
         from musicops.app.pipeline import identity
         local=next((r for r in job.get('existing_album_files',[]) if identity(r)==identity(target) and r.get('duration') and target.get('duration') and abs(r['duration']-target['duration'])<=2),None)
-        imported=local['path'] if local else import_match(target,cfg['workflow']['netease_import_dir']);order=settings['order'] if settings['enabled'] else ['netease'];attempts=[];result=None;proof=None
+        imported=local['path'] if local else import_match(target,cfg['workflow']['netease_import_dir']);order=effective_order(cfg);attempts=[];result=None;proof=None
+        if not order and not imported:attempts.append({'source':'流媒体兜底','status':'NOT_CONFIGURED'})
         for platform in (['import'] if imported else [])+order:
             workflows.checkpoint(job,'streaming_'+platform)
             directory=Path(cfg['paths']['work'])/'streaming'/job['job_id']/key/(platform+'-'+uuid.uuid4().hex[:8]);reject_reparse_chain(directory);directory.mkdir(parents=True,exist_ok=True)
@@ -57,6 +72,9 @@ def run(workflows,job):
                     if reference is not target:
                         target['netease_match']={k:v for k,v in reference.items() if k in ('source','source_song_id','source_album_id','raw_title','artists','album','duration','track','disc')}
                     result=Path(download_track(reference,cfg,directory,workflows.s.vault.get,lambda phase:workflows.checkpoint(job,phase)));proof={'source':'netease','source_song_id':reference['source_song_id']}
+                elif platform in EXTERNAL_SOURCES:
+                    from musicops.providers.musicdl_bridge import download
+                    result,proof=download(settings['musicdl'],platform,target,directory,validator,lambda phase:workflows.checkpoint(job,phase),workflows.s.vault.get)
                 else:
                     effective=dict(settings)
                     if settings.get('managed'):

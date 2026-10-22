@@ -2,7 +2,7 @@
   <img src="src/musicops/assets/musicops.png" width="112" alt="MusicOps 图标">
   <h1>MusicOps</h1>
   <p><strong>从主流平台歌单到自己的音乐库，让下载、整理与升级连起来。</strong></p>
-  <p>中文桌面应用 · 十个平台歌单 · 资料补全 · 音质升级 · 去重合并</p>
+  <p>桌面应用 / 原生 WebUI · 十个平台歌单 · 资料补全 · 音质升级 · 去重合并</p>
   <p>
     <a href="https://github.com/wsdbb72/MusicOps/releases/latest"><img src="https://img.shields.io/github/v/release/wsdbb72/MusicOps?label=%E6%9C%80%E6%96%B0%E7%89%88%E6%9C%AC&amp;color=16857d" alt="最新版本"></a>
     <a href="https://github.com/wsdbb72/MusicOps/actions/workflows/windows-tests.yml"><img src="https://github.com/wsdbb72/MusicOps/actions/workflows/windows-tests.yml/badge.svg" alt="Windows 测试"></a>
@@ -27,6 +27,14 @@ MusicOps 把日常音乐库维护收敛为三个入口：把歌单中缺少的�
 审阅与验收范围：[代码审阅与验证](docs/代码审阅与验证.md)。
 
 **去重合并** 页面：扫描歌曲与分散专辑副本，勾选可靠项目或一键合并全部可靠项。歌曲去重比对文件字节或完整解码后的音频内容；补齐同发行的分散曲目需要标签或人工确认资料库中的发行身份，保留较好的音源，并补齐缺失标签、歌词和封面。不同版本、声道、CUE 引用、歌词或封面冲突会列明原因；同名不会直接删除。旧副本进入可恢复隔离区，支持恢复最近一批合并，重启软件后仍可读取恢复记录。去重操作不改写做种文件。
+
+**0.4.17：启动与任务性能、Plex、Docker 原生网页和统一流媒体设置。** 大档案升级时一次性建立事务维护的任务摘要，界面读取与长任务分离，首次迁移显示进度。保留现有任务、音乐和加密凭据；不在每次启动扫描整个历史数据库。Docker 的 **8080 端口现在提供原生 HTML / HTTP 网页**，共享桌面后台、设置、任务依赖及入库事务，支持手机和电脑浏览器；无需远程桌面或 VNC。Plex 可在设置中测试 Token、读取音乐库 ID，成功入库后通知音乐库扫描。
+
+![Docker 原生网页的音乐库整理](docs/images/docker-webui.png)
+
+“流媒体、媒体工具与歌单授权”集中管理网易云及其他兜底平台，显示中文平台名和可调整顺序，不再要求填写逗号分隔的平台代码。同平台 Cookie / 扫码登录可用于歌单读取与下载，OAuth / Developer Token 保持其各自用途。新增 **TIDAL、Qobuz、Deezer、SoundCloud、JOOX、Audius、千千音乐、街声** 的可选外部 musicdl 适配器：在独立 Python 环境自行安装 `musicdl==2.14.2`，在设置填写该解释器路径、启用引擎并勾选对应平台。musicdl 因上游分发条款不随 MusicOps 捆绑；内置 go-music-dl 仍可直接使用。每个来源必须通过身份、完整时长、实际解码与容器检查，失败只影响当前来源，已完成曲目重试复用缓存。
+
+歌词、AI、Plex 设置都可**测试当前填写内容，不必先保存**。LrcApi 兼容扩展元数据并去除同一歌词的重复候选；一首歌词无效不再阻断整个服务，真实版本冲突仍需核对。自动补歌词不再重复获取不参与自动写入的封面。
 
 **0.4.16：歌手检索、单曲升级完整专辑与下载自动开始。** 在“歌手 / 专辑搜索”选择“按歌手检索全部专辑”，输入歌手名，自动读取已启用站点的可用分页，按 **歌手 → 专辑 → 发行版本 → 各站音源** 展开。DicMusic、Orpheus、RED 使用站点艺人筛选和分组数据；OpenCD 解析资源标题。归属不清的结果进入待核对分组，已配置 AI 时分批辅助识别，也可选择具体音源手动修正。现场、混音、重录和再发行版本保留区别；分组是比较线索，站点结果不保证覆盖歌手全部作品。
 
@@ -98,7 +106,7 @@ AI 优先复用目录、本地索引和缓存；遇到常规匹配失败时自�
 
 支持网易云、QQ 音乐、汽水、酷狗、酷我、咪咕、bilibili、Apple Music、Spotify、YouTube Music 的歌单链接识别，以及 JSON / CSV / TSV / TXT / M3U8 / XLSX 文件导入。**链接能识别，不代表每个平台都能在未登录时完整读取**；具体入口、授权与完整性边界见下方支持表。
 
-下载来自已配置的 OpenCD、DicMusic、Orpheus、Redacted；启用的站点在当前完整结果范围内均没有匹配资源时，可按设置回退流媒体；失败或未读完的结果先等待核对。完成整理和音频验证后，再把文件交给 Roon / Navidrome 读取。
+下载来自已配置的 OpenCD、DicMusic、Orpheus、Redacted；启用的站点在当前完整结果范围内均没有匹配资源时，可按设置回退流媒体；失败或未读完的结果先等待核对。完成整理和音频验证后，再把文件交给 Roon / Navidrome / Plex 读取。
 
 ## 目录
 
@@ -194,7 +202,7 @@ Get-FileHash -LiteralPath .\MusicOps-版本号-Setup.exe -Algorithm SHA256
 
 ### 1. 选择音乐库
 
-选择存放**整理完成的音乐**的目录。Roon / Navidrome 应读取这个目录；MusicOps 自动管理下载和整理工作区。
+选择存放**整理完成的音乐**的目录。Roon / Navidrome / Plex 应读取这个目录；MusicOps 自动管理下载和整理工作区。
 
 使用 Roon 时，在 **Roon → 设置 → 存储** 中添加相同音乐库目录。不要把下载、备份、隔离目录一起设成监听目录，否则未整理或旧版文件也可能被读入。
 
@@ -470,7 +478,7 @@ MusicOps/
 | 音乐库同级 `MusicOps/downloads`、`MusicOps/work` | 临时下载、解密、整理和验证副本 | 入库及文件校验成功后，程序清理本任务副本；待核对文件保留 |
 | 音乐库同级 `MusicOps/seeding` | 保持原始字节的永久 PT 做种文件 | qBittorrent 正在引用时保留，不能当作临时缓存删除 |
 | 音乐库同级 `MusicOps/backup`、`MusicOps/quarantine` | 原文件与恢复内容 | 确认不再需要恢复后再清理；旧事务仍可能引用历史档案中的恢复文件 |
-| 所选音乐库 | 供 Roon / Navidrome 读取的成品 | 不放运行档案或下载临时文件 |
+| 所选音乐库 | 供 Roon / Navidrome / Plex 读取的成品 | 不放运行档案或下载临时文件 |
 
 安装版快捷方式指向该安装目录的 `profile`。绿色版没有指定档案时会使用程序选择的现有档案或本地应用数据目录；需要明确使用随包档案时，可从 PowerShell 运行 `.\MusicOps.exe --base .\profile`。同一个档案的 GUI 与后台必须一致。
 

@@ -14,7 +14,12 @@ class LibraryCatalogDialog(QDialog):
             hint=QLabel('先选原单曲或部分曲目所在专辑，再核对它收录到的完整专辑。曲目少不等于 Single；不会自动改名冒充完整专辑。');hint.setWordWrap(True);layout.addWidget(hint)
             self.retire=QCheckBox('完整专辑入库且对应歌曲音质不下降后，将原单曲移入可恢复备份（默认保留）');layout.addWidget(self.retire)
             self.find_full=QPushButton('查找所选单曲对应的完整专辑');self.find_full.clicked.connect(self.expand_single);layout.addWidget(self.find_full)
+        fill=QPushButton('核对并补全所选专辑缺失的歌曲');fill.clicked.connect(self.fill_album);layout.addWidget(fill)
         row = QHBoxLayout(); back = QPushButton('上一页'); back.clicked.connect(lambda: self.page(-200)); row.addWidget(back); forward = QPushButton('下一页'); forward.clicked.connect(lambda: self.page(200)); row.addWidget(forward);refresh=QPushButton('刷新列表');refresh.clicked.connect(self.load);row.addWidget(refresh); row.addStretch(); close = QPushButton('关闭'); close.clicked.connect(self.accept); row.addWidget(close); layout.addLayout(row); self.load()
+    def fill_album(self):
+        index=self.table.currentRow()
+        if index<0:self.note.setText('请先选择要补齐的本地专辑。');return
+        self.owner.start('fill',album_id=self.table.item(index,0).data(Qt.UserRole));self.accept()
     def expand_single(self):
         index=self.table.currentRow()
         if index<0:self.note.setText('请先选择原单曲所在专辑；列表为空时先更新本地专辑资料库。');return

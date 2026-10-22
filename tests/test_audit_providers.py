@@ -100,8 +100,7 @@ def test_audit_invalid_offset_and_unicode_are_controlled():
     assert validate_lrc('[00:00]\ud800')['errors'] == ['INVALID_TEXT']
 
 
-@pytest.mark.parametrize('failed,state', [(Response(429, headers={'Retry-After': '10'}), 'RATE_LIMITED'),
-                                       (Response(200, b'<html>bad</html>'), 'INVALID_PAYLOAD')])
+@pytest.mark.parametrize('failed,state', [(Response(429, headers={'Retry-After': '10'}), 'RATE_LIMITED')])
 def test_audit_open_circuit_retains_failure_instead_of_no_match(failed,state):
     transport = FakeTransport([failed])
     client = LrcApiClient(lrc_config(), transport, lambda *_: 'virtual')
@@ -194,3 +193,13 @@ def test_audit_non_token_unknown_request_can_be_reconciled(tmp_path):
     store.put('download_tasks','asset:open.cd:1',{'state':'REQUEST_UNKNOWN','source':'open.cd'})
     result = TokenCoordinator(store,Provider()).reconcile({'candidate_id':'open.cd:1','resource_id':'1'})
     assert result['status'] == 'OK' and result['task']['state'] == 'RECONCILED_NOT_CONSUMED'
+
+
+def test_malformed_lyric_is_cached_per_query_and_does_not_block_other_song():
+    transport=FakeTransport([Response(200,b'<html>bad</html>'),lrc_response(title='Other')])
+    client=LrcApiClient(lrc_config(),transport,lambda *_:'virtual')
+    assert client.candidates('Fixture','Artist')['state']=='INVALID_PAYLOAD'
+    assert client.candidates('Fixture','Artist')['state']=='INVALID_PAYLOAD'
+    assert len(transport.requests)==1
+    assert client.candidates('Other','Artist')['state']=='VALID_PAYLOAD'
+    assert len(transport.requests)==2

@@ -1,4 +1,4 @@
-name: Linux amd64 container
+name: Linux amd64 native HTML container
 on:
   workflow_call:
     outputs:
@@ -42,7 +42,7 @@ jobs:
             REVISION=${{ github.sha }}
           cache-from: type=gha,scope=musicops-linux-amd64
           cache-to: type=gha,mode=max,scope=musicops-linux-amd64
-      - name: Exercise the real browser desktop, credentials, engines and restart
+      - name: Exercise native HTML HTTP commands, credentials, engines and restart
         run: python docker/smoke.py musicops-ci:tested container-reports/acceptance.json
       - name: Verify real Linux vault permissions and missing-key recovery
         run: |

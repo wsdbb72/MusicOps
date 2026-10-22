@@ -13,7 +13,7 @@ from musicops.library.index import sha256_file
 
 SOURCES={'qqmusic':'qq','kuwo':'kuwo','kugou':'kugou','migu':'migu','qishui':'soda',
          'bilibili':'bilibili','applemusic':'apple','spotify':'spotify','youtube':'youtube'}
-NAMES={'netease':'网易云','qqmusic':'QQ 音乐','kuwo':'酷我','kugou':'酷狗','migu':'咪咕','qishui':'汽水','bilibili':'bilibili','applemusic':'Apple Music','spotify':'Spotify','youtube':'YouTube Music'}
+NAMES={'netease':'网易云','qqmusic':'QQ 音乐','kuwo':'酷我','kugou':'酷狗','migu':'咪咕','qishui':'汽水','bilibili':'bilibili','applemusic':'Apple Music','spotify':'Spotify','youtube':'YouTube Music','tidal':'TIDAL','qobuz':'Qobuz','deezer':'Deezer','soundcloud':'SoundCloud','joox':'JOOX','audius':'Audius','qianqian':'千千音乐','streetvoice':'街声'}
 
 def validate(settings):
     try:u=urlsplit(settings['base_url'])
@@ -21,7 +21,9 @@ def validate(settings):
     if u.scheme not in ('http','https') or not u.hostname or u.username or u.password or u.query or u.fragment:
         raise ValueError('流媒体服务需要明确的 HTTP(S) 地址，不含凭据、查询或片段')
     if u.scheme=='http' and u.hostname not in ('localhost','127.0.0.1','::1'):raise ValueError('远程流媒体服务必须使用 HTTPS')
-    if not settings['order'] or len(set(settings['order']))!=len(settings['order']) or any(s not in {'netease',*SOURCES} for s in settings['order']):raise ValueError('流媒体回退顺序包含重复或不支持的平台')
+    if not settings['order'] or len(set(settings['order']))!=len(settings['order']) or any(s not in NAMES for s in settings['order']):raise ValueError('流媒体回退顺序包含重复或不支持的平台')
+    external=settings.get('musicdl',{})
+    if not isinstance(external,dict) or type(external.get('enabled',False)) is not bool or not isinstance(external.get('python_path',''),str) or len(external.get('python_path',''))>4096:raise ValueError('外部 musicdl 设置无效')
     if not 3<=settings['timeout']<=120:raise ValueError('流媒体服务超时须为 3 至 120 秒')
     return settings
 

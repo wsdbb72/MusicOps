@@ -2,7 +2,9 @@
 
 镜像：`wsdbb72/muiscops:latest`（仓库名按最初提供的 **MuiscOps** 转为小写，注意拼写）。仅提供 `linux/amd64`，适合 Intel / AMD 64 位 Linux 设备。
 
-容器通过浏览器显示完整 MusicOps 桌面界面，使用 noVNC；功能与桌面版共用同一套后端和任务数据库。浏览器断开不会停止任务。不是重新开发的移动端网页，建议电脑浏览器使用。
+容器的 **8080 端口提供原生 HTML WebUI / HTTP 服务**，电脑和手机浏览器均可访问。页面与桌面版共用同一套后台命令、任务数据库和入库事务，包含歌单入库、四站检索、资料补全、音质升级、任务批量处理及连续核对。浏览器断开不会停止任务，后续版本同步维护两个界面的功能与流程。网页不依赖 VNC、远程桌面或 Qt 窗口。内置 FlareSolverr 在 Linux 上按需使用 Xvfb 执行浏览器验证，这个私有浏览器显示与网页界面无关。
+
+![MusicOps 原生 HTML WebUI](images/docker-webui.png)
 
 ## 安装
 
@@ -27,6 +29,10 @@ ssh -L 8080:127.0.0.1:8080 user@linux设备地址
 
 首次登录从“连接与设置”向导填写 PT 站点 Cookie、qBittorrent、歌词和 AI 等信息；没有的可以跳过。导入的凭据在容器中重新填写，Windows DPAPI/macOS Keychain 文件不能直接移植到 Linux。
 
+## 从旧容器升级
+
+保留同一份 `/config` 和 `/media` 挂载，按下面的更新步骤拉取 `latest`。原网页密码、加密凭据和任务继续使用，端口仍为 8080。首次升级大型历史档案会建立轻量任务摘要，可能需要几十秒；不会清空任务。页面载入失败时先查看容器日志和健康状态。
+
 ## 两个持久挂载，避免路径混乱
 
 | 宿主机示例 | 容器中填写的路径 | 用途 |
@@ -39,7 +45,7 @@ ssh -L 8080:127.0.0.1:8080 user@linux设备地址
 
 如果 qBittorrent 也在 Docker 中，给它挂载同一宿主目录，并且同样映射为 `/media`。qBittorrent 返回的下载位置必须能被 MusicOps 原路径访问；不能一边是 `/downloads`，另一边是 `/media/MusicOps/downloads`。容器中的 `127.0.0.1` 只指该容器自身；连接其他容器时用 Docker 网络服务名或宿主机可达 IP。
 
-FFmpeg / ffprobe、go-music-dl 和 FlareSolverr 连同 Chromium 已随镜像提供。后两个服务只在容器内部按需启动；在设置向导启用和测试，凭据仍从 MusicOps 填写。容器只发布 8080，不发布 VNC、后台 IPC 或引擎端口。
+FFmpeg / ffprobe、go-music-dl 和 FlareSolverr 连同 Chromium 已随镜像提供。后两个服务只在容器内部按需启动；在设置向导启用和测试，凭据仍从 MusicOps 填写。容器只发布原生网页的 8080，不发布后台 IPC 或引擎端口。
 
 ## 密码、权限和备份
 
@@ -57,7 +63,7 @@ docker compose start
 
 ## 更新与日志
 
-Compose 默认使用 `latest`，跟随已通过完整发布验收的新版。需要锁定版本时，可把 image 改为 `wsdbb72/muiscops:0.4.16`。保留原来的配置和媒体挂载，执行以下命令更新：
+Compose 默认使用 `latest`，跟随已通过完整发布验收的新版。需要锁定版本时，可把 image 改为 `wsdbb72/muiscops:0.4.17`。保留原来的配置和媒体挂载，执行以下命令更新：
 
 ```bash
 docker compose pull
@@ -73,6 +79,6 @@ docker compose logs --tail=100 musicops
 docker build --platform linux/amd64 -f docker/Dockerfile -t musicops-local .
 ```
 
-GitHub Actions 会在原生 Linux amd64 上构建镜像，实际验证网页登录、WebSocket 桌面连接、后台 IPC、加密凭据重启恢复、媒体默认路径、FFmpeg，以及两个内置服务和 Chromium 的本地页面渲染。验收只使用合成资料，不消费 FL 或下载真实音乐。通过后将**同一个已测试镜像**推到 Docker Hub；Windows/macOS 同提交验收和正式 Release 完成后才推进 `latest`。
+GitHub Actions 会在原生 Linux amd64 上构建镜像，实际验证网页登录、原生 HTML、受 CSRF 保护的后台命令、后台 IPC、加密凭据重启恢复、媒体默认路径、FFmpeg，以及两个内置服务和 Chromium 的本地页面渲染。验收只使用合成资料，不消费 FL 或下载真实音乐。通过后将**同一个已测试镜像**推到 Docker Hub；Windows/macOS 同提交验收和正式 Release 完成后才推进 `latest`。
 
 仓库 Actions Secret `DOCKERHUB_TOKEN` 保存 Docker Hub 用户 `wsdbb72` 的写入令牌。令牌不进入构建参数、镜像层或源码。镜像保留依赖许可证；系统包许可及对应源码获取说明位于 `/usr/share/doc`，可按 Debian 软件源使用 `apt source` 获取与安装版本对应的源码；引擎对应源码在 `/opt/musicops/engines/licenses/engine-sources.zip`。

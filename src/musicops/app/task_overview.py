@@ -8,21 +8,7 @@ def listing(workflows, offset, state, selection, query=''):
     if state not in ('all', 'active', *STATES):
         raise ValueError('任务分类无效')
     with workflows.store.connection() as connection:
-        rows = connection.execute("""SELECT id,
-            json_extract(payload,'$.job_id') AS job_id,
-            coalesce(nullif(json_extract(payload,'$.identification_job_id'),''),json_extract(payload,'$.job_id')) AS root_id,
-            json_extract(payload,'$.stage') AS stage,
-            json_extract(payload,'$.scene') AS scene,
-            json_extract(payload,'$.task_type') AS task_type,
-            coalesce(json_extract(payload,'$.label'),'') AS label,
-            json_extract(payload,'$.job_kind') AS job_kind,
-            json_extract(payload,'$.review_kind') AS review_kind,
-            coalesce(json_extract(payload,'$.hidden'),0) AS hidden,
-            coalesce(json_extract(payload,'$.paused'),0) AS paused,
-            coalesce(json_extract(payload,'$.created_at'),updated_at) AS created_at
-            FROM evidence WHERE id LIKE 'workflow:%'
-            AND coalesce(json_extract(payload,'$.job_kind'),'album')!='activity'
-            ORDER BY created_at DESC,id""").fetchall()
+        rows = connection.execute("SELECT * FROM workflow_overview WHERE job_kind!='activity' ORDER BY created_at DESC,id").fetchall()
         chains = collections.defaultdict(list)
         for row in rows:
             chains[row['root_id']].append(dict(row))

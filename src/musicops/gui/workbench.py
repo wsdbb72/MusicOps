@@ -58,11 +58,11 @@ class CredentialField(QLineEdit):
     def setPlainText(self,value):self.setText(value)
 
 class Signals(QObject):
-    done=Signal(object);failed=Signal(str)
+    done=Signal(object);failed=Signal(str);progress=Signal(str)
 class Request(QRunnable):
     def __init__(self,client,command,payload):super().__init__();self.client=client;self.command=command;self.payload=payload;self.signals=Signals()
     def run(self):
-        try:self.signals.done.emit(self.client.ensure_running() if self.command=='attach' else self.client.call(self.command,self.payload))
+        try:self.signals.done.emit((self.client.ensure_running(progress=self.signals.progress.emit) if isinstance(self.client,WorkerClient) else self.client.ensure_running()) if self.command=='attach' else self.client.call(self.command,self.payload))
         except Exception as e:self.signals.failed.emit(str(redact(str(e))))
         finally:self.payload={}
 
@@ -84,6 +84,22 @@ def browse_field(value,folder=True):
         path=QFileDialog.getExistingDirectory(root,'选择目录',edit.text()) if folder else QFileDialog.getOpenFileName(root,'选择程序',edit.text(),'程序 (*.exe);;所有文件 (*)' if os.name=='nt' else '可执行文件 (*)')[0]
         if path:edit.setText(path)
     box.addWidget(edit);box.addWidget(button('选择…',choose));return root,edit
+
+class PlatformOrder(QWidget):
+    """Named, checkable platforms; no comma-separated internal codes to memorize."""
+    def __init__(self,values,parent=None):
+        super().__init__(parent)
+        from PySide6.QtWidgets import QListWidget,QListWidgetItem
+        from musicops.providers.streaming import NAMES
+        self.list=QListWidget();self.list.setMaximumHeight(240);box=QVBoxLayout(self);box.setContentsMargins(0,0,0,0);box.addWidget(self.list)
+        for key in dict.fromkeys([*values,*NAMES]):
+            item=QListWidgetItem(NAMES[key]);item.setData(Qt.UserRole,key);item.setFlags(item.flags()|Qt.ItemIsUserCheckable);item.setCheckState(Qt.Checked if key in values else Qt.Unchecked);self.list.addItem(item)
+        actions=QHBoxLayout();actions.addWidget(button('向上',lambda:self.move(-1)));actions.addWidget(button('向下',lambda:self.move(1)));box.addLayout(actions)
+    def move(self,step):
+        row=self.list.currentRow();target=row+step
+        if row>=0 and 0<=target<self.list.count():
+            item=self.list.takeItem(row);self.list.insertItem(target,item);self.list.setCurrentRow(target)
+    def text(self):return ','.join(self.list.item(i).data(Qt.UserRole) for i in range(self.list.count()) if self.list.item(i).checkState()==Qt.Checked)
 
 class SetupWizard(QWizard):
     def __init__(self,owner):
@@ -143,7 +159,7 @@ class SetupWizard(QWizard):
         self.edition_policy=QComboBox()
         for name,key in (('音质最好优先','quality'),('歌曲最全优先','complete'),('特殊版本优先（豪华 / 周年 / 重制）','special')):self.edition_policy.addItem(name,key)
         self.edition_policy.setCurrentIndex(max(0,self.edition_policy.findData(self.values['workflow'].get('edition_policy','quality'))));p.addRow('发行自动筛选',self.edition_policy)
-        p=self._add_page('网易云回退与媒体工具','四站没有合适音源时使用网易云。无法获取的曲目会保留说明，不会用其他歌曲冒充。')
+        p=self._add_page('流媒体、媒体工具与歌单授权','四站没有合适音源时，按顺序获取可验证的完整音源。平台 Cookie 与扫码登录统一管理，歌单读取和下载可复用登录态。')
         self.auto_updates=QCheckBox('启动时检查、下载并启动当前系统更新');self.auto_updates.setChecked(self.values.get('updates',{}).get('enabled',True));p.addRow('软件更新',self.auto_updates)
         flow=self.values.get('workflow',{});self.fallback=QCheckBox('启用网易云回退');self.fallback.setChecked(flow.get('netease_fallback',True));p.addRow(self.fallback)
         self.netease_api=line(flow.get('netease_api_url',''),'可选：本地网易云 API 服务地址');p.addRow('API 服务（可选）',self.netease_api)
@@ -162,12 +178,11 @@ class SetupWizard(QWizard):
         for tool in ('ffmpeg','ffprobe'):
             row,edit=browse_field(self.values.get('paths',{}).get('tools',{}).get(tool,''),False);self.fields[tool]=edit;p.addRow(tool+' 程序',row)
         p.addRow(label('两个媒体工具用于解密后的音频检查和音质识别。已填写有效路径时不用重新安装。','hint'))
-        p=self._add_page('其他流媒体兜底（可选）','先检索资源站，再尝试网易云和这里配置的流媒体。每首都核对歌名、艺人、专辑、完整时长与实际音频，试听和错误歌曲不会入库。')
-        streaming=self.values.get('streaming',{});self.streaming_managed=QCheckBox('使用程序内置 go-music-dl（自动配置与启动）');self.streaming_managed.setChecked(streaming.get('managed',True));p.addRow(self.streaming_managed);self.streaming_enabled=QCheckBox('启用 go-music-dl 多平台回退服务');self.streaming_enabled.setChecked(streaming.get('enabled',False));p.addRow(self.streaming_enabled)
+        p.addRow(label('多平台兜底 · 按勾选顺序处理，完整音频校验后才会入库。','hint'))
+        streaming=self.values.get('streaming',{});self.streaming_managed=QCheckBox('使用程序内置 go-music-dl（自动配置与启动）');self.streaming_managed.setChecked(streaming.get('managed',True));p.addRow(self.streaming_managed);self.streaming_enabled=QCheckBox('启用多平台流媒体兜底');self.streaming_enabled.setChecked(streaming.get('enabled',False));p.addRow(self.streaming_enabled)
         self.streaming_url=line(streaming.get('base_url','http://127.0.0.1:8080/music'),'填写 go-music-dl 网页的完整地址，含 /music');p.addRow('服务网页地址',self.streaming_url)
         self.streaming_cookie=CredentialField('可选：go-music-dl 登录 Cookie JSON，未启用登录时留空',streaming.get('credential_ref') in self.saved_refs);p.addRow('服务登录 Cookie',self.streaming_cookie)
-        self.streaming_order=line(','.join(streaming.get('order',['netease','qqmusic','kuwo','kugou','migu','qishui','bilibili','applemusic'])),'平台代码用逗号分隔');p.addRow('回退顺序',self.streaming_order)
-        p.addRow(label('代码：netease 网易云、qqmusic QQ、kuwo 酷我、kugou 酷狗、migu 咪咕、qishui 汽水、bilibili、applemusic。平台 Cookie 或扫码登录可点击下方按钮在 MusicOps 中配置。Apple Music 仅有试听时会拒绝入库；Spotify / YouTube 需要服务提供对应适配器，不能将跨平台音源标成它们的原生下载。','hint'))
+        self.streaming_order=PlatformOrder(streaming.get('order',[]));p.addRow('参与平台与尝试顺序',self.streaming_order)
         def streaming_mode(enabled):
             self.streaming_url.setDisabled(enabled);self.streaming_cookie.setDisabled(enabled)
         self.streaming_managed.toggled.connect(streaming_mode);streaming_mode(self.streaming_managed.isChecked())
@@ -175,7 +190,17 @@ class SetupWizard(QWizard):
             from musicops.gui.engine_login import EngineLogin
             dialog=EngineLogin(self.owner,self.saved_refs);dialog.exec();self.saved_refs.update(dialog.saved_refs)
         p.addRow(button('平台 Cookie / 扫码登录…',login))
-        p=self._add_page('歌单平台授权（可选）','公开链接先尝试直接读取；遇到登录要求时再补充。也可以导入各平台或 Playlist Out 导出的歌单文件，本步可跳过。')
+        external=streaming['musicdl'];self.musicdl_enabled=QCheckBox('启用自行安装的 musicdl（用于 TIDAL / Qobuz / Deezer 等新增平台）');self.musicdl_enabled.setChecked(external['enabled']);self.musicdl_enabled.toggled.connect(lambda checked:self.streaming_enabled.setChecked(True) if checked else None);p.addRow(self.musicdl_enabled)
+        row,self.musicdl_python=browse_field(external['python_path'],False);p.addRow('已安装 musicdl 的 Python',row)
+        p.addRow(label('musicdl 限制直接捆绑分发，因此由你在独立 Python 环境安装。这里只连接已有安装，仍按歌名、艺人、版本、完整时长和实际解码校验，不接受试听。新增平台需要勾选并排入上方顺序。','hint'))
+        self.musicdl_cookies={};external_box=QComboBox();external_stack=QStackedWidget()
+        from musicops.providers.musicdl_bridge import CLIENTS
+        from musicops.providers.streaming import NAMES
+        for platform in CLIENTS:
+            external_box.addItem(NAMES[platform],platform);edit=CredentialField('可选：{"cookie_name":"cookie_value"}，使用该平台自己的账号',external['credential_refs'].get(platform) in self.saved_refs);self.musicdl_cookies[platform]=edit;external_stack.addWidget(edit)
+        external_box.currentIndexChanged.connect(external_stack.setCurrentIndex);p.addRow('新增平台登录态',external_box);p.addRow(external_stack)
+
+        p.addRow(label('歌单 API 授权 · 公开链接先直接读取；需要 Token 的平台按下面说明填写。Cookie 与扫码登录在上方统一管理。','hint'))
         self.playlist_auth_selector=QComboBox();self.playlist_auth_stack=QStackedWidget();self.playlist_credentials={}
         for platform,name in PLATFORMS.items():
             if platform=='netease':continue
@@ -197,7 +222,7 @@ class SetupWizard(QWizard):
         p.addRow(label('登录信息只保存在本机并绑定到该平台官方 API 域名，不发送给第三方聚合解析服务。','hint'))
         p=self._add_page('补全封面、歌词与资料','这些服务都可以跳过。自动写入歌词时保存为音频同名的 .lrc 文件；没有歌词的曲目不会被视为损坏。')
         lyrics=self.values.get('lyrics',{}).get('primary',{});self.lyric_url=line('' if '.example.invalid' in lyrics.get('base_url','') else lyrics.get('base_url',''),'歌词与封面接口地址');self.lyric_key=CredentialField('填写服务提供的完整 Authorization 值',lyrics.get('auth_secret_ref') in self.saved_refs)
-        p.addRow('歌词接口地址',self.lyric_url);p.addRow('接口鉴权值',self.lyric_key);p.addRow(label('这里填服务给你的鉴权原文，无需填写“凭据引用”。没有服务可留空。','hint'))
+        p.addRow('歌词接口地址',self.lyric_url);p.addRow('接口鉴权值',self.lyric_key);p.addRow(button('测试当前填写的歌词接口',lambda:self.test_connection('lyrics')));self.lyric_test_note=label('测试不写入音乐，也不保存新凭据。','hint');p.addRow(self.lyric_test_note);p.addRow(label('这里填服务给你的鉴权原文，无需填写“凭据引用”。没有服务可留空。','hint'))
         self.discogs=CredentialField('Discogs 设置中生成的个人 Token；可跳过',self.values.get('catalog',{}).get('discogs',{}).get('credential_ref') in self.saved_refs);p.addRow('Discogs Token',self.discogs)
         self.catalog_web=QCheckBox('API 无匹配时自动读取公开音乐资料网站');self.catalog_web.setChecked(self.values.get('catalog',{}).get('web_enabled',True));p.addRow(self.catalog_web)
         self.prefer_simplified=QCheckBox('已确认中文的资料优先简体；日文和语言不明的名称保持原文');self.prefer_simplified.setChecked(self.values.get('metadata',{}).get('prefer_simplified',True));p.addRow(self.prefer_simplified)
@@ -205,13 +230,25 @@ class SetupWizard(QWizard):
         self.ai_url=line('' if '.example.invalid' in ai.get('base_url','') else ai.get('base_url',''),'兼容 Responses 的 API 地址');self.ai_model=line(ai.get('model',''),'服务提供的模型名称');self.ai_key=CredentialField('API Key',ai.get('auth_secret_ref') in self.saved_refs)
         self.ai_key.textChanged.connect(lambda value:self.ai_enabled.setChecked(True) if value.strip() else None)
         p.addRow('AI 地址',self.ai_url);p.addRow('模型名称',self.ai_model);p.addRow('API Key',self.ai_key)
+        p.addRow(button('测试当前 AI 地址、密钥与模型',lambda:self.test_connection('ai')));self.ai_test_note=label('连接测试仅发送一条简短请求。','hint');p.addRow(self.ai_test_note)
         p.addRow(label('顺序：识别 API → 公开资料网站 → AI 联网搜索。AI 地址和模型必须支持 Responses web_search；不支持时会显示原因并等待手动核对，不会伪装联网成功。网站限制访问时可打开来源人工核对。','hint'))
-        p=self._add_page('连接 Navidrome（可选）','程序完成入库后会触发 Navidrome 扫描。若只使用 Roon，可直接保存。')
+        p=self._add_page('连接 Plex / Navidrome（可选）','程序完成入库后会触发 Navidrome 扫描。若只使用 Roon，可直接保存。')
         nav=self.values.get('music_servers',{}).get('navidrome',{});self.nav_enabled=QCheckBox('启用 Navidrome');self.nav_enabled.setChecked(nav.get('enabled',False));p.addRow(self.nav_enabled)
         self.nav_url=line(nav.get('url',''),'例如 http://127.0.0.1:4533');self.nav_user=line(nav.get('username',''),'具有扫描权限的账号');self.nav_pass=CredentialField('Navidrome 账号密码',nav.get('password_ref') in self.saved_refs)
         p.addRow('服务地址',self.nav_url);p.addRow('用户名',self.nav_user);p.addRow('密码',self.nav_pass)
         p.addRow(label('Navidrome 需要监听与你选择的音乐库相同的文件。密码只在当前 Windows 账户的本地保险库中保存。','hint'))
+        plex=self.values['music_servers']['plex'];self.plex_enabled=QCheckBox('入库后通知 Plex 扫描音乐库');self.plex_enabled.setChecked(plex['enabled']);p.addRow(self.plex_enabled)
+        self.plex_url=line(plex['url'],'例如 http://192.168.1.10:32400');self.plex_section=line(plex['section_id'],'测试读取音乐库后填写对应 ID');self.plex_token=CredentialField('X-Plex-Token',plex['auth_secret_ref'] in self.saved_refs)
+        p.addRow('Plex 地址',self.plex_url);p.addRow('Plex 音乐库 ID',self.plex_section);p.addRow('Plex Token',self.plex_token);p.addRow(button('测试 Plex 并读取音乐库 ID',lambda:self.test_connection('plex')));self.plex_test_note=label('仅列出音乐库，不触发扫描。','hint');p.addRow(self.plex_test_note)
         self.save_note=label('');p.addRow(self.save_note)
+    def test_connection(self,kind):
+        if kind=='lyrics':settings={'base_url':self.lyric_url.text().strip(),'authorization':self.lyric_key.text()};note=self.lyric_test_note
+        elif kind=='ai':settings={'base_url':self.ai_url.text().strip(),'model':self.ai_model.text().strip(),'key':self.ai_key.text()};note=self.ai_test_note
+        else:settings={'url':self.plex_url.text().strip(),'token':self.plex_token.text()};note=self.plex_test_note
+        note.setText('正在测试当前填写的连接…')
+        def done(result):
+            note.setText(result.get('message',result.get('status','测试完成'))+'；耗时 '+str(result.get('seconds',0))+' 秒'+('\n'+'\n'.join(row['id']+' · '+str(row['name']) for row in result.get('sections',[])) if result.get('sections') else ''))
+        self.owner.call('test_connection',{'kind':kind,'settings':settings},done,lambda message:note.setText('测试未通过：'+message))
     def _add_page(self,title,subtitle):
         page=QWizardPage();page.setTitle(title);page.setSubTitle(subtitle);outer=QVBoxLayout(page);scroll=QScrollArea();scroll.setWidgetResizable(True);scroll.setFrameShape(QScrollArea.NoFrame);body=QWidget();form=QFormLayout(body);form.setVerticalSpacing(16);form.setHorizontalSpacing(22);form.setFieldGrowthPolicy(QFormLayout.ExpandingFieldsGrow);scroll.setWidget(body);outer.addWidget(scroll);self.addPage(page);return form
     def test_solver(self):
@@ -242,10 +279,10 @@ class SetupWizard(QWizard):
                  'qbt':{'url':self.qbt_url.text().strip(),'username':self.qbt_user.text().strip(),'password':self.qbt_pass.text()},
                  'lyrics':{'url':self.lyric_url.text().strip(),'authorization':self.lyric_key.text()},'discogs_token':self.discogs.text(),
                  'ai':{'enabled':self.ai_enabled.isChecked(),'url':self.ai_url.text().strip(),'model':self.ai_model.text().strip(),'key':self.ai_key.text()},'catalog_web':self.catalog_web.isChecked(),'prefer_simplified':self.prefer_simplified.isChecked(),
-                 'servers':{'roon':self.roon.isChecked(),'navidrome':{'enabled':self.nav_enabled.isChecked(),'url':self.nav_url.text().strip(),'username':self.nav_user.text().strip(),'password':self.nav_pass.text()}},
+                 'servers':{'plex':{'enabled':self.plex_enabled.isChecked(),'url':self.plex_url.text().strip(),'section_id':self.plex_section.text().strip(),'token':self.plex_token.text()},'roon':self.roon.isChecked(),'navidrome':{'enabled':self.nav_enabled.isChecked(),'url':self.nav_url.text().strip(),'username':self.nav_user.text().strip(),'password':self.nav_pass.text()}},
                  'updates':{'enabled':self.auto_updates.isChecked()},'browser_solver':{'managed':self.solver_managed.isChecked(),'enabled':self.solver_enabled.isChecked(),'base_url':self.solver_url.text().strip(),'executable':self.solver_executable.text().strip(),'auto_start':self.solver_auto.isChecked()},
                  'workflow':{'netease_fallback':self.fallback.isChecked(),'netease_api_url':self.netease_api.text().strip(),'netease_import_dir':self.import_dir.text().strip(),'fl_per_batch':self.fl_limit.value(),'fl_unlimited':self.fl_unlimited.isChecked(),'edition_policy':self.edition_policy.currentData()},
-                 'streaming':{'managed':self.streaming_managed.isChecked(),'enabled':self.streaming_enabled.isChecked(),'base_url':self.streaming_url.text().strip(),'cookie_json':self.streaming_cookie.text(),'order':[s.strip() for s in self.streaming_order.text().split(',') if s.strip()]},
+                 'streaming':{'musicdl':{'enabled':self.musicdl_enabled.isChecked(),'python_path':self.musicdl_python.text().strip(),'cookies':{p:e.text() for p,e in self.musicdl_cookies.items()}},'managed':self.streaming_managed.isChecked(),'enabled':self.streaming_enabled.isChecked(),'base_url':self.streaming_url.text().strip(),'cookie_json':self.streaming_cookie.text(),'order':[s.strip() for s in self.streaming_order.text().split(',') if s.strip()]},
                  **{k:w.text().strip() for k,w in self.fields.items()}}
         self.button(QWizard.FinishButton).setEnabled(False);self.button(QWizard.CustomButton2).setEnabled(False);self.save_note.setText('正在保存…')
         def saved(result):self.owner.config=result['config']['values'];super(SetupWizard,self).accept();self.owner.refresh()
@@ -508,6 +545,7 @@ class Workbench(QMainWindow):
                 self.notice.setText('正在重新连接后台，请稍候…' if reconnecting else '需要处理：'+message)
                 if reconnecting:self._connection_notice=self.notice.text();self.timer.start()
             self.update_activity()
+        if command=='attach':request.signals.progress.connect(self.connection.setText)
         request.signals.done.connect(success);request.signals.failed.connect(failure);self.pool.start(request,0 if command in ('get_status','list_workflows','get_task') else 1)
     def poll_tasks(self):
         # A compact status only contains recent tasks. Follow accepted task IDs

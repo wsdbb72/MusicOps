@@ -46,7 +46,7 @@ class WorkerClient:
             raise
         with conn:
             conn.send_bytes(encoded)
-            timeout=max(self.timeout,260) if command=='test_browser_solver' else max(self.timeout,90) if command=='test_qbt_connection' else self.timeout
+            timeout=max(self.timeout,90) if command=='test_connection' else max(self.timeout,260) if command=='test_browser_solver' else max(self.timeout,90) if command=='test_qbt_connection' else self.timeout
             if not conn.poll(timeout):raise WorkerConnectionError('后台响应超时；请先读取任务/配置状态，勿盲重发执行请求')
             data=json.loads(conn.recv_bytes(MAX_RESPONSE_BYTES))
         if not isinstance(data,dict) or 'ok' not in data:raise WorkerConnectionError('IPC_INVALID_RESPONSE')
@@ -54,7 +54,7 @@ class WorkerClient:
         result=data['result']
         if isinstance(result,dict) and 'config' in result: self.config_version=result['config']['version']
         return result
-    def ensure_running(self):
+    def ensure_running(self,progress=None):
         transient=(OSError,EOFError,WorkerConnectionError)
         try:return self.call('attach',{'compact':True})
         except transient:pass
@@ -70,10 +70,22 @@ class WorkerClient:
             else:cmd=[sys.executable,'-m','musicops.worker.server','--base',str(self.base)]
             private_directory(self.base)
             env=os.environ.copy();env['PYTHONPATH']=str(Path(__file__).resolve().parents[2])
-            subprocess.Popen(cmd,env=env,creationflags=0x08000000 if is_windows() else 0,stdin=subprocess.DEVNULL,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,cwd=self.base)
+            # Keep a local diagnostic instead of silently discarding a worker
+            # initialization error and leaving an empty task centre forever.
+            log=self.base/'state'/'worker-startup.log'
+            if log.exists() and log.stat().st_size>2_000_000:log.replace(log.with_suffix('.previous.log'))
+            with log.open('ab') as output:
+                subprocess.Popen(cmd,env=env,creationflags=0x08000000 if is_windows() else 0,stdin=subprocess.DEVNULL,stdout=output,stderr=output,cwd=self.base)
         deadline=time.monotonic()+90
         while time.monotonic()<deadline:
             time.sleep(.2)
+            if progress:
+                try:
+                    path=self.base/'state'/'worker-startup.json'
+                    if path.stat().st_size<4096 and time.time()-path.stat().st_mtime<180:
+                        status=json.loads(path.read_text('utf-8'));progress(status['message'])
+                        if status.get('failed'):raise WorkerRequestError(status['message'],'WORKER_STARTUP_FAILED')
+                except (OSError,ValueError,KeyError):pass
             try:return self.call('attach',{'compact':True})
             except transient:pass
         raise WorkerConnectionError('IPC_CONNECTION_ERROR：后台仍在启动或连接繁忙；已有任务保留，请稍后重连并检查后台启动日志。')

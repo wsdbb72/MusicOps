@@ -4,6 +4,7 @@ import argparse
 import hashlib
 import hmac
 import json
+import os
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -73,7 +74,7 @@ def handle_request(service, req, key):
             return previous['response']
         if command not in READ_COMMANDS | QUEUED_COMMANDS:
             raise RuntimeError('REQUEST_RESULT_UNKNOWN：先读取当前状态，不盲重发')
-    if command in READ_COMMANDS or command in ('engine_control','test_browser_solver','test_qbt_connection'):
+    if command in READ_COMMANDS or command in ('engine_control','test_browser_solver','test_qbt_connection','test_connection'):
         # Polling is read-only and must return current state. Persisting every
         # full status response would grow the database continuously while idle.
         try:
@@ -102,7 +103,7 @@ def serve_connection(service,conn,key,mutation_lock,address,family):
                 req=json.loads(conn.recv_bytes(MAX_REQUEST_BYTES))
                 request_id=req.get('request_id') if isinstance(req,dict) else None
                 command=req.get('command') if isinstance(req,dict) else None
-                if command in READ_COMMANDS or command in ('engine_control','test_browser_solver','test_qbt_connection'):response=handle_request(service,req,key)
+                if command in READ_COMMANDS or command in ('engine_control','test_browser_solver','test_qbt_connection','test_connection'):response=handle_request(service,req,key)
                 else:
                     # Preserve request-id atomicity for simultaneous mutations.
                     with mutation_lock:response=handle_request(service,req,key)
@@ -131,7 +132,16 @@ def main(argv=None):
         return 0
     service = None
     try:
-        service = AppService(base,offline=False)
+        startup=base/'state'/'worker-startup.json'
+        def progress(message):
+            temporary=startup.with_suffix('.tmp')
+            temporary.write_text(json.dumps({'pid':os.getpid(),'message':message,'failed':False}),encoding='utf-8')
+            temporary.replace(startup)
+        progress('正在打开本地状态库')
+        try:service = AppService(base,offline=False,progress=progress)
+        except Exception as exc:
+            startup.write_text(json.dumps({'pid':os.getpid(),'failed':True,'message':'后台启动失败：'+type(exc).__name__+'。请查看 profile/state/worker-startup.log'}),encoding='utf-8')
+            raise
         key = auth_key(base)
         prepare_ipc_socket(base)
         address=pipe_address(base)
@@ -139,6 +149,7 @@ def main(argv=None):
         # GUI polling and task progress can arrive together. A one-connection
         # Unix socket queue rejects healthy concurrent clients on macOS.
         with ThreadPoolExecutor(max_workers=12,thread_name_prefix='MusicOpsIPC') as requests, Listener(address, family=family, backlog=32 if family=='AF_UNIX' else 1, authkey=key) as listener:
+            progress('后台已就绪，正在读取任务列表')
             secure_ipc_socket(address)
             mutation_lock=threading.RLock()
             while not service.stop.is_set():

@@ -123,12 +123,17 @@ class LrcApiClient:
             items=[{'id':hashlib.sha256(data).hexdigest(),'lyrics':text}]
         candidates=[]
         for item in items:
+            item=dict(item);item['lyrics']=normalize_lrc(item['lyrics'])
             validation=validate_lrc(item['lyrics'],query.get('duration'))
             identity=self._identity(item,query)
             candidates.append({'schema_version':1,'resource_id':str(item['id']),'kind':'lyrics','provider':provider,'title':item.get('title'),'artist':item.get('artist'),'album':item.get('album'),'version':item.get('version'),'lyrics':item['lyrics'],'content_hash':validation.get('sha256'),'validation':validation,'identity_state':identity,'selected':False,'reason':'匹配身份与版本' if identity=='matched' else '身份信息不足，需用户复核' if identity=='structural_only' else '标题、艺人、专辑或版本不符'})
         valid=[x for x in candidates if x['validation']['valid'] and x['identity_state']!='mismatch']
         if not valid: return candidates,'MISMATCH' if any(x['identity_state']=='mismatch' for x in candidates) else 'INVALID_PAYLOAD'
-        matched=[x for x in valid if x['identity_state']=='matched']
+        matched=[];seen=set()
+        for row in valid:
+            if row['identity_state']!='matched':continue
+            fingerprint=(row['content_hash'],row.get('title'),str(row.get('artist')),row.get('album'))
+            if fingerprint not in seen:matched.append(row);seen.add(fingerprint)
         if len(matched)==1: matched[0]['selected']=True
         return candidates,None
 
@@ -161,7 +166,7 @@ class LrcApiClient:
             try:result=self._query_uncached(kind,query)
             except Exception as exc:result={'schema_version':1,'state':'API_CONTRACT_ERROR','candidates':[],'errors':[{'error_class':'INVALID_CLIENT_CONFIGURATION','exception_type':type(exc).__name__}]}
             state=result['state']
-            ttl=float(self.config.get('cache_ttl',604800)) if state=='VALID_PAYLOAD' else float(self.config.get('negative_ttl',86400)) if state in ('NO_MATCH','MISMATCH') else 1800 if state in ('INVALID_PAYLOAD','API_CONTRACT_ERROR') else 300
+            ttl=float(self.config.get('cache_ttl',604800)) if state=='VALID_PAYLOAD' else float(self.config.get('negative_ttl',86400)) if state in ('NO_MATCH','MISMATCH') else 60 if state in ('INVALID_PAYLOAD','API_CONTRACT_ERROR') else 300
             size=sum(len(c.get('content_bytes',b''))+len(c.get('lyrics','').encode('utf-8',errors='replace'))+2048 for c in result['candidates'])+2048
             with self._lock:
                 flight['result']=copy.deepcopy(result)
@@ -236,7 +241,8 @@ class LrcApiClient:
                     try:delay=min(1800,max(1,float(retry)))
                     except (TypeError,ValueError):delay=60
                     self._breakers[(provider,kind)]=(self.clock()+delay,error);break
-                if error in ('INVALID_PAYLOAD','API_CONTRACT_ERROR'):self._breakers[(provider,kind)]=(self.clock()+1800,error)
+                # A malformed lyric/recording is query-specific. Do not block
+                # every other song for thirty minutes because of one payload.
                 if error!='TRANSIENT_ERROR':break
                 if attempt+1>=min(2,max(1,int(self.config.get('max_attempts',2)))):self._breakers[(provider,kind)]=(self.clock()+300,error)
             if last=='AUTH_FAILED' and not self.config.get('fallback_on_auth_error',False):break
@@ -245,3 +251,7 @@ class LrcApiClient:
     def candidates(self,title,artist,album='',**kwargs):return self.query('candidates',title,artist,album,**kwargs)
     def lyrics(self,title,artist,album='',**kwargs):return self.query('lyrics',title,artist,album,**kwargs)
     def cover(self,title,artist,album='',**kwargs):return self.query('cover',title,artist,album,**kwargs)
+
+
+def normalize_lrc(text):
+    return '\n'.join(line for line in text.replace('\r\n','\n').split('\n') if not re.fullmatch(r'\s*\[(?:hash|sign|qq|total):[^\r\n]*\]\s*',line,re.I)).strip()

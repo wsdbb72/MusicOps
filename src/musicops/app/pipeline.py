@@ -140,11 +140,19 @@ class Workflows:
         import time
         search_turn=getattr(self,'_fallback_turns',0)>=3
         io_turn=getattr(self,'_io_turns',0)>=3
-        fallback_clause=" OR json_extract(payload,'$.stage')='fallback'" if include_fallback else ""
-        metadata_clause=" OR json_extract(payload,'$.stage')='metadata'" if include_metadata else ''
-        network_clause=" AND (json_extract(payload,'$.stage')='searching' OR (json_extract(payload,'$.stage')='identifying' AND json_extract(payload,'$.scene')!='fill')"+fallback_clause+metadata_clause+")" if network_only else ''
+        stages=['searching','identifying']+(['fallback'] if include_fallback else [])+(['metadata'] if include_metadata else [])
+        network_clause=" AND stage IN ("+','.join('?' for _ in stages)+") AND NOT (stage='identifying' AND scene='fill')" if network_only else ''
+        args=(time.time(),*(stages if network_only else []),io_turn,io_turn,search_turn,search_turn,search_turn)
         with self.store.connection() as c:
-            row=c.execute("SELECT payload FROM evidence AS current WHERE id LIKE 'workflow:%' AND coalesce(json_extract(payload,'$.hidden'),0)=0 AND coalesce(json_extract(payload,'$.job_kind'),'album') NOT IN ('batch','activity') AND coalesce(json_extract(payload,'$.paused'),0)=0 AND json_extract(payload,'$.stage') NOT IN ('completed','failed','needs_review','cancelled','skipped','restored','running') AND (json_extract(payload,'$.identification_job_id') IS NULL OR EXISTS (SELECT 1 FROM evidence AS parent WHERE parent.id='workflow:'||json_extract(current.payload,'$.identification_job_id') AND json_extract(parent.payload,'$.stage')='completed')) AND (json_extract(payload,'$.search_job_id') IS NULL OR coalesce(json_extract(payload,'$.task_type'),'')!='album' OR EXISTS (SELECT 1 FROM evidence AS searched WHERE searched.id='workflow:'||json_extract(current.payload,'$.search_job_id') AND json_extract(searched.payload,'$.stage')='completed')) AND coalesce(json_extract(payload,'$.next_poll'),0)<=?"+network_clause+" ORDER BY CASE json_extract(payload,'$.stage') WHEN 'publishing' THEN 0 WHEN 'retiring' THEN 0 WHEN 'notifying' THEN 0 WHEN 'validating' THEN 0 WHEN 'downloading' THEN CASE WHEN ? THEN 3 ELSE 1 END WHEN 'requesting' THEN CASE WHEN ? THEN 3 ELSE 1 END WHEN 'metadata' THEN 2 WHEN 'enrich' THEN 2 WHEN 'fallback' THEN CASE WHEN ? THEN 4 ELSE 3 END WHEN 'searching' THEN CASE WHEN ? THEN 3 ELSE 4 END ELSE CASE WHEN ? THEN 3 ELSE 5 END END,updated_at,id LIMIT 1",(time.time(),io_turn,io_turn,search_turn,search_turn,search_turn)).fetchone()
+            row=c.execute("""SELECT payload FROM evidence WHERE id=(SELECT current.id FROM workflow_overview AS current
+                WHERE hidden=0 AND paused=0 AND job_kind NOT IN ('batch','activity')
+                AND stage NOT IN ('completed','failed','needs_review','cancelled','skipped','restored','running')
+                AND (identification_job_id IS NULL OR EXISTS (SELECT 1 FROM workflow_overview AS parent WHERE parent.id='workflow:'||current.identification_job_id AND parent.stage='completed'))
+                AND (search_job_id IS NULL OR coalesce(task_type,'')!='album' OR EXISTS (SELECT 1 FROM workflow_overview AS searched WHERE searched.id='workflow:'||current.search_job_id AND searched.stage='completed'))
+                AND next_poll<=?"""+network_clause+""" ORDER BY CASE stage WHEN 'publishing' THEN 0 WHEN 'retiring' THEN 0 WHEN 'notifying' THEN 0 WHEN 'validating' THEN 0
+                WHEN 'downloading' THEN CASE WHEN ? THEN 3 ELSE 1 END WHEN 'requesting' THEN CASE WHEN ? THEN 3 ELSE 1 END
+                WHEN 'metadata' THEN 2 WHEN 'enrich' THEN 2 WHEN 'fallback' THEN CASE WHEN ? THEN 4 ELSE 3 END
+                WHEN 'searching' THEN CASE WHEN ? THEN 3 ELSE 4 END ELSE CASE WHEN ? THEN 3 ELSE 5 END END,updated_at,id LIMIT 1)""",args).fetchone()
         return json.loads(row[0]) if row else None
     def queue(self,args,cfg,task_id=None):
         """Expose the preparation before the serial worker begins any filesystem IO."""
@@ -158,7 +166,7 @@ class Workflows:
         if active:raise PolicyBlocked('已有任务正在准备或运行，请等待完成或取消后再开始下一批')
         root=Path(cfg['paths']['library']);reject_reparse_chain(root)
         if not root.is_dir():raise ValueError('音乐库目录不存在，请在设置中选择已有目录')
-        if scene=='expand':
+        if scene=='expand' or scene=='fill' and args.get('album_id'):
             if type(args.get('retire_single',False)) is not bool:raise ValueError('原单曲保留选项须为勾选状态')
             selected=args.get('album_id')
             if not isinstance(selected,str) or len(selected)!=64 or not all(ch in '0123456789abcdef' for ch in selected):raise ValueError('请先选择库内的单曲专辑')
@@ -198,7 +206,7 @@ class Workflows:
         self.s._index_real_library({'root':str(root),'lightweight':True},cfg,progress=scan_progress)
         self.checkpoint(batch,'grouping_albums');self.put(batch,progress=85,progress_phase='matching',message='本地音乐库扫描完成，正在对比并按专辑整理任务')
         files=[f for f in self.store.list('library_files') if f.get('location_state')=='library' and Path(f['path']).suffix.lower() in AUDIO_EXTENSIONS and Path(f['path']).is_relative_to(root)]
-        if scene=='expand':
+        if scene=='expand' or args.get('_single_file_ids'):
             selected=set(args.get('_single_file_ids',[]))
             files=[f for f in files if f['file_id'] in selected]
             if not files or {f['file_id'] for f in files}!=selected:raise ValueError('所选单曲专辑在扫描后改变，请重新选择')
@@ -254,12 +262,14 @@ class Workflows:
         recover_serialization_failures(self)
         # Version 0.3.1 queued starts were invisible while a first scan was
         # running. Do not replay several historical clicks after an upgrade.
-        for task in self.store.list('tasks'):
+        for task in self.s._pending_tasks():
             if task.get('command')!='start_workflow' or task.get('args',{}).get('_batch_job_id') or task['state'] not in ('queued','running','paused','recovery_required'):continue
             job_id='batch:'+task['task_id'];scene=task.get('args',{}).get('scene','complete')
             self.put({'kind':'workflow','job_kind':'batch','job_id':job_id,'batch_id':task['task_id'],'scene':scene,'stage':'needs_review','progress':0,'label':SCENES.get(scene,scene)+' · 上次准备任务','created_at':task.get('created_at',utcnow()),'message':'旧版准备任务已停止，请重新开始本批次','detail':'保留了原来的歌单选择和设置；旧版重复排队请求不会自动执行下载。','review_kind':'interrupted','start_task_id':task['task_id']})
             task.update(state='recovery_required',error='旧版准备任务已停止，请重新开始本批次',error_class='RECOVERY_REQUIRED');self.store.put('tasks',task['task_id'],task)
-        jobs=self.rows(include_batches=True)
+        with self.store.connection() as connection:
+            rows=connection.execute("SELECT payload FROM evidence WHERE id IN (SELECT id FROM workflow_overview WHERE job_kind='batch' OR stage NOT IN ('completed','failed','needs_review','cancelled','skipped','restored'))").fetchall()
+        jobs=[json.loads(row[0]) for row in rows]
         batches={job['batch_id'] for job in jobs if job.get('job_kind')=='batch' and isinstance(job.get('batch_id'),str) and job['batch_id'] and job.get('job_id')=='batch:'+job['batch_id']}
         legacy=[]
         for job in jobs:
@@ -324,7 +334,7 @@ class Workflows:
             children=[]
             if job.get('job_kind')=='batch':
                 with self.store.connection() as c:
-                    rows=c.execute("SELECT payload FROM evidence WHERE id LIKE 'workflow:%' AND json_extract(payload,'$.batch_id')=? AND coalesce(json_extract(payload,'$.job_kind'),'album')!='batch'",(job['batch_id'],)).fetchall()
+                    rows=c.execute("SELECT payload FROM evidence WHERE id IN (SELECT id FROM workflow_overview WHERE batch_id=? AND job_kind!='batch')",(job['batch_id'],)).fetchall()
                 children=[json.loads(r[0]) for r in rows]
             stopped=TERMINAL-{'needs_review'} if action=='cancel' else TERMINAL
             affected=[row for row in [job,*children] if row['stage'] not in stopped]
@@ -526,6 +536,7 @@ class Workflows:
                 self.put(child)
             self.put(job,stage='completed',progress=100,processing_job_id=child_id,message='检索完成，已创建独立下载与入库任务')
     def _searching(self,job):
+        from musicops.app.streaming_fallback import available as fallback_available
         cfg=job['config'];tracks=job['targets'] or job['old_files'];first=tracks[0];album=first.get('album');artists=first.get('albumartist') or first.get('artists',[])
         if not album or not artists or job['scene']=='playlist' and first.get('source') and not first.get('duration'):
             from musicops.providers.catalog import lookup_links
@@ -559,9 +570,9 @@ class Workflows:
             from musicops.app.source_identity import recover
             if recover(self,job):return
         if not summary['successful_sites'] and not summary['unavailable_sites']:
-            if job['scene'] in ('playlist','fill') and cfg['workflow']['netease_fallback']:
-                self._queue_processing(job,'fallback','未启用资源站，按设置使用网易云下载',progress=20)
-            else:self.put(job,stage='needs_review',review_kind='search',message='尚未启用可检索站点',detail='请在连接与设置中启用资源站，或为歌单开启网易云回退。')
+            if job['scene'] in ('playlist','fill') and fallback_available(cfg):
+                self._queue_processing(job,'fallback','未启用资源站，按统一顺序尝试完整流媒体音源',progress=20)
+            else:self.put(job,stage='needs_review',review_kind='search',message='尚未启用可检索站点',detail='请在连接与设置中启用资源站，或在统一流媒体设置中启用兜底来源。')
             return
         exact=[c for c in candidates if c.get('identity_exact') and (c['source']=='open.cd' or (c.get('seeders') or 0)>0)]
         if job['scene']=='upgrade':
@@ -610,8 +621,8 @@ class Workflows:
             self.put(job,stage='needs_review',review_kind='search',message='已启用站点当前均不可用' if summary['unavailable_sites'] else '尚未启用可检索站点',detail=search_detail(summary) or '请在连接与设置中启用资源站。');return
         if summary['unavailable_sites'] or summary['limited_sites']:
             self.put(job,stage='needs_review',review_kind='search',message='部分站点失败或结果尚不完整，暂停自动流媒体回退',detail=search_detail(summary)+'；可重试失败站点，或在核对页明确选择回退流媒体。');return
-        if job['scene'] in ('playlist','fill') and cfg['workflow']['netease_fallback']:
-            self._queue_processing(job,'fallback','可用站点未找到匹配发行，回退网易云下载',progress=20,detail=search_detail(summary));return
+        if job['scene'] in ('playlist','fill') and fallback_available(cfg):
+            self._queue_processing(job,'fallback','可用站点未找到匹配发行，按统一顺序尝试完整流媒体音源',progress=20,detail=search_detail(summary));return
         self.put(job,stage='skipped',message='可用站点未找到匹配发行，当前音源保留',detail=search_detail(summary))
     def _requesting(self,job):
         cfg=job['config'];candidate=job.get('selected') or {}
@@ -876,7 +887,7 @@ class Workflows:
                 timed=next((v for v in read_tag_fields(row['path']).get('lyrics',[]) if validate_lrc(v,row.get('duration'))['valid']),None)
                 if timed:
                     path=Path(row['path']).with_suffix('.lrc');path.write_text(timed,encoding='utf-8');row['sidecars'].append(str(path))
-            resources=self.s._real_resources({'title':row['raw_title'],'artist':' / '.join(row['artists']),'album':album,'duration':row.get('duration'),'refresh':job.get('refresh_resources',False)},cfg) if not row['sidecars'] and not job.get('skip_lyrics_service') and '.example.invalid' not in cfg['lyrics']['primary']['base_url'] else {}
+            resources=self.s._real_resources({'title':row['raw_title'],'artist':' / '.join(row['artists']),'album':album,'duration':row.get('duration'),'refresh':job.get('refresh_resources',False),'include_cover':False},cfg) if not row['sidecars'] and not job.get('skip_lyrics_service') and '.example.invalid' not in cfg['lyrics']['primary']['base_url'] else {}
             state=resources.get('lyrics',{}).get('state')
             lyric=next((c for c in resources.get('candidates',[]) if c.get('kind')=='lyrics' and c.get('selected') and c.get('identity_state')=='matched'),None)
             if lyric and not row['sidecars']:
@@ -1040,6 +1051,11 @@ class Workflows:
                 self.store.put('evidence','resources-checked:'+file_id,{'kind':'resource_check','resource_contract':job.get('resource_contract',1),'version':[stat.st_size,stat.st_mtime_ns],'checked_at':__import__('time').time(),'settings':digest(job['config']['lyrics'])})
         try:result=scan(job['config']['music_servers']['navidrome'],self.s.vault.get);message=result['message']
         except (HttpError,PolicyBlocked):message='音乐已入库；Navidrome 扫描未成功，请检查连接设置'
+        from musicops.clients.plex import scan as plex_scan
+        try:
+            plex=plex_scan(job['config']['music_servers'].get('plex',{}),self.s.vault.get)
+            if plex['state']!='skipped':message+='；'+plex['message']
+        except (HttpError,ValueError):message+='；Plex 通知失败，请检查连接设置（音频已入库）'
         self.put(job,stage='completed',progress=100,message='已完成 · '+message,detail=f"暂无匹配歌词：{job.get('lyrics_missing',0)} 首；未找到可靠封面：{job.get('cover_missing',0)} 首。恢复副本保存在音乐库外，不影响 Roon 分组。")
     def review(self,job_id,choice=None,metadata=None,cover_path=None,query=None,sites=None,expected_revision=None):
         job=self.store.get('evidence','workflow:'+job_id)
@@ -1051,7 +1067,8 @@ class Workflows:
             from musicops.app.download_policy import approve
             return approve(self,job or {},'once' if choice=='nonfree_once' else 'batch')
         if choice=='streaming_fallback' and job and job.get('stage')=='needs_review' and job.get('review_kind')=='search' and job['scene'] in ('playlist','fill'):
-            if not job['config']['workflow']['netease_fallback']:raise PolicyBlocked('当前设置未启用流媒体回退')
+            from musicops.app.streaming_fallback import available as fallback_available
+            if not fallback_available(job['config']):raise PolicyBlocked('当前设置未启用流媒体回退')
             self._queue_processing(job,'fallback','用户确认在当前检索范围后回退流媒体',progress=20);return {'status':'OK'}
         if job and choice in ('retry','research') and (job.get('review_kind') in ('search','error','interrupted') or job['stage'] in ('failed','skipped') or choice=='research' and job.get('task_type')=='search'):
             from musicops.app.workflow_actions import retry

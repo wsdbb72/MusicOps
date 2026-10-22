@@ -45,6 +45,18 @@ def save_setup(service,payload):
         supplied=payload['streaming'];target=values['streaming'];previous_host=urlsplit(target['base_url']).hostname
         for key in ('managed','enabled','base_url','order','timeout'):
             if key in supplied:target[key]=supplied[key]
+        if 'musicdl' in supplied:
+            external=supplied['musicdl']
+            if type(external.get('enabled',False)) is not bool:raise ValueError('外部 musicdl 开关无效')
+            target['musicdl']['enabled']=external.get('enabled',False)
+            if 'python_path' in external:target['musicdl']['python_path']=external['python_path']
+            from musicops.providers.musicdl_bridge import CLIENTS
+            for platform,text in external.get('cookies',{}).items():
+                if platform not in CLIENTS:raise ValueError('未知 musicdl 平台')
+                if text.strip():
+                    cookies=json.loads(text)
+                    if not isinstance(cookies,dict) or any(not isinstance(k,str) or not isinstance(v,str) for k,v in cookies.items()):raise ValueError('musicdl Cookie 请填写 name:value 的 JSON 对象')
+                    ref='vault://musicdl/'+platform;pending.append((ref,json.dumps(cookies),'musicdl:'+platform,('streaming','musicdl','credential_refs',platform)))
         if previous_host!=urlsplit(target['base_url']).hostname:target['credential_ref']=''
         if supplied.get('cookie_json'):
             host=urlsplit(target['base_url']).hostname;cookies=import_cookies(supplied['cookie_json'],host)
@@ -80,6 +92,12 @@ def save_setup(service,payload):
         if nav.get('url'):target['url']=nav['url'].rstrip('/')
         if nav.get('username'):target['username']=nav['username']
         if nav.get('password'):secret('navidrome',target['url'],nav['password'],('music_servers','navidrome','password_ref'))
+    plex=server.get('plex',{})
+    if plex:
+        target=values['music_servers']['plex'];target['enabled']=bool(plex.get('enabled',target['enabled']));target['library']=str(library)
+        for key in ('url','section_id'):
+            if key in plex:target[key]=str(plex[key]).rstrip('/')
+        if plex.get('token'):secret('plex',target['url'],plex['token'],('music_servers','plex','auth_secret_ref'))
     workflow=payload.get('workflow',{})
     for key in ('edition_policy','netease_fallback','netease_api_url','netease_downloader','netease_download_args','netease_import_dir','prefer_24bit','fl_per_batch','fl_unlimited'):
         if key in workflow:values['workflow'][key]=workflow[key]
@@ -98,6 +116,11 @@ def save_setup(service,payload):
         for key in path[:-1]:obj=obj[key]
         obj[path[-1]]=ref
     if pending:saved=service.config.save(values,saved['version'])
+    from musicops.app.platform_credentials import share
+    if payload.get('netease_cookie_json','').strip():share(service,'netease',payload['netease_cookie_json'])
+    for platform,text in payload.get('playlist_credentials',{}).items():
+        if text.strip():share(service,platform,text)
+    saved=service.config.current()
     if saved['values']['ai'].get('enabled'):
         from musicops.app.review_queue import submit
         submit(service,{'all':True})

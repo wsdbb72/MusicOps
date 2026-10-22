@@ -2,10 +2,7 @@
 FROM python:3.12-slim-bookworm AS system
 ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    chromium chromium-driver ffmpeg xvfb x11vnc openbox novnc websockify nginx-light \
-    fonts-noto-cjk xdg-utils libegl1 libopengl0 libgl1 libdbus-1-3 libxkbcommon-x11-0 \
-    libxcb-cursor0 libxcb-icccm4 libxcb-keysyms1 libxcb-shape0 libxcb-xinerama0 \
-    libxcb-randr0 libxcb-render-util0 libxcb-xfixes0 libxcb-xkb1 libsm6 libice6 \
+    chromium chromium-driver ffmpeg fonts-noto-cjk xvfb \
     openssl ca-certificates tini && rm -rf /var/lib/apt/lists/*
 FROM golang:1.26.3-bookworm AS golang
 FROM system AS build
@@ -22,7 +19,7 @@ COPY pyproject.toml /build/
 COPY src /build/src
 RUN pip wheel --no-deps --wheel-dir /wheels . && python packaging/collect_licenses.py /licenses
 FROM system AS runtime
-ARG VERSION=0.4.16
+ARG VERSION=0.4.17
 ARG REVISION=unknown
 LABEL org.opencontainers.image.title="MusicOps" \
       org.opencontainers.image.source="https://github.com/wsdbb72/MusicOps" \
@@ -40,7 +37,7 @@ RUN useradd --create-home --uid 1000 musicops && mkdir -p /config /media/music /
 ENV MUSICOPS_CONTAINER=1 MUSICOPS_ENGINE_ROOT=/opt/musicops/engines \
     MUSICOPS_VAULT_KEY_FILE=/config/keys/vault.key \
     HOME=/config/home XDG_DATA_HOME=/config/home/.local/share \
-    DISPLAY=:99 QT_QPA_PLATFORM=xcb QT_X11_NO_MITSHM=1 \
+    QT_QPA_PLATFORM=offscreen \
     PYTHONUNBUFFERED=1
 USER 1000:1000
 WORKDIR /config

@@ -1,4 +1,5 @@
 """Task record removal and deliberate retries; music/download evidence survives."""
+import json
 import copy
 from musicops.clients.http import PolicyBlocked
 from musicops.state.store import utcnow
@@ -23,7 +24,10 @@ def current_config(workflows, job):
 
 
 def descendants(workflows, job):
-    rows = workflows.rows(include_batches=True)
+    # Graph traversal needs identifiers, not every historical album's tags,
+    # candidate list, config snapshot and file manifest on every checkbox.
+    with workflows.store.connection() as connection:
+        rows=[dict(row) for row in connection.execute("SELECT job_id,batch_id,task_type,identification_job_id,search_job_id FROM workflow_overview WHERE hidden=0 ORDER BY updated_at DESC,id")]
     found = {job['job_id']}
     if job.get('job_kind') == 'batch':
         found.update(r['job_id'] for r in rows if r.get('batch_id') == job.get('batch_id'))
@@ -35,7 +39,13 @@ def descendants(workflows, job):
         found.update(r['job_id'] for r in rows if r.get('identification_job_id') in found
                      or r.get('task_type') != 'identification' and r.get('search_job_id') in found)
         changed = len(found) != before
-    return [r for r in rows if r['job_id'] in found]
+    result=[]
+    with workflows.store.connection() as connection:
+        identifiers=['workflow:'+r['job_id'] for r in rows if r['job_id'] in found]
+        for offset in range(0,len(identifiers),500):
+            page=identifiers[offset:offset+500]
+            result.extend(json.loads(row[0]) for row in connection.execute('SELECT payload FROM evidence WHERE id IN ('+','.join('?' for _ in page)+') ORDER BY updated_at DESC,id',page))
+    return result
 
 
 def remove(workflows, job):

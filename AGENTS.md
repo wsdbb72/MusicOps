@@ -11,4 +11,6 @@
 
 - From 0.4.3 onward, build and publish only arm64 for macOS. Preserve historical Intel release attachments; do not build new Intel artifacts. Automatic updates use only official GitHub release installers, require SHA-256 verification and safely stop the worker before installer handoff.
 - Keep the persistent local album catalogue incremental; playlist presence must verify unchanged existing audio, and local tag grouping must not be presented as confirmed online release identity.
-- Also build and smoke-test the Linux amd64 browser desktop container on GitHub Actions. Publish the exact tested image to `wsdbb72/muiscops` using the encrypted Actions secret, and promote `latest` only after the matching desktop Release succeeds. Preserve `/config` and sibling media storage, require browser authentication, and keep Docker deployment instructions current.
+- Also build and smoke-test the Linux amd64 native HTML WebUI container on GitHub Actions. Publish the exact tested image to `wsdbb72/muiscops` using the encrypted Actions secret, and promote `latest` only after the matching desktop Release succeeds. Preserve `/config` and sibling media storage, require browser authentication, and keep Docker deployment instructions current.
+
+- Keep the native HTML Docker interface and desktop operations synchronized, including album deduplication/restore, selected-album completion, single-to-full-album expansion, review controls and credential setup. Do not reintroduce noVNC, a virtual desktop or a separate implementation of the library workflow.

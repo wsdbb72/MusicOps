@@ -44,6 +44,9 @@ class ManagedServices:
         self.running = {}
         self.owners = {}
         self.sessions = {}
+        self._cookie_generation=0
+        self._cookies_applied=0
+        self._cookie_generation_lock=threading.Lock()
         self.default_tools = lambda: {}
         self.default_storage = lambda: ''
         self.tool_config = {}
@@ -73,6 +76,12 @@ class ManagedServices:
         previous = self.running.get(name)
         if previous and previous[0].poll() is None:
             if name!='go-music-dl' or not restart_if_changed or self.tool_config.get(name)==tools:
+                if name=='go-music-dl' and self._cookies_applied!=self._cookie_generation:
+                    generation=self._cookie_generation
+                    with httpx.Client(trust_env=False,follow_redirects=False,timeout=15) as client:
+                        response=client.post(previous[1]+'/cookies',json=self._cookies(),headers={'X-MusicOps-Service':previous[2]})
+                        if response.status_code!=200:raise HttpError('AUTH_FAILED','已保存的平台登录态尚未被内置引擎接受，请重新测试登录')
+                    self._cookies_applied=generation
                 return previous[1], previous[2]
             # The serial workflow calls this between requests. Login UI
             # calls never restart an engine underneath an active download.
@@ -132,10 +141,12 @@ class ManagedServices:
                         response = client.get(base + ('/healthz' if name == 'go-music-dl' else '/health'), headers={'X-MusicOps-Service': token})
                         if response.status_code == 200:
                             if name == 'go-music-dl':
+                                generation=self._cookie_generation
                                 cookies = self._cookies()
                                 if cookies:
                                     response = client.post(base + '/cookies', json=cookies, headers={'X-MusicOps-Service': token})
                                     response.raise_for_status()
+                                self._cookies_applied=generation
                             return base, token
                     except httpx.HTTPError: pass
                     time.sleep(.2)
@@ -153,6 +164,11 @@ class ManagedServices:
                 if value: result[source] = value
             except KeyError: pass
         return result
+
+    def credentials_changed(self):
+        # Applied atomically before the next request; an in-flight download is
+        # never interrupted just to refresh the account for future requests.
+        with self._cookie_generation_lock:self._cookie_generation+=1
 
     def request(self, method, path, **kwargs):
         base, token = self.ensure('go-music-dl')

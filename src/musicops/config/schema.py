@@ -29,10 +29,10 @@ def default_config(base,offline=True):
       worker=dict(concurrency=1,keep_background=True,decode_timeout=60),
       netease=dict(batch_size=150,timeout=15,max_attempts=2,credential_ref='',strip_layers=['VipSongsDownload']),
       updates=dict(enabled=True),
-      streaming=dict(managed=True,enabled=False,base_url='http://127.0.0.1:8080/music',credential_ref='',order=['netease','qqmusic','kuwo','kugou','migu','qishui','bilibili','applemusic'],timeout=30),
+      streaming=dict(musicdl=dict(enabled=False,python_path='',credential_refs={}),managed=True,enabled=False,base_url='http://127.0.0.1:8080/music',credential_ref='',order=['netease','qqmusic','kuwo','kugou','migu','qishui','bilibili','applemusic'],timeout=30),
       browser_solver=dict(managed=True,enabled=False,base_url='http://127.0.0.1:8191',timeout=60,executable='',auto_start=False),
       workflow=dict(edition_policy='quality',setup_done=False,source_order=['open.cd','dicmusic','orpheus','redacted'],free_only=True,fl_per_batch=3,fl_unlimited=False,max_albums=50,netease_fallback=True,netease_api_url='',netease_downloader='',netease_download_args=[],netease_import_dir='',backup_days=7,prefer_24bit=True),
-      music_servers=dict(roon=dict(enabled=False,library='',watched_folders=[],credential_ref='',client='Roon',host='127.0.0.1',port=9330,timeout=8),navidrome=dict(enabled=False,url='',username='',password_ref='',library='')),
+      music_servers=dict(plex=dict(enabled=False,url='',section_id='',auth_secret_ref='',library=''),roon=dict(enabled=False,library='',watched_folders=[],credential_ref='',client='Roon',host='127.0.0.1',port=9330,timeout=8),navidrome=dict(enabled=False,url='',username='',password_ref='',library='')),
       playlist_sources={key:dict(credential_ref='',timeout=15) for key in ('qqmusic','qishui','kugou','kuwo','migu','bilibili','applemusic','spotify','youtube')})
 
 def upgrade_config(values,base):
@@ -147,6 +147,8 @@ def validate_config(values):
     for server in values['music_servers'].values():
         if server.get('library') and not Path(server['library']).is_absolute():raise ValueError('音乐服务器目录须为绝对路径')
         if server.get('enabled') and not server.get('library'):raise ValueError('已启用音乐服务器须填写音乐目录')
+    from musicops.clients.plex import validate as validate_plex
+    validate_plex(values['music_servers']['plex'])
     nav=values['music_servers']['navidrome']
     roon=values['music_servers']['roon']
     if roon['host'] not in ('localhost','127.0.0.1','::1'):raise ValueError('当前Roon只读验收仅连接本机Core')
@@ -193,6 +195,7 @@ class ConfigManager:
                     if previous and provider['base_url']!=previous['base_url']: provider['credential_ref']=''; provider['rules_verified']=False
                 if fresh['lyrics']['primary']['base_url']!=old['values']['lyrics']['primary']['base_url']: fresh['lyrics']['primary']['auth_secret_ref']=''
                 if fresh['lyrics']['direct_backup']['base_url']!=old['values']['lyrics']['direct_backup']['base_url']: fresh['lyrics']['direct_backup']['auth_secret_ref']=''
+                if fresh['music_servers']['plex']['url']!=old['values'].get('music_servers',{}).get('plex',{}).get('url',''):fresh['music_servers']['plex']['auth_secret_ref']=''
                 if fresh['qbt']['base_url']!=old['values']['qbt']['base_url']:fresh['qbt']['credential_ref']=''
                 if old['values'].get('streaming') and fresh['streaming']['base_url']!=old['values']['streaming']['base_url']:fresh['streaming']['credential_ref']=''
                 if fresh.get('ai') and old['values'].get('ai') and fresh['ai']['base_url']!=old['values']['ai']['base_url']:fresh['ai']['auth_secret_ref']=''

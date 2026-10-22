@@ -1,0 +1,283 @@
+:root {
+  color-scheme: dark;
+  font:
+    15px/1.6 system-ui,
+    "Microsoft YaHei",
+    sans-serif;
+  background: #0b1220;
+  color: #e6edf7;
+  --accent: #72e3cd;
+  --line: #26364c;
+}
+* {
+  box-sizing: border-box;
+}
+body {
+  margin: 0;
+  display: flex;
+}
+aside {
+  position: fixed;
+  width: 220px;
+  height: 100vh;
+  background: #101b2c;
+  padding: 28px 20px;
+  border-right: 1px solid var(--line);
+}
+h1 {
+  font-size: 25px;
+  color: var(--accent);
+}
+aside p,
+small,
+p {
+  color: #9eafc5;
+}
+nav {
+  display: grid;
+  gap: 10px;
+  margin: 40px 0;
+}
+nav button {
+  text-align: left;
+  padding: 13px;
+}
+nav button.active {
+  background: #183c40;
+  color: var(--accent);
+}
+main {
+  margin-left: 220px;
+  padding: 30px 36px;
+  width: calc(100% - 220px);
+}
+header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 24px;
+}
+h2 {
+  margin: 3px 0;
+  font-size: 30px;
+}
+h3 {
+  margin-top: 0;
+}
+button,
+input,
+select,
+textarea {
+  font: inherit;
+  color: inherit;
+  border: 1px solid #344762;
+  border-radius: 9px;
+  background: #111e31;
+  padding: 9px 13px;
+}
+button {
+  cursor: pointer;
+  transition: background 0.15s;
+}
+button:hover {
+  background: #243b52;
+}
+button:disabled {
+  opacity: 0.5;
+  cursor: wait;
+}
+button.primary {
+  background: var(--accent);
+  color: #092c2b;
+  border-color: var(--accent);
+  font-weight: 650;
+}
+.danger {
+  color: #ffacac;
+}
+input:not([type="checkbox"]),
+select {
+  min-width: 120px;
+}
+input {
+  max-width: 100%;
+}
+input[type="checkbox"] {
+  accent-color: var(--accent);
+}
+.row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  align-items: center;
+  margin: 14px 0;
+}
+.row input:not([type="checkbox"]) {
+  flex: 1;
+}
+.card {
+  background: #101c2d;
+  border: 1px solid var(--line);
+  border-radius: 16px;
+  padding: 24px;
+  margin-bottom: 20px;
+}
+.grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+  gap: 20px;
+}
+.grid .card {
+  margin: 0;
+}
+.table-scroll {
+  overflow: auto;
+  max-height: 60vh;
+}
+table {
+  border-collapse: collapse;
+  width: 100%;
+  text-align: left;
+}
+td,
+th {
+  padding: 10px;
+  border-bottom: 1px solid var(--line);
+}
+th {
+  color: #9eafc5;
+  position: sticky;
+  top: 0;
+  background: #101c2d;
+}
+#notice {
+  position: sticky;
+  top: 5px;
+  z-index: 2;
+  background: #173637;
+  border-radius: 9px;
+  padding: 10px 16px;
+  margin-bottom: 18px;
+  white-space: pre-line;
+}
+#notice:empty {
+  display: none;
+}
+.job {
+  border: 1px solid var(--line);
+  padding: 13px 16px;
+  border-radius: 10px;
+  margin: 10px 0;
+}
+.job-head {
+  display: flex;
+  gap: 12px;
+  align-items: center;
+}
+.job-title {
+  flex: 1;
+}
+.job small {
+  display: block;
+}
+progress {
+  accent-color: var(--accent);
+  width: 100%;
+  height: 4px;
+}
+details {
+  margin: 12px 0;
+}
+summary {
+  cursor: pointer;
+  color: var(--accent);
+}
+label {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 10px 0;
+}
+.field {
+  display: grid;
+  grid-template-columns: 180px minmax(140px, 1fr);
+  gap: 14px;
+  margin: 14px 0;
+}
+.field input {
+  width: 100%;
+}
+fieldset {
+  border: 0;
+  padding: 0;
+}
+dialog {
+  background: #101c2d;
+  color: inherit;
+  border: 1px solid #39506a;
+  border-radius: 16px;
+  width: min(1000px, 94vw);
+  max-height: 90vh;
+  overflow: auto;
+}
+dialog::backdrop {
+  background: #020713be;
+}
+pre {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+#login-image {
+  max-width: 280px;
+}
+.muted {
+  color: #9eafc5;
+}
+[hidden] {
+  display: none !important;
+}
+@media (max-width: 800px) {
+  aside {
+    position: static;
+    width: 100%;
+    height: auto;
+    padding: 12px;
+  }
+  body {
+    display: block;
+  }
+  nav {
+    display: flex;
+    flex-wrap: wrap;
+    margin: 10px 0;
+  }
+  main {
+    margin: 0;
+    width: 100%;
+    padding: 18px;
+  }
+  .field {
+    grid-template-columns: 1fr;
+  }
+  header {
+    align-items: flex-start;
+  }
+  aside p {
+    display: none;
+  }
+}
+
+h1 img {
+  width: 32px;
+  height: 32px;
+  vertical-align: middle;
+  border-radius: 8px;
+}
+
+.grid {
+  margin-bottom: 20px;
+}
+.card > button {
+  margin-right: 8px;
+  margin-bottom: 8px;
+}

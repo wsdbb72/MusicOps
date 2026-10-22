@@ -44,7 +44,7 @@ try:
     installation.registry('DisplayVersion','0.4.1')
     code,log=installation.run();checks['upgrade_reuses_existing_registration']=code==0 and str(target).casefold() in log.casefold()
     checks['profile_vault_and_tools_preserved']=all(digest(Path(p))==value for p,value in before.items())
-    checks['installed_executables_match_release']=all(digest(target/name)==digest(bundle/name) for name in ('MusicOps.exe','MusicOps-worker.exe'))
+    checks['installed_executables_match_release']=all(digest(target/name)==digest(bundle/name) for name in ('MusicOps.exe','MusicOps-worker.exe','用户操作说明.md','运维与恢复说明.md','manifest.json','requirements.lock'))
     from smoke_engines import smoke as smoke_engines
     engines=smoke_engines(target/'tools/services',work/'installed-engine-profile')
     checks['installed_executables_match_release'] &= engines['passed']

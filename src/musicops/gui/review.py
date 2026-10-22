@@ -33,10 +33,12 @@ class ReviewDialog(QDialog):
         self.tabs = QTabWidget(); layout.addWidget(self.tabs, 1)
         page = QWidget(); form = QVBoxLayout(page)
         hint = QLabel('可手动修改每首曲目的资料。多位艺人用“ / ”分隔。黄色字段是 AI 建议，保存后才采用。'); hint.setWordWrap(True); form.addWidget(hint)
+        self.metadata_hint=hint
         self.metadata = QTableWidget(0, 4); self.metadata.setHorizontalHeaderLabels(['歌曲', '艺人', '专辑', '完整时长（秒）']); self.metadata.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch); self.metadata.verticalHeader().setVisible(False); self.metadata.verticalHeader().setDefaultSectionSize(44); self.metadata.setAlternatingRowColors(True); form.addWidget(self.metadata)
         self.catalog = QComboBox(); self.catalog.setMinimumContentsLength(25); self.catalog.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
         form.addWidget(self.catalog); self.catalog_use = QPushButton('用所选目录候选填入当前曲目（仍可修改）'); self.catalog_use.clicked.connect(self.use_catalog); form.addWidget(self.catalog_use)
         self.complete_release=QPushButton('采用所选完整发行并继续补缺曲');self.complete_release.clicked.connect(self.submit_complete_release);form.addWidget(self.complete_release)
+        self.keep_single=QPushButton('保留原单曲发行，继续检索');self.keep_single.clicked.connect(lambda:self.send({'choice':'keep_single'}));form.addWidget(self.keep_single)
         self.save_metadata = QPushButton('保存已核对资料并继续'); self.save_metadata.clicked.connect(self.submit_metadata); form.addWidget(self.save_metadata)
         self.tabs.addTab(page, '曲目资料')
         page = QWidget(); form = QVBoxLayout(page)
@@ -85,8 +87,12 @@ class ReviewDialog(QDialog):
         for candidate in self.catalog_rows:
             self.catalog.addItem(' · '.join([str(candidate.get('source', '')), str(candidate.get('title', '')), ' / '.join(candidate.get('artists', [])), str(candidate.get('album') or ''),str(candidate.get('date') or candidate.get('year') or ''),('曲目 '+str(len(candidate['tracklist']))) if candidate.get('tracklist_complete') else '', ' / '.join(candidate.get('release_secondary_types',[]))]))
         self.catalog_use.setEnabled(bool(self.catalog_rows and rows)); self.catalog.setEnabled(bool(self.catalog_rows))
-        self.complete_release.setVisible(job.get('scene') in ('fill','expand') and job.get('review_kind')=='metadata');self.complete_release.setEnabled(bool(self.catalog_rows))
-        self.complete_release.setText('确认所选完整专辑，开始检索与入库' if job.get('scene')=='expand' else '采用所选完整发行并继续补缺曲')
+        scope=job.get('review_kind')=='album_scope'
+        self.keep_single.setVisible(scope);self.tabs.setTabVisible(1,not scope);self.tabs.setTabVisible(2,not scope)
+        self.metadata.setEnabled(not scope);self.catalog_use.setVisible(not scope);self.save_metadata.setVisible(not scope)
+        self.metadata_hint.setText('以下是歌单选择的原单曲。你可以保留原发行，或选择下方已核验的完整专辑；确认后才会检索和下载。' if scope else '可手动修改每首曲目的资料。多位艺人用“ / ”分隔。黄色字段是 AI 建议，保存后才采用。')
+        self.complete_release.setVisible(scope or job.get('scene') in ('fill','expand') and job.get('review_kind')=='metadata');self.complete_release.setEnabled(bool(self.catalog_rows))
+        self.complete_release.setText('确认所选完整专辑，开始检索与入库' if scope or job.get('scene')=='expand' else '采用所选完整发行并继续补缺曲')
         from musicops.domain.editions import describe
         choices=list(job.get('choices') or []);groups={}
         for c in choices:groups.setdefault(describe(c)['group_id'],len(groups)+1)
@@ -123,7 +129,7 @@ class ReviewDialog(QDialog):
         self.candidate_use.setEnabled(job.get('stage') == 'needs_review' and job.get('review_kind') == 'candidate' and bool(choices))
         self.update_candidate_button()
         self.research.setEnabled(waiting and (job.get('task_type') == 'search' or job.get('review_kind') == 'search' or job.get('task_type') == 'manual_search'))
-        self.ai_button.setEnabled(waiting)
+        self.ai_button.setEnabled(waiting and not scope)
         self.fallback_button.setVisible(job.get('review_kind')=='search' and job.get('scene') in ('playlist','fill'))
         self.retry_processing.setVisible(job.get('review_kind') in ('error','interrupted') or job.get('stage') in ('failed','skipped'))
         kind = job.get('review_kind'); self.tabs.setCurrentIndex(1 if kind == 'candidate' else 2 if kind in {'search', 'error', 'interrupted'} or job.get('stage') in {'failed', 'skipped'} else 0)
@@ -193,7 +199,7 @@ class ReviewDialog(QDialog):
         candidate_id=self.catalog_rows[index].get('candidate_id')
         if not candidate_id or not any(c.get('candidate_id')==candidate_id for c in self.job.get('catalog_choices',[])):
             self.result.setText('此项是资料线索，尚未核实为任务中的完整发行，请选择已有目录候选');return
-        self.send({'choice':'completion_release:'+candidate_id})
+        self.send({'choice':('playlist_album:' if self.job.get('review_kind')=='album_scope' else 'completion_release:')+candidate_id})
 
     def submit_search(self):
         sites = [site for site, check in self.site_checks.items() if check.isEnabled() and check.isChecked()]

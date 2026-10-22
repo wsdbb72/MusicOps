@@ -638,6 +638,11 @@ class CatalogResolver:
         complete = complete and bool(tracks) and all(t['position'] for t in tracks) and len({t['position'] for t in tracks}) == len(tracks)
         candidate.update(tracklist=tracks, tracklist_complete=complete, year=data.get('year'),
                          country=data.get('country'), lookup_links=[])
+        formats=data.get('formats',[])
+        descriptions={d for f in formats if isinstance(f,dict) and isinstance(f.get('descriptions'),list) for d in f['descriptions'] if isinstance(d,str)} if isinstance(formats,list) else set()
+        kinds=descriptions&{'Album','Single','EP'}
+        if len(kinds)==1:candidate['release_type']=next(iter(kinds))
+        candidate['release_secondary_types']=sorted(descriptions&{'Live','Remix','Compilation','Remastered','Reissue'})
         return candidate
 
     def website(self):

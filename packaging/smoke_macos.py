@@ -19,7 +19,7 @@ REQUIRED_CHECKS=frozenset({
     'native_managed_engine_cookie','native_managed_solver','native_durable_ai_registration',
     'native_task_status_filter','native_full_queue_selection','native_streaming_and_edition_settings','native_full_album_preparation',
     'native_multiplatform_file_import','native_manual_search_readonly','native_search_activity_visible',
-    'native_artist_discography_readonly','native_single_expansion_selection_guard',
+    'native_artist_discography_readonly','native_single_expansion_selection_guard','native_playlist_single_scope',
     'configuration_roundtrip','native_cocoa_window_exit_zero','native_window_rendered',
     'frozen_worker_restart_keeps_credentials','configuration_persisted_after_restart',
     'offscreen_gui_rendered','worker_clean_shutdown','app_bundle_unchanged_after_use','no_profile_inside_app',
@@ -158,6 +158,8 @@ def main():
             client.call('start_workflow',{'scene':'expand','album_id':'0'*64})
             checks['native_single_expansion_selection_guard']=False
         except RuntimeError as exc:checks['native_single_expansion_selection_guard']='专辑不存在' in str(exc)
+        from smoke_album_scope import check as scope_check
+        checks['native_playlist_single_scope']=scope_check(client,store)
         engine=client.call('engine_control',{'action':'start'})
         cookie=client.call('engine_control',{'action':'cookie','source':'qq','cookie':'synthetic_frozen=synthetic-only'})
         checks['native_managed_engine_cookie']=engine.get('status')=='OK' and cookie.get('saved') is True

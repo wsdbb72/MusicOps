@@ -13,6 +13,9 @@ from pathlib import Path
 from urllib.parse import urlsplit
 from musicops.worker.client import WorkerClient
 from musicops.clients.http import redact
+from musicops.providers.playlist_files import MAX_BYTES as PLAYLIST_MAX_BYTES
+
+UPLOAD_LIMITS={'playlist':PLAYLIST_MAX_BYTES,'cover':10_000_000}
 
 COMMANDS = frozenset(('attach get_status get_task list_workflows get_workflow '
     'get_playlist_targets refresh_playlist start_workflow manual_album_search list_library_albums '
@@ -32,6 +35,7 @@ class Server(ThreadingHTTPServer):
         self.password=password
         self.csrf=secrets.token_urlsafe(32)
         self.slots=threading.BoundedSemaphore(16)
+        self.upload_slots=threading.BoundedSemaphore(2)
         super().__init__(address,Handler)
 
 
@@ -86,9 +90,10 @@ class Handler(BaseHTTPRequestHandler):
         endpoint=urlsplit(self.path).path
         try:size=int(self.headers.get('Content-Length','0'))
         except ValueError:return self.respond(400,{'error':'长度无效'})
-        limit=15_000_000 if endpoint=='/api/upload' else 1_000_000
+        limit=30_000_000 if endpoint=='/api/upload' else 1_000_000
         if not 0<size<=limit:return self.respond(413,{'error':'请求过大，请分批处理'})
-        if not self.server.slots.acquire(blocking=False):return self.respond(429,{'error':'请求繁忙，请稍后重试'})
+        slots=self.server.upload_slots if endpoint=='/api/upload' else self.server.slots
+        if not slots.acquire(blocking=False):return self.respond(429,{'error':'请求繁忙，请稍后重试'})
         try:
             # Consume the bounded body before rejecting a request. Closing a
             # socket with unread POST bytes can reset Windows connections and
@@ -109,7 +114,7 @@ class Handler(BaseHTTPRequestHandler):
                 allowed={'playlist':{'.json','.csv','.tsv','.txt','.xlsx','.m3u','.m3u8'},'cover':{'.jpg','.jpeg','.png','.webp'}}
                 if suffix not in allowed.get(kind,set()):raise ValueError('文件类型不支持')
                 content=base64.b64decode(body.get('content',''),validate=True)
-                if not 0<len(content)<=10_000_000:raise ValueError('文件须小于 10MB')
+                if not 0<len(content)<=UPLOAD_LIMITS[kind]:raise ValueError('歌单文件不能超过 20MB' if kind=='playlist' else '封面不能超过 10MB')
                 if kind=='cover':
                     from musicops.media.resources import validate_cover
                     if not validate_cover(content,300)['valid']:raise ValueError('封面须为至少 300 像素的有效图片')
@@ -132,7 +137,7 @@ class Handler(BaseHTTPRequestHandler):
             self.respond(200,{'ok':True,'result':result})
         except Exception as exc:
             self.respond(400,{'ok':False,'error':redact(str(exc)),'error_class':getattr(exc,'error_class',type(exc).__name__)})
-        finally:self.server.slots.release()
+        finally:slots.release()
 
 
 def main(argv=None):

@@ -127,7 +127,9 @@ def assist_workflows(service, args, cfg):
             revision = review_revision(job)
         try:
             kind = job.get('review_kind')
-            if kind in ('error','interrupted') and job.get('error_class') in ('NETWORK_ERROR','TRANSIENT_ERROR','BROWSER_SOLVER_UNAVAILABLE','SOURCE_UNAVAILABLE') and job.get('resume_stage') in ('downloading','fallback','searching','notifying') and not job.get('retry_count'):
+            if kind=='album_scope':
+                proposal={'status':'NEEDS_INPUT','kind':kind,'message':'目录已核验，下载单曲还是完整专辑须由你选择；无需额外调用 AI'}
+            elif kind in ('error','interrupted') and job.get('error_class') in ('NETWORK_ERROR','TRANSIENT_ERROR','BROWSER_SOLVER_UNAVAILABLE','SOURCE_UNAVAILABLE') and job.get('resume_stage') in ('downloading','fallback','searching','notifying') and not job.get('retry_count'):
                 proposal={'status':'READY','kind':'retry','message':'瞬时连接问题，沿用已有下载记录重试一次，不额外调用 AI'}
             elif kind == 'candidate' and job.get('choices'):
                 proposal = _candidate(service, job, cfg, provider)

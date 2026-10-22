@@ -35,12 +35,18 @@ def recover(workflows,job):
             album=resolved.get('album') or resolved.get('title')
             if len(mapping)==len(rows) and album:
                 changed=any(strict_text(r.get('album'))!=strict_text(album) for r in rows)
+                single_choice=job.get('prefer_full_album') and job.get('album_scope_decision') not in ('single','full','full_pending') and str(resolved.get('release_type','')).casefold()=='single' and (changed or not job.get('album_scope_verified_single'))
                 if changed:
                     for row,track in zip(rows,mapping):
                         row.setdefault('source_metadata_original',{k:copy.deepcopy(row.get(k)) for k in ('raw_title','artists','album','duration')})
                         row.update(album=album,artists=copy.deepcopy(track['artists']),metadata_complete=True)
                         if row.get('albumartist'):row['albumartist']=copy.deepcopy(resolved.get('artists') or track['artists'])
                     job['recognition_evidence']={'source':resolved['source'],'source_id':resolved['source_id'],'tracklist_verified':True,'basis':'title_artist_duration'}
+                if single_choice:
+                    workflows.put(job,identified_release=copy.deepcopy(resolved),album_scope_decision=None,stage='identifying',search_query=None,
+                        message='平台资料已识别为 Single，先核对是否下载收录它的完整专辑')
+                    return True
+                if changed:
                     workflows.put(job,stage='searching',search_query=None,label=' / '.join(rows[0]['artists'])+' · '+album,
                         message='平台专辑资料已从真实曲目表纠正，重新检索音源')
                     return True

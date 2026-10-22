@@ -6,12 +6,14 @@ const $ = (id) => document.getElementById(id),
     if (cls) e.className = cls;
     return e;
   };
+const apiURL = (path) => {
+  const url = new URL(path, location.href);
+  url.username = "";
+  url.password = "";
+  return url.href;
+};
 if (new URL(location.href).username)
-  history.replaceState(
-    null,
-    "",
-    location.pathname + location.search + location.hash,
-  );
+  history.replaceState(null, "", apiURL(location.href));
 let csrf = "",
   config = null,
   refs = new Set(),
@@ -23,7 +25,9 @@ let csrf = "",
   polling = false,
   reviewQueue = [],
   currentReview = null,
-  loginTimer = null;
+  loginTimer = null,
+  jobsGeneration = 0,
+  taskStats = null;
 const pages = {
   playlist: "歌单入库",
   library: "音乐库整理",
@@ -99,7 +103,7 @@ async function api(command, payload = {}) {
     ).join("");
   const body = JSON.stringify({ command, payload, request_id });
   const send = () =>
-    fetch("api/command", {
+    fetch(apiURL("api/command"), {
       method: "POST",
       headers: { "Content-Type": "application/json", "X-MusicOps-CSRF": csrf },
       body,
@@ -107,7 +111,7 @@ async function api(command, payload = {}) {
   let response = await send(),
     data = await response.json();
   if (response.status === 403 && data.error_class === "CSRF_EXPIRED") {
-    csrf = (await (await fetch("api/bootstrap")).json()).csrf;
+    csrf = (await (await fetch(apiURL("api/bootstrap"))).json()).csrf;
     response = await send();
     data = await response.json();
   }
@@ -177,14 +181,18 @@ function loaded(result) {
   notice(result.reason || "已读取，请勾选要入库的曲目。");
 }
 async function upload(file, kind) {
-  if (file.size > 10000000) throw new Error("文件须小于 10MB");
+  const limit = kind === "playlist" ? 20 * 1024 * 1024 : 10000000;
+  if (file.size > limit)
+    throw new Error(
+      kind === "playlist" ? "歌单文件不能超过 20MB" : "封面不能超过 10MB",
+    );
   const content = await new Promise((resolve, reject) => {
     const reader = new FileReader();
     reader.onload = () => resolve(reader.result.split(",")[1]);
     reader.onerror = reject;
     reader.readAsDataURL(file);
   });
-  const r = await fetch("api/upload", {
+  const r = await fetch(apiURL("api/upload"), {
     method: "POST",
     headers: { "Content-Type": "application/json", "X-MusicOps-CSRF": csrf },
     body: JSON.stringify({ filename: file.name, kind, content }),
@@ -194,18 +202,30 @@ async function upload(file, kind) {
   return data.file_path;
 }
 $("import-file").onclick = () => $("playlist-file").click();
+function textOrder() {
+  return new Promise((resolve) => {
+    const dialog = $("text-order-dialog");
+    dialog.returnValue = "";
+    dialog.onclose = () =>
+      resolve(
+        ["title-artist", "artist-title"].includes(dialog.returnValue)
+          ? dialog.returnValue
+          : null,
+      );
+    dialog.showModal();
+  });
+}
 $("playlist-file").onchange = async () => {
   const file = $("playlist-file").files[0];
+  $("playlist-file").value = "";
   if (!file) return;
   await guard($("import-file"), async () => {
+    const isText = file.name.toLowerCase().endsWith(".txt");
+    const order = isText ? await textOrder() : null;
+    if (isText && !order) return;
     const path = await upload(file, "playlist");
     const args = { file_path: path, platform: $("playlist-platform").value };
-    if (file.name.toLowerCase().endsWith(".txt"))
-      args.text_order = confirm(
-        "文本每行是否按“歌手 - 歌名”排列？选择取消表示“歌名 - 歌手”。",
-      )
-        ? "artist-title"
-        : "title-artist";
+    if (isText) args.text_order = order;
     await operation("refresh_playlist", args, loaded);
   });
 };
@@ -240,7 +260,14 @@ async function start(scene, extra = {}) {
   showPage("tasks");
   await operation(
     "start_workflow",
-    { scene, target_ids: ids, prefer_24bit: true, ...extra },
+    {
+      scene,
+      target_ids: ids,
+      prefer_24bit: true,
+      prefer_full_album:
+        scene === "playlist" && $("playlist-full-album").checked,
+      ...extra,
+    },
     (r) => notice(r.message),
   );
   await refreshJobs();
@@ -512,14 +539,17 @@ const states = {
 };
 async function refreshJobs() {
   if (!config) return;
+  const generation = ++jobsGeneration;
   const result = await api("list_workflows", {
     offset,
     state: $("task-state").value,
     view: $("task-view").value,
     query: $("task-query").value.trim(),
   });
+  if (generation !== jobsGeneration) return;
   jobs = result.jobs;
   total = result.total;
+  taskStats = result;
   const area = $("job-list"),
     scroll = window.scrollY,
     expanded = new Set(
@@ -527,16 +557,33 @@ async function refreshJobs() {
         .filter((e) => e.querySelector("details[open]"))
         .map((e) => e.dataset.id),
     );
-  area.replaceChildren();
+  const previousCards = new Map(
+    [...area.children].map((e) => [e.dataset.id, e]),
+  );
+  let position = 0;
   for (const j of jobs) {
+    const signature = JSON.stringify(j),
+      previous = previousCards.get(j.job_id);
+    previousCards.delete(j.job_id);
+    if (previous?.musicopsSignature === signature) {
+      previous.querySelector("input[type=checkbox]").checked = selected.has(
+        j.job_id,
+      );
+      if (area.children[position] !== previous)
+        area.insertBefore(previous, area.children[position] || null);
+      position++;
+      continue;
+    }
     const card = node("div", undefined, "job"),
       head = node("div", undefined, "job-head"),
       check = node("input");
     card.dataset.id = j.job_id;
     check.type = "checkbox";
     check.checked = selected.has(j.job_id);
-    check.onchange = () =>
+    check.onchange = () => {
       check.checked ? selected.add(j.job_id) : selected.delete(j.job_id);
+      updateTaskSummary();
+    };
     head.append(
       check,
       node("strong", j.label || j.job_id, "job-title"),
@@ -563,14 +610,23 @@ async function refreshJobs() {
         );
       card.append(chain);
     }
-    area.append(card);
+    card.musicopsSignature = signature;
+    if (previous) previous.replaceWith(card);
+    if (area.children[position] !== card)
+      area.insertBefore(card, area.children[position] || null);
+    position++;
   }
+  for (const old of previousCards.values()) old.remove();
   window.scrollTo(0, scroll);
   $("page-info").textContent = `${total} 项 · 第 ${offset / 200 + 1} 页`;
   $("previous").disabled = offset === 0;
   $("next").disabled = offset + 200 >= total;
-  $("task-summary").textContent =
-    `进行中 ${result.active} · 暂停 ${result.paused_count} · 已完成 ${result.finished} · 已勾选 ${selected.size}`;
+  updateTaskSummary();
+}
+function updateTaskSummary() {
+  if (taskStats)
+    $("task-summary").textContent =
+      `进行中 ${taskStats.active} · 暂停 ${taskStats.paused_count} · 已完成 ${taskStats.finished} · 已勾选 ${selected.size}`;
 }
 async function idsFor(state) {
   return (
@@ -591,6 +647,10 @@ $("task-actions").onclick = async (e) => {
   await guard(b, async () => {
     const a = b.dataset.action,
       ids = [...selected];
+    if (a === "clear") {
+      selected.clear();
+      return refreshJobs();
+    }
     if (a === "select") {
       const all = jobs.every((j) => selected.has(j.job_id));
       jobs.forEach((j) =>
@@ -673,6 +733,39 @@ async function openReview(id) {
   const area = $("review-content");
   area.replaceChildren();
   const metadata = job.prepared || [];
+  if (job.review_kind === "album_scope") {
+    const options = node("div", undefined, "scope-options");
+    area.append(
+      node("p", "歌单原曲：" + metadata.map((t) => t.raw_title).join(" / ")),
+      options,
+    );
+    options.append(
+      action("保留原单曲发行，继续检索", () =>
+        submitReview({ choice: "keep_single" }),
+      ),
+    );
+    for (const c of job.catalog_choices || []) {
+      options.append(
+        action(
+          "下载完整专辑：" +
+            (c.album || c.title) +
+            " · " +
+            (c.artists || []).join(" / ") +
+            " · " +
+            (c.date || c.year || "年份待确认") +
+            " · " +
+            (c.tracklist || []).length +
+            " 首" +
+            ((c.release_secondary_types || []).length
+              ? " · " + c.release_secondary_types.join(" / ")
+              : ""),
+          () => submitReview({ choice: "playlist_album:" + c.candidate_id }),
+        ),
+      );
+    }
+    if (!$("review-dialog").open) $("review-dialog").showModal();
+    return;
+  }
   if (metadata.length) {
     const table = node("table"),
       head = node("tr");
@@ -1402,7 +1495,7 @@ async function refresh() {
     if (!$("tasks").hidden) await refreshJobs();
   } catch (e) {
     try {
-      const status = await (await fetch("api/startup")).json();
+      const status = await (await fetch(apiURL("api/startup"))).json();
       connectionMessage = status.message || e.message;
     } catch (_) {
       connectionMessage = e.message;
@@ -1416,7 +1509,7 @@ async function refresh() {
 $("refresh").onclick = () => refresh();
 (async () => {
   try {
-    csrf = (await (await fetch("api/bootstrap")).json()).csrf;
+    csrf = (await (await fetch(apiURL("api/bootstrap"))).json()).csrf;
     showPage("playlist");
     await refresh();
     setInterval(() => {

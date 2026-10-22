@@ -158,6 +158,7 @@ class Workflows:
         """Expose the preparation before the serial worker begins any filesystem IO."""
         scene=args.get('scene')
         if scene not in SCENES:raise ValueError('请选择歌单入库、资料补全或音质升级')
+        if type(args.get('prefer_full_album',False)) is not bool:raise ValueError('完整专辑选项须为勾选状态')
         if cfg['offline']:raise PolicyBlocked('请先在连接向导完成设置')
         # Keep scans and replacement batches exclusive. A local-only repair
         # must not prevent an independently selected playlist import.
@@ -169,7 +170,7 @@ class Workflows:
         if scene=='expand' or scene=='fill' and args.get('album_id'):
             if type(args.get('retire_single',False)) is not bool:raise ValueError('原单曲保留选项须为勾选状态')
             selected=args.get('album_id')
-            if not isinstance(selected,str) or len(selected)!=64 or not all(ch in '0123456789abcdef' for ch in selected):raise ValueError('请先选择库内的单曲专辑')
+            if not isinstance(selected,str) or len(selected)!=64 or not all(ch in '0123456789abcdef' for ch in selected):raise ValueError('请先选择库内专辑')
             from musicops.library.catalog import root_key
             with self.store.connection() as connection:
                 row=connection.execute('SELECT payload FROM library_albums WHERE root_key=? AND album_id=?',(root_key(root),selected)).fetchone()
@@ -209,7 +210,7 @@ class Workflows:
         if scene=='expand' or args.get('_single_file_ids'):
             selected=set(args.get('_single_file_ids',[]))
             files=[f for f in files if f['file_id'] in selected]
-            if not files or {f['file_id'] for f in files}!=selected:raise ValueError('所选单曲专辑在扫描后改变，请重新选择')
+            if not files or {f['file_id'] for f in files}!=selected:raise ValueError('所选专辑在扫描后改变，请重新选择')
         groups=collections.defaultdict(list);batch_id=batch['batch_id']
         if scene=='playlist':
             tids=args.get('target_ids')
@@ -248,6 +249,7 @@ class Workflows:
             paused=bool((self.store.get('evidence','workflow:'+batch['job_id']) or {}).get('paused'))
             job={'kind':'workflow','job_id':job_id,'batch_id':batch_id,'scene':scene,'config':copy.deepcopy(cfg),'targets':tracks if scene=='playlist' else [],'old_files':tracks if scene!='playlist' else [],'stage':stage,'task_group':'repair' if scene=='complete' else 'identify','task_type':'album' if scene=='complete' else 'identification','target_count':len(tracks),'paused':paused,'progress':0,'created_at':utcnow(),'message':'等待识别' if scene=='playlist' else '等待处理','detail':'','label':(first.get('album') or '待识别专辑')+' · '+' / '.join(first.get('albumartist') or first.get('artists',[])),'prefer_24bit':args.get('prefer_24bit',cfg['workflow']['prefer_24bit']),'refresh_resources':bool(args.get('refresh_resources')),'retire_single_requested':bool(args.get('retire_single'))}
             if scene=='playlist':
+                job['prefer_full_album']=args.get('prefer_full_album',False)
                 local=local_groups.get((strict_text(first.get('album')),artist_key(first.get('albumartist') or first.get('artists',[]))),[])
                 if len({str(album_root(f,root)) for f in local})==1:job['existing_album_files']=local
             self.put(job)
@@ -471,6 +473,12 @@ class Workflows:
             current=self.store.get('evidence','workflow:'+job['job_id']) or job
             if current.get('cancel_requested'):return
             job['paused']=bool(current.get('paused'))
+            # A late identity/scope correction belongs to this search. Creating
+            # another search would split the original album's overview chain.
+            if job.get('task_type')=='search':
+                if message=='识别完成，已创建独立搜索任务':message='身份与下载范围已核对，继续当前搜索任务'
+                self.put(job,stage='searching',progress=0,review_kind=None,message=message)
+                return
             search_id=str(uuid.uuid5(uuid.NAMESPACE_URL,'musicops:search:'+job['job_id']))
             previous=self.store.get('evidence','workflow:'+search_id)
             if not previous:
@@ -479,6 +487,8 @@ class Workflows:
                 self.put(child)
             self.put(job,stage='completed',progress=100,search_job_id=search_id,message=message)
     def _identifying(self,job):
+        from musicops.app.playlist_album import prepare,offer
+        if job.get('scene')=='playlist' and prepare(self,job):return
         if job['scene']=='expand':
             from musicops.app.single_upgrade import identify
             return identify(self,job)
@@ -520,6 +530,8 @@ class Workflows:
             for target,recording in zip(tracks,mapping):
                 target.update(album=candidate.get('album') or candidate['title'],metadata_complete=True)
             job['recognition_evidence']={'source':candidate['source'],'source_id':candidate['source_id'],'tracklist_verified':True}
+            if job.get('prefer_full_album'):job['identified_release']=copy.deepcopy(candidate)
+        if offer(self,job):return
         self.put(job,matched_count=len(tracks),target_count=len(tracks))
         self._queue_search(job)
     def _queue_processing(self,job,stage,message,**changes):
@@ -932,6 +944,8 @@ class Workflows:
             selected=job['selected'];expected_artists={alias_key(a) for a in selected.get('artists',[])}
             if family_base(job['album'])!=family_base((selected.get('release') or {}).get('album') or selected['title']) or expected_artists!={alias_key(a) for a in job.get('albumartists',[])}:
                 raise PolicyBlocked('所选版本与实际下载专辑或专辑艺人不一致，保留文件等待核对')
+        from musicops.app.playlist_album import validate as validate_album_scope
+        validate_album_scope(job,rows)
         job['cover_missing']=sum(not embedded_covers(row['path']) for row in rows)
         if job.get('cover_missing') and not job.get('cover_unavailable'):
             self.put(job,prepared=rows,stage='needs_review',review_kind='cover',message='音频通过检查，但缺少可靠封面；请选择已核对的专辑封面，或明确跳过');return
@@ -1063,6 +1077,10 @@ class Workflows:
         if expected_revision is not None:
             from musicops.app.assistance import review_revision
             if not job or review_revision(job)!=expected_revision:raise PolicyBlocked('任务资料已改变，请重新打开核对窗口')
+        if job and job.get('review_kind')=='album_scope':
+            from musicops.app.playlist_album import choose
+            if not isinstance(choice,str) or choice!='keep_single' and not choice.startswith('playlist_album:'):raise PolicyBlocked('请明确选择保留原单曲发行，或选择已核验的完整专辑')
+            return choose(self,job,choice)
         if choice in ('nonfree_once','nonfree_batch'):
             from musicops.app.download_policy import approve
             return approve(self,job or {},'once' if choice=='nonfree_once' else 'batch')
@@ -1123,6 +1141,10 @@ class Workflows:
                     if row.get('source'):row.setdefault('source_metadata_original',{k:copy.deepcopy(row.get(k)) for k in ('raw_title','artists','album','duration')})
                     row.update(raw_title=proposal['title'].strip(),artists=[a.strip() for a in proposal['artist'].split(' / ') if a.strip()],album=proposal['album'].strip(),metadata_complete=True)
                 self.put(job,manual_metadata=True)
+                if job.get('prefer_full_album') and job.get('album_scope_decision') not in ('single','full','full_pending'):
+                    self.put(job,identified_release=None,album_scope_decision=None,stage='identifying',review_kind=None,
+                        message='采用核对资料，先检查单曲发行与完整专辑选项')
+                    return {'status':'OK'}
                 if job.get('task_type')=='identification':self._queue_search(job,'采用用户核对的资料，已创建独立搜索任务')
                 else:self.put(job,stage='searching',message='采用用户核对的资料，重新寻找发行')
                 return {'status':'OK'}

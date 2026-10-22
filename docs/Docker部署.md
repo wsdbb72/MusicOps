@@ -63,7 +63,7 @@ docker compose start
 
 ## 更新与日志
 
-Compose 默认使用 `latest`，跟随已通过完整发布验收的新版。需要锁定版本时，可把 image 改为 `wsdbb72/muiscops:0.4.17`。保留原来的配置和媒体挂载，执行以下命令更新：
+Compose 默认使用 `latest`，跟随已通过完整发布验收的新版。需要锁定版本时，可把 image 改为 `wsdbb72/muiscops:0.4.18`。保留原来的配置和媒体挂载，执行以下命令更新：
 
 ```bash
 docker compose pull

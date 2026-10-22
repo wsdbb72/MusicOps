@@ -5,7 +5,7 @@
 #ifndef AppIdentity
   #define AppIdentity "MusicOps.Desktop"
 #endif
-#define MusicOpsVersion "0.4.17"
+#define MusicOpsVersion "0.4.18"
 
 [Setup]
 AppId={#AppIdentity}
@@ -72,6 +72,10 @@ Source: "{#BundleDir}\licenses\*"; DestDir: "{app}\licenses"; Flags: ignoreversi
 Source: "{#BundleDir}\LICENSE"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#BundleDir}\THIRD-PARTY-NOTICES.md"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#BundleDir}\启动说明.txt"; DestDir: "{app}"; Flags: ignoreversion
+Source: "{#BundleDir}\用户操作说明.md"; DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist
+Source: "{#BundleDir}\运维与恢复说明.md"; DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist
+Source: "{#BundleDir}\manifest.json"; DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist
+Source: "{#BundleDir}\requirements.lock"; DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist
 
 Source: "{#BundleDir}\tools\services\*"; DestDir: "{app}\tools\services"; Flags: ignoreversion recursesubdirs createallsubdirs skipifsourcedoesntexist
 

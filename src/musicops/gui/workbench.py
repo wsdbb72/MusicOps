@@ -329,12 +329,13 @@ class Workbench(QMainWindow):
         if columns[0]=='选择':table.horizontalHeader().setSectionResizeMode(0,QHeaderView.ResizeToContents)
         return table
     def _playlist(self):
-        box=self.page('把歌单带进音乐库','粘贴主流平台的歌单链接或导入歌单文件，自动查找缺少的音乐、整理资料，并交给 Roon / Navidrome。');self.steps(box,'读取歌单  →  对比本地音乐库  →  识别缺失专辑  →  搜索与下载  →  校验入库')
+        box=self.page('把歌单带进音乐库','粘贴主流平台的歌单链接或导入歌单文件，自动查找缺少的音乐、整理资料，并交给 Roon / Navidrome / Plex。');self.steps(box,'读取歌单  →  对比本地音乐库  →  识别缺失专辑  →  搜索与下载  →  校验入库')
         row=QHBoxLayout();self.playlist_platform=QComboBox();self.playlist_platform.addItem('自动识别平台','auto')
         for key,name in PLATFORMS.items():self.playlist_platform.addItem(name,key)
         self.playlist_platform.setMaximumWidth(170);row.addWidget(self.playlist_platform);self.playlist=line('','粘贴歌单链接 / 分享文本；纯 ID 请先选择平台');row.addWidget(self.playlist);row.addWidget(button('解析歌单',self.parse,True));row.addWidget(button('导入文件',self.import_playlist));box.addLayout(row)
         self.playlist_note=label('已在音乐库中的曲目会跳过；找不到的音源可回退网易云。','hint');box.addWidget(self.playlist_note)
         self.track_table=self.table(['选择','歌曲','艺人','专辑','状态']);self.track_table.setMinimumHeight(220);box.addWidget(self.track_table,1)
+        self.playlist_full_album=QCheckBox('单曲发行可选择下载完整专辑（先核对，再下载）');self.playlist_full_album.setToolTip('可选。只对真实目录确认的 Single 查找收录相同录音的完整 Album；由你选择原发行或完整专辑，不会仅凭曲目数量猜测。');box.addWidget(self.playlist_full_album)
         row=QHBoxLayout();row.addWidget(button('全选 / 取消',self.select_all));row.addWidget(button('恢复已解析曲目',self.load_cached_playlist));row.addStretch();row.addWidget(button('开始入库',lambda:self.start('playlist'),True));box.addLayout(row)
     def _complete(self):
         box=self.page('补齐音乐库资料','检查专辑、艺人、封面和歌词。可靠匹配自动补齐，资料不明确的项目单独列出。');self.steps(box,'读取标签  →  识别缺失资料  →  查询与匹配  →  写入副本并验证')
@@ -650,7 +651,7 @@ class Workbench(QMainWindow):
             if result.get('error'):self.notice.setText('任务未创建：'+result['error'])
             else:self.notice.setText(result.get('message','任务已创建'))
             self.refresh()
-        self.call('start_workflow',{'scene':scene,'target_ids':targets,'prefer_24bit':self.prefer24.isChecked(),'refresh_resources':refresh_resources,**options},started)
+        self.call('start_workflow',{'scene':scene,'target_ids':targets,'prefer_24bit':self.prefer24.isChecked(),'refresh_resources':refresh_resources,'prefer_full_album':scene=='playlist' and self.playlist_full_album.isChecked(),**options},started)
     def show_jobs(self,result):
         scene_counts=result.get('scene_active_counts',{})
         scene_note='当前仅有本地资料补全，不会搜索或下载音源。 ' if scene_counts.get('complete') and not any(scene_counts.get(k) for k in ('playlist','upgrade','fill','expand')) else ''

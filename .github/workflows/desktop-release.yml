@@ -79,7 +79,7 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'Native installer regression tests failed' }
       - name: Run the remaining complete regression suite
         run: |
-          python -m pytest -q --ignore=tests/test_windows_installer.py --junitxml=dist/windows/reports/unit-tests.xml
+          python -m pytest -q --ignore=tests/test_windows_installer.py --basetemp="$env:RUNNER_TEMP/musicops-tests" --junitxml=dist/windows/reports/unit-tests.xml
           if ($LASTEXITCODE -ne 0) { throw 'Regression tests failed' }
       - name: Require all six native installer scenarios to execute
         shell: python
@@ -142,7 +142,7 @@ jobs:
           root = pathlib.Path('release-assets'); bundle = pathlib.Path('dist/MusicOps-Windows')
           report = json.loads(pathlib.Path('dist/windows/reports/packaged-starts.json').read_text('utf-8'))
           installed = json.loads(pathlib.Path('dist/windows/reports/full-installer-smoke.json').read_text('utf-8'))
-          required = {'native_tag_cleanup_auth_guard','native_fixed_qbt_tag','native_background_policy','native_empty_duplicate_scan','native_duplicate_history','native_duplicate_restore_guard','native_qbt_independent_test','native_solver_independent_test','native_album_overview','native_concurrent_polling','native_managed_engine_cookie','native_managed_solver','native_durable_ai_registration','native_task_status_filter','native_full_queue_selection','native_streaming_and_edition_settings','native_full_album_preparation','identification_and_search_are_separate', 'native_bulk_cancel_review_tasks', 'native_manual_search_readonly', 'native_search_activity_visible', 'native_artist_discography_readonly', 'native_single_expansion_selection_guard', 'gui_exit_zero'}
+          required = {'native_tag_cleanup_auth_guard','native_fixed_qbt_tag','native_background_policy','native_empty_duplicate_scan','native_duplicate_history','native_duplicate_restore_guard','native_qbt_independent_test','native_solver_independent_test','native_album_overview','native_concurrent_polling','native_managed_engine_cookie','native_managed_solver','native_durable_ai_registration','native_task_status_filter','native_full_queue_selection','native_streaming_and_edition_settings','native_full_album_preparation','native_playlist_single_scope','identification_and_search_are_separate', 'native_bulk_cancel_review_tasks', 'native_manual_search_readonly', 'native_search_activity_visible', 'native_artist_discography_readonly', 'native_single_expansion_selection_guard', 'gui_exit_zero'}
           if report['version'] != version or report.get('passed') is not True or report.get('external_requests') != 0 or not required.issubset(report['checks']) or not all(report['checks'].values()):
               raise SystemExit('Packaged acceptance evidence is incomplete')
           if installed.get('version') != version or installed.get('passed') is not True or len(installed.get('checks', {})) != 9 or not all(installed['checks'].values()):
@@ -254,7 +254,7 @@ jobs:
                   raise SystemExit('Build source, version or native acceptance mismatch: '+platform)
               if platform == 'Windows':
                   windows = data
-                  if not {'native_task_status_filter','native_full_queue_selection','native_streaming_and_edition_settings','native_full_album_preparation','native_bulk_retry_search','native_review_snapshot','native_local_album_database','native_ai_assistance_guard','native_delete_records_only','native_update_setting','native_browser_solver_guard'}.issubset(data.get('packaged_checks',{})) or data.get('architecture') != 'x86_64' or data.get('unit_tests_passed') is not True or data.get('installer_test_count') != 6 or data.get('source_archive_commit') != commit or data.get('external_requests') != 0 or not data.get('packaged_checks') or not all(data['packaged_checks'].values()) or len(data.get('installer_smoke_checks', {})) != 9 or not all(data['installer_smoke_checks'].values()):
+                  if not {'native_task_status_filter','native_full_queue_selection','native_streaming_and_edition_settings','native_full_album_preparation','native_playlist_single_scope','native_bulk_retry_search','native_review_snapshot','native_local_album_database','native_ai_assistance_guard','native_delete_records_only','native_update_setting','native_browser_solver_guard'}.issubset(data.get('packaged_checks',{})) or data.get('architecture') != 'x86_64' or data.get('unit_tests_passed') is not True or data.get('installer_test_count') != 6 or data.get('source_archive_commit') != commit or data.get('external_requests') != 0 or not data.get('packaged_checks') or not all(data['packaged_checks'].values()) or len(data.get('installer_smoke_checks', {})) != 9 or not all(data['installer_smoke_checks'].values()):
                       raise SystemExit('Windows regression or packaged evidence is incomplete')
                   names = {f'MusicOps-{version}-Setup.exe', f'MusicOps-{version}-Windows.zip', f'MusicOps-{version}-source.zip'}
               else:
@@ -323,7 +323,7 @@ jobs:
               if obj['type'] != 'commit' or obj['sha'] != commit:
                   raise SystemExit('The existing tag does not identify the tested source')
           notes = pathlib.Path('release-notes.md')
-          notes.write_text('修复大档案启动与任务列表读取阻塞：使用事务维护的轻量摘要索引，保留原始任务、配置和凭据，首次升级显示明确进度。新增 Plex 音乐库连接测试与入库后扫描。Docker 8080 改为原生 HTML WebUI，与桌面共用后台，支持歌单、检索、任务批量处理、连续手动核对、去重恢复、所选专辑补缺曲及单曲升级整碟。\n\n统一流媒体兜底和歌单授权设置，Cookie/扫码登录可在同平台复用，API Token 不与网页 Cookie 混用。新增可选外部 musicdl 适配器，支持 TIDAL、Qobuz、Deezer、SoundCloud、JOOX、Audius、千千和街声；因上游分发条款不捆绑 musicdl，需自行安装。参考 Antra 的多源身份核验流程。新增当前填写内容的歌词、AI 与 Plex 连接测试，修复扩展 LRC 元数据及单曲无效响应误熔断全服务，补歌词时不再重复下载无关封面。\n\n提供 Windows 安装版、便携版及 macOS ARM 原生 PKG 与 ZIP；同提交同步发布 Linux amd64 Docker。macOS 为 ad-hoc 签名，尚无 Developer ID 公证。验收使用合成资料，未发起真实音乐下载或消费 FL；外部平台实际可用性仍取决于账号权限及服务。\n\nSource commit: '+commit+'\n', 'utf-8')
+          notes.write_text('修复大档案启动与任务列表读取阻塞：使用事务维护的轻量摘要索引，保留原始任务、配置和凭据，首次升级显示明确进度。新增 Plex 音乐库连接测试与入库后扫描。Docker 8080 改为原生 HTML WebUI，与桌面共用后台，支持歌单、检索、任务批量处理、连续手动核对、去重恢复、所选专辑补缺曲、库内单曲升级整碟，以及歌单 Single 在下载前选择完整 Album；同一完整发行共享下载任务，保留歌单来源，特殊录音与再版分别核验。\n\n统一流媒体兜底和歌单授权设置，Cookie/扫码登录可在同平台复用，API Token 不与网页 Cookie 混用。新增可选外部 musicdl 适配器，支持 TIDAL、Qobuz、Deezer、SoundCloud、JOOX、Audius、千千和街声；因上游分发条款不捆绑 musicdl，需自行安装。参考 Antra 的多源身份核验流程。新增当前填写内容的歌词、AI 与 Plex 连接测试，修复扩展 LRC 元数据及单曲无效响应误熔断全服务，补歌词时不再重复下载无关封面。\n\n提供 Windows 安装版、便携版及 macOS ARM 原生 PKG 与 ZIP；同提交同步发布 Linux amd64 Docker。macOS 为 ad-hoc 签名，尚无 Developer ID 公证。验收使用合成资料，未发起真实音乐下载或消费 FL；外部平台实际可用性仍取决于账号权限及服务。\n\nSource commit: '+commit+'\n', 'utf-8')
           def gh(*arguments):
               subprocess.run(['gh', *arguments], check=True)
           gh('release', 'create', tag, '--verify-tag', '--target', commit, '--draft', '--title', 'MusicOps '+version, '--notes-file', str(notes))

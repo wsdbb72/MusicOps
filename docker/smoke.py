@@ -51,6 +51,7 @@ try:
         checks['native_html_shared_commands']=json.load(response)['ok']
     checks['no_vnc_processes']=execute("from pathlib import Path;print(not any(b'websockify' in p.read_bytes() or b'x11vnc' in p.read_bytes() for p in Path('/proc').glob('[0-9]*/comm')))")=='True'
     checks['worker_ipc']=json.loads(execute("import json;from musicops.worker.client import WorkerClient;print(json.dumps(WorkerClient('/config/profile').call('get_status',{'compact':True})))")) is not None
+    checks['shared_playlist_single_scope']=execute("import sys;sys.path.insert(0,'/opt/musicops/packaging');from smoke_album_scope import check;from musicops.worker.client import WorkerClient;from musicops.state.store import StateStore;print(check(WorkerClient('/config/profile'),StateStore('/config/profile/state/musicops.sqlite')))")=='True'
     cfg=json.loads(execute("import json;from musicops.worker.client import WorkerClient;print(json.dumps(WorkerClient('/config/profile').call('attach',{'compact':True})['config']['values']))"))
     checks['sibling_media_paths']=cfg['paths']['library']=='/media/music' and cfg['paths']['source']=='/media/MusicOps/downloads'
     checks['ffmpeg_and_ffprobe']=all(cfg['paths']['tools'][key] for key in ('ffmpeg','ffprobe'))

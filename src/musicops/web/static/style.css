@@ -281,3 +281,14 @@ h1 img {
   margin-right: 8px;
   margin-bottom: 8px;
 }
+#review-title {
+  flex: 1;
+}
+.scope-options {
+  display: grid;
+  gap: 12px;
+  margin-top: 18px;
+}
+.scope-options button {
+  text-align: left;
+}

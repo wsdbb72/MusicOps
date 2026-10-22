@@ -1,4 +1,4 @@
-import copy,json,os,time
+import copy,json,os,time,threading
 os.environ.setdefault('QT_QPA_PLATFORM','offscreen')
 import pytest
 from PySide6.QtCore import Qt,QTimer
@@ -57,7 +57,20 @@ def test_full_playlist_selection_has_no_1000_track_truncation(app,tmp_path):
 
 def test_long_request_does_not_freeze_ui_event_loop(app,tmp_path):
     window=Workbench(tmp_path,Client(tmp_path),autostart=False);ticks=[];timer=QTimer();timer.setInterval(10);timer.timeout.connect(lambda:ticks.append(1));timer.start()
-    window.call('slow',{});wait(app,lambda:not window.requests);timer.stop();assert len(ticks)>=8;window.close()
+    entered=threading.Event();release=threading.Event();threads=[];original=window.client.call
+    def blocked(command,payload):
+        if command=='slow':
+            threads.append(threading.get_ident());entered.set()
+            assert release.wait(10),'GUI did not release the test request'
+            return {}
+        return original(command,payload)
+    window.client.call=blocked
+    try:
+        window.call('slow',{});wait(app,lambda:entered.is_set() and len(ticks)>=3)
+        assert len(threads)==1 and threads[0]!=threading.get_ident()
+    finally:
+        release.set();timer.stop()
+    wait(app,lambda:not window.requests);window.close()
 
 def test_fl_all_disables_count_and_serializes_explicit_unlimited_flag(app,tmp_path):
     client=Client(tmp_path);window=Workbench(tmp_path,client,autostart=False);window.config=client.config

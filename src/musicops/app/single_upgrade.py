@@ -10,18 +10,24 @@ from musicops.domain.errors import PathBlocked
 
 def matches(old,track,album=''):
     from musicops.app.pipeline import identity
+    if old.get('recording_id') and track.get('recording_id') and str(old['recording_id']).casefold()!=str(track['recording_id']).casefold():return False
     return (identity(old)==identity(track) and bool(old.get('duration') and track.get('duration'))
             and abs(old['duration']-track['duration'])<=2
             and recording_kinds(old.get('album','')+' '+old.get('raw_title',''))==recording_kinds(album+' '+track.get('raw_title',track.get('title',''))))
 
 
+def album_context(candidate):
+    return str(candidate.get('album') or candidate.get('title',''))+' '+' '.join(t for t in candidate.get('release_secondary_types',[]) if isinstance(t,str))
+
+
 def full_album(candidate,old):
+    if not old:return False
     tracks=candidate.get('tracklist') or []
     if str(candidate.get('release_type','')).casefold()!='album' or not candidate.get('tracklist_complete') or not tracks:return False
     album=candidate.get('album') or candidate.get('title','')
     if len(tracks)<=len(old) and strict_text(album)==strict_text(old[0].get('album','')):return False
     if any(not t.get('duration') or not t.get('artists') or not (t.get('title') or t.get('raw_title')) for t in tracks):return False
-    return any(len([t for t in tracks if matches(row,t,candidate.get('album') or candidate.get('title',''))])==1 for row in old)
+    return any(len([t for t in tracks if matches(row,t,album_context(candidate))])==1 for row in old)
 
 
 def identify(workflows,job):
@@ -36,7 +42,7 @@ def identify(workflows,job):
         targets=[{**copy.deepcopy(t),'raw_title':t.get('raw_title') or t['title'],'album':album,'albumartist':resolved.get('artists',[]),'source':'catalog',
                   'target_id':str(uuid.uuid5(uuid.NAMESPACE_URL,job['job_id']+':full:'+str(i))),
                   'track':str(t.get('position') or i+1),'disc':str(t.get('disc') or 1)} for i,t in enumerate(tracks)]
-        represented=[r for r in old if len([t for t in tracks if matches(r,t,album)])==1]
+        represented=[r for r in old if len([t for t in tracks if matches(r,t,album_context(resolved))])==1]
         retire=bool(job.get('retire_single_requested') and len(represented)==len(old))
         job.update(targets=targets,expected_album_tracks=copy.deepcopy(targets),target_count=len(targets),single_release=copy.deepcopy(resolved),
                    retire_single=retire,single_match_count=len(represented),single_unmatched_count=len(old)-len(represented),label=album+' · '+' / '.join(resolved.get('artists',[])))
@@ -45,8 +51,16 @@ def identify(workflows,job):
             return
         workflows._queue_search(job,'已确认完整专辑，开始检索；'+('核验入库后原单曲移入恢复备份' if retire else '保留原单曲发行'))
         return
-    first=old[0]
-    found=workflows.s._recognize_metadata({'title':first.get('raw_title',''),'artists':first.get('artists',[]),'album':'','duration':first.get('duration')},cfg,force=True)
+    found,verified=discover(workflows,job,old)
+    workflows.put(job,stage='needs_review',review_kind='metadata',catalog_choices=verified,lookup_links=found.get('lookup_links',[]),
+        message='请选择要升级到的完整专辑发行' if verified else '尚未找到可核验的完整专辑，原单曲保留',
+        detail='仅列出目录标记为 Album、完整曲目表和录音时长可对应的发行；候选范围有限。请确认专辑、年份和版本后继续。未被完整专辑收录的 B 面或特别录音会保留在原单曲中。')
+
+
+def discover(workflows,job,old,found=None):
+    """Shared bounded release discovery for existing singles and playlist songs."""
+    first=old[0];cfg=job['config'];resolver=workflows.s._catalog_resolver(cfg)
+    if found is None:found=workflows.s._recognize_metadata({'title':first.get('raw_title',''),'artists':first.get('artists',[]),'album':'','duration':first.get('duration')},cfg,force=True)
     seeds=([found['selected_candidate']] if found.get('selected_candidate') else [])+found.get('candidates',[])
     pending=[];seen=set();recordings=set();verified={}
     for seed in seeds:
@@ -67,20 +81,23 @@ def identify(workflows,job):
         # A recording search relation, matching names/artists and full durations
         # are required. File count alone is never evidence of an album release.
         if full_album(resolved,old):
-            resolved['single_matched_tracks']=sum(len([t for t in resolved['tracklist'] if matches(r,t,resolved.get('album') or resolved.get('title',''))])==1 for r in old)
+            resolved['single_matched_tracks']=sum(len([t for t in resolved['tracklist'] if matches(r,t,album_context(resolved))])==1 for r in old)
             verified[key]=resolved
-    workflows.put(job,stage='needs_review',review_kind='metadata',catalog_choices=list(verified.values()),lookup_links=found.get('lookup_links',[]),
-        message='请选择要升级到的完整专辑发行' if verified else '尚未找到可核验的完整专辑，原单曲保留',
-        detail='仅列出目录标记为 Album、完整曲目表和录音时长可对应的发行；候选范围有限。请确认专辑、年份和版本后继续。未被完整专辑收录的 B 面或特别录音会保留在原单曲中。')
+    return found,list(verified.values())
 
 
 def in_library(workflows,job,targets):
     root=Path(job['config']['paths']['library']).resolve();groups={}
+    release=job.get('album_scope_release') or job.get('single_release') or {}
+    expected_id=str(release.get('release_id') or str(release.get('source_id','')).removeprefix('release:'))
+    if release.get('source') and release.get('source')!='musicbrainz':expected_id=release['source']+':'+expected_id
     from musicops.app.pipeline import album_root
     for row in workflows.store.list('library_files'):
         path=Path(row.get('path',''))
         if row.get('location_state')!='library' or not path.is_absolute() or not path.is_relative_to(root):continue
         if strict_text(row.get('album',''))!=strict_text(targets[0]['album']):continue
+        # Local tag grouping cannot certify a specifically selected reissue.
+        if expected_id and row.get('release_id')!=expected_id:continue
         try:
             from musicops.library.paths import reject_reparse_chain
             reject_reparse_chain(path)
@@ -100,7 +117,7 @@ def validate(job,rows,validator):
         if len([r for r in rows if matches(track,r,job['album'])])!=1:raise PolicyBlocked('完整专辑缺曲或录音版本不一致，原单曲保留')
     compared=0
     for original in job['old_files']:
-        same=[r for r in rows if matches(original,r,job['album'])]
+        same=[r for r in rows if matches(original,r,album_context(job['single_release']))]
         if not same:
             if job.get('retire_single'):raise PolicyBlocked('完整专辑未包含全部原单曲，不能移出原版')
             continue

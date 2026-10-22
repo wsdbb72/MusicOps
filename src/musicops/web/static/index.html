@@ -44,6 +44,14 @@
             /><button id="import-file">导入歌单文件</button>
           </div>
           <div class="row">
+            <label
+              ><input
+                type="checkbox"
+                id="playlist-full-album"
+              />单曲发行可选择下载完整专辑（先核对，再下载）</label
+            >
+          </div>
+          <div class="row">
             <button id="select-tracks">全选 / 取消</button
             ><button id="import-tracks" class="primary">
               将勾选曲目按专辑入库</button
@@ -150,6 +158,7 @@
           <p id="task-summary"></p>
           <div id="task-actions" class="row">
             <button data-action="select">勾选本页</button
+            ><button data-action="clear">清空勾选</button
             ><button data-action="resume">继续</button
             ><button data-action="pause">暂停</button
             ><button data-action="retry">重试失败任务</button
@@ -170,6 +179,17 @@
       </section>
       <section id="settings" hidden><form id="setup"></form></section>
     </main>
+    <dialog id="text-order-dialog">
+      <form method="dialog">
+        <h3>TXT 文件每行的顺序</h3>
+        <p>选择文件里的排列方式；取消会停止本次导入。</p>
+        <div class="row">
+          <button value="title-artist">歌名 - 歌手</button>
+          <button value="artist-title">歌手 - 歌名</button>
+          <button value="cancel">取消导入</button>
+        </div>
+      </form>
+    </dialog>
     <dialog id="review-dialog">
       <div class="row">
         <h3 id="review-title"></h3>

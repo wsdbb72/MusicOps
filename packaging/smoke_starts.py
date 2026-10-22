@@ -108,6 +108,8 @@ def main():
             client.call('start_workflow',{'scene':'expand','album_id':'0'*64})
             report['checks']['native_single_expansion_selection_guard']=False
         except RuntimeError as exc:report['checks']['native_single_expansion_selection_guard']='专辑不存在' in str(exc)
+        from smoke_album_scope import check as scope_check
+        report['checks']['native_playlist_single_scope']=scope_check(client,store)
         engine=client.call('engine_control',{'action':'start'})
         cookie=client.call('engine_control',{'action':'cookie','source':'qq','cookie':'synthetic_frozen=synthetic-only'})
         report['checks']['native_managed_engine_cookie']=engine.get('status')=='OK' and cookie.get('saved') is True

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "musicops"
-version = "0.4.17"
+version = "0.4.18"
 description = "MusicOps desktop music library manager for Windows, macOS and Linux Docker"
 requires-python = ">=3.12"
 dependencies = [

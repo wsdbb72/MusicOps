@@ -107,6 +107,20 @@ def test_native_upload_stays_inside_profile_and_rejects_executables(web):
     assert client.post('/api/upload',auth=auth,headers=headers,json={**payload,'kind':'cover','filename':'fake.png'}).status_code==400
 
 
+def test_web_playlist_upload_uses_desktop_size_limit(web):
+    from musicops.providers.playlist_files import MAX_BYTES
+    client,server=web;auth=('musicops','synthetic-web-password')
+    headers={'X-MusicOps-CSRF':client.get('/api/bootstrap',auth=auth).json()['csrf']}
+    content=b'title,artist\n'+b' '*(10_000_001-13)
+    payload={'kind':'playlist','filename':'large.csv','content':base64.b64encode(content).decode()}
+    response=client.post('/api/upload',auth=auth,headers=headers,json=payload)
+    assert response.status_code==200 and Path(response.json()['file_path']).stat().st_size==len(content)
+    payload['content']=base64.b64encode(b' '*(MAX_BYTES+1)).decode()
+    response=client.post('/api/upload',auth=auth,headers=headers,json=payload)
+    assert response.status_code==400 and '20MB' in response.json()['error']
+    assert len(list((server.client.base/'work/web-uploads').iterdir()))==1
+
+
 def test_native_qr_url_is_rendered_locally_without_external_image_service(web):
     client,server=web;auth=('musicops','synthetic-web-password')
     token=client.get('/api/bootstrap',auth=auth).json()['csrf']

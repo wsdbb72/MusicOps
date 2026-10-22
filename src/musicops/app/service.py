@@ -85,8 +85,9 @@ class AppService:
             job=self.store.get('evidence','workflow:'+payload['job_id'])
             if not job or job.get('hidden'):raise ValueError('任务不存在或已删除')
             from musicops.app.assistance import review_revision
-            public={k:job.get(k) for k in ('job_id','job_kind','task_type','task_group','scene','stage','label','message','detail','review_kind','choices','lookup_links','catalog_choices','paused','pause_pending','version_choice','ai_fallback','search_summary','outcomes','source_outcomes','target_count','identification_job_id','search_job_id','ai_assistance','retry_job_id','search_query','search_sites')}
+            public={k:job.get(k) for k in ('job_id','job_kind','task_type','task_group','scene','stage','label','message','detail','review_kind','choices','lookup_links','catalog_choices','paused','pause_pending','version_choice','ai_fallback','search_summary','outcomes','source_outcomes','target_count','identification_job_id','search_job_id','ai_assistance','retry_job_id','search_query','search_sites','prefer_full_album','album_scope_decision','album_scope_note','merged_into_job_id')}
             public['review_revision']=review_revision(job)
+            if job.get('album_scope_note'):public['detail']=(public.get('detail') or '')+'\n完整专辑核验：'+job['album_scope_note']
             public['prepared']=[{**{k:r.get(k) for k in ('raw_title','artists','album','duration')},'track':(r.get('tags',{}).get('tracknumber') or [r.get('track','')])[0],'disc':(r.get('tags',{}).get('discnumber') or [r.get('disc','1')])[0]} for r in job.get('prepared',[]) or job.get('targets',[]) or job.get('old_files',[])]
             return {'job':public}
         if command=='queue_ai_reviews':

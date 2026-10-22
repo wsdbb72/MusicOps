@@ -87,7 +87,7 @@ def retry(workflows, job, *, query=None, sites=None, allow_review_search=False,a
     if any(row['job_id'] != job['job_id'] and not row.get('hidden') for row in children):
         raise PolicyBlocked('已有后续任务，请重试失败的后续任务，避免重复下载')
     kind = job.get('review_kind')
-    if kind in {'metadata', 'candidate', 'numbering', 'cover', 'edition', 'locks', 'resources'} and not (allow_review_search and job.get('task_type')=='search' and kind=='candidate'):
+    if kind in {'metadata', 'candidate', 'numbering', 'cover', 'edition', 'locks', 'resources','album_scope'} and not (allow_review_search and job.get('task_type')=='search' and kind=='candidate'):
         raise PolicyBlocked('此任务需要选择或补充资料，请打开核对窗口')
     if job.get('legacy_batch_requires_review') and not allow_legacy:
         raise PolicyBlocked('旧版队列请从对应入口重新创建，避免重放历史下载')

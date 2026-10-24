@@ -3,10 +3,10 @@ VSVersionInfo(
   kids=[StringFileInfo([StringTable('080404B0',[
     StringStruct('CompanyName','wsdbb72'),
     StringStruct('FileDescription','MusicOps 音乐库管理'),
-    StringStruct('FileVersion','0.4.21.0'),
+    StringStruct('FileVersion','0.4.22.0'),
     StringStruct('InternalName','MusicOps'),
     StringStruct('OriginalFilename','MusicOps.exe'),
     StringStruct('ProductName','MusicOps'),
-    StringStruct('ProductVersion','0.4.21')
+    StringStruct('ProductVersion','0.4.22')
   ])]),VarFileInfo([VarStruct('Translation',[2052,1200])])]
 )

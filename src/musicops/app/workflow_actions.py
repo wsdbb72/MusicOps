@@ -117,11 +117,12 @@ def retry(workflows, job, *, query=None, sites=None, allow_review_search=False,a
     if any(row['job_id'] != job['job_id'] and not row.get('hidden') for row in children):
         raise PolicyBlocked('已有后续任务，请重试失败的后续任务，避免重复下载')
     kind = job.get('review_kind')
-    if kind in {'metadata', 'candidate', 'numbering', 'cover', 'edition', 'locks', 'resources','album_scope'} and not (allow_review_search and job.get('task_type')=='search' and kind=='candidate'):
+    enrichment_retry=kind in {'numbering','cover','resources'} and bool(job.get('prepared'))
+    if kind in {'metadata', 'candidate', 'numbering', 'cover', 'edition', 'locks', 'resources','album_scope'} and not enrichment_retry and not (allow_review_search and job.get('task_type')=='search' and kind=='candidate'):
         raise PolicyBlocked('此任务需要选择或补充资料，请打开核对窗口')
     if job.get('legacy_batch_requires_review') and not allow_legacy:
         raise PolicyBlocked('旧版队列请从对应入口重新创建，避免重放历史下载')
-    stage = 'searching' if job.get('task_type') == 'search' or kind == 'search' else job.get('resume_stage')
+    stage = 'enrich' if enrichment_retry else 'searching' if job.get('task_type') == 'search' or kind == 'search' else job.get('resume_stage')
     if stage=='running' and allow_legacy:
         # Old versions overwrote the actual checkpoint with the UI-only state.
         # Only an explicit Continue action may recover such records.
@@ -136,9 +137,14 @@ def retry(workflows, job, *, query=None, sites=None, allow_review_search=False,a
     if stage not in RETRY_STAGES:
         raise PolicyBlocked('请先核对文件事务或原音源；此阶段不能直接重放')
     cfg = current_config(workflows, job)
+    if enrichment_retry:
+        with workflows.store.connection() as connection:
+            existing=connection.execute("SELECT 1 FROM transactions WHERE json_extract(payload,'$.plan_id') IN (?,?) LIMIT 1",('workflow:'+job['job_id'],'retire:'+job['job_id'])).fetchone()
+        if existing:raise PolicyBlocked('已有文件事务，请先恢复或核对事务后再修改资料')
     changes = dict(config=cfg, stage=stage, paused=False, next_poll=0,
                    review_kind=None, detail='', error_class=None, ai_assistance=None,
                    retry_count=int(job.get('retry_count', 0)) + 1, message='已重新排队，先核对既有状态后重试')
+    if enrichment_retry:changes.update(refresh_resources=True,resource_retry_count=0,enrichment_retry_count=int(job.get('enrichment_retry_count',0))+1,message='已按当前设置重新补全资料；有可靠证据才自动提交')
     if stage=='metadata':
         archived=archive_failed_preparation(workflows,job,cfg)
         if archived:changes['failed_preparations']=[*job.get('failed_preparations',[]),archived]

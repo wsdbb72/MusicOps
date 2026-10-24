@@ -16,10 +16,11 @@ def netease_reference(target):
 
 
 def same_recording(target,candidate):
-    artists=lambda row:{strict_text(a) for a in row.get('artists',[]) if a}
-    if not target.get('raw_title') or not artists(target) or not target.get('album'):return False
-    if strict_text(target['raw_title'])!=strict_text(candidate.get('raw_title')) or artists(target)!=artists(candidate):return False
-    if strict_text(target['album'])!=strict_text(candidate.get('album')):return False
+    from musicops.media.identity_fields import credits_equal,title_keys
+    if not target.get('raw_title') or not target.get('artists') or not target.get('album'):return False
+    if not title_keys(target)&title_keys(candidate) or not credits_equal(target.get('artists',[]),candidate.get('artists',[])):return False
+    from musicops.media.chinese import alias_key
+    if alias_key(target['album'])!=alias_key(candidate.get('album')):return False
     a,b=target.get('duration'),candidate.get('duration')
     return type(a) in (int,float) and type(b) in (int,float) and a>0 and b>0 and abs(a-b)<=2
 

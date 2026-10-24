@@ -46,28 +46,53 @@ def reject_reparse_chain(path, stop=None):
         current = current.parent
 
 
-def safe_destination(root, relative, *, max_length=240):
+def _filesystem_limit(root,name,fallback):
+    parent=Path(root)
+    while not parent.exists() and parent!=parent.parent:parent=parent.parent
+    try:
+        value=os.pathconf(parent,name)
+        return value if value>0 else fallback
+    except (OSError,ValueError,AttributeError):return fallback
+
+
+def safe_destination(root, relative, *, max_length=None):
     raw = str(relative)
     windows = PureWindowsPath(raw)
     if not raw or windows.is_absolute() or windows.drive or raw.startswith(('/', '\\')):
         raise PathBlocked('目标必须为批准根目录下相对路径')
-    if '..' in windows.parts or '.' in windows.parts:
+    if any(part in ('.','..') for part in re.split(r'[\\/]',raw)):
         raise PathBlocked('目标拒绝父目录/点路径')
-    check_components(raw)
+    if os.name=='nt':check_components(raw)
+    elif '\x00' in raw or '\\' in raw:
+        raise PathBlocked('目标包含空字符或含义不明确的反斜线')
     root = Path(root).absolute()
     reject_reparse_chain(root)
     target = root.joinpath(*windows.parts)
+    # POSIX libraries can already have valid paths far beyond MAX_PATH. Count
+    # filesystem bytes there, Windows UTF-16 units on Windows, before lstat or
+    # resolve can itself fail with ENAMETOOLONG.
+    if os.name=='nt':
+        length=lambda text:len(str(text).encode('utf-16-le'))//2
+        path_limit=240 if max_length is None else max_length
+        name_limit=255
+    else:
+        length=lambda text:len(os.fsencode(text))
+        native_limit=_filesystem_limit(root,'PC_PATH_MAX',4096)-1
+        path_limit=native_limit if max_length is None else min(max_length,native_limit)
+        name_limit=_filesystem_limit(root,'PC_NAME_MAX',255)
+    if any(length(part)>name_limit for part in windows.parts):
+        raise PathBlocked('目标文件名超过当前文件系统的单个名称长度上限')
+    if length(target)>path_limit:
+        raise PathBlocked('目标超过保守Windows路径长度上限，请缩短名称' if os.name=='nt' and max_length is None else '目标超过当前文件系统或指定的路径长度上限')
     reject_reparse_chain(target, root)
     if not within(target, root) or target.resolve() == root.resolve():
         raise PathBlocked('目标解析后不在批准根目录内')
-    if len(str(target)) > max_length:
-        raise PathBlocked('目标超过保守Windows路径长度上限，请缩短名称')
     # Existing spelling differs only by case => conflict rather than Windows silent aliasing.
     current = root
     for part in windows.parts:
         if current.is_dir():
             matches = [p.name for p in current.iterdir() if p.name.casefold() == part.casefold()]
-            if matches and part not in matches:
+            if matches and part not in matches and (os.name=='nt' or (current/part).exists()):
                 raise PathBlocked('路径与现有文件/目录存在大小写碰撞')
         current = current / part
     return target

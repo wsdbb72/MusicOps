@@ -81,7 +81,7 @@ jobs:
           BUILD_ARCH: ${{ matrix.arch }}
         run: |
           mkdir -p dist/macos/reports
-          python -m pytest tests/test_platform_runtime.py -q \
+          python -m pytest tests/test_platform_runtime.py tests/test_native_paths.py -q \
             --basetemp "$RUNNER_TEMP/musicops-platform-pytest" \
             --junitxml "dist/macos/reports/platform-runtime-$BUILD_ARCH.xml"
           python - <<'PY'

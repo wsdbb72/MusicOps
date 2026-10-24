@@ -157,11 +157,15 @@ class TransactionEngine:
             raise Conflict('来源内容在计划后发生变化')
         staging = safe_destination(self.roots['work'], f'{tx_id}/staging/{index:04d}{source.suffix}')
         # Reserve enough room for same-volume atomic publish/restore temporary names too.
-        temp_name = destination.with_name(f'.{destination.name}.{tx_id}.publish')
+        temporary_id=hashlib.sha256((tx_id+':'+str(index)).encode('utf-8')).hexdigest()[:32]
+        temp_name = destination.with_name('.musicops-'+temporary_id+'.publish')
+        restore_target=source if kind=='quarantine' else destination
+        restore_name=restore_target.with_name('.musicops-'+temporary_id+'.restore')
         destination_root = self.roots['quarantine'] if kind == 'quarantine' else self.roots['library']
         safe_destination(destination_root, temp_name.relative_to(destination_root))
+        safe_destination(self.roots['library'],restore_name.relative_to(self.roots['library']))
         return {**operation, 'schema_version': 1, 'kind': kind, 'source': str(source), 'destination': str(destination),
-                'source_hash': source_hash, 'staging': str(staging), 'after_hash': None,
+                'source_hash': source_hash, 'staging': str(staging), 'after_hash': None,'publish_temporary':str(temp_name),'restore_temporary':str(restore_name),
                 'published': False, 'source_removed': False, 'validation': None}
 
     def _build(self, plan, tx_id):
@@ -355,7 +359,9 @@ class TransactionEngine:
         tx['created_directories'].extend(p for p in missing if p not in tx['created_directories'])
         self._write(tx)
         target.parent.mkdir(parents=True, exist_ok=True)
-        temporary = target.with_name(f'.{target.name}.{tx["tx_id"]}.publish')
+        # Older manifests retain their original temporary-name convention.
+        temporary = Path(op.get('publish_temporary') or target.with_name(f'.{target.name}.{tx["tx_id"]}.publish'))
+        safe_destination(target_root,temporary.relative_to(target_root))
         reject_reparse_chain(temporary)
         if temporary.exists():
             raise Conflict('发布临时路径已存在，进入恢复')
@@ -560,7 +566,8 @@ class TransactionEngine:
                 if not original.exists():
                     if not item or not item['backed_up']:
                         raise RecoveryRequired('隔离恢复缺完整原件')
-                    temp = original.with_name(f'.{original.name}.{tx["tx_id"]}.restore')
+                    temp = Path(op.get('restore_temporary') or original.with_name(f'.{original.name}.{tx["tx_id"]}.restore'))
+                    safe_destination(self.roots['library'],temp.relative_to(self.roots['library']))
                     if temp.exists():
                         self._check_hash(temp, item['before_hash'])
                         temp.unlink()
@@ -579,7 +586,8 @@ class TransactionEngine:
                     continue
                 if not item['backed_up']:
                     raise RecoveryRequired('替换恢复缺完整原件')
-                temp = target.with_name(f'.{target.name}.{tx["tx_id"]}.restore')
+                temp = Path(op.get('restore_temporary') or target.with_name(f'.{target.name}.{tx["tx_id"]}.restore'))
+                safe_destination(self.roots['library'],temp.relative_to(self.roots['library']))
                 if temp.exists():
                     self._check_hash(temp, item['before_hash'])
                     temp.unlink()

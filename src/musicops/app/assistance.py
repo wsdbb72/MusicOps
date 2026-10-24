@@ -129,6 +129,8 @@ def assist_workflows(service, args, cfg):
             kind = job.get('review_kind')
             if kind=='album_scope':
                 proposal={'status':'NEEDS_INPUT','kind':kind,'message':'目录已核验，下载单曲还是完整专辑须由你选择；无需额外调用 AI'}
+            elif kind=='resources':
+                proposal={'status':'NEEDS_INPUT','kind':kind,'message':'歌词服务的连接或鉴权需要修复。请在设置测试接口后点击重试；此类故障不额外调用 AI，也不会自动跳过歌词'}
             elif kind in ('error','interrupted') and job.get('error_class') in ('NETWORK_ERROR','TRANSIENT_ERROR','BROWSER_SOLVER_UNAVAILABLE','SOURCE_UNAVAILABLE') and job.get('resume_stage') in ('downloading','fallback','searching','notifying') and not job.get('retry_count'):
                 proposal={'status':'READY','kind':'retry','message':'瞬时连接问题，沿用已有下载记录重试一次，不额外调用 AI'}
             elif kind == 'candidate' and job.get('choices'):

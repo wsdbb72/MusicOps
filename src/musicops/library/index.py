@@ -13,7 +13,7 @@ from musicops.domain.errors import PathBlocked
 from .paths import reparse, reject_reparse_chain, within
 from .resources import companion_relations
 
-AUDIO_EXTENSIONS = {'.flac', '.mp3', '.m4a', '.mp4', '.ogg', '.opus', '.wav', '.aif', '.aiff', '.dsf', '.dff', '.ape', '.wma', '.ncm'}
+AUDIO_EXTENSIONS = {'.flac', '.mp3', '.m4a', '.mp4', '.aac', '.ogg', '.opus', '.wav', '.aif', '.aiff', '.dsf', '.dff', '.ape', '.wma', '.ncm'}
 METADATA_INDEX_VERSION = 2
 
 

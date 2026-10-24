@@ -172,9 +172,11 @@ class TransactionEngine:
         destinations = [op['destination'].casefold() for op in operations]
         if len(destinations) != len(set(destinations)):
             raise Conflict('同计划目标路径重复/大小写碰撞')
-        for previous in self.store.list('transactions'):
-            if previous['tx_id'] != tx_id and previous.get('state') not in {'ROLLED_BACK', 'CONFLICT'} and set(ids) & {op['operation_id'] for op in previous.get('operations', [])}:
-                raise Conflict('operation_id已归属于其他事务，不重复执行')
+        with self.store.connection() as connection:
+            for offset in range(0,len(ids),500):
+                page=ids[offset:offset+500]
+                if connection.execute("SELECT 1 FROM transaction_operations WHERE operation_id IN ("+','.join('?' for _ in page)+") AND transaction_id!=? AND (state IS NULL OR state NOT IN ('ROLLED_BACK','CONFLICT')) LIMIT 1",(*page,tx_id)).fetchone():
+                    raise Conflict('operation_id已归属于其他事务，不重复执行')
         group = None
         if all(op['kind'] == 'publish' for op in operations):
             common = Path(os.path.commonpath([str(Path(op['destination']).parent) for op in operations]))
@@ -214,7 +216,11 @@ class TransactionEngine:
                 existing = existing.parent
             if shutil.disk_usage(existing).free < estimated + int(plan.get('safety_margin_bytes', 1024 * 1024)):
                 raise ValidationFailed('磁盘峰值预算不足')
-        before_rows = [item for item in self.store.list('library_files') if item.get('path') in affected or item.get('path') in [op['destination'] for op in operations]]
+        paths=list(set(affected)|{op['destination'] for op in operations});before_rows=[]
+        with self.store.connection() as connection:
+            for offset in range(0,len(paths),500):
+                page=paths[offset:offset+500]
+                before_rows.extend(json.loads(row[0]) for row in connection.execute("SELECT payload FROM library_files WHERE json_extract(payload,'$.path') IN ("+','.join('?' for _ in page)+')',page))
         return {'schema_version': 1, 'tx_id': tx_id, 'plan_id': plan['plan_id'], 'plan_hash': digest(plan), 'config_hash': plan['config_hash'],
                 'snapshot_hash': plan.get('snapshot_hash'), 'state': 'PLANNED', 'created_at': now(), 'operations': operations,
                 'backup_manifest': backups, 'staging_manifest': [], 'publish_manifest': [], 'state_before': before_rows,

@@ -22,8 +22,12 @@ from musicops.app.search_status import SITE_NAMES,search_site,search_album,editi
 TERMINAL={'completed','failed','needs_review','cancelled','skipped','restored'}
 SCENES={'playlist':'歌单入库','complete':'资料补全','upgrade':'音质升级','fill':'补全整张专辑','expand':'单曲升级完整专辑'}
 
-def artist_key(artists):return tuple(sorted(strict_text(a) for a in artists if a))
-def identity(row):return (strict_text(row.get('raw_title',row.get('title',''))),artist_key(row.get('artists',[])))
+def artist_key(artists):
+    from musicops.media.chinese import alias_key
+    return tuple(sorted(alias_key(a) for a in artists if a))
+def identity(row):
+    from musicops.media.chinese import alias_key
+    return (alias_key(row.get('raw_title',row.get('title',''))),artist_key(row.get('artists',[])))
 def segment(text):
     text=re.sub(r'[<>:"/\\|?*\x00-\x1f]','_',str(text)).strip(' .')[:100]
     if not text or re.fullmatch(r'(CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])(?:\..*)?',text,re.I):text='_'+(text or '未命名')
@@ -110,18 +114,19 @@ class Workflows:
         if view!='steps':raise ValueError('任务视图无效')
         from musicops.app.task_filters import predicate
         clause,parameters=predicate(state)
+        clause=clause.replace("json_extract(payload,'$.stage')",'stage')
         if query.strip():
             escaped=query.strip().replace('\\','\\\\').replace('%','\\%').replace('_','\\_')
-            clause+=" AND coalesce(json_extract(payload,'$.label'),'') LIKE ? ESCAPE '\\'"
+            clause+=" AND label LIKE ? ESCAPE '\\'"
             parameters=(*parameters,'%'+escaped+'%')
         with self.store.connection() as c:
             if selection:
-                selected=c.execute("SELECT json_extract(payload,'$.job_id') FROM evidence WHERE id LIKE 'workflow:%' AND coalesce(json_extract(payload,'$.hidden'),0)=0 AND coalesce(json_extract(payload,'$.job_kind'),'album') NOT IN ('batch','activity')"+clause+" ORDER BY coalesce(json_extract(payload,'$.created_at'),updated_at),id",parameters).fetchall()
+                selected=c.execute("SELECT job_id FROM workflow_overview WHERE hidden=0 AND job_kind NOT IN ('batch','activity')"+clause+" ORDER BY created_at,id",parameters).fetchall()
                 return {'job_ids':[r[0] for r in selected],'total':len(selected)}
-            filtered=c.execute("SELECT COUNT(*) FROM evidence WHERE id LIKE 'workflow:%' AND coalesce(json_extract(payload,'$.hidden'),0)=0"+clause,parameters).fetchone()[0]
-            counts=c.execute("SELECT json_extract(payload,'$.stage'),coalesce(json_extract(payload,'$.job_kind'),'album'),COUNT(*),coalesce(json_extract(payload,'$.paused'),0) FROM evidence WHERE id LIKE 'workflow:%' AND coalesce(json_extract(payload,'$.hidden'),0)=0 GROUP BY 1,2,4").fetchall()
-            token_prompts=[r[0] for r in c.execute("SELECT json_extract(payload,'$.job_id') FROM evidence WHERE id LIKE 'workflow:%' AND coalesce(json_extract(payload,'$.hidden'),0)=0 AND json_extract(payload,'$.stage')='needs_review' AND json_extract(payload,'$.review_kind')='token' ORDER BY updated_at,id LIMIT 100").fetchall()]
-            rows=c.execute("SELECT json_remove(payload,'$.config','$.targets','$.old_files','$.prepared','$.choices','$.outcomes','$.publication_plan','$.catalog_choices','$.lookup_links','$.engine_paths') FROM evidence WHERE id LIKE 'workflow:%' AND coalesce(json_extract(payload,'$.hidden'),0)=0"+clause+" ORDER BY coalesce(json_extract(payload,'$.created_at'),updated_at) DESC,id LIMIT 200 OFFSET ?",(*parameters,offset)).fetchall()
+            filtered=c.execute("SELECT COUNT(*) FROM workflow_overview WHERE hidden=0"+clause,parameters).fetchone()[0]
+            counts=c.execute("SELECT stage,job_kind,COUNT(*),paused FROM workflow_overview WHERE hidden=0 GROUP BY 1,2,4").fetchall()
+            token_prompts=[r[0] for r in c.execute("SELECT job_id FROM workflow_overview WHERE hidden=0 AND stage='needs_review' AND review_kind='token' ORDER BY updated_at,id LIMIT 100").fetchall()]
+            rows=c.execute("SELECT json_remove(payload,'$.config','$.targets','$.old_files','$.prepared','$.choices','$.outcomes','$.publication_plan','$.catalog_choices','$.lookup_links','$.engine_paths') FROM workflow_overview AS w JOIN evidence AS e ON e.id=w.id WHERE w.id IN (SELECT id FROM workflow_overview WHERE hidden=0"+clause+" ORDER BY created_at DESC,id LIMIT 200 OFFSET ?) ORDER BY w.created_at DESC,w.id",(*parameters,offset)).fetchall()
         public=[self.public_row(json.loads(r[0])) for r in rows]
         return {'jobs':public,'token_prompts':token_prompts,'total':filtered,'all_total':sum(r[2] for r in counts),'offset':offset,'active':sum(r[2] for r in counts if r[0] not in TERMINAL and not r[3]),'paused_count':sum(r[2] for r in counts if r[0] not in TERMINAL and r[3]),'total_active':sum(r[2] for r in counts if r[0] not in TERMINAL),'finished':sum(r[2] for r in counts if r[0]=='completed' and r[1]!='batch'),'preparing_count':sum(r[2] for r in counts if r[1]=='batch' and r[0] not in TERMINAL)}
     def public_row(self,j):
@@ -262,6 +267,13 @@ class Workflows:
     def recover(self):
         from musicops.app.storage_migration import recover_serialization_failures
         recover_serialization_failures(self)
+        # Older selected-version jobs depended on themselves and could never
+        # pass next_job's completed-parent gate. Repair only independent editions.
+        with self.store.connection() as connection:
+            blocked=connection.execute("SELECT payload FROM evidence WHERE id IN (SELECT id FROM workflow_overview WHERE hidden=0 AND task_type='album' AND identification_job_id=job_id AND stage NOT IN ('completed','cancelled','skipped','restored'))").fetchall()
+        for raw in blocked:
+            job=json.loads(raw[0])
+            if job.get('version_parent_id'):self.put(job,identification_job_id=None)
         # Version 0.3.1 queued starts were invisible while a first scan was
         # running. Do not replay several historical clicks after an upgrade.
         for task in self.s._pending_tasks():
@@ -783,6 +795,13 @@ class Workflows:
                 tags={'title':meta.get('musicName'),'artist':artist,'album':meta.get('album') or meta.get('albumName')}
                 apply_tag_changes(dest,{k:v for k,v in tags.items() if v})
                 if result.get('artwork_base64'):apply_cover_changes(dest,base64.b64decode(result['artwork_base64']),min_side=cfg['lyrics']['min_cover_side'])
+            elif job['scene']!='complete' and source.suffix.lower()=='.ape':
+                from musicops.media.validation import prepare_media_copy
+                source_tags=read_tag_fields(source)
+                dest=dest.with_suffix('.flac')
+                conversion=prepare_media_copy(source,dest,self.s._validator(cfg),convert_to='flac')
+                apply_tag_changes(dest,{field:value for field,value in source_tags.items() if value})
+                job.setdefault('media_conversions',[]).append({'source':str(source),'destination':str(dest),'source_hash':conversion['source_hash'],'after_hash':conversion['after_hash'],'pcm_verified':True})
             else:durable_copy(source,dest)
             if sha256_file(source)!=original_hash:raise PolicyBlocked('原音源在复制时发生改变，请重新扫描')
             tags=read_tag_fields(dest)
@@ -932,7 +951,11 @@ class Workflows:
                 if locked and not read_tag_fields(row['path']).get('lyrics'):raise PolicyBlocked('歌词标签已锁定，暂不补写；请先核对字段锁')
                 embed_sidecar(row['path'],sidecar,row.get('duration'))
             self.checkpoint(job,'full_decode');validation=validator.validate(row['path'])
-            if validation['decode_state']!='passed' or not validation.get('roon_compatible'):raise PolicyBlocked('完整音频校验未通过，原音源保留')
+            if validation['decode_state']!='passed' or not validation.get('roon_compatible'):
+                row['validation']=validation
+                self.put(job,prepared=prepared,validation_failure={'file':Path(row['path']).name,'decode_state':validation['decode_state'],'error_class':validation.get('error_class'),'roon_compatible':validation.get('roon_compatible')})
+                reason=validation.get('error_class') or ('ROON_UNSUPPORTED' if not validation.get('roon_compatible') else validation['decode_state'])
+                raise PolicyBlocked('音频校验未通过：'+Path(row['path']).name+'（'+reason+'）；原音源保留，请替换损坏音源或核对格式后重试')
             row['validation']=validation;row['media_info']=validation['media_info'];row['duration']=validation.get('duration');rows.append(row)
         if job['targets']:
             for target in job['targets']:
@@ -1167,7 +1190,7 @@ class Workflows:
         elif job.get('review_kind')=='edition':self.put(job,edition_approved=True,stage='publishing',message='用户确认发行版本，准备替换')
         elif choice=='retry' and job.get('resume_stage') in ('identifying','searching','downloading','requesting','validating','notifying','retiring'):
             current=self.s.config.current()['values']
-            if any(current['paths'][k]!=job['config']['paths'][k] for k in ('library','source','backup','quarantine')):raise PolicyBlocked('音乐目录已改变，请建立新的任务')
+            if any(current['paths'][k]!=job['config']['paths'][k] for k in ('library','source','work','backup','quarantine')):raise PolicyBlocked('音乐目录已改变，请建立新的任务')
             self.put(job,config=copy.deepcopy(current),stage=job['resume_stage'],message='重新核对当前状态后继续处理')
         else:raise PolicyBlocked('需要先解决连接、文件或资料问题；不会重复消费 FL 或跳过音频校验')
         return {'status':'OK'}
@@ -1190,7 +1213,7 @@ class Workflows:
                 if not self.store.get('evidence','workflow:'+child_id):
                     child={k:copy.deepcopy(v) for k,v in job.items() if k not in ('cancel_requested','resume_stage','created_at','updated_at','review_kind','processing_job_id','choices')}
                     version=describe(candidate)
-                    child.update(job_id=child_id,identification_job_id=child_id,version_parent_id=job.get('identification_job_id') or job['job_id'],label=str(job.get('label') or candidate['title'])+' · '+version['label']+' '+str(version['year'] or ''),task_type='album',task_group='process',stage='requesting',scene='playlist',targets=[],old_files=[],existing_album_files=[],selected=candidate,selected_edition=True,edition_origin_targets=copy.deepcopy(job.get('targets',[])),search_job_id=job['job_id'],message='用户选择独立版本，保留已有音源并准备下载',created_at=utcnow())
+                    child.update(job_id=child_id,identification_job_id=None,version_parent_id=job.get('identification_job_id') or job['job_id'],label=str(job.get('label') or candidate['title'])+' · '+version['label']+' '+str(version['year'] or ''),task_type='album',task_group='process',stage='requesting',scene='playlist',targets=[],old_files=[],existing_album_files=[],selected=candidate,selected_edition=True,edition_origin_targets=copy.deepcopy(job.get('targets',[])),search_job_id=job['job_id'],message='用户选择独立版本，保留已有音源并准备下载',created_at=utcnow())
                     self.put(child)
                 created.append(child_id)
             self.put(job,stage='completed',progress=100,processing_job_ids=created,message=f'已为{len(created)}个所选版本创建独立下载与入库任务')

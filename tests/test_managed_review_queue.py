@@ -54,8 +54,11 @@ def test_restart_recovers_inflight_without_replaying_changed_task(controls):
     assert entries(service)[0]['state']=='pending'
     row['prepared']=[{'raw_title':'Changed','artists':['Other']}]
     service.workflows.put(row)
-    assert not schedule(service)
+    # A bounded scheduler discards the old revision and may immediately pick
+    # the new revision registered by put(), without replaying the stale one.
+    assert schedule(service)
     assert any(r['state']=='stale' for r in entries(service))
+    assert any(r['revision']==review_revision(row) and r['state']=='running' for r in entries(service))
 
 
 def test_explicit_resubmission_retries_ai_connection_failure_without_repeating_ready_result(controls):

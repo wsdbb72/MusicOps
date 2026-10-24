@@ -41,6 +41,17 @@ class StateStore:
             from musicops.state.projections import initialize
             if progress:progress('正在更新任务摘要索引；首次升级大档案可能需要几十秒，历史记录会保留')
             initialize(c)
+            # Exact-path and operation ownership lookups must not deserialize
+            # every historical file/transaction for each album publication.
+            c.execute("CREATE INDEX IF NOT EXISTS library_file_path ON library_files(json_extract(payload,'$.path'))")
+            projected=c.execute("SELECT 1 FROM sqlite_master WHERE name='transaction_operations'").fetchone()
+            c.execute('CREATE TABLE IF NOT EXISTS transaction_operations (transaction_id TEXT NOT NULL,operation_id TEXT NOT NULL,state TEXT,PRIMARY KEY(transaction_id,operation_id))')
+            c.execute('CREATE INDEX IF NOT EXISTS transaction_operation_owner ON transaction_operations(operation_id,state,transaction_id)')
+            for action in ('INSERT','UPDATE'):
+                c.execute(f"CREATE TRIGGER IF NOT EXISTS transaction_operations_{action.lower()} AFTER {action} ON transactions BEGIN DELETE FROM transaction_operations WHERE transaction_id=NEW.id; INSERT OR IGNORE INTO transaction_operations SELECT NEW.id,json_extract(value,'$.operation_id'),json_extract(NEW.payload,'$.state') FROM json_each(NEW.payload,'$.operations') WHERE json_extract(value,'$.operation_id') IS NOT NULL; END")
+            c.execute('CREATE TRIGGER IF NOT EXISTS transaction_operations_delete AFTER DELETE ON transactions BEGIN DELETE FROM transaction_operations WHERE transaction_id=OLD.id; END')
+            if not projected:
+                c.execute("INSERT OR IGNORE INTO transaction_operations SELECT t.id,json_extract(op.value,'$.operation_id'),json_extract(t.payload,'$.state') FROM transactions AS t,json_each(t.payload,'$.operations') AS op WHERE json_extract(op.value,'$.operation_id') IS NOT NULL")
     @contextlib.contextmanager
     def connection(self):
         c=sqlite3.connect(self.path,timeout=15)

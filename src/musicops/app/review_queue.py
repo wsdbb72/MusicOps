@@ -64,19 +64,15 @@ def schedule(service):
     if config['offline'] or not config['ai'].get('enabled'):
         return False
     with service.store.connection() as connection:
-        row = connection.execute("SELECT id,payload FROM evidence WHERE id LIKE 'ai-review:%' AND json_extract(payload,'$.state')='pending' AND EXISTS (SELECT 1 FROM evidence AS job WHERE job.id='workflow:'||json_extract(evidence.payload,'$.job_id') AND coalesce(json_extract(job.payload,'$.paused'),0)=0) ORDER BY updated_at,id LIMIT 1").fetchone()
-    if not row:
-        return False
-    import json
-    entry = json.loads(row['payload'])
-    job = service.store.get('evidence', 'workflow:' + entry['job_id'])
-    if not job or job.get('paused'):
-        if not job:
-            service.store.put('evidence', row['id'], {**entry, 'state': 'stale'})
-        return False
-    if job.get('hidden') or review_revision(job) != entry['revision']:
-        service.store.put('evidence', row['id'], {**entry, 'state': 'stale'})
-        return False
+        rows = connection.execute("SELECT e.id,e.payload FROM evidence AS e LEFT JOIN workflow_overview AS w ON w.id='workflow:'||json_extract(e.payload,'$.job_id') WHERE e.id LIKE 'ai-review:%' AND json_extract(e.payload,'$.state')='pending' AND coalesce(w.paused,0)=0 ORDER BY e.updated_at,e.id LIMIT 32").fetchall()
+    for row in rows:
+        entry=json.loads(row['payload'])
+        job=service.store.get('evidence','workflow:'+entry['job_id'])
+        if not job or job.get('hidden') or job.get('stage') not in ('needs_review','failed','skipped') or review_revision(job)!=entry['revision']:
+            service.store.put('evidence',row['id'],{**entry,'state':'stale'})
+            continue
+        break
+    else:return False
     result = service.enqueue('assist_workflows', {'job_ids': [entry['job_id']],
         'apply_verified': entry['apply_verified'], '_review_queue_id': row['id']})
     service.store.put('evidence', row['id'], {**entry, 'state': 'running', 'task_id': result['task_id']})

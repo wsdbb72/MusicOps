@@ -1,6 +1,8 @@
 """Task record removal and deliberate retries; music/download evidence survives."""
 import json
 import copy
+import uuid
+from pathlib import Path
 from musicops.clients.http import PolicyBlocked
 from musicops.state.store import utcnow
 
@@ -21,6 +23,34 @@ def current_config(workflows, job):
     if any(cfg['paths'][key] != job['config']['paths'][key] for key in PATH_KEYS):
         raise PolicyBlocked('音乐目录已改变，请从对应入口重新创建任务')
     return copy.deepcopy(cfg)
+
+
+def archive_failed_preparation(workflows,job,cfg):
+    """Explicit retry retains an owned, unpublished failed work copy for audit."""
+    from musicops.library.paths import reject_reparse_chain
+    from musicops.library.storage import storage_paths
+    expected=Path(storage_paths(cfg['paths']['library'])['work'])
+    configured=Path(workflows.work_paths({**job,'config':cfg})['work'])
+    if configured.absolute()!=expected.absolute():raise PolicyBlocked('旧工作目录与音乐库同级目录不一致，请先核对副本位置')
+    work=expected/'prepared'/job['job_id']
+    reject_reparse_chain(work)
+    if not work.exists():return None
+    if not job.get('prepared_root') or Path(job['prepared_root']).absolute()!=work.absolute():
+        raise PolicyBlocked('整理目录缺少本任务的归属记录，请先核对工作副本')
+    for prefix in ('workflow:','retire:'):
+        tx_id=str(uuid.uuid5(uuid.NAMESPACE_URL,'musicops:transaction:'+prefix+job['job_id']))
+        if workflows.store.get('transactions',tx_id) or workflows.store.get('change_plans',prefix+job['job_id']):
+            raise PolicyBlocked('已有文件事务，请先恢复或核对，不能重新准备音频')
+    archive=work.parent.parent/'failed-preparations'/job['job_id']/str(uuid.uuid4())
+    reject_reparse_chain(archive)
+    archive.parent.mkdir(parents=True,exist_ok=True)
+    # Intent survives interruption between rename and task-state persistence.
+    record={'kind':'failed_preparation','job_id':job['job_id'],'source':str(work),'archive':str(archive),'state':'planned'}
+    key='failed-preparation:'+archive.name
+    workflows.store.put('evidence',key,record)
+    work.rename(archive)
+    workflows.store.put('evidence',key,{**record,'state':'archived'})
+    return str(archive)
 
 
 def descendants(workflows, job):
@@ -109,6 +139,10 @@ def retry(workflows, job, *, query=None, sites=None, allow_review_search=False,a
     changes = dict(config=cfg, stage=stage, paused=False, next_poll=0,
                    review_kind=None, detail='', error_class=None, ai_assistance=None,
                    retry_count=int(job.get('retry_count', 0)) + 1, message='已重新排队，先核对既有状态后重试')
+    if stage=='metadata':
+        archived=archive_failed_preparation(workflows,job,cfg)
+        if archived:changes['failed_preparations']=[*job.get('failed_preparations',[]),archived]
+        changes.update(prepared=[],prepared_root=None,validation_failure=None)
     if allow_legacy:changes.update(legacy_batch_requires_review=False)
     if stage=='requesting':
         changes['add_unknown_polls']=0

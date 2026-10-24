@@ -292,14 +292,7 @@ class AppService:
                 if self.paused: continue
                 with self.store.connection() as c:row=c.execute("SELECT payload FROM tasks WHERE json_extract(payload,'$.state')='queued' ORDER BY CASE json_extract(payload,'$.command') WHEN 'refresh_playlist' THEN 0 WHEN 'manual_album_search' THEN 1 WHEN 'identify_metadata' THEN 1 WHEN 'resolve_metadata' THEN 1 WHEN 'accept_metadata' THEN 1 WHEN 'assist_workflows' THEN 3 WHEN 'advance_workflows' THEN 4 ELSE 2 END,updated_at,id LIMIT 1").fetchone()
                 if row is None:
-                    # A large AI backlog must not prevent already-resolved
-                    # albums from searching, downloading and reaching validation.
-                    if time.monotonic()-self._last_workflow_tick>=.5:
-                        self._last_workflow_tick=time.monotonic()
-                        if self.workflows.next_job():
-                            self.enqueue('advance_workflows',{});continue
-                    from musicops.app.review_queue import schedule
-                    if schedule(self):continue
+                    self._schedule_background()
                     continue
                 task=json.loads(row[0]); self.active=task['task_id']; task.update(state='running',started_at=utcnow()); self.store.put('tasks',self.active,task)
                 activity=self.store.get('evidence','workflow:activity:'+task['task_id'])
@@ -327,6 +320,25 @@ class AppService:
             from musicops.app.review_queue import finish
             finish(self,task)
             self.store.put('tasks',task['task_id'],task); self.store.event('task_'+task['state'],{'command':task['command'],'error':task.get('error'),'result':task.get('result')},task['task_id']); self.active=None
+    def _schedule_background(self):
+        now=time.monotonic()
+        if now-self._last_workflow_tick<.5:return False
+        self._last_workflow_tick=now
+        job=self.workflows.next_job()
+        waves=getattr(self,'_workflow_waves',0)
+        # Publication and active downloads retain priority. Other waves share
+        # the worker with durable AI reviews, even while metadata is backlogged.
+        urgent=job and job.get('stage') in ('requesting','downloading','validating','publishing','notifying','retiring')
+        from musicops.app.review_queue import schedule
+        if (not job or waves>=3 and not urgent) and schedule(self):
+            self._workflow_waves=0
+            return True
+        if job:
+            self.enqueue('advance_workflows',{})
+            self._workflow_waves=waves+1
+            return True
+        return False
+
     @staticmethod
     def _task_state(state):
         if state=='CANCELLED':return 'cancelled'
@@ -352,7 +364,13 @@ class AppService:
             self.stop.wait(.1)
     def _validator(self,cfg):
         from musicops.media.validation import MediaValidator
-        return MediaValidator(cfg['paths']['tools']['ffmpeg'],cfg['paths']['tools']['ffprobe'],timeout=cfg['worker']['decode_timeout'])
+        key=(cfg['paths']['tools']['ffmpeg'],cfg['paths']['tools']['ffprobe'],cfg['worker']['decode_timeout'])
+        with self.mutex:
+            if not hasattr(self,'_validators'):self._validators={}
+            if key not in self._validators:
+                self._validators[key]=MediaValidator(key[0],key[1],timeout=key[2])
+                if len(self._validators)>4:del self._validators[next(iter(self._validators))]
+            return self._validators[key]
     def _engine(self,cfg):
         from musicops.library.transactions import TransactionEngine
         for key in ('library','source','work','backup','quarantine'): self._safe_path(cfg['paths'][key])
@@ -685,7 +703,7 @@ class AppService:
             return self._catalog_clients[key]
     def _recognize_metadata(self,query,cfg,found=None,force=False):
         from musicops.app.recognition import RecognitionFallback
-        key='recognition-cache-v2:'+digest({'query':query,'found':found,'force':force,'ai':cfg['ai'],'credential_revision':self.vault.revision(cfg['ai'].get('auth_secret_ref','')),'catalog':cfg['catalog']})
+        key='recognition-cache-v3:'+digest({'query':query,'found':found,'force':force,'ai':cfg['ai'],'offline':cfg['offline'],'credential_revision':self.vault.revision(cfg['ai'].get('auth_secret_ref','')),'catalog_credential_revision':self.vault.revision(cfg['catalog']['discogs'].get('credential_ref','')),'catalog':cfg['catalog']})
         cached=self.store.get('evidence',key)
         if cached and time.time()-cached.get('at',0)<3600:return copy.deepcopy(cached['result'])
         result=RecognitionFallback(cfg,self._catalog_resolver(cfg),self.vault.get,self._checkpoint).identify(query,found=found,force=force)
@@ -904,12 +922,14 @@ class AppService:
         if settings['direct_backup'].get('enabled'):raise PolicyBlocked('真实只读资源阶段只验证HTTPS主服务，直连备用仍待独立确认')
         host=urlsplit(settings['primary']['base_url']).hostname
         public_hosts={urlsplit(settings['public_fallback'][k]).hostname for k in ('lyrics_url','cover_url')}
-        if not hasattr(self,'_lrc_clients'):self._lrc_clients={}
         key=digest(settings)
-        if key not in self._lrc_clients:
-            if len(self._lrc_clients)>=4:self._lrc_clients.pop(next(iter(self._lrc_clients)))
-            self._lrc_clients[key]=LrcApiClient(settings,{'private':SafeHttpTransport([host],offline=False),'public':SafeHttpTransport(public_hosts,offline=not settings['public_fallback']['enabled'])},self.vault.get)
-        client=self._lrc_clients[key];title=args.get('title','');artist=args.get('artist','');album=args.get('album','');query=dict(duration=args.get('duration'),refresh=args.get('refresh',False))
+        with self.mutex:
+            if not hasattr(self,'_lrc_clients'):self._lrc_clients={}
+            if key not in self._lrc_clients:
+                if len(self._lrc_clients)>=4:self._lrc_clients.pop(next(iter(self._lrc_clients)))
+                self._lrc_clients[key]=LrcApiClient(settings,{'private':SafeHttpTransport([host],offline=False),'public':SafeHttpTransport(public_hosts,offline=not settings['public_fallback']['enabled'])},self.vault.get)
+            client=self._lrc_clients[key]
+        title=args.get('title','');artist=args.get('artist','');album=args.get('album','');query=dict(duration=args.get('duration'),refresh=args.get('refresh',False))
         self._checkpoint('before_real_lyrics');lyrics=client.candidates(title,artist,album,**query)
         self._checkpoint('before_real_cover');cover=client.cover(title,artist,album,**query) if args.get('include_cover',True) else {'state':'SKIPPED','candidates':[],'errors':[]}
         candidates=[];cover_preview=None

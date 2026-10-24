@@ -21,16 +21,16 @@ MESSAGES = {
 }
 
 
-def search_site(factory, query):
+def search_site(factory, query, page=1):
     """Isolate one site's construction/network failure without hiding cancellation."""
     try:
-        return factory().search(query)
+        return factory().search(query) if page==1 else factory().search(query,page=page)
     except (HttpError, PolicyBlocked, OSError, TimeoutError) as exc:
         return {'status': getattr(exc, 'error_class', 'NETWORK_ERROR'), 'candidates': []}
 
 
 def search_album(factory, query, album='', checkpoint=None):
-    """One exact query, then one title-only query only after a successful empty page.
+    """Bounded pagination, then title-only after a successful empty search.
 
     Broader results are candidates, never evidence that identity is confirmed.
     Rate/auth/network failures do not trigger an immediate retry storm.
@@ -40,11 +40,19 @@ def search_album(factory, query, album='', checkpoint=None):
         queries.append(album.strip())
     attempts = []; candidates = {}; result = {}
     for keyword in queries:
-        if checkpoint: checkpoint()
-        result = search_site(factory, keyword)
-        attempts.append({'query': keyword, 'status': result.get('status')})
-        for candidate in result.get('candidates', []):
-            candidates.setdefault((candidate.get('source'), candidate.get('candidate_id')), candidate)
+        seen_pages=set()
+        for page in range(1,6):
+            if checkpoint: checkpoint()
+            result=search_site(factory,keyword,page)
+            attempts.append({'query':keyword,'page':page,'status':result.get('status')})
+            page_ids=tuple(sorted((str(c.get('source')),str(c.get('candidate_id'))) for c in result.get('candidates',[])))
+            for candidate in result.get('candidates',[]):
+                candidates.setdefault((candidate.get('source'),candidate.get('candidate_id')),candidate)
+            if result.get('status') not in SUCCESS or result.get('search_complete') is not False:break
+            # Sites without valid pagination evidence cannot be safely guessed.
+            if result.get('page')!=page or not page_ids or page_ids in seen_pages:break
+            seen_pages.add(page_ids)
+            if page==5:result={**result,'limit_reason':'检索已达每站每词 5 页上限，可缩小搜索词后重试'}
         if candidates or result.get('status') not in SUCCESS or result.get('search_complete') is False:
             break
     return {**result, 'candidates': list(candidates.values()), 'attempts': attempts}

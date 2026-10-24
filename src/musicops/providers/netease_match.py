@@ -25,6 +25,15 @@ def same_recording(target,candidate):
 
 
 def resolve_netease_target(target,config,secret_getter,checkpoint=lambda *_:None,transport=None):
+    if transport is not None:return _resolve_netease_target(target,config,secret_getter,checkpoint,transport)
+    reference=netease_reference(target)
+    if reference:return reference
+    owned=SafeHttpTransport(['music.163.com'],offline=False)
+    try:return _resolve_netease_target(target,config,secret_getter,checkpoint,owned)
+    finally:owned.close()
+
+
+def _resolve_netease_target(target,config,secret_getter,checkpoint,transport):
     reference=netease_reference(target)
     if reference:return reference
     if not target.get('raw_title') or not target.get('artists') or not target.get('album') or not target.get('duration'):

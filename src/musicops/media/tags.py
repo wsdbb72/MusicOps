@@ -7,13 +7,16 @@ from mutagen.id3 import ID3, TIT2, TPE1, TALB, TPE2, TRCK, TPOS, TDRC, TCON, TCO
 from mutagen.id3 import APIC
 from mutagen.flac import FLAC,Picture
 from mutagen.mp4 import MP4Cover
+from mutagen.apev2 import APEv2,APETextValue
 from musicops.media.resources import validate_cover
 
 ID3_FIELDS = {'title':('TIT2',TIT2),'artist':('TPE1',TPE1),'album':('TALB',TALB),'albumartist':('TPE2',TPE2),'tracknumber':('TRCK',TRCK),'discnumber':('TPOS',TPOS),'date':('TDRC',TDRC),'genre':('TCON',TCON),'composer':('TCOM',TCOM)}
 SUPPORTED = set(ID3_FIELDS) | {'lyrics'}
+APE_FIELDS={'albumartist':'Album Artist','tracknumber':'Track','discnumber':'Disc','date':'Year'}
 
 def _values(value):
     if value is None: return []
+    if isinstance(value,APETextValue):return list(value)
     return [str(x) for x in value] if isinstance(value,(list,tuple)) else [str(value)]
 
 def read_tag_fields(path) -> dict:
@@ -30,6 +33,8 @@ def read_tag_fields(path) -> dict:
         result = {k:_values((tags or {}).get(v,[])) for k,v in mapping.items()}
         for field,key in [('tracknumber','trkn'),('discnumber','disk')]:
             result[field] = [str(x[0]) if not x[1] else f'{x[0]}/{x[1]}' for x in (tags or {}).get(key,[])]
+    elif isinstance(tags,APEv2):
+        result={field:_values(tags.get(APE_FIELDS.get(field,field),tags.get(field,[]))) for field in SUPPORTED}
     else:
         result = {field:_values((tags or {}).get(field,[])) for field in SUPPORTED}
     return result
@@ -69,6 +74,11 @@ def apply_tag_changes(copy_path, changes) -> dict:
                 values = [tuple(int(x) for x in v.split('/')) if '/' in v else (int(v),0) for v in values]
             if values: obj.tags[key]=values
             elif key in obj.tags: del obj.tags[key]
+        elif isinstance(obj.tags,APEv2):
+            key=APE_FIELDS.get(field,field)
+            if key.casefold()!=field.casefold() and field in obj.tags:del obj.tags[field]
+            if values:obj.tags[key]=values
+            elif key in obj.tags:del obj.tags[key]
         else:
             if values: obj.tags[field]=values
             elif field in obj.tags: del obj.tags[field]
@@ -90,6 +100,8 @@ def embedded_covers(path) -> list[bytes]:
     if isinstance(obj,FLAC):return [picture.data for picture in obj.pictures]
     if isinstance(getattr(obj,'tags',None),ID3):return [picture.data for picture in obj.tags.getall('APIC')]
     if obj and obj.__class__.__name__=='MP4':return [bytes(data) for data in (obj.tags or {}).get('covr',[])]
+    if isinstance(getattr(obj,'tags',None),APEv2):
+        return [bytes(value).split(b'\0',1)[1] for key,value in obj.tags.items() if key.casefold().startswith('cover art (') and getattr(value,'kind',None)==1 and b'\0' in bytes(value)]
     result=[]
     if obj:
         for encoded in (obj.tags or {}).get('metadata_block_picture',[]):
@@ -147,6 +159,9 @@ def apply_cover_changes(copy_path,content,min_side=300) -> dict:
         if checked['format'] not in ('JPEG','PNG'):raise ValueError('UNSUPPORTED_MP4_COVER_FORMAT')
         retained=list(obj.tags.get('covr',[]))[1:]
         obj.tags['covr']=[MP4Cover(content,imageformat=MP4Cover.FORMAT_JPEG if checked['format']=='JPEG' else MP4Cover.FORMAT_PNG),*retained]
+    elif isinstance(obj.tags,APEv2):
+        extension={'JPEG':'jpg','PNG':'png','WEBP':'webp'}[checked['format']]
+        obj.tags['Cover Art (Front)']=('cover.'+extension).encode('ascii')+b'\0'+content
     elif obj.__class__.__name__ in ('OggVorbis','OggOpus'):
         retained=[]
         for old in obj.tags.get('metadata_block_picture',[]):

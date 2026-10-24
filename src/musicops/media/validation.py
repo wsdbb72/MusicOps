@@ -8,6 +8,7 @@ import shutil
 import subprocess
 import tempfile
 import uuid
+import threading
 from datetime import datetime, timezone
 from pathlib import Path
 from collections import OrderedDict
@@ -38,14 +39,28 @@ class MediaValidator:
     def __init__(self, ffmpeg='ffmpeg', ffprobe='ffprobe', timeout=60):
         self.ffmpeg, self.ffprobe, self.timeout = str(ffmpeg), str(ffprobe), timeout
         self._cache = OrderedDict()
+        self._cache_lock=threading.RLock()
+        self._versions=None
+        self._tool_identity=None
 
     def tool_versions(self):
+        identity=[]
+        for executable in (self.ffmpeg,self.ffprobe):
+            resolved=shutil.which(executable) or executable
+            try:
+                stat=Path(resolved).stat();identity.append((str(Path(resolved).resolve()),stat.st_size,stat.st_mtime_ns,stat.st_ino))
+            except OSError:identity=None;break
+        with self._cache_lock:
+            if identity is not None and identity==self._tool_identity and self._versions is not None:
+                return dict(self._versions)
         versions = {}
         for name, executable in [('ffmpeg', self.ffmpeg), ('ffprobe', self.ffprobe)]:
             value = _run([executable, '-version'], min(self.timeout, 10))
             if value.returncode:
                 raise OSError('媒体验证器版本查询失败')
             versions[name] = value.stdout.decode('utf-8', 'replace').splitlines()[0]
+        if identity is not None:
+            with self._cache_lock:self._tool_identity=identity;self._versions=dict(versions)
         return versions
 
     def validate(self, path):
@@ -61,14 +76,15 @@ class MediaValidator:
             versions = self.tool_versions()
             result.update(file_hash=content_hash, size=before[0], mtime_ns=before[1], tool_versions=versions)
             key = (content_hash, before, path.suffix.casefold(), json.dumps(versions, sort_keys=True), tuple(result['parameters']))
-            if key in self._cache:
+            with self._cache_lock:
+                cached=copy.deepcopy(self._cache.get(key))
+                if cached:self._cache.move_to_end(key)
+            if cached:
                 # Hash is freshly calculated even for a cache hit, never path-only.
-                cached = copy.deepcopy(self._cache[key])
                 if file_version(path) != before or sha256_file(path) != content_hash:
                     result.update(decode_state='changed_during_check', error_class='CHANGED_DURING_CHECK')
                     return result
                 cached.update(path=str(path), cache_hit=True)
-                self._cache.move_to_end(key)
                 return cached
             probe = _run([self.ffprobe, '-v', 'error', '-show_format', '-show_streams', '-of', 'json', str(path)], self.timeout)
             probe_text = probe.stderr.decode('utf-8', 'replace')
@@ -108,10 +124,10 @@ class MediaValidator:
             if before != after or sha256_file(path) != content_hash:
                 result.update(decode_state='changed_during_check', error_class='CHANGED_DURING_CHECK', roon_compatible=False)
             if result['decode_state'] in {'passed', 'corrupt', 'unsupported'}:
-                self._cache[key] = copy.deepcopy(result)
-                self._cache.move_to_end(key)
-                if len(self._cache)>1024:
-                    self._cache.popitem(last=False)
+                with self._cache_lock:
+                    self._cache[key] = copy.deepcopy(result)
+                    self._cache.move_to_end(key)
+                    if len(self._cache)>1024:self._cache.popitem(last=False)
         except subprocess.TimeoutExpired:
             result.update(decode_state='timeout', error_class='TIMEOUT')
         except (OSError, ValueError, json.JSONDecodeError) as exc:

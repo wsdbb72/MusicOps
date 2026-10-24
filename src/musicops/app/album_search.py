@@ -68,5 +68,5 @@ def manual_album_search(service,args,cfg):
     if not configured:message='尚未启用资源站，请在连接与设置中导入 Cookie 并开启参与检索。'
     elif not summary['successful_sites']:message='已启用站点当前均不可用，请查看各站状态后重试。'
     elif summary['unavailable_sites']:message+=' 可访问站点的检索已完成，其他站点可稍后单独重试。'
-    if summary['limited_sites']:message+=' 部分站点仅返回首页，当前结果不能用于断言全站无匹配。'
+    if summary['limited_sites']:message+=' 部分站点仍有未读取或未核实的结果页，当前结果不能用于断言全站无匹配。'
     return {'status':'NOT_CONFIGURED' if not configured else 'SEARCH_UNAVAILABLE' if not summary['successful_sites'] else 'OK' if candidates else 'NO_MATCH','mode':mode,'query':query,'album':identity,'candidates':candidates,'source_outcomes':outcomes,'excluded_count':excluded,'read_only':True,'music_writes':0,'message':message,**summary}

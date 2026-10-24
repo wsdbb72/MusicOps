@@ -92,7 +92,7 @@ def test_unread_result_pages_are_a_scope_warning_not_a_failed_search(service,mon
     monkeypatch.setattr(service,'_catalog_command',lambda *a:{'candidate':{'title':'Album','artists':['Artist']}})
     class Provider:
         def __init__(self,site):self.site=site
-        def search(self,_):return {'status':'OK','search_complete':False,'page':1,'pages':3,'candidates':[candidate(self.site,'Other Album')]}
+        def search(self,_,page=1):return {'status':'OK','search_complete':False,'page':page,'pages':3,'candidates':[candidate(self.site,'Other Album')]}
     monkeypatch.setattr(service,'_real_pt',lambda site,cfg:Provider(site))
     result=manual_album_search(service,{'mode':'precise','query':'Album','candidate_id':'chosen'},service.config.current()['values'])
     assert result['status']=='NO_MATCH' and result['candidates']==[] and result['excluded_count']==4

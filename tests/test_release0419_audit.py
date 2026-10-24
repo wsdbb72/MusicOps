@@ -1,5 +1,6 @@
 """Private-profile audit regressions; no live download or library modifications."""
 import json
+import sqlite3
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -91,6 +92,48 @@ def test_transaction_owner_projection_backfills_legacy_state(tmp_path):
     store=StateStore(store.path)
     with store.connection() as connection:
         assert tuple(connection.execute('SELECT transaction_id,operation_id FROM transaction_operations').fetchone())==('old','old-op')
+
+
+def test_interrupted_projection_migration_rolls_back_ddl_and_retries(tmp_path,monkeypatch):
+    store=StateStore(tmp_path/'interrupted.sqlite')
+    store.put('transactions','old',{'tx_id':'old','state':'COMMITTED','operations':[{'operation_id':'preserved'}]})
+    with store.connection() as connection:
+        for action in ('insert','update','delete'):connection.execute('DROP TRIGGER transaction_operations_'+action)
+        connection.execute('DROP TABLE transaction_operations')
+    connect=sqlite3.connect
+    class Interrupted(sqlite3.Connection):
+        def execute(self,sql,*args,**kwargs):
+            if sql.startswith('INSERT OR IGNORE INTO transaction_operations SELECT t.id'):
+                raise sqlite3.OperationalError('synthetic interruption before backfill')
+            return super().execute(sql,*args,**kwargs)
+    with monkeypatch.context() as patch:
+        patch.setattr(sqlite3,'connect',lambda *a,**k:connect(*a,**k,factory=Interrupted))
+        with pytest.raises(sqlite3.OperationalError,match='synthetic interruption'):StateStore(store.path)
+    with connect(store.path) as connection:
+        assert connection.execute("SELECT 1 FROM sqlite_master WHERE name='transaction_operations'").fetchone() is None
+    store=StateStore(store.path)
+    with store.connection() as connection:
+        assert connection.execute('SELECT operation_id FROM transaction_operations').fetchone()[0]=='preserved'
+
+
+def test_interrupted_task_projection_does_not_hide_existing_jobs(tmp_path,monkeypatch):
+    store=StateStore(tmp_path/'task-migration.sqlite')
+    store.put('evidence','workflow:kept',{'job_id':'kept','stage':'needs_review'})
+    with store.connection() as connection:
+        for action in ('insert','update','delete'):connection.execute('DROP TRIGGER workflow_projection_'+action)
+        connection.execute('DROP TABLE workflow_overview')
+    connect=sqlite3.connect
+    class Interrupted(sqlite3.Connection):
+        def execute(self,sql,*args,**kwargs):
+            if sql.startswith('INSERT OR REPLACE INTO workflow_overview'):
+                raise sqlite3.OperationalError('synthetic task-index interruption')
+            return super().execute(sql,*args,**kwargs)
+    with monkeypatch.context() as patch:
+        patch.setattr(sqlite3,'connect',lambda *a,**k:connect(*a,**k,factory=Interrupted))
+        with pytest.raises(sqlite3.OperationalError,match='synthetic task-index'):StateStore(store.path)
+    store=StateStore(store.path)
+    with store.connection() as connection:
+        assert connection.execute('SELECT job_id FROM workflow_overview').fetchone()[0]=='kept'
 
 
 def test_preparation_retry_archives_failed_work_then_rebuilds(service):

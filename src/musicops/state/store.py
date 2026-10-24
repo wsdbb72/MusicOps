@@ -40,6 +40,9 @@ class StateStore:
             c.execute('PRAGMA user_version=1')
             from musicops.state.projections import initialize
             if progress:progress('正在更新任务摘要索引；首次升级大档案可能需要几十秒，历史记录会保留')
+            # DDL must be atomic with backfill: interruption cannot leave an
+            # existing but empty task/operation ownership projection.
+            if not c.in_transaction:c.execute('BEGIN IMMEDIATE')
             initialize(c)
             # Exact-path and operation ownership lookups must not deserialize
             # every historical file/transaction for each album publication.

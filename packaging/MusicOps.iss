@@ -5,7 +5,7 @@
 #ifndef AppIdentity
   #define AppIdentity "MusicOps.Desktop"
 #endif
-#define MusicOpsVersion "0.4.20"
+#define MusicOpsVersion "0.4.21"
 
 [Setup]
 AppId={#AppIdentity}

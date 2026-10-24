@@ -306,3 +306,20 @@ def test_non_chinese_identity_does_not_load_conversion_dictionary(monkeypatch):
     monkeypatch.setattr('musicops.media.chinese._converter',lambda:pytest.fail('non-Han identity must not load Chinese dictionaries'))
     assert alias_key('  Synthetic ARTIST  ')=='synthetic artist'
     assert alias_key('カタカナ')=='カタカナ'
+
+
+def test_publisher_reads_notes_from_verified_source_without_checkout(tmp_path,monkeypatch):
+    import pathlib,textwrap,zipfile
+    root=Path(__file__).resolve().parents[1]
+    workflow=(root/'.github/workflows/desktop-release.yml').read_text('utf-8')
+    # Execute the real publisher fragment in an empty directory. Its job
+    # downloads build artifacts and intentionally does not check out the repo.
+    fragment=workflow[workflow.index("          notes = pathlib.Path('release-notes.md')"):]
+    fragment=fragment[:fragment.index('          def gh(')]
+    artifacts=tmp_path/'release-assets';artifacts.mkdir()
+    with zipfile.ZipFile(artifacts/'MusicOps-0.0.1-source.zip','w') as archive:
+        archive.writestr('MusicOps-0.0.1/docs/发布说明.md','合成发行说明')
+    monkeypatch.chdir(tmp_path)
+    assert not (tmp_path/'docs').exists()
+    exec(compile(textwrap.dedent(fragment),'publisher-notes','exec'),{'pathlib':pathlib,'zipfile':zipfile,'root':artifacts,'version':'0.0.1','commit':'f'*40})
+    assert (tmp_path/'release-notes.md').read_text('utf-8')=='合成发行说明\n\nSource commit: '+'f'*40+'\n'

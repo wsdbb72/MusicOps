@@ -323,7 +323,9 @@ jobs:
               if obj['type'] != 'commit' or obj['sha'] != commit:
                   raise SystemExit('The existing tag does not identify the tested source')
           notes = pathlib.Path('release-notes.md')
-          notes.write_text(pathlib.Path('docs/发布说明.md').read_text('utf-8').rstrip()+'\n\nSource commit: '+commit+'\n', 'utf-8')
+          with zipfile.ZipFile(root/f'MusicOps-{version}-source.zip') as archived_source:
+              release_notes = archived_source.read(f'MusicOps-{version}/docs/发布说明.md').decode('utf-8')
+          notes.write_text(release_notes.rstrip()+'\n\nSource commit: '+commit+'\n', 'utf-8')
           def gh(*arguments):
               subprocess.run(['gh', *arguments], check=True)
           gh('release', 'create', tag, '--verify-tag', '--target', commit, '--draft', '--title', 'MusicOps '+version, '--notes-file', str(notes))

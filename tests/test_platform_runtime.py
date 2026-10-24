@@ -22,6 +22,12 @@ from musicops.worker.client import WorkerClient,pipe_address
 from musicops.worker.lock import WriterLock
 
 
+def test_native_runtime_chinese_converter_and_dictionary():
+    from musicops.media.chinese import alias_key
+    assert alias_key('合成測試藝人')==alias_key('合成测试艺人')
+    assert alias_key('Synthetic Artist')=='synthetic artist'
+
+
 def test_windows_pipe_address_contract_is_unchanged(tmp_path,monkeypatch):
     monkeypatch.setattr(platforms,'runtime_platform',lambda:'win32')
     expected=hashlib.sha256((str(tmp_path.resolve()).lower()+os.environ.get('USERNAME','')).encode()).hexdigest()[:24]

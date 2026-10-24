@@ -286,3 +286,23 @@ def test_validation_failure_persists_track_cause_and_leaves_source(service,tmp_p
     assert saved['validation_failure']['error_class']=='DECODE_FAILED'
     assert saved['prepared'][0]['validation']['decode_state']=='corrupt'
     assert source.read_bytes()==b'corrupt fixture'
+
+
+def test_native_platform_dependency_locks_cover_project_runtime_dependencies():
+    import tomllib
+    from packaging.requirements import Requirement
+    from packaging.utils import canonicalize_name
+    root=Path(__file__).resolve().parents[1]
+    project=tomllib.loads((root/'pyproject.toml').read_text('utf-8'))
+    runtime={canonicalize_name(Requirement(value).name) for value in project['project']['dependencies']}
+    for filename in ('requirements.lock','packaging/requirements-macos.txt','docker/requirements.txt'):
+        pinned={canonicalize_name(Requirement(line).name) for line in (root/filename).read_text('utf-8').splitlines() if line.strip() and not line.startswith('#')}
+        expected=runtime-({'pyside6'} if filename.startswith('docker/') else set())
+        assert expected<=pinned,(filename,expected-pinned)
+
+
+def test_non_chinese_identity_does_not_load_conversion_dictionary(monkeypatch):
+    from musicops.media.chinese import alias_key
+    monkeypatch.setattr('musicops.media.chinese._converter',lambda:pytest.fail('non-Han identity must not load Chinese dictionaries'))
+    assert alias_key('  Synthetic ARTIST  ')=='synthetic artist'
+    assert alias_key('カタカナ')=='カタカナ'

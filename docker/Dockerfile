@@ -19,7 +19,7 @@ COPY pyproject.toml /build/
 COPY src /build/src
 RUN pip wheel --no-deps --wheel-dir /wheels . && python packaging/collect_licenses.py /licenses
 FROM system AS runtime
-ARG VERSION=0.4.19
+ARG VERSION=0.4.20
 ARG REVISION=unknown
 LABEL org.opencontainers.image.title="MusicOps" \
       org.opencontainers.image.source="https://github.com/wsdbb72/MusicOps" \

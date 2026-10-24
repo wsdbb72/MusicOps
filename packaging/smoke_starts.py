@@ -19,7 +19,7 @@ def main():
     values['catalog']['enabled']=False
     for provider in values['providers'].values():provider['enabled']=False
     config.save(values,current['version'])
-    store.put('target_tracks','fixture-track',{'target_id':'fixture-track','raw_title':'Fixture Song','artists':['Fixture Artist'],'album':'Fixture Album','duration':120})
+    store.put('target_tracks','fixture-track',{'target_id':'fixture-track','raw_title':'合成測試歌曲','artists':['合成測試藝人'],'album':'合成測試專輯','duration':120})
     env=os.environ.copy();env['QT_QPA_PLATFORM']='offscreen'
     for key in ('PYTHONPATH','PYTHONHOME','VIRTUAL_ENV'):env.pop(key,None)
     process=subprocess.Popen([str(bundle/'MusicOps.exe'),'--base',str(base),'--quit-after','180000'],cwd=bundle,env=env,creationflags=0x08000000)

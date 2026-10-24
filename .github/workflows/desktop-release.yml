@@ -323,7 +323,7 @@ jobs:
               if obj['type'] != 'commit' or obj['sha'] != commit:
                   raise SystemExit('The existing tag does not identify the tested source')
           notes = pathlib.Path('release-notes.md')
-          notes.write_text('修复大档案启动与任务列表读取阻塞：使用事务维护的轻量摘要索引，保留原始任务、配置和凭据，首次升级显示明确进度。新增 Plex 音乐库连接测试与入库后扫描。Docker 8080 改为原生 HTML WebUI，与桌面共用后台，支持歌单、检索、任务批量处理、连续手动核对、去重恢复、所选专辑补缺曲、库内单曲升级整碟，以及歌单 Single 在下载前选择完整 Album；同一完整发行共享下载任务，保留歌单来源，特殊录音与再版分别核验。\n\n统一流媒体兜底和歌单授权设置，Cookie/扫码登录可在同平台复用，API Token 不与网页 Cookie 混用。新增可选外部 musicdl 适配器，支持 TIDAL、Qobuz、Deezer、SoundCloud、JOOX、Audius、千千和街声；因上游分发条款不捆绑 musicdl，需自行安装。参考 Antra 的多源身份核验流程。新增当前填写内容的歌词、AI 与 Plex 连接测试，修复扩展 LRC 元数据及单曲无效响应误熔断全服务，补歌词时不再重复下载无关封面。\n\n提供 Windows 安装版、便携版及 macOS ARM 原生 PKG 与 ZIP；同提交同步发布 Linux amd64 Docker。macOS 为 ad-hoc 签名，尚无 Developer ID 公证。验收使用合成资料，未发起真实音乐下载或消费 FL；外部平台实际可用性仍取决于账号权限及服务。\n\nSource commit: '+commit+'\n', 'utf-8')
+          notes.write_text(pathlib.Path('docs/发布说明.md').read_text('utf-8').rstrip()+'\n\nSource commit: '+commit+'\n', 'utf-8')
           def gh(*arguments):
               subprocess.run(['gh', *arguments], check=True)
           gh('release', 'create', tag, '--verify-tag', '--target', commit, '--draft', '--title', 'MusicOps '+version, '--notes-file', str(notes))

@@ -80,7 +80,7 @@ def main():
         values['catalog']['enabled']=False;values['ai']['enabled']=False
         for provider in values['providers'].values():provider['enabled']=False
         values['music_servers']['roon']['enabled']=False;values['music_servers']['navidrome']['enabled']=False;manager.save(values,current['version'])
-        store.put('target_tracks','macos:fixture',{'target_id':'macos:fixture','source':'local','raw_title':'Synthetic Song','artists':['Synthetic Artist'],'album':'Synthetic Album','duration':120,'metadata_complete':True})
+        store.put('target_tracks','macos:fixture',{'target_id':'macos:fixture','source':'local','raw_title':'合成測試歌曲','artists':['合成測試藝人'],'album':'合成測試專輯','duration':120,'metadata_complete':True})
         phase='native_cocoa_gui';screenshot=work/'native-window.png';process=launch(gui,'--base',base,'--screenshot',screenshot,'--quit-after','14000')
         status=wait_for(lambda:client.call('get_status',{'compact':True}));checks['gui_started_frozen_worker']=Path(status['base'])==base and status['offline'] is False
         phase='concurrent_gui_polling'

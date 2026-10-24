@@ -9,7 +9,9 @@ def _converter():
     return OpenCC('t2s')
 
 def simplified(text):
-    return _converter().convert(str(text or ''))
+    text=str(text or '')
+    if not re.search(r'[\u3400-\u9fff\uf900-\ufaff]',text):return text
+    return _converter().convert(text)
 
 def alias_key(text):
     return ' '.join(unicodedata.normalize('NFKC',simplified(text)).casefold().split())

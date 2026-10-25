@@ -98,7 +98,8 @@ def _candidate(service, job, cfg, provider):
         context = RecognitionFallback._context_candidate(candidate)
         context['disambiguation'] = json.dumps({k:candidate.get('media',{}).get(k) for k in ('format','encoding','sample_rate','bits_per_sample','bitrate','channels')},ensure_ascii=False)[:500]
         contexts.append(context)
-    query = RecognitionFallback._query({'album': first.get('album', ''), 'artists': first.get('albumartist') or first.get('artists', []), 'title': ''})
+    from musicops.media.source_labels import effective_album_artists
+    query = RecognitionFallback._query({'album': first.get('album', ''), 'artists': effective_album_artists(first), 'title': ''})
     key='ai-choice:'+digest({'query':query,'candidates':contexts,'ai':cfg['ai']})
     cached=service.store.get('evidence',key)
     import time

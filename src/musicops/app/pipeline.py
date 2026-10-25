@@ -17,6 +17,7 @@ from musicops.library.transactions import TransactionEngine,durable_copy
 from musicops.media.tags import read_tag_fields,apply_tag_changes,embedded_covers,apply_cover_changes
 from musicops.media.resources import validate_lrc,validate_cover
 from musicops.media.identity_fields import usable,release_pairs
+from musicops.media.source_labels import album_artist_credits,effective_album_artists,normalize_album_artist,has_source_credit,album_label
 from musicops.app.search_status import SITE_NAMES,search_site,search_album,edition_conflict,summarize,detail as search_detail
 
 TERMINAL={'completed','failed','needs_review','cancelled','skipped','restored'}
@@ -241,25 +242,26 @@ class Workflows:
                 groups[key].append(t)
         else:
             for f in files:
-                groups[(str(album_root(f,root)),strict_text(f.get('album')),() if scene=='expand' else artist_key(f.get('albumartist') or f.get('artists',[])))].append(f)
+                groups[(str(album_root(f,root)),strict_text(f.get('album')),() if scene=='expand' else artist_key(effective_album_artists(f)))].append(f)
         local_groups=collections.defaultdict(list)
         if scene=='playlist':
-            for f in files:local_groups[(strict_text(f.get('album')),artist_key(f.get('albumartist') or f.get('artists',[])))].append(f)
+            for f in files:local_groups[(strict_text(f.get('album')),artist_key(effective_album_artists(f)))].append(f)
         created=0
         for _,tracks in groups.items():
             self.checkpoint(batch,'creating_album_tasks')
             if scene=='complete' and not args.get('refresh_resources'):
                 recent=True
                 for row in tracks:
+                    if any(isinstance(marker,dict) and marker.get('field')=='albumartist' for marker in row.get('source_labels',[])):recent=False
                     cached=self.store.get('evidence','resources-checked:'+row['file_id'])
                     recent=recent and bool(cached and cached.get('resource_contract')==2 and cached.get('version')==[row['size'],row['mtime_ns']] and cached.get('settings')==digest(cfg['lyrics']) and __import__('time').time()-cached.get('checked_at',0)<cfg['lyrics']['negative_ttl'])
                 if recent:continue
             job_id=str(uuid.uuid4());first=tracks[0];stage='metadata' if scene=='complete' else 'snapshotting' if scene in ('upgrade','fill','expand') else 'identifying'
             paused=bool((self.store.get('evidence','workflow:'+batch['job_id']) or {}).get('paused'))
-            job={'kind':'workflow','job_id':job_id,'batch_id':batch_id,'scene':scene,'config':copy.deepcopy(cfg),'targets':tracks if scene=='playlist' else [],'old_files':tracks if scene!='playlist' else [],'stage':stage,'task_group':'repair' if scene=='complete' else 'identify','task_type':'album' if scene=='complete' else 'identification','target_count':len(tracks),'paused':paused,'progress':0,'created_at':utcnow(),'message':'等待识别' if scene=='playlist' else '等待处理','detail':'','label':(first.get('album') or '待识别专辑')+' · '+' / '.join(first.get('albumartist') or first.get('artists',[])),'prefer_24bit':args.get('prefer_24bit',cfg['workflow']['prefer_24bit']),'refresh_resources':bool(args.get('refresh_resources')),'retire_single_requested':bool(args.get('retire_single'))}
+            job={'kind':'workflow','job_id':job_id,'batch_id':batch_id,'scene':scene,'config':copy.deepcopy(cfg),'targets':tracks if scene=='playlist' else [],'old_files':tracks if scene!='playlist' else [],'stage':stage,'task_group':'repair' if scene=='complete' else 'identify','task_type':'album' if scene=='complete' else 'identification','target_count':len(tracks),'paused':paused,'progress':0,'created_at':utcnow(),'message':'等待识别' if scene=='playlist' else '等待处理','detail':'','label':album_label(first),'prefer_24bit':args.get('prefer_24bit',cfg['workflow']['prefer_24bit']),'refresh_resources':bool(args.get('refresh_resources')),'retire_single_requested':bool(args.get('retire_single'))}
             if scene=='playlist':
                 job['prefer_full_album']=args.get('prefer_full_album',False)
-                local=local_groups.get((strict_text(first.get('album')),artist_key(first.get('albumartist') or first.get('artists',[]))),[])
+                local=local_groups.get((strict_text(first.get('album')),artist_key(effective_album_artists(first))),[])
                 if len({str(album_root(f,root)) for f in local})==1:job['existing_album_files']=local
             self.put(job)
             created+=1
@@ -442,6 +444,13 @@ class Workflows:
             # Older snapshots may move cached files or torrent locations.
             with self._migration_lock:
                 if not prepare(self,job):return {'status':'OK','job_id':job['job_id'],'relocating':True}
+            if stage in ('validating','publishing') and any(has_source_credit(row.get('tags',{}).get('albumartist')) for row in job.get('prepared',[])):
+                plan_id=(job.get('publication_plan') or {}).get('plan_id') or 'workflow:'+job['job_id']
+                with self.store.connection() as connection:existing=connection.execute("SELECT 1 FROM transactions WHERE json_extract(payload,'$.plan_id')=? LIMIT 1",(plan_id,)).fetchone()
+                if not existing:
+                    history=job.get('source_repair_previous_plans',[])
+                    if job.get('publication_plan'):history=[*history,job['publication_plan']]
+                    stage='enrich';self.put(job,publication_plan=None,resource_contract=0,source_repair_previous_plans=history,resume_stage=stage,message='来源标记不作为专辑艺人，重新整理副本后验证')
             self.checkpoint(job,stage)
             getattr(self,'_'+stage)(job)
         except Exception as exc:
@@ -565,7 +574,7 @@ class Workflows:
             self.put(job,stage='completed',progress=100,processing_job_id=child_id,message='检索完成，已创建独立下载与入库任务')
     def _searching(self,job):
         from musicops.app.streaming_fallback import available as fallback_available
-        cfg=job['config'];tracks=job['targets'] or job['old_files'];first=tracks[0];album=first.get('album');artists=first.get('albumartist') or first.get('artists',[])
+        cfg=job['config'];tracks=job['targets'] or job['old_files'];first=tracks[0];album=first.get('album');artists=effective_album_artists(first)
         if not album or not artists or job['scene']=='playlist' and first.get('source') and not first.get('duration'):
             from musicops.providers.catalog import lookup_links
             self.put(job,lookup_links=lookup_links({'title':first.get('raw_title',''),'artists':artists,'album':album}),stage='needs_review',review_kind='metadata',message='专辑、艺人或完整时长缺失，需要先核对资料');return
@@ -750,7 +759,7 @@ class Workflows:
                 tracks=resolved.get('tracklist',[])
                 if for_cover:
                     from musicops.media.identity_fields import cover_artist_names,credits_equal
-                    local_artists=first.get('tags',{}).get('albumartist') or first.get('artists',[])
+                    local_artists=album_artist_credits(first.get('tags',{}).get('albumartist')) or first.get('artists',[])
                     if not credits_equal(cover_artist_names(local_artists),cover_artist_names(resolved.get('artists',[]))):continue
                 from musicops.media.identity_fields import cover_pairs
                 pairs=cover_pairs(rows,tracks) if for_cover else release_pairs(rows,tracks)
@@ -782,6 +791,7 @@ class Workflows:
             complete=True;disc_totals=[];disc_numbers=[]
             for row in job['old_files']:
                 tags=read_tag_fields(row['path']);number=(tags.get('discnumber') or [''])[0]
+                if has_source_credit(tags.get('albumartist')):complete=False
                 if not all(tags.get(k) and all(usable(v) for v in tags[k]) for k in ('title','artist','album','albumartist','tracknumber','discnumber')) or '/' not in number:complete=False
                 if '/' in number:
                     n,total=number.split('/',1)
@@ -870,6 +880,7 @@ class Workflows:
         self._enrich(job,prepared)
     def _enrich(self,job,prepared=None):
         prepared=prepared if prepared is not None else job['prepared']
+        for row in prepared:normalize_album_artist(row,row.get('tags',{}).get('albumartist',[]))
         cfg=job['config'];album_names={strict_text(r['album']) for r in prepared}
         if len(album_names)!=1:raise PolicyBlocked('下载内容包含多个专辑，不能合并为一张发行')
         from musicops.media.numbering import number_tag,directory_disc,declared_disc_total,netease_pairs
@@ -901,7 +912,7 @@ class Workflows:
                 if not write_numbering(row,changes):return
             if any(not number_tag((r['tags'].get('tracknumber') or [''])[0]) for r in prepared):
                 self.put(job,prepared=prepared,stage='needs_review',review_kind='numbering',message='缺少可靠曲序，需要核对每碟曲目编号后继续');return
-        album=prepared[0]['album'];albumartists=[a for a in prepared[0]['tags'].get('albumartist',[]) if usable(a)] or sorted(set(a for row in prepared for a in row['artists'] if usable(a)))
+        album=prepared[0]['album'];albumartists=[a for a in album_artist_credits(prepared[0]['tags'].get('albumartist')) if usable(a)] or sorted(set(a for row in prepared for a in row['artists'] if usable(a)))
         if not albumartists or any(not r['artists'] or any(not usable(a) for a in r['artists']) for r in prepared):raise PolicyBlocked('艺人标签缺失或损坏，不能作为 ??? 入库，请先核对发行信息')
         discs=[];declared_totals=[]
         for row in prepared:

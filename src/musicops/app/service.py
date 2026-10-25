@@ -31,7 +31,10 @@ class AppService:
         for task in self._pending_tasks():
             if task['state']=='running' or task['state']=='paused' and task.get('started_at'): task.update(state='recovery_required',error='上次进程中断；先核对事务/请求，不能盲重试'); self.store.put('tasks',task['task_id'],task)
         from musicops.app.pipeline import Workflows
-        self.workflows=Workflows(self);self.workflows.recover();self._last_workflow_tick=0
+        self.workflows=Workflows(self)
+        from musicops.app.source_cleanup import run as repair_source_labels
+        repair_source_labels(self,progress)
+        self.workflows.recover();self._last_workflow_tick=0
         from musicops.app.review_queue import recover
         recover(self)
         self.prepare_local_catalog()

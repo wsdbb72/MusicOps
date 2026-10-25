@@ -12,9 +12,10 @@ from musicops.domain.identity import search_text
 from musicops.domain.errors import PathBlocked
 from .paths import reparse, reject_reparse_chain, within
 from .resources import companion_relations
+from musicops.media.source_labels import normalize_album_artist
 
 AUDIO_EXTENSIONS = {'.flac', '.mp3', '.m4a', '.mp4', '.aac', '.ogg', '.opus', '.wav', '.aif', '.aiff', '.dsf', '.dff', '.ape', '.wma', '.ncm'}
-METADATA_INDEX_VERSION = 2
+METADATA_INDEX_VERSION = 3
 
 
 def sha256_file(path):
@@ -75,6 +76,7 @@ def tag_fields(tags):
         if name in {'track', 'disc'} and found and isinstance(found, list) and isinstance(found[0], tuple):
             data = [str(found[0][0])]
         result[name] = data if name in {'artists', 'albumartist'} else (data[0] if data else '')
+    normalize_album_artist(result)
     return result
 
 
@@ -176,7 +178,7 @@ def _index_metadata(root, excluded, checkpoint, cached=None, progress=None, sele
             previous = cached.get(file_id)
             # Only reuse our bounded metadata format. A same-size file with a
             # changed timestamp/inode, prior read error, or older schema is read again.
-            if previous and str(previous.get('path','')).casefold()==str(path).casefold() and previous.get('metadata_index_version') == METADATA_INDEX_VERSION and not previous.get('read_error'):
+            if previous and str(previous.get('path','')).casefold()==str(path).casefold() and previous.get('metadata_index_version') in (2,METADATA_INDEX_VERSION) and not previous.get('read_error'):
                 try:
                     reject_reparse_chain(path, root)
                     before = file_version(path)
@@ -184,6 +186,8 @@ def _index_metadata(root, excluded, checkpoint, cached=None, progress=None, sele
                         if sidecars is None:
                             sidecars = _metadata_companions(directory)
                         row = copy.deepcopy(previous)
+                        normalize_album_artist(row)
+                        row['metadata_index_version']=METADATA_INDEX_VERSION
                         row['companions'] = _metadata_relations(path, sidecars)
                         if file_version(path) == before:
                             records.append(row)
@@ -230,7 +234,7 @@ def _index_metadata(root, excluded, checkpoint, cached=None, progress=None, sele
                             row['tag_format'] = type(tags).__name__
                             row['pictures'] = [_metadata_summary(p) for p in getattr(audio, 'pictures', [])[:8]]
                             fields = tag_fields(tags)
-                            fields = {k: [v[:1024] for v in value[:64]] if isinstance(value, list) else str(value)[:1024]
+                            fields = {k: [{name:str(text)[:1024] for name,text in marker.items()} for marker in value[:64]] if k=='source_labels' else [v[:1024] for v in value[:64]] if isinstance(value, list) else str(value)[:1024]
                                       for k, value in fields.items()}
                             info = audio.info
                             for key in ('length', 'sample_rate', 'channels', 'bits_per_sample', 'bitrate'):

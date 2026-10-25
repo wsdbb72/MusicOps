@@ -1,11 +1,12 @@
 """Resolve a complete release before treating a partial local album as complete."""
 import uuid
 from musicops.domain.identity import strict_text
+from musicops.media.source_labels import effective_album_artists
 
 def manifest(workflows,job):
     from musicops.app.pipeline import identity
     old=job['old_files'];first=old[0];cfg=job['config'];resolver=workflows.s._catalog_resolver(cfg)
-    query={'title':first.get('raw_title',''),'artists':first.get('albumartist') or first.get('artists',[]),'album':first.get('album',''),'duration':first.get('duration')}
+    query={'title':first.get('raw_title',''),'artists':effective_album_artists(first),'album':first.get('album',''),'duration':first.get('duration')}
     found=workflows.s._recognize_metadata(query,cfg,force=True);verified={}
     candidates=[job['completion_choice']] if job.get('completion_choice') else ([found['selected_candidate']] if found.get('selected_candidate') else [])+found.get('candidates',[])[:8]
     for candidate in candidates:

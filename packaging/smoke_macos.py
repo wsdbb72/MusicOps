@@ -8,6 +8,7 @@ import argparse,hashlib,json,os,platform,plistlib,subprocess,sys,time,uuid
 from pathlib import Path
 
 REQUIRED_CHECKS=frozenset({
+    'native_source_albumartist_migration','native_source_albumartist_catalogue',
     'native_architecture','bundle_identity_version_icon','gui_started_frozen_worker',
     'concurrent_gui_polling_stays_connected','keychain_encrypted_vault_write',
     'keychain_cross_process_roundtrip','vault_has_no_plaintext_secret','vault_host_binding',
@@ -81,6 +82,8 @@ def main():
         for provider in values['providers'].values():provider['enabled']=False
         values['music_servers']['roon']['enabled']=False;values['music_servers']['navidrome']['enabled']=False;manager.save(values,current['version'])
         store.put('target_tracks','macos:fixture',{'target_id':'macos:fixture','source':'local','raw_title':'合成測試歌曲','artists':['合成測試藝人'],'album':'合成測試專輯','duration':120,'metadata_complete':True})
+        from smoke_source_labels import seed,check as source_check
+        seed(store,library)
         phase='native_cocoa_gui';screenshot=work/'native-window.png';process=launch(gui,'--base',base,'--screenshot',screenshot,'--quit-after','14000')
         status=wait_for(lambda:client.call('get_status',{'compact':True}));checks['gui_started_frozen_worker']=Path(status['base'])==base and status['offline'] is False
         phase='concurrent_gui_polling'
@@ -91,6 +94,7 @@ def main():
         with Client(pipe_address(base),family=ipc_family(),authkey=auth_key(base)) as idle, ThreadPoolExecutor(max_workers=8) as pool:
             replies=list(pool.map(lambda _:WorkerClient(base,timeout=5).call('get_status',{'compact':True}),range(16)))
         checks['concurrent_gui_polling_stays_connected']=len(replies)==16 and all(Path(reply['base'])==base for reply in replies)
+        checks.update(source_check(client))
         # The worker receives a new token over authenticated local IPC and writes
         # encrypted data. No token value is printed or added to the report.
         phase='keychain_vault_roundtrip';secret='synthetic-macos-'+uuid.uuid4().hex;ref='vault://smoke/macos/token';host='smoke.example.invalid';sensitive_values.append(secret)

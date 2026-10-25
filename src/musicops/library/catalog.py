@@ -11,6 +11,7 @@ from musicops.domain.errors import PathBlocked
 from musicops.library.paths import reject_reparse_chain
 from musicops.library.index import AUDIO_EXTENSIONS
 from musicops.state.store import utcnow
+from musicops.media.source_labels import effective_album_artists
 
 
 def album_directory(row, library):
@@ -33,7 +34,7 @@ def _facts(root,files,key,now,checkpoint):
         if row.get('read_error') or not row.get('raw_title') or not row.get('artists') or not album or type(duration) not in (int,float) or not math.isfinite(duration) or duration<=0:continue
         matches.append((key,row['file_id'],strict_text(row['raw_title']),artist_key(row['artists']),strict_text(album),duration,album_id))
     for album_id,tracks in groups.items():
-        first=tracks[0];artists=list(dict.fromkeys(a for row in tracks for a in (row.get('albumartist') or row.get('artists',[]))))
+        first=tracks[0];artists=list(dict.fromkeys(a for row in tracks for a in effective_album_artists(row)))
         complete=all(row.get('raw_title') and row.get('artists') and row.get('album') and row.get('duration') and not row.get('read_error') for row in tracks)
         albums.append((key,album_id,json.dumps({'album_id':album_id,'album':first.get('album') or '待识别专辑','artists':artists,'directory':str(album_directory(first,root)),'track_count':len(tracks),'file_ids':[row['file_id'] for row in tracks],'state':'local_tags_matched' if complete else 'needs_metadata','release_confirmed':False,'updated_at':now},ensure_ascii=False)))
     return matches,albums
@@ -46,7 +47,7 @@ class AlbumCatalog:
         files=[r for r in files if Path(r.get('path','')).suffix.casefold() in AUDIO_EXTENSIONS]
         key = root_key(root)
         versions = [{k: row.get(k) for k in ('file_id', 'size', 'mtime_ns', 'raw_title', 'artists', 'album', 'albumartist', 'duration', 'read_error', 'metadata_resolution')} for row in files]
-        fingerprint = digest(versions)
+        fingerprint = digest({'album_artist_policy':2,'files':versions})
         previous = self.store.get('evidence', 'library-catalog:' + key)
         if previous and previous.get('fingerprint') == fingerprint:
             return {**previous, 'reused': True}

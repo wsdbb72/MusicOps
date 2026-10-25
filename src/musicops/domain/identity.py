@@ -43,9 +43,10 @@ def recording_identity(track):
 
 
 def release_identity(track):
+    from musicops.media.source_labels import album_artist_credits
     return {'schema_version': 1, 'release_id': track.get('release_id'),
             'source_album_id': track.get('source_album_id'), 'album': strict_text(track.get('album', '')),
-            'release_artist': sorted({strict_text(a) for a in values(track.get('albumartist', track.get('release_artist', [])))}),
+            'release_artist': sorted({strict_text(a) for a in album_artist_credits(track.get('albumartist', track.get('release_artist', [])))}),
             'edition': strict_text(track.get('edition', '')), 'catalogue': strict_text(track.get('catalogue', '')),
             'disc': _position(track.get('disc')), 'track': _position(track.get('track')),
             'date_raw': track.get('date_raw'), 'date_source': track.get('date_source'), 'date_semantics': track.get('date_semantics')}

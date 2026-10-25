@@ -254,6 +254,7 @@ jobs:
                   raise SystemExit('Build source, version or native acceptance mismatch: '+platform)
               if platform == 'Windows':
                   windows = data
+                  if not {'native_source_albumartist_migration','native_source_albumartist_catalogue'}.issubset(data.get('packaged_checks',{})):raise SystemExit('Source-label migration was not exercised by the frozen worker')
                   if not {'native_task_status_filter','native_full_queue_selection','native_streaming_and_edition_settings','native_full_album_preparation','native_playlist_single_scope','native_bulk_retry_search','native_review_snapshot','native_local_album_database','native_ai_assistance_guard','native_delete_records_only','native_update_setting','native_browser_solver_guard'}.issubset(data.get('packaged_checks',{})) or data.get('architecture') != 'x86_64' or data.get('unit_tests_passed') is not True or data.get('installer_test_count') != 6 or data.get('source_archive_commit') != commit or data.get('external_requests') != 0 or not data.get('packaged_checks') or not all(data['packaged_checks'].values()) or len(data.get('installer_smoke_checks', {})) != 9 or not all(data['installer_smoke_checks'].values()):
                       raise SystemExit('Windows regression or packaged evidence is incomplete')
                   names = {f'MusicOps-{version}-Setup.exe', f'MusicOps-{version}-Windows.zip', f'MusicOps-{version}-source.zip'}

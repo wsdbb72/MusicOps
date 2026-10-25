@@ -19,6 +19,7 @@ from musicops.media.resources import validate_cover,validate_lrc
 from musicops.media.tags import read_tag_fields,apply_tag_changes,embedded_covers,apply_cover_changes
 from musicops.performance import bounded_map
 from musicops.media.chinese import alias_key
+from musicops.media.source_labels import effective_album_artists,album_artist_credits
 
 
 def _release_key(row):
@@ -34,7 +35,7 @@ def _release_key(row):
     return ('' if proposal.get('source')=='musicbrainz' else str(proposal.get('source'))+':')+str(proposal['release_id'])
 
 def _album(row):
-    return (_release_key(row),alias_key(row.get('album')),tuple(sorted(alias_key(a) for a in (row.get('albumartist') or row.get('artists',[])))),strict_text(row.get('edition')),strict_text(row.get('catalogue')))
+    return (_release_key(row),alias_key(row.get('album')),tuple(sorted(alias_key(a) for a in effective_album_artists(row))),strict_text(row.get('edition')),strict_text(row.get('catalogue')))
 
 def _slot(row):
     disc=str(row.get('disc') or '1').split('/')[0];track=str(row.get('track') or '').split('/')[0]
@@ -104,7 +105,7 @@ def scan(service,cfg):
         slots=collections.Counter(_slot(r) for r in rows)
         if not any(n>1 for n in slots.values()) and not (key[0] and len(directories)>1):continue
         if len(candidates)>=1000:truncated=True;break
-        candidate={'group_id':digest([key,sorted(r['file_id'] for r in rows)]),'album':rows[0]['album'],'artists':rows[0].get('albumartist') or rows[0]['artists'],'file_count':len(rows),'directory_count':len(directories),'state':'review','reason':'','files':[{'file_id':r['file_id'],'path':r['path'],'title':r['raw_title']} for r in rows[:50]]}
+        candidate={'group_id':digest([key,sorted(r['file_id'] for r in rows)]),'album':rows[0]['album'],'artists':effective_album_artists(rows[0]),'file_count':len(rows),'directory_count':len(directories),'state':'review','reason':'','files':[{'file_id':r['file_id'],'path':r['path'],'title':r['raw_title']} for r in rows[:50]]}
         if len(rows)>500:candidate['reason']='单组超过500首，保留原文件并等待分组核对'
         elif any(r['file_id'] in locked or r['path'] in locked for r in rows):candidate['reason']='包含人工锁定或抑制记录'
         else:
@@ -174,7 +175,7 @@ def _prepare(service,cfg,rows,confirmed_release):
     for slot,versions in slots.items():
         first=versions[0]
         def spelling(row):
-            return {**row,'raw_title':alias_key(row.get('raw_title')),'artists':[alias_key(a) for a in row.get('artists',[])],'album':alias_key(row.get('album')),'albumartist':[alias_key(a) for a in row.get('albumartist',[])]}
+            return {**row,'raw_title':alias_key(row.get('raw_title')),'artists':[alias_key(a) for a in row.get('artists',[])],'album':alias_key(row.get('album')),'albumartist':[alias_key(a) for a in album_artist_credits(row.get('albumartist'))]}
         if any(not identities_same(spelling(first),spelling(r)) for r in versions[1:]):raise Conflict('同曲号存在歌名、歌手、时长或版本冲突')
         dsd={str(r['media_info'].get('codec_name','')).startswith('dsd') for r in versions}
         if len(dsd)>1:raise Conflict('DSD 与 PCM 音源保留为独立版本，不自动替换')

@@ -46,7 +46,7 @@ jobs:
         run: python docker/smoke.py musicops-ci:tested container-reports/acceptance.json
       - name: Verify real Linux vault permissions and missing-key recovery
         run: |
-          docker run --rm --entrypoint sh -v "$PWD:/workspace:ro" musicops-ci:tested -c 'python -m pip install --user pytest==9.1.1 && cd /workspace && python -m pytest -q -p no:cacheprovider tests/test_release0415_container.py tests/test_native_paths.py tests/test_release0422_repair.py'
+          docker run --rm --entrypoint sh -v "$PWD:/workspace:ro" musicops-ci:tested -c 'python -m pip install --user pytest==9.1.1 && cd /workspace && python -m pytest -q -p no:cacheprovider tests/test_release0415_container.py tests/test_native_paths.py tests/test_release0422_repair.py tests/test_release0423_sources.py'
       - name: Preserve synthetic Linux acceptance evidence
         if: always()
         uses: actions/upload-artifact@v7

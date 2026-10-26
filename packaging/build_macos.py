@@ -102,12 +102,13 @@ def package(args):
         'FFmpeg / ffprobe 未包含，可在设置中选择已安装的 macOS 可执行程序。\n'
         'Windows 路径和 .exe 媒体工具不能在 Mac 上使用。\n',encoding='utf-8')
     archive=output/(stem+'.zip');run('/usr/bin/ditto','-c','-k','--sequesterRsrc','--keepParent',stage,archive)
+    disk_image=build_disk_image(stage,output,stem,app_version,args.arch)
     from macos_installer import build as build_installer
     installer=build_installer(app,output,app_version,args.arch)
     installer_report=reports/(stem+'-installer.json')
     run(sys.executable,ROOT/'packaging/smoke_macos_installer.py','--pkg',installer,'--app',app,'--work',output/'installer-smoke','--report',installer_report,'--arch',args.arch,cwd=ROOT,env=env)
     artifacts={}
-    for artifact in (archive,installer):
+    for artifact in (archive,installer,disk_image):
         hashes={}
         for algorithm in ('sha256','sha512'):
             with artifact.open('rb') as stream:hashes[algorithm]=hashlib.file_digest(stream,algorithm).hexdigest()
@@ -117,9 +118,33 @@ def package(args):
     commit=subprocess.run(['git','rev-parse','HEAD'],cwd=ROOT,capture_output=True,text=True,check=True).stdout.strip()
     engines=json.loads((reports/(stem+'-engines.json')).read_text('utf-8'))
     if not engines.get('passed') or len(engines.get('checks',{}))!=9:raise RuntimeError('Native bundled engines acceptance is incomplete')
-    metadata={'managed_engines_passed':True,'managed_engine_checks':engines['checks'],'version':app_version,'architecture':args.arch,'minimum_macos':'15.0','commit':commit,'archive':archive.name,'digests':digests,'artifacts':artifacts,'installer':installer.name,'installer_smoke_passed':True,'installer_signed':False,'signing':'ad-hoc','developer_id_signed':False,'notarized':False,'cryptography_openssl_static':True,'smoke_passed':True,'runner_macos':platform.mac_ver()[0]}
+    metadata={'managed_engines_passed':True,'managed_engine_checks':engines['checks'],'version':app_version,'architecture':args.arch,'minimum_macos':'15.0','commit':commit,'archive':archive.name,'digests':digests,'artifacts':artifacts,'installer':installer.name,'installer_smoke_passed':True,'disk_image':disk_image.name,'disk_image_smoke_passed':True,'installer_signed':False,'signing':'ad-hoc','developer_id_signed':False,'notarized':False,'cryptography_openssl_static':True,'smoke_passed':True,'runner_macos':platform.mac_ver()[0]}
     (output/(stem+'-build.json')).write_text(json.dumps(metadata,ensure_ascii=False,indent=2)+'\n','utf-8')
     print(json.dumps(metadata,ensure_ascii=True))
+
+def build_disk_image(stage,output,stem,app_version,arch):
+    """Drag-to-Applications DMG built from the same tested, ad-hoc signed bundle."""
+    source=output/'dmg'/stem
+    if source.exists():shutil.rmtree(source)
+    source.parent.mkdir(parents=True,exist_ok=True)
+    run('/usr/bin/ditto',stage,source)
+    (source/'Applications').symlink_to('/Applications')
+    image=output/(stem+'.dmg');image.unlink(missing_ok=True)
+    run('/usr/bin/hdiutil','create','-volname','MusicOps '+app_version,'-srcfolder',source,'-fs','HFS+','-format','UDZO','-imagekey','zlib-level=9','-ov',image)
+    run('/usr/bin/hdiutil','verify',image)
+    mount=output/'dmg-mount';mount.mkdir(exist_ok=True)
+    run('/usr/bin/hdiutil','attach','-readonly','-nobrowse','-noautoopen','-mountpoint',mount,image)
+    try:
+        mounted=mount/'MusicOps.app'
+        run('/usr/bin/codesign','--verify','--deep','--strict',mounted)
+        if os.readlink(mount/'Applications')!='/Applications':raise RuntimeError('DMG Applications shortcut is invalid')
+        info=plistlib.loads((mounted/'Contents/Info.plist').read_bytes())
+        if info.get('CFBundleShortVersionString')!=app_version:raise RuntimeError('DMG app version mismatch')
+        executable=mounted/'Contents/MacOS'/info['CFBundleExecutable']
+        run('/usr/bin/lipo',executable,'-verify_arch',arch)
+    finally:
+        run('/usr/bin/hdiutil','detach',mount)
+    return image
 
 def main():
     parser=argparse.ArgumentParser();parser.add_argument('--arch',choices=('arm64',),default=platform.machine());parser.add_argument('--output',default='dist/macos');args=parser.parse_args();package(args)

@@ -1,7 +1,7 @@
 # MusicOps maintenance
 
 - Keep the desktop app, Chinese README, configuration help and packaged behavior consistent.
-- For each completed batch of changes, commit and push the reviewed source to `wsdbb72/MusicOps`, increment the app version, and publish a matching GitHub Release with the Windows installer, portable ZIP, macOS Apple Silicon native PKG installer and application ZIP, source ZIP and SHA-256 checksums. Build and smoke-test the macOS applications and real installer/reinstall behavior on GitHub Actions because the maintainer has no local Mac.
+- For each completed batch of changes, commit and push the reviewed source to `wsdbb72/MusicOps`, increment the app version, and publish a matching GitHub Release with the Windows installer, portable ZIP, macOS Apple Silicon native PKG installer, DMG disk image and application ZIP, source ZIP and SHA-256 checksums. Build and smoke-test the macOS applications and real installer/reinstall behavior on GitHub Actions because the maintainer has no local Mac.
 - Use only `MusicOps X.Y.Z` as the release title, with the matching version number.
 - Use the complete desktop release workflow on a `codex/release-*` branch to build and verify Windows and native Apple Silicon macOS before publishing. Synchronize the same verified commit to `main`; never publish an incomplete set or replace an existing public version.
 - Run relevant regression tests and verify the actual packaged EXE before publishing. Clearly distinguish synthetic verification from authenticated live-site verification.

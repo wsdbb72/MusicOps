@@ -1,10 +1,9 @@
 """Plex music sections and authenticated, targeted library scan requests."""
-import ipaddress
 import re
 from urllib.parse import urlsplit
 from xml.etree import ElementTree
 import httpx
-from musicops.clients.http import HttpError
+from musicops.clients.http import HttpError,local_service_host
 
 
 def validate(config):
@@ -12,10 +11,7 @@ def validate(config):
     u=urlsplit(config.get('url',''))
     if u.scheme not in ('http','https') or not u.hostname or u.username or u.password or u.query or u.fragment:
         raise ValueError('Plex 地址须为不含凭据的 HTTP(S) 服务地址')
-    local=u.hostname=='localhost'
-    try:local=local or ipaddress.ip_address(u.hostname).is_private
-    except ValueError:pass
-    if u.scheme=='http' and not local:raise ValueError('公网 Plex 请使用 HTTPS；局域网支持 HTTP')
+    if u.scheme=='http' and not local_service_host(u.hostname):raise ValueError('公网 Plex 请使用 HTTPS；局域网支持 HTTP')
     if config.get('section_id') and not re.fullmatch(r'\d{1,12}',str(config['section_id'])):
         raise ValueError('Plex 音乐库 ID 须为数字，可先测试读取音乐库列表')
 

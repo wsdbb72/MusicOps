@@ -84,6 +84,39 @@ def test_native_web_auth_static_and_csrf(web):
     assert client.post('/api/command',auth=auth,json={'command':'shutdown_worker'},headers=headers).status_code==400
 
 
+def test_client_disconnect_during_response_is_not_reported_twice(tmp_path,capsys):
+    from musicops.web.server import Handler
+    class Gone:
+        def write(self,_):raise BrokenPipeError(32,'Broken pipe')
+        def flush(self):pass
+    handler=Handler.__new__(Handler)
+    handler.wfile=Gone();handler.request_version='HTTP/1.1';handler.requestline='POST /api/command HTTP/1.1';handler.command='POST'
+    handler.close_connection=False
+    handler.respond(200,{'ok':True})
+    assert handler.close_connection is True
+    assert 'Traceback' not in capsys.readouterr().err
+
+
+def test_anonymous_stalled_posts_do_not_exhaust_request_slots(web):
+    import socket
+    client,server=web
+    stalled=[]
+    for _ in range(20):
+        sock=socket.create_connection(('127.0.0.1',server.server_port),timeout=5)
+        sock.sendall(b'POST /api/command HTTP/1.1\r\nHost: x\r\nContent-Type: application/json\r\nContent-Length: 900000\r\n\r\n')
+        stalled.append(sock)
+    try:
+        time.sleep(.3)
+        auth=('musicops','synthetic-web-password')
+        csrf=client.get('/api/bootstrap',auth=auth).json()['csrf']
+        response=client.post('/api/command',auth=auth,json={'command':'get_status','payload':{}},headers={'X-MusicOps-CSRF':csrf})
+        assert response.status_code==200
+        upload=client.post('/api/upload',json={'kind':'cover'},headers={'X-MusicOps-CSRF':csrf})
+        assert upload.status_code==401
+    finally:
+        for sock in stalled:sock.close()
+
+
 def test_new_platform_settings_upgrade_without_losing_secrets(tmp_path):
     cfg=default_config(tmp_path);del cfg['music_servers']['plex'];del cfg['streaming']['musicdl']
     cfg['lyrics']['primary']['auth_secret_ref']='vault://synthetic/existing'

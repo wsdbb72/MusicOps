@@ -57,7 +57,11 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header('Referrer-Policy','no-referrer')
         self.send_header('Content-Security-Policy',"default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'")
         if status==401:self.send_header('WWW-Authenticate','Basic realm="MusicOps", charset="UTF-8"')
-        self.end_headers();self.wfile.write(data)
+        try:self.end_headers();self.wfile.write(data)
+        except (BrokenPipeError,ConnectionResetError,ConnectionAbortedError,TimeoutError):
+            # A closed tab or proxy has already left; a second error response
+            # would only fail again and fill the container log with tracebacks.
+            self.close_connection=True
 
     def authenticated(self):
         try:
@@ -92,6 +96,15 @@ class Handler(BaseHTTPRequestHandler):
         except ValueError:return self.respond(400,{'error':'长度无效'})
         limit=30_000_000 if endpoint=='/api/upload' else 1_000_000
         if not 0<size<=limit:return self.respond(413,{'error':'请求过大，请分批处理'})
+        if not self.authenticated():
+            # The Authorization header arrives before the body. Anonymous
+            # clients must not hold a shared request slot or buffer an upload;
+            # drain a small prefix briefly so the 401 still reaches browsers.
+            self.close_connection=True
+            try:
+                self.connection.settimeout(5);self.rfile.read(min(size,65536))
+            except OSError:pass
+            return self.respond(401,{'error':'请登录'})
         slots=self.server.upload_slots if endpoint=='/api/upload' else self.server.slots
         if not slots.acquire(blocking=False):return self.respond(429,{'error':'请求繁忙，请稍后重试'})
         try:
@@ -99,7 +112,6 @@ class Handler(BaseHTTPRequestHandler):
             # socket with unread POST bytes can reset Windows connections and
             # hide the actual 401/403 response from the browser.
             raw=self.rfile.read(size)
-            if not self.authenticated():return self.respond(401,{'error':'请登录'})
             origin=self.headers.get('Origin')
             if origin and urlsplit(origin).netloc!=self.headers.get('Host'):
                 return self.respond(403,{'error':'请求来源不匹配'})

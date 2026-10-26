@@ -119,6 +119,7 @@ jobs:
           path: |
             dist/macos/MusicOps-*-macOS-*.zip
             dist/macos/MusicOps-*-macOS-*.pkg
+            dist/macos/MusicOps-*-macOS-*.dmg
             dist/macos/MusicOps-*-macOS-*.sha256
             dist/macos/MusicOps-*-macOS-*.sha512
             dist/macos/MusicOps-*-macOS-*-build.json

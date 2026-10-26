@@ -21,8 +21,9 @@ def readonly_preflight(config,secret_getter):
     except (ValueError,TypeError,KeyError):return _result('POLICY_BLOCKED',reason='qBittorrent服务地址格式无效')
     if u.scheme not in ('http','https') or not u.hostname or u.username or u.password or u.query or u.fragment or u.path not in ('','/'):
         return _result('POLICY_BLOCKED',reason='qBittorrent需干净服务origin')
-    if u.scheme=='http' and u.hostname not in ('127.0.0.1','localhost','::1'):
-        return _result('POLICY_BLOCKED',reason='明文qBittorrent凭据仅允许本机回环地址')
+    from musicops.clients.http import local_service_host
+    if u.scheme=='http' and not local_service_host(u.hostname):
+        return _result('POLICY_BLOCKED',reason='公网 qBittorrent 请使用 HTTPS；本机、局域网和 Docker 内网地址可使用 HTTP')
     try:
         raw=secret_getter(config['credential_ref'],u.hostname)
         if not raw:return _result('AUTH_REQUIRED',reason='qBittorrent登录信息未配置')

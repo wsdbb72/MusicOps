@@ -81,11 +81,28 @@ def schedule(service):
 
 
 def recover(service):
+    """Give each interrupted review exactly one owner after a restart.
+
+    A queued task survives restarts, so re-pending its entry as well would
+    let the scheduler enqueue a second AI call for the same revision. A task
+    that already finished keeps its result instead of being replayed.
+    """
     with service.store.connection() as connection:
         rows = connection.execute("SELECT id,payload FROM evidence WHERE id LIKE 'ai-review:%' AND json_extract(payload,'$.state')='running'").fetchall()
-    import json
     for row in rows:
-        service.store.put('evidence', row['id'], {**json.loads(row['payload']), 'state': 'pending'})
+        entry=json.loads(row['payload'])
+        task=service.store.get('tasks',entry['task_id']) if entry.get('task_id') else None
+        state=task.get('state') if task else None
+        if state in ('completed','failed','blocked','cancelled'):
+            finish(service,task);continue
+        if state in ('queued','paused') and not task.get('started_at'):
+            # The scheduler re-checks the revision before it runs anything;
+            # the superseded task must not call AI for a possibly stale job.
+            task.update(state='cancelled',cancel_requested=True,result={'message':'AI 核对已重新排队，避免重启后重复调用'})
+            service.store.put('tasks',task['task_id'],task)
+        service.store.put('evidence', row['id'], {**entry, 'state': 'pending'})
+        job=service.store.get('evidence','workflow:'+entry['job_id'])
+        if job and job.get('ai_review_state')=='running':service.store.put('evidence','workflow:'+entry['job_id'],{**job,'ai_review_state':'pending'})
 
 
 def finish(service, task):

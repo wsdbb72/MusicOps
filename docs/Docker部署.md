@@ -43,7 +43,7 @@ ssh -L 8080:127.0.0.1:8080 user@linux设备地址
 
 **必须挂载共同父目录到 `/media`，不要单独把音乐库和下载目录映射到不同的临时卷。** 默认路径已经按上表设置。临时下载进入 `/media/MusicOps/downloads`，入库时移动到 `/media/music`，沿用既有 qBittorrent 改目录和保种流程。
 
-如果 qBittorrent 也在 Docker 中，给它挂载同一宿主目录，并且同样映射为 `/media`。qBittorrent 返回的下载位置必须能被 MusicOps 原路径访问；不能一边是 `/downloads`，另一边是 `/media/MusicOps/downloads`。容器中的 `127.0.0.1` 只指该容器自身；连接其他容器时用 Docker 网络服务名或宿主机可达 IP。
+如果 qBittorrent 也在 Docker 中，给它挂载同一宿主目录，并且同样映射为 `/media`。qBittorrent 返回的下载位置必须能被 MusicOps 原路径访问；不能一边是 `/downloads`，另一边是 `/media/MusicOps/downloads`。容器中的 `127.0.0.1` 只指该容器自身；连接其他容器时用 Docker 网络服务名或宿主机可达 IP。例如 `http://qbittorrent:8080`；本机、局域网私有地址和 Docker 服务名可以使用 HTTP，公网地址需要 HTTPS。
 
 FFmpeg / ffprobe、go-music-dl 和 FlareSolverr 连同 Chromium 已随镜像提供。后两个服务只在容器内部按需启动；在设置向导启用和测试，凭据仍从 MusicOps 填写。容器只发布原生网页的 8080，不发布后台 IPC 或引擎端口。
 

@@ -40,6 +40,49 @@ def _facts(root,files,key,now,checkpoint):
     return matches,albums
 
 
+_UNKNOWN_ARTISTS={'unknown','未知','unknown artist','未知艺人'}
+
+
+def _version(track):
+    from musicops.domain.identity import version_from_title
+    # Normalize tags and titles through the same version markers. An empty or
+    # generic tag such as "Original"/"Album Version" is "not recorded", not
+    # a different recording, so the title markers decide instead.
+    explicit=track.get('recording_version') or track.get('version') or ''
+    explicit=' '.join(map(str,explicit)) if isinstance(explicit,(list,tuple)) else str(explicit)
+    if explicit and not explicit.lstrip().startswith(('(','[','（')):explicit='('+explicit+')'
+    return version_from_title(explicit) or version_from_title(track.get('raw_title') or track.get('title',''))
+
+
+def same_local_recording(target,row):
+    """Fast-path identity gate: title/artist/album/duration are only candidates."""
+    from musicops.domain.identity import _position
+    if row.get('read_error') or row.get('filename_tag_conflict'):return False
+    artists={strict_text(a) for a in row.get('artists') or [] if a}
+    if not artists or artists&_UNKNOWN_ARTISTS:return False
+    if _version(target)!=_version(row):return False
+    for field in ('edition','release_id','catalogue'):
+        wanted,found=strict_text(target.get(field)),strict_text(row.get(field))
+        if wanted and wanted!=found:return False
+    if (target.get('source') or 'netease')=='netease':
+        # Local NetEase tags share the target's namespace; other platforms'
+        # song/album IDs are not comparable with those tags.
+        for field in ('source_song_id','source_album_id'):
+            if target.get(field) and row.get(field) and str(target[field])!=str(row[field]):return False
+    for field in ('disc','track'):
+        wanted,found=_position(target.get(field)),_position(row.get(field))
+        if wanted and found and wanted!=found:return False
+    return True
+
+
+def unchanged_library_file(row,root):
+    path=Path(row['path']);reject_reparse_chain(path)
+    if row.get('location_state')!='library' or type(row.get('size')) is not int or type(row.get('mtime_ns')) is not int:return False
+    if not path.resolve().is_relative_to(Path(root).resolve()):return False
+    stat=path.stat()
+    return path.is_file() and (stat.st_size,stat.st_mtime_ns)==(row.get('size'),row.get('mtime_ns'))
+
+
 class AlbumCatalog:
     def __init__(self, store): self.store = store
 
@@ -124,13 +167,11 @@ class AlbumCatalog:
                     (key, strict_text(target.get('raw_title') or target.get('title', '')), artist_key(target.get('artists', [])), strict_text(target.get('album') or ''), target['duration'])).fetchall()
                 for raw in rows:
                     row = json.loads(raw[0]); fid = row['file_id']
+                    if not same_local_recording(target, row): continue
                     if fid not in verified:
                         valid = False
-                        try:
-                            path = Path(row['path']); reject_reparse_chain(path)
-                            stat = path.stat()
-                            valid = row.get('location_state') == 'library' and path.resolve().is_relative_to(Path(root).resolve()) and (stat.st_size, stat.st_mtime_ns) == (row.get('size'), row.get('mtime_ns'))
-                        except (OSError, RuntimeError, PathBlocked): pass
+                        try: valid = unchanged_library_file(row, root)
+                        except (OSError, RuntimeError, ValueError, PathBlocked): pass
                         verified[fid] = valid
                     if verified[fid]: present.add(target['target_id']); break
         return present

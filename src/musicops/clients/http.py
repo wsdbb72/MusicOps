@@ -20,12 +20,30 @@ class Response:
         def invalid_constant(value):raise ValueError('JSON包含无效非有限数值')
         return json.loads(self.text,parse_constant=invalid_constant)
 
+LOCAL_SUFFIXES=('.localhost','.local','.lan','.internal','.home.arpa')
+
+def local_service_host(hostname):
+    """Loopback, private-network and Docker/LAN service names may use HTTP.
+
+    Single-label names are what Docker networks and LAN DNS hand out for
+    sibling containers (for example ``qbittorrent``); public hosts still need
+    HTTPS so credentials never cross the internet in plain text.
+    """
+    import ipaddress
+    host=str(hostname or '').rstrip('.').lower()
+    if not host:return False
+    if host in ('localhost','host.docker.internal') or host.endswith(LOCAL_SUFFIXES):return True
+    try:address=ipaddress.ip_address(host.split('%',1)[0])
+    except ValueError:return '.' not in host and re.fullmatch(r'[a-z0-9_](?:[a-z0-9_-]{0,61}[a-z0-9_])?',host) is not None
+    if address.version==6 and address.ipv4_mapped:address=address.ipv4_mapped
+    return not address.is_unspecified and not address.is_multicast and (address.is_loopback or address.is_private or address.is_link_local)
+
 def redact(data):
     if isinstance(data,dict):
         return {k:('[REDACTED]' if is_secret_key(k) else redact(v)) for k,v in data.items()}
     if isinstance(data,list): return [redact(v) for v in data]
     if isinstance(data,str):
-        data=re.sub(r'https?://[^\s<>\"]+(?:passkey|authkey|token)[^\s<>\"]*','[SENSITIVE_URL]',data,flags=re.I)
+        data=re.sub(r'https?://[^\s<>\"]+(?:passkey|authkey|token|api[_-]?key|secret|password|[?&;]sid=)[^\s<>\"]*','[SENSITIVE_URL]',data,flags=re.I)
         return data
     return data
 

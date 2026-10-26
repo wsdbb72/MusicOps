@@ -147,5 +147,7 @@ class StateStore:
         return value
     def backup(self,destination):
         dest=Path(destination); dest.parent.mkdir(parents=True,exist_ok=True)
-        with sqlite3.connect(self.path) as src,sqlite3.connect(dest) as out: src.backup(out)
+        # sqlite3's context manager only commits; close both handles so a
+        # Windows backup file can be moved or deleted immediately afterwards.
+        with contextlib.closing(sqlite3.connect(self.path,timeout=15)) as src,contextlib.closing(sqlite3.connect(dest)) as out: src.backup(out)
         return str(dest)

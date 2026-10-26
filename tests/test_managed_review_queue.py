@@ -61,6 +61,30 @@ def test_restart_recovers_inflight_without_replaying_changed_task(controls):
     assert any(r['revision']==review_revision(row) and r['state']=='running' for r in entries(service))
 
 
+def test_restart_does_not_queue_a_second_ai_task_for_the_same_review(controls):
+    service=controls;enable(service)
+    album(service,stage='needs_review',review_kind='metadata')
+    assert schedule(service)
+    original=[r for r in service.store.list('tasks') if r['command']=='assist_workflows']
+    for _ in range(2):
+        recover(service);schedule(service)
+    tasks=[r for r in service.store.list('tasks') if r['command']=='assist_workflows']
+    assert len([r for r in tasks if r['state']=='queued'])==1
+    assert service.store.get('tasks',original[0]['task_id'])['state']=='cancelled'
+    assert [r['state'] for r in entries(service)]==['running']
+
+
+def test_restart_keeps_finished_ai_result_instead_of_replaying_it(controls):
+    service=controls;enable(service)
+    row=album(service,stage='needs_review',review_kind='metadata')
+    assert schedule(service)
+    task=[r for r in service.store.list('tasks') if r['command']=='assist_workflows'][0]
+    service.store.put('tasks',task['task_id'],{**task,'state':'completed'})
+    recover(service)
+    assert entries(service)[0]['state']=='completed' and read_job(service,row['job_id'])['ai_review_state']=='completed'
+    assert not schedule(service)
+
+
 def test_explicit_resubmission_retries_ai_connection_failure_without_repeating_ready_result(controls):
     row=album(controls,stage='needs_review',review_kind='metadata')
     assert submit(controls,{'job_ids':[row['job_id']]})['registered']==1

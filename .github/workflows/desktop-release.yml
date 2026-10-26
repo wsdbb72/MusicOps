@@ -236,7 +236,7 @@ jobs:
         with:
           name: MusicOps-macOS-arm64
           path: release-assets
-      - name: Validate all five assets, create draft, upload, verify and publish
+      - name: Validate all six assets, create draft, upload, verify and publish
         shell: python
         run: |
           import hashlib, json, os, pathlib, re, subprocess, urllib.error, urllib.request, zipfile
@@ -260,11 +260,11 @@ jobs:
                   names = {f'MusicOps-{version}-Setup.exe', f'MusicOps-{version}-Windows.zip', f'MusicOps-{version}-source.zip'}
               else:
                   arch = platform.removeprefix('macOS-')
-                  names = {f'MusicOps-{version}-{platform}.zip', f'MusicOps-{version}-{platform}.pkg'}
-                  if data.get('architecture') != arch or data.get('cryptography_openssl_static') is not True or data.get('minimum_macos') != '15.0':
+                  names = {f'MusicOps-{version}-{platform}.zip', f'MusicOps-{version}-{platform}.pkg', f'MusicOps-{version}-{platform}.dmg'}
+                  if data.get('architecture') != arch or data.get('cryptography_openssl_static') is not True or data.get('minimum_macos') != '15.0' or data.get('disk_image_smoke_passed') is not True:
                       raise SystemExit('Native Mac architecture or crypto boundary mismatch')
-                  if {data.get('archive'), data.get('installer')} != names:
-                      raise SystemExit('Mac ZIP and native PKG are both required')
+                  if {data.get('archive'), data.get('installer'), data.get('disk_image')} != names:
+                      raise SystemExit('Mac ZIP, native PKG and DMG are all required')
                   expected.update({f'MusicOps-{version}-{platform}.sha256', f'MusicOps-{version}-{platform}.sha512'})
                   for algorithm in ('sha256', 'sha512'):
                       lines = (root/f'MusicOps-{version}-{platform}.{algorithm}').read_text('utf-8').splitlines()
@@ -284,7 +284,7 @@ jobs:
                           raise SystemExit('Artifact checksum mismatch: '+name)
                   covered.add(name)
           expected.update(core)
-          if len(core) != 5 or covered != core or {path.name for path in root.iterdir()} != expected:
+          if len(core) != 6 or covered != core or {path.name for path in root.iterdir()} != expected:
               raise SystemExit('Release is missing required files or contains unexpected files')
           with zipfile.ZipFile(root/f'MusicOps-{version}-source.zip') as source:
               if source.comment.decode('ascii') != commit:

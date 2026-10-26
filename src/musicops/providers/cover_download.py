@@ -5,6 +5,7 @@ import httpx
 from musicops.clients.http import HttpError,PolicyBlocked
 from musicops.media.resources import validate_cover
 from musicops.media.chinese import alias_key
+from musicops import __version__
 
 class Artwork(bytes):
     def __new__(cls,data,**provenance):
@@ -15,7 +16,7 @@ def _image(url,min_side,allowed):
         for _ in range(5):
             u=urlsplit(url)
             if u.scheme!='https' or u.username or u.password or not u.hostname or not allowed(u.hostname):raise PolicyBlocked('封面来源或重定向不受支持')
-            with client.stream('GET',url,headers={'User-Agent':'MusicOps/0.3.0 (personal music library)'}) as r:
+            with client.stream('GET',url,headers={'User-Agent':'MusicOps/'+__version__+' (personal music library)'}) as r:
                 if r.status_code in (301,302,303,307,308):url=urljoin(url,r.headers.get('location',''));continue
                 if r.status_code==404:return None
                 if r.status_code!=200:raise HttpError('NETWORK_ERROR','专辑封面暂不可用')

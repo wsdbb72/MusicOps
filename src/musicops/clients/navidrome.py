@@ -2,12 +2,12 @@
 import hashlib,secrets
 from urllib.parse import urlsplit
 import httpx
-from musicops.clients.http import PolicyBlocked,HttpError
+from musicops.clients.http import PolicyBlocked,HttpError,local_service_host
 
 def scan(config,secret_getter):
     if not config['enabled']:return {'state':'skipped','message':'未启用 Navidrome；Roon 由监听目录自动扫描'}
     u=urlsplit(config['url'])
-    if u.scheme=='http' and u.hostname not in ('127.0.0.1','localhost','::1'):raise PolicyBlocked('远程 Navidrome 请使用 HTTPS')
+    if u.scheme=='http' and not local_service_host(u.hostname):raise PolicyBlocked('公网 Navidrome 请使用 HTTPS；本机、局域网和 Docker 内网地址可使用 HTTP')
     password=secret_getter(config['password_ref'],u.hostname)
     if not password:raise HttpError('AUTH_REQUIRED','请在设置中填写 Navidrome 密码')
     salt=secrets.token_hex(16);token=hashlib.md5((password+salt).encode()).hexdigest()

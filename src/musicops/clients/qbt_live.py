@@ -2,7 +2,7 @@
 import json
 from urllib.parse import urlsplit
 import httpx
-from musicops.clients.http import Response, HttpError, PolicyBlocked
+from musicops.clients.http import Response, HttpError, PolicyBlocked, local_service_host
 from musicops.clients.qbt import QbtClient
 
 class QbtSession:
@@ -12,8 +12,8 @@ class QbtSession:
         self.origin=config['base_url'].rstrip('/');u=urlsplit(self.origin)
         if u.scheme not in ('http','https') or not u.hostname or u.username or u.password or u.query or u.fragment or u.path not in ('','/'):
             raise PolicyBlocked('qBittorrent 地址需要为完整服务地址')
-        if u.scheme=='http' and u.hostname not in ('127.0.0.1','localhost','::1'):
-            raise PolicyBlocked('远程 qBittorrent 请使用 HTTPS')
+        if u.scheme=='http' and not local_service_host(u.hostname):
+            raise PolicyBlocked('公网 qBittorrent 请使用 HTTPS；本机、局域网和 Docker 内网地址可使用 HTTP')
         raw=secret_getter(config['credential_ref'],u.hostname)
         if not raw:raise HttpError('AUTH_REQUIRED','请在连接向导填写 qBittorrent 登录信息')
         try:creds=json.loads(raw)

@@ -33,6 +33,10 @@ small,
 p {
   color: #9eafc5;
 }
+aside small {
+  display: block;
+  margin-top: 8px;
+}
 nav {
   display: grid;
   gap: 10px;

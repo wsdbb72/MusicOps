@@ -46,6 +46,7 @@ try:
         checks['browser_page']=response.status==200 and b'app.js' in response.read()
     with urllib.request.urlopen(urllib.request.Request('http://127.0.0.1:'+str(port)+'/api/bootstrap',headers={'Authorization':auth}),timeout=10) as response:
         bootstrap=json.load(response)
+    checks['webui_shows_running_version']=bool(bootstrap.get('version')) and bootstrap['version']==execute('from musicops import __version__;print(__version__)')
     payload=json.dumps({'command':'get_status','payload':{'compact':True}}).encode()
     with urllib.request.urlopen(urllib.request.Request('http://127.0.0.1:'+str(port)+'/api/command',data=payload,headers={'Authorization':auth,'Content-Type':'application/json','X-MusicOps-CSRF':bootstrap['csrf']}),timeout=15) as response:
         checks['native_html_shared_commands']=json.load(response)['ok']

@@ -1588,7 +1588,10 @@ async function refresh() {
 $("refresh").onclick = () => refresh();
 (async () => {
   try {
-    csrf = (await (await fetch(apiURL("api/bootstrap"))).json()).csrf;
+    const boot = await (await fetch(apiURL("api/bootstrap"))).json();
+    csrf = boot.csrf;
+    $("app-version").textContent =
+      "MusicOps " + (boot.version || "") + " · 你的音乐收藏";
     showPage("playlist");
     await refresh();
     loadSubscriptions().catch(() => {});

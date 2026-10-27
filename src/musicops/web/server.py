@@ -11,6 +11,7 @@ import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import urlsplit
+from musicops import __version__
 from musicops.worker.client import WorkerClient
 from musicops.clients.http import redact
 from musicops.providers.playlist_files import MAX_BYTES as PLAYLIST_MAX_BYTES
@@ -78,7 +79,7 @@ class Handler(BaseHTTPRequestHandler):
             return self.respond(200,{'http':'ready'})
         if not self.authenticated():return self.respond(401,{'error':'请使用 musicops 用户及 /config/web-password 中的密码登录'})
         if path=='/api/bootstrap':
-            return self.respond(200,{'csrf':self.server.csrf,'commands':sorted(COMMANDS)})
+            return self.respond(200,{'csrf':self.server.csrf,'commands':sorted(COMMANDS),'version':__version__})
         if path=='/api/startup':
             try:status=json.loads((self.server.client.base/'state'/'worker-startup.json').read_text('utf-8'))
             except (OSError,ValueError):status={'message':'后台正在准备，请稍候'}

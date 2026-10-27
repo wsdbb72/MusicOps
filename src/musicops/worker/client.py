@@ -43,6 +43,10 @@ class WorkerClient:
         try:conn=Client(pipe_address(self.base),family=ipc_family(),authkey=auth_key(self.base))
         except OSError as exc:
             if getattr(exc,'winerror',None) in (121,231):raise WorkerConnectionError('IPC_CONNECTION_ERROR：后台连接繁忙，请稍后重连；已有任务仍保留') from None
+            # A missing pipe/socket means the worker exited or is restarting;
+            # never surface the raw "file not found" as a task problem.
+            if isinstance(exc,(FileNotFoundError,ConnectionRefusedError)) or getattr(exc,'winerror',None) in (2,53,109,232,233):
+                raise WorkerConnectionError('IPC_CONNECTION_ERROR：后台未运行或正在重启，正在重新连接；已有任务仍保留') from None
             raise
         with conn:
             conn.send_bytes(encoded)

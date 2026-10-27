@@ -553,11 +553,21 @@ class Workbench(QMainWindow):
         def failure(message):
             if read_key:self.inflight_reads.discard(read_key)
             self.requests.discard(request)
+            lost=message.startswith(('[Errno ','[WinError ')) or 'IPC_CONNECTION_ERROR' in message or '后台响应超时' in message
             if failed:failed(message)
-            else:
-                reconnecting=command in ('attach','get_status','list_workflows','get_task') and (message.startswith(('[Errno ','[WinError ')) or 'IPC_CONNECTION_ERROR' in message or '后台响应超时' in message)
-                self.notice.setText('正在重新连接后台，请稍候…' if reconnecting else '需要处理：'+message)
-                if reconnecting:self._connection_notice=self.notice.text();self.timer.start()
+            elif lost:
+                background=command in ('attach','get_status','list_workflows','get_task','list_subscriptions')
+                interrupted='后台连接中断，正在重新连接；连接恢复后请重试刚才的操作。'
+                # Keep telling the user an action did not run until the worker is back.
+                if not (background and self.notice.text()==interrupted):self.notice.setText('正在重新连接后台，请稍候…' if background else interrupted)
+                self._connection_notice=self.notice.text();self.timer.start()
+            else:self.notice.setText('需要处理：'+message)
+            # A stopped or crashed worker leaves no pipe; restart it once instead
+            # of polling a missing pipe forever.
+            if lost and command!='attach' and not getattr(self,'_reattaching',False):
+                self._reattaching=True
+                def reattached(_):self._reattaching=False;self.refresh()
+                self.call('attach',{},reattached,failed=lambda _:setattr(self,'_reattaching',False))
             self.update_activity()
         if command=='attach':request.signals.progress.connect(self.connection.setText)
         request.signals.done.connect(success);request.signals.failed.connect(failure);self.pool.start(request,0 if command in ('get_status','list_workflows','get_task') else 1)

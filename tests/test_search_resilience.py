@@ -26,7 +26,8 @@ def test_one_site_failure_waits_for_explicit_fallback_after_other_empty_searches
         calls.append(site)
         return {'status':failure,'candidates':[]} if site=='open.cd' else {'status':'NO_RESOURCE','candidates':[]}
     monkeypatch.setattr(service.workflows,'provider',lambda site,cfg:SimpleNamespace(search=lambda _:search(site)))
-    job=make_job(service);service.workflows._searching(job)
+    # Transient failures are searched again automatically first; this is the state after those retries.
+    job=make_job(service);job['search_retry_count']=3;service.workflows._searching(job)
     assert job['stage']=='needs_review' and job['review_kind']=='search' and len(calls)==7 and calls.count('open.cd')==1
     assert not job.get('processing_job_id')
     service.workflows.review(job['job_id'],'streaming_fallback')
@@ -53,7 +54,7 @@ def test_provider_constructor_network_failure_is_isolated_for_manual_search(serv
 
 def test_all_unavailable_waits_for_review_and_does_not_claim_no_match(service,monkeypatch):
     monkeypatch.setattr(service.workflows,'provider',lambda *a:SimpleNamespace(search=lambda _: {'status':'NETWORK_ERROR','candidates':[]}))
-    job=make_job(service);service.workflows._searching(job)
+    job=make_job(service);job['search_retry_count']=3;service.workflows._searching(job)
     assert job['stage']=='needs_review' and job['review_kind']=='search'
     assert not job['search_summary']['successful_sites']
     monkeypatch.setattr(service,'_real_pt',lambda *a:SimpleNamespace(search=lambda _: {'status':'AUTH_FAILED','candidates':[]}))
@@ -94,3 +95,43 @@ def test_skipping_all_pt_accounts_respects_explicit_netease_fallback_without_ai_
         assert process['task_group']=='process' and process['search_job_id']==job['job_id']
     else:assert job['stage']=='needs_review' and not job.get('processing_job_id')
     assert not service.store.list('download_tasks') and not service.store.list('token_reservations')
+
+
+@pytest.mark.parametrize('failure',['NETWORK_ERROR','RATE_LIMITED','TRANSIENT_ERROR'])
+def test_transient_site_failures_are_searched_again_before_review(service,monkeypatch,failure):
+    import time
+    state={'failing':True}
+    def search(site):
+        if site=='open.cd' and state['failing']:return {'status':failure,'candidates':[]}
+        return {'status':'NO_RESOURCE','candidates':[]}
+    monkeypatch.setattr(service.workflows,'provider',lambda site,cfg:SimpleNamespace(search=lambda _:search(site)))
+    job=make_job(service)
+    for attempt,delay in enumerate((600,1800,3600),1):
+        before=time.time();service.workflows._searching(job);job=service.store.get('evidence','workflow:'+job['job_id'])
+        assert job['stage']=='searching' and job['search_retry_count']==attempt and job['next_poll']>=before+delay-1
+    service.workflows._searching(job);job=service.store.get('evidence','workflow:'+job['job_id'])
+    assert job['stage']=='needs_review' and job['review_kind']=='search'
+
+
+def test_login_failure_is_not_retried_automatically(service,monkeypatch):
+    monkeypatch.setattr(service.workflows,'provider',lambda site,cfg:SimpleNamespace(search=lambda _: {'status':'AUTH_FAILED' if site=='open.cd' else 'NO_RESOURCE','candidates':[]}))
+    job=make_job(service);service.workflows._searching(job)
+    assert job['stage']=='needs_review' and not job.get('search_retry_count')
+
+
+def test_traditional_title_and_joined_artist_credit_are_an_exact_match(service,monkeypatch):
+    candidate={'source':'dicmusic','candidate_id':'t1','resource_id':'t1','title':'葉惠美','artists':['周杰倫 & 方文山'],'seeders':5,'release':{'album':'葉惠美'},'media':{'format':'FLAC'}}
+    def search(site):
+        return {'status':'OK','candidates':[dict(candidate)]} if site=='dicmusic' else {'status':'NO_RESOURCE','candidates':[]}
+    monkeypatch.setattr(service.workflows,'provider',lambda site,cfg:SimpleNamespace(search=lambda _:search(site)))
+    job=make_job(service);job['targets'][0].update(album='叶惠美',artists=['周杰伦','方文山']);job['old_files']=[]
+    service.workflows.put(job);service.workflows._searching(job)
+    job=service.store.get('evidence','workflow:'+job['job_id'])
+    assert job.get('review_kind')!='candidate' and any(c.get('identity_exact') for c in job['choices']),job.get('message')
+
+
+def test_a_different_artist_with_the_same_album_title_still_needs_review(service,monkeypatch):
+    candidate={'source':'dicmusic','candidate_id':'t2','resource_id':'t2','title':'Album','artists':['Somebody Else'],'seeders':5,'release':{'album':'Album'},'media':{'format':'FLAC'}}
+    monkeypatch.setattr(service.workflows,'provider',lambda site,cfg:SimpleNamespace(search=lambda _:{'status':'OK','candidates':[dict(candidate)]} if site=='dicmusic' else {'status':'NO_RESOURCE','candidates':[]}))
+    job=make_job(service);service.workflows._searching(job)
+    assert job['stage']=='needs_review' and job['review_kind']=='candidate'

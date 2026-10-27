@@ -14,13 +14,15 @@ from musicops.domain.editions import compatible as album_compatible
 from musicops.library.index import index_library,AUDIO_EXTENSIONS,sha256_file
 from musicops.library.paths import reject_reparse_chain
 from musicops.library.transactions import TransactionEngine,durable_copy
-from musicops.media.tags import read_tag_fields,apply_tag_changes,embedded_covers,apply_cover_changes
+from musicops.media.tags import read_tag_fields,apply_tag_changes,embedded_covers,apply_cover_changes,repair_embedded_pictures
 from musicops.media.resources import validate_lrc,validate_cover
 from musicops.media.lyrics import embedded_synchronized,player_lrc,player_ready_sidecar,write_sidecar
 from musicops.media.identity_fields import usable,release_pairs
 from musicops.media.source_labels import album_artist_credits,effective_album_artists,normalize_album_artist,has_source_credit,album_label
 from musicops.app.search_status import SITE_NAMES,search_site,search_album,edition_conflict,summarize,detail as search_detail
 
+TRANSIENT_SEARCH={'RATE_LIMITED','NETWORK_ERROR','TRANSIENT_ERROR'}
+SEARCH_RETRY_DELAYS=(600,1800,3600)
 # 3: lyrics are embedded with their timeline and sidecars use the shared player dialect.
 RESOURCE_CONTRACT=3
 
@@ -39,6 +41,18 @@ def unreadable_audio(job):
 def artist_key(artists):
     from musicops.media.chinese import alias_key
     return tuple(sorted(alias_key(a) for a in artists if a))
+ARTIST_JOINERS=re.compile(r'\s*(?:&|＆|/|／|;|；|,|，|、|×|\bfeat\.|\bfeat\b|\bft\.|\bfeaturing\b)\s*',re.I)
+def credited_artists(artists):
+    """One artist set whether a credit is one joined string or separate names."""
+    from musicops.media.chinese import alias_key
+    names=set()
+    for credit in artists or ():
+        parts=[p for p in ARTIST_JOINERS.split(str(credit)) if p.strip()]
+        names.update(alias_key(p) for p in parts)
+    return frozenset(names)
+def alias_title(value):
+    from musicops.media.chinese import alias_key
+    return alias_key(strict_text(value))
 def identity(row):
     from musicops.media.chinese import alias_key
     return (alias_key(row.get('raw_title',row.get('title',''))),artist_key(row.get('artists',[])))
@@ -607,8 +621,9 @@ class Workflows:
             finally:lock.release()
             outcomes[site]={k:v for k,v in result.items() if k not in ('candidates','reason')}
             for c in result.get('candidates',[]):
-                exact=strict_text(c['title'])==strict_text(album) and artist_key(c['artists'])==artist_key(artists)
-                if job['scene']=='playlist' and artists and strict_text(c['title'])==strict_text(album) and set(artist_key(artists)).issubset(set(artist_key(c['artists']))):exact=True
+                same_title=alias_title(c['title'])==alias_title(album)
+                exact=same_title and credited_artists(c['artists'])==credited_artists(artists)
+                if job['scene']=='playlist' and artists and same_title and credited_artists(artists)<=credited_artists(c['artists']):exact=True
                 if site=='open.cd' and len(artists)==1:
                     text=strict_text(c['title']);prefix=strict_text(artists[0])+' - '+strict_text(album)
                     tail=text[len(prefix):] if text.startswith(prefix) else None
@@ -670,6 +685,14 @@ class Workflows:
                 credits=candidate.get('artists',[]);query=' '.join(credits)+' '+str(canonical or '')
                 if canonical and credits and len(query)<=300 and strict_text(query)!=strict_text(' '.join(artists)+' '+album):
                     self.put(job,stage='searching',search_query=query,message='AI 找到真实目录中的别名，使用规范关键词重新检索',detail='别名仅用于检索；不一致的艺人或发行仍需核对。');return
+        # A rate limit or brief outage is not a reason for a person to look at
+        # the album: search again later before asking for review.
+        failures={outcomes[site].get('status') for site in summary['unavailable_sites']}
+        attempt=job.get('search_retry_count',0)
+        if summary['unavailable_sites'] and failures<=TRANSIENT_SEARCH and attempt<len(SEARCH_RETRY_DELAYS):
+            import time
+            delay=SEARCH_RETRY_DELAYS[attempt]
+            self.put(job,stage='searching',search_retry_count=attempt+1,next_poll=time.time()+delay,message=f'部分站点暂时不可用，{delay//60} 分钟后自动重新检索（{attempt+1}/{len(SEARCH_RETRY_DELAYS)}）',detail=search_detail(summary));return
         if candidates:self.put(job,stage='needs_review',review_kind='candidate',message='找到了候选发行，需要核对艺人和版本');return
         if not summary['successful_sites']:
             self.put(job,stage='needs_review',review_kind='search',message='已启用站点当前均不可用' if summary['unavailable_sites'] else '尚未启用可检索站点',detail=search_detail(summary) or '请在连接与设置中启用资源站。');return
@@ -850,6 +873,7 @@ class Workflows:
                 job.setdefault('media_conversions',[]).append({'source':str(source),'destination':str(dest),'source_hash':conversion['source_hash'],'after_hash':conversion['after_hash'],'pcm_verified':True})
             else:durable_copy(source,dest)
             if sha256_file(source)!=original_hash:raise PolicyBlocked('原音源在复制时发生改变，请重新扫描')
+            if repair_embedded_pictures(dest):job.setdefault('repaired_pictures',[]).append(source.name)
             tags=read_tag_fields(dest)
             from musicops.media.chinese import declared_language,display_text
             language=declared_language(dest)
@@ -1058,7 +1082,9 @@ class Workflows:
         from musicops.app.playlist_album import validate as validate_album_scope
         validate_album_scope(job,rows)
         job['cover_missing']=sum(not embedded_covers(row['path']) for row in rows)
-        if job.get('cover_missing') and not job.get('cover_unavailable'):
+        # A download is not imported coverless without an explicit skip. Local
+        # completion keeps the other repairs; the missing count is in the summary.
+        if job.get('cover_missing') and not job.get('cover_unavailable') and job['scene']!='complete':
             self.put(job,prepared=rows,stage='needs_review',review_kind='cover',message='音频通过检查，但缺少可靠封面；请选择已核对的专辑封面，或明确跳过');return
         if job['scene']=='expand':
             from musicops.app.single_upgrade import validate

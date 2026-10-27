@@ -150,6 +150,51 @@ def mark_local_compilation(copy_path):
         obj.tags['compilation']=['1']
     obj.save()
 
+IMAGE_MIMES={'JPEG':'image/jpeg','PNG':'image/png','WEBP':'image/webp','GIF':'image/gif','BMP':'image/bmp'}
+
+def _image_facts(data):
+    import io
+    from PIL import Image
+    try:
+        with Image.open(io.BytesIO(data)) as img:
+            if img.format not in IMAGE_MIMES:return None
+            img.verify()
+            return IMAGE_MIMES[img.format],img.size
+    except Exception:return None
+
+def repair_embedded_pictures(copy_path) -> int:
+    """Fix picture blocks whose MIME type or size fields are missing.
+
+    Some store downloads embed a valid JPEG with an empty MIME type and a 0x0
+    size. Recent FFmpeg refuses to open such files and older builds report an
+    error, so a playable album fails validation. The image bytes are kept; a
+    block whose data is not an image is dropped. Only work copies are edited.
+    Returns the number of repaired or dropped pictures.
+    """
+    path=Path(copy_path)
+    if path.stat().st_nlink!=1:raise ValueError('HARDLINK_EDIT_FORBIDDEN')
+    obj=mutagen.File(path)
+    changed=0
+    if isinstance(obj,FLAC):
+        kept=[]
+        for pic in obj.pictures:
+            facts=_image_facts(pic.data)
+            if facts is None:changed+=1;continue
+            mime,(width,height)=facts
+            if pic.mime!=mime or not pic.width or not pic.height:
+                pic.mime=mime;pic.width=width;pic.height=height;pic.depth=pic.depth or 24;changed+=1
+            kept.append(pic)
+        if changed:
+            obj.clear_pictures()
+            for pic in kept:obj.add_picture(pic)
+    elif obj is not None and isinstance(obj.tags,ID3):
+        for frame in list(obj.tags.getall('APIC')):
+            facts=_image_facts(frame.data)
+            if facts is None:obj.tags.delall(frame.HashKey);changed+=1
+            elif frame.mime!=facts[0]:frame.mime=facts[0];changed+=1
+    if changed:obj.save()
+    return changed
+
 def apply_cover_changes(copy_path,content,min_side=300) -> dict:
     """Replace front cover only on a work copy; preserve other/unknown pictures."""
     path=Path(copy_path)

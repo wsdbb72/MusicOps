@@ -143,7 +143,7 @@ def retry(workflows, job, *, query=None, sites=None, allow_review_search=False,a
         if existing:raise PolicyBlocked('已有文件事务，请先恢复或核对事务后再修改资料')
     changes = dict(config=cfg, stage=stage, paused=False, next_poll=0,
                    review_kind=None, detail='', error_class=None, ai_assistance=None,
-                   retry_count=int(job.get('retry_count', 0)) + 1, message='已重新排队，先核对既有状态后重试')
+                   retry_count=int(job.get('retry_count', 0)) + 1, search_retry_count=0, message='已重新排队，先核对既有状态后重试')
     if enrichment_retry:changes.update(refresh_resources=True,resource_retry_count=0,enrichment_retry_count=int(job.get('enrichment_retry_count',0))+1,message='已按当前设置重新补全资料；有可靠证据才自动提交')
     if stage=='metadata':
         archived=archive_failed_preparation(workflows,job,cfg)

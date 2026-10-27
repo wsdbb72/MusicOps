@@ -1112,6 +1112,13 @@ function settings() {
     edition.append(new Option(title, key));
   edition.value = config.workflow.edition_policy;
   p.append(node("p", "同一发行的音源筛选策略"), edition);
+  field(
+    p,
+    "artist-folders",
+    "资料补全后把根目录下的专辑移到“音乐人/专辑”文件夹（合作专辑用 A／B）",
+    config.workflow.artist_folders !== false,
+    "checkbox",
+  );
   p.append(
     action("将已有下载标签统一为 MusicOps", () =>
       operation("normalize_qbt_tags", {}, (r) =>
@@ -1394,6 +1401,7 @@ async function saveSettings() {
       netease_import_dir: val("netease-import"),
       fl_unlimited: checked("fl-unlimited"),
       fl_per_batch: Number(val("fl-count")),
+      artist_folders: checked("artist-folders"),
     },
     streaming: {
       musicdl: {

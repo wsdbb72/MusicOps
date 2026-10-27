@@ -80,7 +80,8 @@ def test_source_artist_forces_existing_album_repair_despite_positive_resource_ca
     service.store.put('evidence','resources-checked:'+row['file_id'],{'resource_contract':2,'version':[row['size'],row['mtime_ns']],'settings':digest(cfg['lyrics']),'checked_at':time.time()})
     result=service.workflows.start({'scene':'complete'},cfg);assert result['album_count']==1
     finished=until_terminal(service);assert finished['stage']=='completed',finished
-    assert FLAC(path)['albumartist']==['Artist']
+    # The repaired root-level album also moves into its artist folder.
+    path=root/'Artist'/'Album'/'song.flac';assert FLAC(path)['albumartist']==['Artist']
     transaction=service.store.get('transactions',finished['transaction_id'])
     assert any(item['before_hash']==before for item in transaction['backup_manifest'])
 

@@ -99,8 +99,9 @@ def save_setup(service,payload):
             if key in plex:target[key]=str(plex[key]).rstrip('/')
         if plex.get('token'):secret('plex',target['url'],plex['token'],('music_servers','plex','auth_secret_ref'))
     workflow=payload.get('workflow',{})
-    for key in ('edition_policy','netease_fallback','netease_api_url','netease_downloader','netease_download_args','netease_import_dir','prefer_24bit','fl_per_batch','fl_unlimited'):
+    for key in ('edition_policy','netease_fallback','netease_api_url','netease_downloader','netease_download_args','netease_import_dir','prefer_24bit','fl_per_batch','fl_unlimited','artist_folders'):
         if key in workflow:values['workflow'][key]=workflow[key]
+    if type(values['workflow'].get('artist_folders',True)) is not bool:raise ValueError('按音乐人整理文件夹须为勾选状态')
     if 'updates' in payload:
         if not isinstance(payload['updates'],dict) or type(payload['updates'].get('enabled')) is not bool:raise ValueError('自动更新设置无效')
         values['updates']['enabled']=payload['updates']['enabled']

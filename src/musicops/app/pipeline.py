@@ -282,7 +282,8 @@ class Workflows:
                     if any(isinstance(marker,dict) and marker.get('field')=='albumartist' for marker in row.get('source_labels',[])):recent=False
                     cached=self.store.get('evidence','resources-checked:'+row['file_id'])
                     recent=recent and bool(cached and cached.get('resource_contract')==RESOURCE_CONTRACT and cached.get('version')==[row['size'],row['mtime_ns']] and cached.get('settings')==digest(cfg['lyrics']) and __import__('time').time()-cached.get('checked_at',0)<cfg['lyrics']['negative_ttl'])
-                if recent:continue
+                from musicops.app.artist_folders import loose_at_root
+                if recent and not (cfg['workflow'].get('artist_folders',True) and loose_at_root(tracks[0],root)):continue
             job_id=str(uuid.uuid4());first=tracks[0];stage='metadata' if scene=='complete' else 'snapshotting' if scene in ('upgrade','fill','expand') else 'identifying'
             paused=bool((self.store.get('evidence','workflow:'+batch['job_id']) or {}).get('paused'))
             job={'kind':'workflow','job_id':job_id,'batch_id':batch_id,'scene':scene,'config':copy.deepcopy(cfg),'targets':tracks if scene=='playlist' else [],'old_files':tracks if scene!='playlist' else [],'stage':stage,'task_group':'repair' if scene=='complete' else 'identify','task_type':'album' if scene=='complete' else 'identification','target_count':len(tracks),'paused':paused,'progress':0,'created_at':utcnow(),'message':'等待识别' if scene=='playlist' else '等待处理','detail':'','label':album_label(first),'prefer_24bit':args.get('prefer_24bit',cfg['workflow']['prefer_24bit']),'refresh_resources':bool(args.get('refresh_resources')),'retire_single_requested':bool(args.get('retire_single'))}
@@ -845,7 +846,16 @@ class Workflows:
                         if value and list(value)!=[number.split('/',1)[1]]:complete=False
                 if not embedded_covers(row['path']) or not embedded_synchronized(row['path'],row.get('duration')) or not any(c['type']=='lyrics' and player_ready_sidecar(c['path'],row.get('duration')) for c in row.get('companions',[])):complete=False
             if complete and disc_numbers and set(disc_numbers)==set(range(1,max(disc_numbers)+1)) and set(disc_totals)=={max(disc_numbers)}:
-                self.put(job,stage='skipped',message='专辑、艺人、封面和同步歌词已齐全');return
+                # Nothing to repair, but a root-level album still moves into its artist folder.
+                library=Path(job['config']['paths']['library']);paths=[row['path'] for row in job['old_files']]
+                tags=read_tag_fields(paths[0]);job.update(album=(tags.get('album') or [''])[0],albumartists=effective_album_artists({**job['old_files'][0],'albumartist':tags.get('albumartist',[]),'artists':tags.get('artist',[])}),total_discs=max(disc_numbers))
+                published,affected=self._relocate(job,library,paths,[Path(p) for p in paths])
+                if affected:
+                    from musicops.library.catalog import AlbumCatalog as Catalog
+                    indexed=index_library(library,metadata_only=True,selected_paths=published,checkpoint=lambda:self.checkpoint(job,'index_published_files'))
+                    Catalog(self.store).refresh_files(library,indexed,checkpoint=lambda phase:self.checkpoint(job,phase),affected_directories=affected)
+                    self.put(job,stage='completed',progress=100,message='资料已齐全 · 已整理到音乐人文件夹',detail=str(Path(job['relocation']['to']).relative_to(library)));return
+                self.put(job,stage='skipped',message='专辑、艺人、封面和同步歌词已齐全',detail=('未移动文件夹：'+job['relocation']['reason']) if (job.get('relocation') or {}).get('reason') else '');return
         if work.exists():raise PolicyBlocked('已存在未发布的整理副本，请核对后继续')
         work.mkdir(parents=True);job['prepared_root']=str(work);job['engine_paths']=paths
         sources=job['old_files'] if job['scene']=='complete' else index_library(job['source_path'],metadata_only=True,checkpoint=lambda:self.checkpoint(job,'download_index'))
@@ -1117,7 +1127,8 @@ class Workflows:
             with self.store.connection() as connection:existing=connection.execute("SELECT 1 FROM transactions WHERE json_extract(payload,'$.plan_id')=? LIMIT 1",(job['publication_plan']['plan_id'],)).fetchone()
             if existing:return self._commit_publication(job,job['publication_plan'])
         if job.get('resource_contract')!=RESOURCE_CONTRACT and not job.get('publication_plan'):return self._validating(job)
-        cfg=job['config'];root=Path(cfg['paths']['library']);operations=[];verified={};album=job['album'];artist=' & '.join(job['albumartists']);suffix=''
+        from musicops.app.artist_folders import folder_artist
+        cfg=job['config'];root=Path(cfg['paths']['library']);operations=[];verified={};album=job['album'];artist=folder_artist(job['albumartists']);suffix=''
         if job['scene'] in ('upgrade','expand'):suffix=' [升级 '+job['job_id'][:8]+']'
         elif job.get('selected_edition'):
             from musicops.domain.editions import describe
@@ -1181,21 +1192,35 @@ class Workflows:
         self.checkpoint(job,'before_retirement');result=engine.execute({'schema_version':1,'plan_id':'retire:'+job['job_id'],'config_hash':digest(cfg),'operations':operations})
         if result['state']!='COMMITTED':raise PolicyBlocked('旧版移出事务尚未提交，需要核对')
         self.put(job,retirement_transaction_id=result['tx_id'],stage='notifying',message='旧版已移出监听目录，恢复副本已保存')
+    def _relocate(self,job,library,paths,published):
+        """Move a root-level album into its artist folder; returns re-pointed paths."""
+        from musicops.app.artist_folders import relocate,moved
+        mapping=relocate(self,job,paths)
+        if not (mapping['dirs'] or mapping['files']):return published,[]
+        stale=[row['file_id'] for row in job.get('old_files',[]) if row.get('file_id')]
+        with self.store.connection() as connection:connection.executemany('DELETE FROM library_files WHERE id=?',[(i,) for i in stale])
+        return [moved(p,mapping) for p in published],[album_root({'path':paths[0]},library)]
     def _notifying(self,job):
         from musicops.clients.navidrome import scan
         from musicops.app.publication_cleanup import finish
-        if not finish(self,job):return
+        # Cleanup verified the committed files before any recorded move; a resumed
+        # move would otherwise look like a changed publication.
+        if (job.get('relocation') or {}).get('state') not in ('intent','done'):
+            if not finish(self,job):return
         library=Path(job['config']['paths']['library'])
         published=[library/op['destination'] for op in (job.get('publication_plan') or {}).get('operations',[]) if Path(op['destination']).suffix.lower() in AUDIO_EXTENSIONS]
         for rel in (job.get('verified_destinations') or {}):
             target=library/rel
             if target.suffix.lower() in AUDIO_EXTENSIONS and target not in published:published.append(target)
+        affected=[]
+        if job['scene']=='complete':
+            published,affected=self._relocate(job,library,[row['original_path'] for row in job.get('prepared',[])],published)
         if published:
             from musicops.library.index import index_library
             from musicops.library.catalog import AlbumCatalog
             indexed=index_library(library,metadata_only=True,selected_paths=published,checkpoint=lambda:self.checkpoint(job,'index_published_files'))
             if len(indexed)!=len(published) or any(row.get('read_error') for row in indexed):raise PolicyBlocked('入库音频已提交，元数据索引未完成；原文件保留并等待重新刷新')
-            AlbumCatalog(self.store).refresh_files(library,indexed,checkpoint=lambda phase:self.checkpoint(job,phase))
+            AlbumCatalog(self.store).refresh_files(library,indexed,checkpoint=lambda phase:self.checkpoint(job,phase),affected_directories=affected)
         for destination in published:
             if destination.suffix.lower() in AUDIO_EXTENSIONS and destination.is_file():
                 file_id=str(uuid.uuid5(uuid.NAMESPACE_URL,str(destination).casefold()));stat=destination.stat()
@@ -1207,7 +1232,9 @@ class Workflows:
             plex=plex_scan(job['config']['music_servers'].get('plex',{}),self.s.vault.get)
             if plex['state']!='skipped':message+='；'+plex['message']
         except (HttpError,ValueError):message+='；Plex 通知失败，请检查连接设置（音频已入库）'
-        self.put(job,stage='completed',progress=100,message='已完成 · '+message,detail=f"暂无匹配歌词：{job.get('lyrics_missing',0)} 首；未找到可靠封面：{job.get('cover_missing',0)} 首。恢复副本保存在音乐库外，不影响 Roon 分组。")
+        relocation=job.get('relocation') or {}
+        place='已整理到音乐人文件夹：'+str(Path(relocation['to']).relative_to(library))+'。' if relocation.get('state')=='done' else '未移动文件夹：'+relocation['reason']+'。' if relocation.get('reason') else ''
+        self.put(job,stage='completed',progress=100,message='已完成 · '+message,detail=place+f"暂无匹配歌词：{job.get('lyrics_missing',0)} 首；未找到可靠封面：{job.get('cover_missing',0)} 首。恢复副本保存在音乐库外，不影响 Roon 分组。")
     def review(self,job_id,choice=None,metadata=None,cover_path=None,query=None,sites=None,expected_revision=None):
         job=self.store.get('evidence','workflow:'+job_id)
         if job and job.get('job_kind')=='batch':raise ValueError('请返回“'+SCENES.get(job['scene'],job['scene'])+'”页面重新开始；此准备记录不会自动重放')

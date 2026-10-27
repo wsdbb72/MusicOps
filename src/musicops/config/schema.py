@@ -31,7 +31,7 @@ def default_config(base,offline=True):
       updates=dict(enabled=True),
       streaming=dict(musicdl=dict(enabled=False,python_path='',credential_refs={}),managed=True,enabled=False,base_url='http://127.0.0.1:8080/music',credential_ref='',order=['netease','qqmusic','kuwo','kugou','migu','qishui','bilibili','applemusic'],timeout=30),
       browser_solver=dict(managed=True,enabled=False,base_url='http://127.0.0.1:8191',timeout=60,executable='',auto_start=False),
-      workflow=dict(edition_policy='quality',setup_done=False,source_order=['open.cd','dicmusic','orpheus','redacted'],free_only=True,fl_per_batch=3,fl_unlimited=False,max_albums=50,netease_fallback=True,netease_api_url='',netease_downloader='',netease_download_args=[],netease_import_dir='',backup_days=7,prefer_24bit=True),
+      workflow=dict(edition_policy='quality',setup_done=False,source_order=['open.cd','dicmusic','orpheus','redacted'],free_only=True,fl_per_batch=3,fl_unlimited=False,artist_folders=True,max_albums=50,netease_fallback=True,netease_api_url='',netease_downloader='',netease_download_args=[],netease_import_dir='',backup_days=7,prefer_24bit=True),
       music_servers=dict(plex=dict(enabled=False,url='',section_id='',auth_secret_ref='',library=''),roon=dict(enabled=False,library='',watched_folders=[],credential_ref='',client='Roon',host='127.0.0.1',port=9330,timeout=8),navidrome=dict(enabled=False,url='',username='',password_ref='',library='')),
       playlist_sources={key:dict(credential_ref='',timeout=15) for key in ('qqmusic','qishui','kugou','kuwo','migu','bilibili','applemusic','spotify','youtube')})
 

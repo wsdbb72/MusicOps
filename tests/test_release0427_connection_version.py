@@ -4,7 +4,7 @@ import pytest
 from PySide6.QtWidgets import QApplication
 from musicops import __version__
 from musicops.gui.workbench import Workbench
-from musicops.worker.client import WorkerClient,WorkerConnectionError
+from musicops.worker.client import WorkerClient,WorkerConnectionError,WorkerUnavailableError
 from test_release0417_web_performance import web  # noqa: F401  (fixture)
 from test_workbench import Client,wait
 
@@ -17,6 +17,8 @@ def test_missing_worker_pipe_is_a_connection_error_not_a_raw_file_error(tmp_path
     # No worker is listening: Windows reports [WinError 2], POSIX ENOENT.
     with pytest.raises(WorkerConnectionError) as error:WorkerClient(tmp_path/'profile',timeout=2).call('get_status',{})
     assert 'IPC_CONNECTION_ERROR' in str(error.value) and 'WinError' not in str(error.value)
+    # Startup/shutdown loops in the smoke scripts and container entrypoint wait on OSError.
+    assert isinstance(error.value,WorkerUnavailableError) and isinstance(error.value,OSError)
 
 
 def test_lost_worker_during_background_refresh_reconnects_instead_of_showing_winerror(app,tmp_path):

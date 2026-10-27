@@ -17,6 +17,10 @@ class WorkerRequestError(RuntimeError):
 class WorkerConnectionError(RuntimeError):
     error_class='IPC_CONNECTION_ERROR'
 
+class WorkerUnavailableError(WorkerConnectionError,ConnectionError):
+    """No worker is listening. Still an OSError, so startup and shutdown
+    loops that wait on a missing pipe keep their existing behaviour."""
+
 def pipe_address(base):return ipc_address(base)
 def auth_key(base):
     path=Path(base)/'vault'/('ipc.keychain' if is_macos() else 'ipc.dpapi' if is_windows() else 'ipc.aesgcm');private_directory(path.parent)
@@ -46,7 +50,7 @@ class WorkerClient:
             # A missing pipe/socket means the worker exited or is restarting;
             # never surface the raw "file not found" as a task problem.
             if isinstance(exc,(FileNotFoundError,ConnectionRefusedError)) or getattr(exc,'winerror',None) in (2,53,109,232,233):
-                raise WorkerConnectionError('IPC_CONNECTION_ERROR：后台未运行或正在重启，正在重新连接；已有任务仍保留') from None
+                raise WorkerUnavailableError('IPC_CONNECTION_ERROR：后台未运行或正在重启，正在重新连接；已有任务仍保留') from None
             raise
         with conn:
             conn.send_bytes(encoded)

@@ -337,6 +337,18 @@ class Workbench(QMainWindow):
         self.track_table=self.table(['选择','歌曲','艺人','专辑','状态']);self.track_table.setMinimumHeight(220);box.addWidget(self.track_table,1)
         self.playlist_full_album=QCheckBox('单曲发行可选择下载完整专辑（先核对，再下载）');self.playlist_full_album.setToolTip('可选。只对真实目录确认的 Single 查找收录相同录音的完整 Album；由你选择原发行或完整专辑，不会仅凭曲目数量猜测。');box.addWidget(self.playlist_full_album)
         row=QHBoxLayout();row.addWidget(button('全选 / 取消',self.select_all));row.addWidget(button('恢复已解析曲目',self.load_cached_playlist));row.addStretch();row.addWidget(button('开始入库',lambda:self.start('playlist'),True));box.addLayout(row)
+        self._subscriptions(box)
+    def _subscriptions(self,box):
+        card=QGroupBox('订阅监控歌单');card.setObjectName('card');form=QVBoxLayout(card)
+        form.addWidget(label('订阅上方填写的歌单后，后台按间隔重新读取；只把新增曲目按专辑自动入库，已在音乐库中的跳过，歌单删除的曲目不会从音乐库移除。','hint'))
+        row=QHBoxLayout();self.subscription_hours=QSpinBox();self.subscription_hours.setRange(1,168);self.subscription_hours.setValue(6);self.subscription_hours.setPrefix('每 ');self.subscription_hours.setSuffix(' 小时检查')
+        self.subscription_existing=QCheckBox('现有曲目也入库');self.subscription_existing.setToolTip('不勾选时，首次检查只记录现有曲目，之后新增的才入库。')
+        row.addWidget(self.subscription_hours);row.addWidget(self.subscription_existing);row.addStretch();row.addWidget(button('订阅当前歌单',self.add_subscription,True));form.addLayout(row)
+        self.subscription_table=self.table(['歌单','间隔','上次检查','结果','下次检查']);self.subscription_table.setMinimumHeight(160);form.addWidget(self.subscription_table)
+        row=QHBoxLayout();row.addWidget(button('立即检查',self.check_subscription));row.addWidget(button('暂停 / 恢复',self.toggle_subscription));row.addWidget(button('删除订阅',self.delete_subscription));row.addStretch();form.addLayout(row)
+        self.subscription_note=label('','hint');form.addWidget(self.subscription_note);box.addWidget(card)
+        self.subscription_timer=QTimer(self);self.subscription_timer.setInterval(30000);self.subscription_timer.timeout.connect(self.load_subscriptions);self.subscription_timer.start()
+        QTimer.singleShot(0,self.load_subscriptions)
     def _complete(self):
         box=self.page('补齐音乐库资料','检查专辑、艺人、封面和歌词。可靠匹配自动补齐，资料不明确的项目单独列出。');self.steps(box,'读取标签  →  识别缺失资料  →  查询与匹配  →  写入副本并验证')
         card=QGroupBox('将补齐的内容');card.setObjectName('card');form=QVBoxLayout(card)
@@ -619,6 +631,44 @@ class Workbench(QMainWindow):
             self.loaded_tracks(result)
             if result.get('reason') and not result.get('targets'):self.playlist_note.setText(self.playlist_note.text()+' '+result['reason'])
         self.call('refresh_playlist',payload,parsed,lambda error:self.playlist_note.setText('读取未完成：'+error))
+    def load_subscriptions(self):
+        def loaded(result):
+            if result.get('error'):return
+            import datetime as dt
+            def when(value):
+                if not value:return '—'
+                try:moment=dt.datetime.fromtimestamp(value) if isinstance(value,(int,float)) else dt.datetime.fromisoformat(str(value)).astimezone()
+                except (ValueError,OSError):return '—'
+                return moment.strftime('%m-%d %H:%M')
+            self.subscriptions=result.get('subscriptions',[]);table=self.subscription_table;table.setRowCount(len(self.subscriptions))
+            for i,row in enumerate(self.subscriptions):
+                values=[(row.get('name') or row['playlist_input'])+('' if row.get('enabled') else '（已暂停）'),f"{row['interval_hours']} 小时",when(row.get('last_checked_at')),row.get('last_reason') or '等待首次检查',when(row.get('next_check_at')) if row.get('enabled') else '—']
+                for j,value in enumerate(values):
+                    item=QTableWidgetItem(value);item.setToolTip(row['playlist_input'] if j==0 else value);item.setData(Qt.UserRole,row['subscription_id']);table.setItem(i,j,item)
+        self.call('list_subscriptions',{},loaded)
+    def _selected_subscription(self):
+        row=self.subscription_table.currentRow()
+        if row<0 or not self.subscription_table.item(row,0):self.subscription_note.setText('请先在列表中选择一个订阅。');return None
+        return self.subscription_table.item(row,0).data(Qt.UserRole)
+    def _subscription_done(self,message):
+        def done(result):
+            self.subscription_note.setText(result['error'] if result.get('error') else message);self.load_subscriptions()
+        return done
+    def add_subscription(self):
+        text=self.playlist.text().strip()
+        if not text:self.subscription_note.setText('请先在上方粘贴要订阅的歌单链接。');return
+        self.call('save_subscription',{'playlist_input':text,'platform':self.playlist_platform.currentData(),'import_existing':self.subscription_existing.isChecked(),
+                                       'interval_hours':self.subscription_hours.value(),'prefer_full_album':self.playlist_full_album.isChecked()},self._subscription_done('已订阅，马上进行首次检查。'))
+    def check_subscription(self):
+        sid=self._selected_subscription()
+        if sid:self.call('check_subscription_now',{'subscription_id':sid},self._subscription_done('检查完成。'),lambda error:self.subscription_note.setText('检查未完成：'+error),lambda _:self.subscription_note.setText('正在检查歌单…'))
+    def toggle_subscription(self):
+        sid=self._selected_subscription();row=next((r for r in getattr(self,'subscriptions',[]) if r['subscription_id']==sid),None)
+        if row:self.call('save_subscription',{'subscription_id':sid,'enabled':not row.get('enabled')},self._subscription_done('已恢复订阅。' if not row.get('enabled') else '已暂停订阅。'))
+    def delete_subscription(self):
+        sid=self._selected_subscription()
+        if sid and QMessageBox.question(self,'删除订阅','删除后不再检查这个歌单；已入库的音乐不受影响。')==QMessageBox.Yes:
+            self.call('delete_subscription',{'subscription_id':sid},self._subscription_done('已删除订阅。'))
     def load_cached_playlist(self):
         def loaded(result):
             if not result.get('targets'):

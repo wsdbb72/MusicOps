@@ -102,6 +102,10 @@ select {
 input {
   max-width: 100%;
 }
+#subscription-hours {
+  min-width: 0;
+  width: 5em;
+}
 input[type="checkbox"] {
   accent-color: var(--accent);
 }

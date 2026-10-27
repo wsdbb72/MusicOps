@@ -71,6 +71,46 @@
             </table>
           </div>
         </div>
+        <div class="card">
+          <h3>订阅监控歌单</h3>
+          <p>
+            订阅上方填写的歌单后，后台按间隔重新读取；只把新增曲目按专辑自动入库，已在音乐库中的跳过，歌单删除的曲目不会从音乐库移除。
+          </p>
+          <div class="row">
+            <label
+              >每
+              <input
+                id="subscription-hours"
+                type="number"
+                min="1"
+                max="168"
+                value="6"
+                aria-label="检查间隔（小时）"
+              />
+              小时检查</label
+            ><label
+              ><input
+                type="checkbox"
+                id="subscription-existing"
+              />现有曲目也入库</label
+            ><button id="subscribe" class="primary">订阅当前歌单</button>
+          </div>
+          <div class="table-scroll">
+            <table>
+              <thead>
+                <tr>
+                  <th>歌单</th>
+                  <th>间隔</th>
+                  <th>上次检查</th>
+                  <th>结果</th>
+                  <th>下次检查</th>
+                  <th>操作</th>
+                </tr>
+              </thead>
+              <tbody id="subscriptions"></tbody>
+            </table>
+          </div>
+        </div>
       </section>
       <section id="library" hidden>
         <div class="grid">

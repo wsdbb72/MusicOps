@@ -23,7 +23,8 @@ COMMANDS = frozenset(('attach get_status get_task list_workflows get_workflow '
     'pause_pipeline resume_pipeline cancel_workflow save_setup engine_control test_connection '
     'test_browser_solver test_qbt_connection scan_duplicates merge_duplicates restore_duplicates '
     'duplicate_history compilation_albums preview_compilation merge_compilation restore_workflow '
-    'assist_workflows normalize_qbt_tags').split())
+    'assist_workflows normalize_qbt_tags list_subscriptions save_subscription delete_subscription '
+    'check_subscription_now').split())
 
 
 class Server(ThreadingHTTPServer):

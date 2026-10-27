@@ -242,6 +242,77 @@ $("parse").onclick = () =>
   );
 $("cache").onclick = () =>
   guard($("cache"), async () => loaded(await api("get_playlist_targets")));
+function when(value) {
+  if (!value) return "—";
+  const date = new Date(typeof value === "number" ? value * 1000 : value);
+  return isNaN(date)
+    ? "—"
+    : date.toLocaleString([], {
+        month: "2-digit",
+        day: "2-digit",
+        hour: "2-digit",
+        minute: "2-digit",
+      });
+}
+async function loadSubscriptions() {
+  const { subscriptions } = await api("list_subscriptions");
+  $("subscriptions").replaceChildren(
+    ...subscriptions.map((s) => {
+      const tr = node("tr"),
+        controls = node("td"),
+        id = { subscription_id: s.subscription_id },
+        title = node(
+          "td",
+          (s.name || s.playlist_input) + (s.enabled ? "" : "（已暂停）"),
+        );
+      title.title = s.playlist_input;
+      controls.append(
+        action("立即检查", async () => {
+          notice("正在检查歌单…");
+          await operation("check_subscription_now", id, (r) =>
+            notice(r.reason || "检查完成"),
+          );
+          await loadSubscriptions();
+        }),
+        action(s.enabled ? "暂停" : "恢复", async () => {
+          await api("save_subscription", { ...id, enabled: !s.enabled });
+          await loadSubscriptions();
+        }),
+        action("删除", async () => {
+          if (!confirm("删除后不再检查这个歌单；已入库的音乐不受影响。")) return;
+          await api("delete_subscription", id);
+          await loadSubscriptions();
+        }),
+      );
+      tr.append(
+        title,
+        node("td", s.interval_hours + " 小时"),
+        node("td", when(s.last_checked_at)),
+        node("td", s.last_reason || "等待首次检查"),
+        node("td", s.enabled ? when(s.next_check_at) : "—"),
+        controls,
+      );
+      return tr;
+    }),
+  );
+}
+$("subscribe").onclick = () =>
+  guard($("subscribe"), async () => {
+    const text = $("playlist-url").value.trim();
+    if (!text) throw new Error("请先在上方粘贴要订阅的歌单链接");
+    await api("save_subscription", {
+      playlist_input: text,
+      platform: $("playlist-platform").value,
+      import_existing: $("subscription-existing").checked,
+      interval_hours: Number($("subscription-hours").value),
+      prefer_full_album: $("playlist-full-album").checked,
+    });
+    notice("已订阅，马上进行首次检查。");
+    await loadSubscriptions();
+  });
+setInterval(() => {
+  if (!$("playlist").hidden) loadSubscriptions().catch(() => {});
+}, 30000);
 $("select-tracks").onclick = () => {
   const checks = [...$("tracks").querySelectorAll("input")],
     all = checks.every((e) => e.checked);
@@ -1512,6 +1583,7 @@ $("refresh").onclick = () => refresh();
     csrf = (await (await fetch(apiURL("api/bootstrap"))).json()).csrf;
     showPage("playlist");
     await refresh();
+    loadSubscriptions().catch(() => {});
     setInterval(() => {
       if (!document.hidden) refresh();
     }, 5000);

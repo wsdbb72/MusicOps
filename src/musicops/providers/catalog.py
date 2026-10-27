@@ -654,6 +654,10 @@ class CatalogResolver:
     def web_identify(self, query):
         if self.offline or not self.config.get('enabled', True) or not self.config.get('web_enabled', True):
             return {'candidates': [], 'sources': [], 'status': 'DISABLED'}
+        if not str(query.get('title') or '').strip() and not str(query.get('album') or '').strip():
+            # Untagged disc images (one WAV/APE plus CUE) have nothing to search
+            # for; they go to manual identification instead of failing the album.
+            return {'candidates': [], 'sources': [], 'status': 'NO_QUERY'}
         return self.website().identify(self._query(query))
 
     def web_read(self, url):

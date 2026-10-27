@@ -27,6 +27,15 @@ RESOURCE_CONTRACT=3
 TERMINAL={'completed','failed','needs_review','cancelled','skipped','restored'}
 SCENES={'playlist':'歌单入库','complete':'资料补全','upgrade':'音质升级','fill':'补全整张专辑','expand':'单曲升级完整专辑'}
 
+def unreadable_audio(job):
+    import mutagen
+    names=[]
+    for row in job.get('prepared') or job.get('old_files') or []:
+        try:
+            if mutagen.File(row['path']) is None:names.append(Path(row['path']).name)
+        except Exception:names.append(Path(row.get('path','')).name)
+    return '、'.join(names[:5])+(f' 等 {len(names)} 个' if len(names)>5 else '') if names else '本专辑中的音频'
+
 def artist_key(artists):
     from musicops.media.chinese import alias_key
     return tuple(sorted(alias_key(a) for a in artists if a))
@@ -465,6 +474,10 @@ class Workflows:
             if job.get('cancel_requested') or getattr(exc,'error_class',None)=='CANCELLED':self.put(job,stage='cancelled',message='已取消；已有下载和原音源保留')
             else:
                 category=getattr(exc,'error_class',type(exc).__name__)
+                import mutagen
+                if isinstance(exc,mutagen.MutagenError):
+                    # Empty, truncated or mislabeled audio: name the files instead of a parser class.
+                    exc=PolicyBlocked('音频文件无法读取（可能为空、损坏或扩展名与内容不符）：'+unreadable_audio(job)+'；原文件保留，请替换音源后重试');category='UNREADABLE_AUDIO'
                 if category=='TOKEN_APPROVAL_REQUIRED':exc=PolicyBlocked(SITE_NAMES.get((job.get('selected') or {}).get('source'),'资源站')+'：'+str(exc))
                 stage='needs_review' if isinstance(exc,(PolicyBlocked,HttpError)) or category in ('RECOVERY_REQUIRED','CONFLICT','PATH_BLOCKED') else 'failed'
                 # Never store exception URLs, credentials, API payloads or remote HTML.

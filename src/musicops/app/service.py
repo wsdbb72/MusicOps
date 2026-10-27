@@ -72,7 +72,7 @@ class AppService:
         return p
     def dispatch(self,command,payload=None,request_id=None):
         if command in ('engine_control','test_browser_solver','test_qbt_connection','test_connection'):return self._execute(command,payload or {},self.config.current()['values'])
-        if command in ('attach','get_status','list_workflows','get_workflow','get_task','list_library_albums','list_library_files','events','get_playlist_targets'):
+        if command in ('attach','get_status','list_workflows','get_workflow','get_task','list_library_albums','list_library_files','events','get_playlist_targets','list_subscriptions'):
             return self._dispatch(command,payload,request_id)
         with self.mutex:return self._dispatch(command,payload,request_id)
     def _dispatch(self,command,payload=None,request_id=None):
@@ -96,6 +96,12 @@ class AppService:
         if command=='queue_ai_reviews':
             from musicops.app.review_queue import submit
             return submit(self,payload)
+        if command in ('list_subscriptions','save_subscription','delete_subscription','check_subscription_now'):
+            from musicops.app import subscriptions
+            if command=='list_subscriptions':return subscriptions.listing(self)
+            if command=='save_subscription':return subscriptions.save(self,payload)
+            if command=='delete_subscription':return subscriptions.delete(self,payload)
+            return subscriptions.check_now(self,payload,request_id)
         if command=='cancel_workflow':return self.workflows.cancel(payload['job_id'])
         if command=='bulk_workflows':return self.workflows.bulk(payload.get('action'),payload.get('job_ids'))
         if command=='review_workflow':return self.workflows.review(payload['job_id'],payload.get('choice'),payload.get('metadata'),payload.get('cover_path'),payload.get('query'),payload.get('sites'),payload.get('expected_revision'))
@@ -218,7 +224,7 @@ class AppService:
         if command=='shutdown_worker':
             if self.active or getattr(self,'_playlist_active',None): raise RuntimeError('当前任务尚未到安全退出点，请先暂停流水线')
             self.stop.set(); return {'stopped':True,'seeding_unchanged':True}
-        if command in ('preview_compilation','merge_compilation','scan_duplicates','merge_duplicates','restore_duplicates','normalize_qbt_tags','browser_solver_preflight','assist_workflows','manual_album_search','restore_workflow','start_workflow','advance_workflows','demo','index_library','compare','search','resources','prepare_fill','prepare_resource','prepare_repair','prepare_dedup','submit_plan','request_rollback','export_report','refresh_playlist','submit_download','recover','pt_preflight','qbt_preflight','ai_analyze','ai_plan','ai_test','lyrics_preflight','identify_metadata','resolve_metadata','accept_metadata','validate_selected_file','roon_preflight'):
+        if command in ('preview_compilation','merge_compilation','scan_duplicates','merge_duplicates','restore_duplicates','normalize_qbt_tags','browser_solver_preflight','assist_workflows','manual_album_search','restore_workflow','start_workflow','advance_workflows','demo','index_library','compare','search','resources','prepare_fill','prepare_resource','prepare_repair','prepare_dedup','submit_plan','request_rollback','export_report','refresh_playlist','submit_download','recover','pt_preflight','qbt_preflight','ai_analyze','ai_plan','ai_test','lyrics_preflight','identify_metadata','resolve_metadata','accept_metadata','validate_selected_file','roon_preflight','check_subscription'):
             return self.enqueue(command,payload,request_id=request_id)
         raise ValueError('UNKNOWN_COMMAND:'+command)
     def enqueue(self,command,args,request_id=None):
@@ -332,6 +338,9 @@ class AppService:
         # Publication and active downloads retain priority. Other waves share
         # the worker with durable AI reviews, even while metadata is backlogged.
         urgent=job and job.get('stage') in ('requesting','downloading','validating','publishing','notifying','retiring')
+        # A due playlist subscription is a short read; it goes ahead of long waves.
+        from musicops.app.subscriptions import schedule as subscription_due
+        if subscription_due(self):return True
         from musicops.app.review_queue import schedule
         if (not job or waves>=3 and not urgent) and schedule(self):
             self._workflow_waves=0
@@ -408,6 +417,9 @@ class AppService:
             from musicops.app.album_search import manual_album_search
             return manual_album_search(self,args,cfg)
         if command=='start_workflow':return self.workflows.start(args,cfg)
+        if command=='check_subscription':
+            from musicops.app.subscriptions import run
+            return run(self,args,cfg)
         if command=='advance_workflows':return self.workflows.advance()
         if command=='restore_workflow':return self.workflows.restore(args['job_id'])
         if command in ('identify_metadata','resolve_metadata','accept_metadata'):

@@ -16,9 +16,13 @@ from musicops.library.paths import reject_reparse_chain
 from musicops.library.transactions import TransactionEngine,durable_copy
 from musicops.media.tags import read_tag_fields,apply_tag_changes,embedded_covers,apply_cover_changes
 from musicops.media.resources import validate_lrc,validate_cover
+from musicops.media.lyrics import embedded_synchronized,player_lrc,player_ready_sidecar,write_sidecar
 from musicops.media.identity_fields import usable,release_pairs
 from musicops.media.source_labels import album_artist_credits,effective_album_artists,normalize_album_artist,has_source_credit,album_label
 from musicops.app.search_status import SITE_NAMES,search_site,search_album,edition_conflict,summarize,detail as search_detail
+
+# 3: lyrics are embedded with their timeline and sidecars use the shared player dialect.
+RESOURCE_CONTRACT=3
 
 TERMINAL={'completed','failed','needs_review','cancelled','skipped','restored'}
 SCENES={'playlist':'歌单入库','complete':'资料补全','upgrade':'音质升级','fill':'补全整张专辑','expand':'单曲升级完整专辑'}
@@ -254,7 +258,7 @@ class Workflows:
                 for row in tracks:
                     if any(isinstance(marker,dict) and marker.get('field')=='albumartist' for marker in row.get('source_labels',[])):recent=False
                     cached=self.store.get('evidence','resources-checked:'+row['file_id'])
-                    recent=recent and bool(cached and cached.get('resource_contract')==2 and cached.get('version')==[row['size'],row['mtime_ns']] and cached.get('settings')==digest(cfg['lyrics']) and __import__('time').time()-cached.get('checked_at',0)<cfg['lyrics']['negative_ttl'])
+                    recent=recent and bool(cached and cached.get('resource_contract')==RESOURCE_CONTRACT and cached.get('version')==[row['size'],row['mtime_ns']] and cached.get('settings')==digest(cfg['lyrics']) and __import__('time').time()-cached.get('checked_at',0)<cfg['lyrics']['negative_ttl'])
                 if recent:continue
             job_id=str(uuid.uuid4());first=tracks[0];stage='metadata' if scene=='complete' else 'snapshotting' if scene in ('upgrade','fill','expand') else 'identifying'
             paused=bool((self.store.get('evidence','workflow:'+batch['job_id']) or {}).get('paused'))
@@ -803,7 +807,7 @@ class Workflows:
                     for alias in ('totaldiscs','disctotal'):
                         value=(audio.tags or {}).get(alias)
                         if value and list(value)!=[number.split('/',1)[1]]:complete=False
-                if not embedded_covers(row['path']) or not any(v.strip() for v in tags.get('lyrics',[])) or not any(c['type']=='lyrics' and validate_lrc(Path(c['path']).read_text('utf-8-sig'),row.get('duration'))['valid'] for c in row.get('companions',[])):complete=False
+                if not embedded_covers(row['path']) or not embedded_synchronized(row['path'],row.get('duration')) or not any(c['type']=='lyrics' and player_ready_sidecar(c['path'],row.get('duration')) for c in row.get('companions',[])):complete=False
             if complete and disc_numbers and set(disc_numbers)==set(range(1,max(disc_numbers)+1)) and set(disc_totals)=={max(disc_numbers)}:
                 self.put(job,stage='skipped',message='专辑、艺人、封面和同步歌词已齐全');return
         if work.exists():raise PolicyBlocked('已存在未发布的整理副本，请核对后继续')
@@ -853,9 +857,10 @@ class Workflows:
                 cp=Path(companion['path']);reject_reparse_chain(cp)
                 if companion['type']=='lyrics':
                     text=cp.read_text('utf-8-sig')
-                    if validate_lrc(text,row.get('duration'))['valid']:
-                        dst=dest.with_suffix('.lrc');durable_copy(cp,dst);item['sidecars'].append(str(dst))
-                        item['old_sidecars'][str(cp)]=sha256_file(dst)
+                    if validate_lrc(player_lrc(text),row.get('duration'))['valid']:
+                        # Rewrite the timeline in the one LRC dialect Plex, Navidrome and Roon all follow.
+                        dst=dest.with_suffix('.lrc');write_sidecar(dst,text,row.get('duration'));item['sidecars'].append(str(dst))
+                        item['old_sidecars'][str(cp)]=sha256_file(cp)
                 elif companion['type']=='cover' and not embedded_covers(dest):
                     content=cp.read_bytes()
                     if validate_cover(content,cfg['lyrics']['min_cover_side'])['valid']:apply_cover_changes(dest,content,min_side=cfg['lyrics']['min_cover_side'])
@@ -974,30 +979,29 @@ class Workflows:
             # Query only lyrics for automatic writes. Unrelated structurally valid
             # covers from a search service never become an album cover silently.
             if not row['sidecars']:
-                timed=next((v for v in read_tag_fields(row['path']).get('lyrics',[]) if validate_lrc(v,row.get('duration'))['valid']),None)
-                if timed:
-                    path=Path(row['path']).with_suffix('.lrc');path.write_text(timed,encoding='utf-8');row['sidecars'].append(str(path))
+                timed=next((v for v in read_tag_fields(row['path']).get('lyrics',[]) if validate_lrc(player_lrc(v),row.get('duration'))['valid']),None)
+                if timed:row['sidecars'].append(write_sidecar(Path(row['path']).with_suffix('.lrc'),timed,row.get('duration')))
             transient_states={'NETWORK_ERROR','TRANSIENT_ERROR','RATE_LIMITED'}
             refresh=job.get('refresh_resources',False) or bool(job.get('resource_retry_count') and row.get('lyrics_service_state') in transient_states)
             resources=self.s._real_resources({'title':row['raw_title'],'artist':' / '.join(row['artists']),'album':album,'duration':row.get('duration'),'refresh':refresh,'include_cover':False},cfg) if not row['sidecars'] and not job.get('skip_lyrics_service') and '.example.invalid' not in cfg['lyrics']['primary']['base_url'] else {}
             state=resources.get('lyrics',{}).get('state')
             row['lyrics_service_state']=state;row['lyrics_service_errors']=resources.get('lyrics',{}).get('errors',[])
             lyric=next((c for c in resources.get('candidates',[]) if c.get('kind')=='lyrics' and c.get('selected') and c.get('identity_state')=='matched'),None)
-            if lyric and not row['sidecars']:
-                path=Path(row['path']).with_suffix('.lrc');path.write_text(lyric['lyrics'],encoding='utf-8');row['sidecars'].append(str(path))
+            if lyric and not row['sidecars'] and validate_lrc(player_lrc(lyric['lyrics']),row.get('duration'))['valid']:
+                row['sidecars'].append(write_sidecar(Path(row['path']).with_suffix('.lrc'),lyric['lyrics'],row.get('duration')))
             if not row['sidecars']:
                 from musicops.providers.netease_match import netease_reference
                 target=next((ref for t in job['targets'] if identity(t)==identity(row) for ref in [netease_reference(t)] if ref),None)
                 if target and cfg['providers']['netease']['enabled']:
                     from musicops.providers.netease_download import lyrics_for_id
                     text=lyrics_for_id(target['source_song_id'],row.get('duration'))
-                    if text:
-                        path=Path(row['path']).with_suffix('.lrc');path.write_text(text,encoding='utf-8');row['sidecars'].append(str(path))
+                    if text and validate_lrc(player_lrc(text),row.get('duration'))['valid']:
+                        row['sidecars'].append(write_sidecar(Path(row['path']).with_suffix('.lrc'),text,row.get('duration')))
             if not row['sidecars']:lyric_missing+=1
             if row['sidecars']:
                 from musicops.media.lyrics import embed_sidecar
                 if 'lyrics' in locked and not read_tag_fields(row['path']).get('lyrics'):raise PolicyBlocked('歌词标签已锁定，暂不补写；请先核对字段锁')
-                embed_sidecar(row['path'],row['sidecars'][0],row.get('duration'))
+                embed_sidecar(row['path'],row['sidecars'][0],row.get('duration'),upgrade='lyrics' not in locked)
             elif state in ('AUTH_REQUIRED','AUTH_FAILED','ACCESS_BLOCKED','NETWORK_ERROR','TRANSIENT_ERROR','RATE_LIMITED'):resource_errors.append(state)
         if resource_errors:
             errors=sorted(set(resource_errors));attempt=job.get('resource_retry_count',0)
@@ -1020,7 +1024,7 @@ class Workflows:
                 if not Path(sidecar).is_file():raise PolicyBlocked('整理副本的歌词文件缺失，请重新补全资料')
                 locked='lyrics' in cfg['metadata']['locked_fields'] or any(v.get('identity')==row.get('file_id') and v.get('field')=='lyrics' for v in locks)
                 if locked and not read_tag_fields(row['path']).get('lyrics'):raise PolicyBlocked('歌词标签已锁定，暂不补写；请先核对字段锁')
-                embed_sidecar(row['path'],sidecar,row.get('duration'))
+                embed_sidecar(row['path'],sidecar,row.get('duration'),upgrade=not locked)
             self.checkpoint(job,'full_decode');validation=validator.validate(row['path'])
             if validation['decode_state']!='passed' or not validation.get('roon_compatible'):
                 row['validation']=validation
@@ -1068,12 +1072,12 @@ class Workflows:
             if not better:self.put(job,stage='skipped',message='新版没有实际音质提升，当前音源保留');return
             if not edition and not job.get('edition_approved'):
                 self.put(job,prepared=rows,stage='needs_review',review_kind='edition',message='新版音质较高且曲目完整，但缺少同一发行的 ID，需要核对版本后替换');return
-        self.put(job,prepared=rows,resource_contract=2,stage='publishing',progress=85,message='全部音频通过，准备入库')
+        self.put(job,prepared=rows,resource_contract=RESOURCE_CONTRACT,stage='publishing',progress=85,message='全部音频通过，准备入库')
     def _publishing(self,job):
         if job.get('publication_plan'):
             with self.store.connection() as connection:existing=connection.execute("SELECT 1 FROM transactions WHERE json_extract(payload,'$.plan_id')=? LIMIT 1",(job['publication_plan']['plan_id'],)).fetchone()
             if existing:return self._commit_publication(job,job['publication_plan'])
-        if job.get('resource_contract')!=2 and not job.get('publication_plan'):return self._validating(job)
+        if job.get('resource_contract')!=RESOURCE_CONTRACT and not job.get('publication_plan'):return self._validating(job)
         cfg=job['config'];root=Path(cfg['paths']['library']);operations=[];verified={};album=job['album'];artist=' & '.join(job['albumartists']);suffix=''
         if job['scene'] in ('upgrade','expand'):suffix=' [升级 '+job['job_id'][:8]+']'
         elif job.get('selected_edition'):

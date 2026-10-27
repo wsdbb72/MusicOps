@@ -77,12 +77,13 @@ def test_migration_does_not_accept_corrupt_moved_audio(tmp_path):
     assert Path(qbt._get('job')['source_path'])==old
 
 
-def test_roon_lyrics_embed_plain_text_and_keep_timed_sidecar(tmp_path):
+def test_roon_lyrics_embed_timed_text_and_keep_timed_sidecar(tmp_path):
     audio=flac(tmp_path/'song.flac');sidecar=audio.with_suffix('.lrc')
     lrc='[ar:Artist]\n[00:00.00]一行歌词\n[00:01.00]Second line'
     sidecar.write_text(lrc,'utf-8');assert embed_sidecar(audio,sidecar,2)
     from musicops.media.tags import read_tag_fields
-    assert read_tag_fields(audio)['lyrics']==['一行歌词\nSecond line'] and sidecar.read_text('utf-8')==lrc
+    assert read_tag_fields(audio)['lyrics']==[lrc] and sidecar.read_text('utf-8')==lrc
+    assert plain_lyrics(lrc)=='一行歌词\nSecond line'
 
 
 def test_placeholder_artist_needs_unique_track_duration_evidence():
@@ -150,7 +151,7 @@ def test_official_lyrics_fallback_precedes_auth_error_review(service,monkeypatch
     monkeypatch.setattr(netease_download,'lyrics_for_id',lambda *_:'[00:00.00]First\n[00:01.00]Second')
     done=until_terminal(service);assert done['stage']=='completed',done
     output=next(Path(cfg['paths']['library']).rglob('*.flac'))
-    assert read_tag_fields(output)['lyrics']==['First\nSecond'] and output.with_suffix('.lrc').is_file()
+    assert read_tag_fields(output)['lyrics']==['[00:00.00]First\n[00:01.00]Second'] and output.with_suffix('.lrc').is_file()
 
 
 def test_local_cover_uses_unique_exact_album_api_identity(monkeypatch):
@@ -253,7 +254,7 @@ def test_legacy_ready_publication_revalidates_and_embeds_existing_lrc(service):
     apply_tag_changes(audio,{'lyrics':[]});pending.update(stage='publishing');pending.pop('resource_contract',None);service.workflows.put(pending)
     done=until_terminal(service);assert done['stage']=='completed',done
     published=next(Path(cfg['paths']['library']).rglob('*.flac'))
-    assert read_tag_fields(published)['lyrics']==['First\nSecond'] and published.with_suffix('.lrc').is_file()
+    assert read_tag_fields(published)['lyrics']==['[00:00.00]First\n[00:01.00]Second'] and published.with_suffix('.lrc').is_file()
 
 
 def test_long_unicode_release_paths_fit_windows_limit_without_truncating_tags(service):

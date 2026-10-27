@@ -585,7 +585,11 @@ class AppService:
             if kind=='lyrics':
                 text=args.get('lyrics') or args.get('candidate',{}).get('lyrics',''); check=validate_lrc(text,duration=args.get('duration'))
                 if not check['valid']:raise RuntimeError('歌词内容校验失败；未写资源内容')
-                dest=path.with_suffix('.lrc'); staged=staged_root/dest.name; staged.write_text(text,encoding='utf-8')
+                # The candidate hash covers the source text; what is written is the
+                # same timeline in the dialect Plex, Navidrome and Roon all follow.
+                from musicops.media.lyrics import player_lrc,write_sidecar
+                text=player_lrc(text)
+                dest=path.with_suffix('.lrc'); staged=staged_root/dest.name; write_sidecar(staged,text,args.get('duration'))
             elif kind=='cover':
                 import base64
                 cand=args.get('candidate',{}); content=base64.b64decode(cand['content_base64']) if cand.get('content_base64') else self._safe_path(cand.get('path',str(Path(paths['source'])/'cover.jpg'))).read_bytes()

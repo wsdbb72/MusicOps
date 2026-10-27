@@ -3,12 +3,12 @@ from __future__ import annotations
 import hashlib,base64
 from pathlib import Path
 import mutagen
-from mutagen.id3 import ID3, TIT2, TPE1, TALB, TPE2, TRCK, TPOS, TDRC, TCON, TCOM, USLT
+from mutagen.id3 import ID3, TIT2, TPE1, TALB, TPE2, TRCK, TPOS, TDRC, TCON, TCOM, USLT, SYLT
 from mutagen.id3 import APIC
 from mutagen.flac import FLAC,Picture
 from mutagen.mp4 import MP4Cover
 from mutagen.apev2 import APEv2,APETextValue
-from musicops.media.resources import validate_cover
+from musicops.media.resources import validate_cover,validate_lrc,STAMP
 
 ID3_FIELDS = {'title':('TIT2',TIT2),'artist':('TPE1',TPE1),'album':('TALB',TALB),'albumartist':('TPE2',TPE2),'tracknumber':('TRCK',TRCK),'discnumber':('TPOS',TPOS),'date':('TDRC',TDRC),'genre':('TCON',TCON),'composer':('TCOM',TCOM)}
 SUPPORTED = set(ID3_FIELDS) | {'lyrics'}
@@ -39,6 +39,17 @@ def read_tag_fields(path) -> dict:
         result = {field:_values((tags or {}).get(field,[])) for field in SUPPORTED}
     return result
 
+def _sylt(text):
+    rows=[]
+    for line in text.splitlines():
+        line=line.strip();stamps=[];position=0
+        while match:=STAMP.match(line,position):stamps.append(match);position=match.end()
+        lyric=line[position:].strip()
+        for match in stamps if lyric else ():
+            fraction=match.group(3) or '0'
+            rows.append((lyric,(int(match.group(1))*60+int(match.group(2)))*1000+round(int(fraction)*10**(3-len(fraction)))))
+    return sorted(rows,key=lambda row:row[1])
+
 def plan_tag_changes(path, changes, locks=()) -> dict:
     path = Path(path)
     fields = read_tag_fields(path)
@@ -61,8 +72,11 @@ def apply_tag_changes(copy_path, changes) -> dict:
         values = _values(value.get('value') if isinstance(value,dict) else value)
         if isinstance(obj.tags,ID3):
             if field == 'lyrics':
-                obj.tags.delall('USLT')
-                for i,text in enumerate(values): obj.tags.add(USLT(encoding=3,lang='eng',desc=str(i),text=text))
+                obj.tags.delall('USLT');obj.tags.delall('SYLT')
+                for i,text in enumerate(values):
+                    obj.tags.add(USLT(encoding=3,lang='eng',desc=str(i),text=text))
+                    # Roon reads ID3 synchronized lyrics from SYLT, not USLT.
+                    if validate_lrc(text)['valid']:obj.tags.add(SYLT(encoding=3,lang='eng',format=2,type=1,desc=str(i),text=_sylt(text)))
             else:
                 key,cls = ID3_FIELDS[field]
                 obj.tags.delall(key)

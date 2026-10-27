@@ -8,7 +8,7 @@ from pathlib import Path
 from PIL import Image, ImageStat
 
 STAMP = re.compile(r"\[(\d{1,3}):([0-5]\d)(?:[.:](\d{1,3}))?\]")
-META = re.compile(r"^\[(?:ar|ti|al|by|re|ve|length|offset|id):.*\]$", re.I)
+META = re.compile(r"^\[(?:ar|ti|al|by|re|ve|length|offset|id|au):.*\]$", re.I)
 
 def validate_lrc(text: str, duration: float | None = None) -> dict:
     result = {"schema_version": 1, "valid": False, "kind": "synchronized", "errors": [], "timestamps": [], "line_count": 0}
@@ -51,6 +51,8 @@ def validate_lrc(text: str, duration: float | None = None) -> dict:
             result['timestamps'].append(round(stamp, 3))
         previous=first_stamp
     if not lyrics: result['errors'].append('NO_LYRIC_LINES'); result['kind'] = 'plain'
+    # Pseudo-synced text (every line at [00:00.00]) never advances in a player.
+    elif lyrics>=4 and len(set(result['timestamps']))<=max(1,lyrics//4): result['errors'].append('UNTIMED_LYRICS')
     result['errors'] = sorted(set(result['errors']))
     result['line_count'] = lyrics
     result['valid'] = not result['errors']

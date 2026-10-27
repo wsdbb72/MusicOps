@@ -77,5 +77,9 @@ def lyrics_for_id(song_id,duration=None):
             r=client.get('https://music.163.com/api/song/lyric',params={'id':str(song_id),'lv':'-1','kv':'-1','tv':'-1'})
         if r.status_code!=200:return None
         payload=r.json();text=payload.get('lrc',{}).get('lyric')
-        return text if payload.get('code')==200 and validate_lrc(text,duration)['valid'] else None
+        if payload.get('code')!=200 or not isinstance(text,str):return None
+        # NetEase prefixes credits as JSON rows; drop them rather than the whole timeline.
+        from musicops.media.lyrics import player_lrc
+        text=player_lrc(text)
+        return text if validate_lrc(text,duration)['valid'] else None
     except (httpx.HTTPError,ValueError,TypeError):return None

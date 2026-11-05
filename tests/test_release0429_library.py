@@ -39,6 +39,11 @@ def test_changed_valid_publication_is_completed_note_but_all_sources_are_kept(se
     assert finish(service.workflows,job)
     assert job['cleanup_deferred'] and job['warnings'][0]['skip_reason']=='target_changed'
     assert raw.exists() and copy.exists()
+    service.workflows._notifying(job)
+    assert job['stage']=='completed'
+    import uuid
+    file_id=str(uuid.uuid5(uuid.NAMESPACE_URL,str(final).casefold()))
+    assert service.store.get('evidence','resources-checked:'+file_id) is None
     job['publication_plan']['operations'].append({'destination':'Artist/Album/missing.flac','source_hash':'none'})
     with pytest.raises(PolicyBlocked):finish(service.workflows,job)
     assert raw.exists() and copy.exists()

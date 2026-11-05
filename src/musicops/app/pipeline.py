@@ -1267,7 +1267,7 @@ class Workflows:
             if len(indexed)!=len(published) or any(row.get('read_error') for row in indexed):raise PolicyBlocked('入库音频已提交，元数据索引未完成；原文件保留并等待重新刷新')
             AlbumCatalog(self.store).refresh_files(library,indexed,checkpoint=lambda phase:self.checkpoint(job,phase),affected_directories=affected)
         for destination in published:
-            if destination.suffix.lower() in AUDIO_EXTENSIONS and destination.is_file():
+            if not job.get('cleanup_deferred') and destination.suffix.lower() in AUDIO_EXTENSIONS and destination.is_file():
                 file_id=str(uuid.uuid5(uuid.NAMESPACE_URL,str(destination).casefold()));stat=destination.stat()
                 self.store.put('evidence','resources-checked:'+file_id,{'kind':'resource_check','resource_contract':job.get('resource_contract',1),'version':[stat.st_size,stat.st_mtime_ns],'checked_at':__import__('time').time(),'settings':digest(job['config']['lyrics'])})
         try:result=scan(job['config']['music_servers']['navidrome'],self.s.vault.get);message=result['message']

@@ -804,6 +804,14 @@ async function openReview(id) {
   const area = $("review-content");
   area.replaceChildren();
   const metadata = job.prepared || [];
+  if (job.review_kind === "existing_album") {
+    for (const album of job.existing_album_choices || []) {
+      area.append(action("补入既有目录（保留已有录音）：" + album.directory + " · " + album.track_count + " 首", () => submitReview({choice: "existing_album:" + album.album_id})));
+    }
+    area.append(action("保留为独立版本，不合并", () => submitReview({choice: "separate_album_version"})));
+    if (!$("review-dialog").open) $("review-dialog").showModal();
+    return;
+  }
   if (job.review_kind === "album_scope") {
     const options = node("div", undefined, "scope-options");
     area.append(
@@ -1327,6 +1335,7 @@ function settings() {
     config.catalog.web_enabled,
     "checkbox",
   );
+  field(p,"reject-dsd","不下载 DSD / SACD 音源（下载前过滤，不使用令牌）",config.quality.dsd_policy === "reject","checkbox");
   field(
     p,
     "simplified",
@@ -1392,6 +1401,7 @@ async function saveSettings() {
       password: val("qbt-pass"),
     },
     catalog_web: checked("catalog-web"),
+    dsd_policy: checked("reject-dsd") ? "reject" : "preserve",
     prefer_simplified: checked("simplified"),
     discogs_token: val("discogs-token"),
     workflow: {

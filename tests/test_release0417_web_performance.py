@@ -65,6 +65,9 @@ def web(tmp_path):
 
 def test_native_web_auth_static_and_csrf(web):
     client,server=web
+    assert client.get('/healthz').status_code==503
+    (server.client.base/'state').mkdir(exist_ok=True)
+    (server.client.base/'state'/'worker-health.json').write_text(json.dumps({'at':time.time(),'queue_alive':True}),encoding='utf-8')
     assert client.get('/healthz').status_code==200
     assert client.get('/').status_code==401
     auth=('musicops','synthetic-web-password')

@@ -11,6 +11,10 @@ def main(argv=None):
     from musicops.gui.branding import app_icon,set_windows_identity,apply_native_titlebar
     parser=argparse.ArgumentParser(description='MusicOps 音乐库管理');parser.add_argument('--base');parser.add_argument('--screenshot');parser.add_argument('--quit-after',type=int,default=0);args=parser.parse_args(argv)
     base=Path(args.base).resolve() if args.base else default_profile();remember_profile(base)
+    from musicops.worker.lifecycle import install
+    fault_log=install(base,'gui')
+    from musicops.worker.supervision import start
+    if not args.quit_after and not args.screenshot:start(base)
     set_windows_identity()
     app=QApplication.instance() or QApplication(sys.argv[:1]);app.setApplicationName('MusicOps');app.setWindowIcon(app_icon())
     translator=QTranslator(app)

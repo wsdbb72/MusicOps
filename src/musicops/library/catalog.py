@@ -35,8 +35,9 @@ def _facts(root,files,key,now,checkpoint):
         matches.append((key,row['file_id'],strict_text(row['raw_title']),artist_key(row['artists']),strict_text(album),duration,album_id))
     for album_id,tracks in groups.items():
         first=tracks[0];artists=list(dict.fromkeys(a for row in tracks for a in effective_album_artists(row)))
+        from musicops.library.album_lookup import key as album_lookup_key
         complete=all(row.get('raw_title') and row.get('artists') and row.get('album') and row.get('duration') and not row.get('read_error') for row in tracks)
-        albums.append((key,album_id,json.dumps({'album_id':album_id,'album':first.get('album') or '待识别专辑','artists':artists,'directory':str(album_directory(first,root)),'track_count':len(tracks),'file_ids':[row['file_id'] for row in tracks],'state':'local_tags_matched' if complete else 'needs_metadata','release_confirmed':False,'updated_at':now},ensure_ascii=False)))
+        albums.append((key,album_id,json.dumps({'album_id':album_id,'lookup_key':album_lookup_key(first.get('album',''),artists),'album':first.get('album') or '待识别专辑','artists':artists,'directory':str(album_directory(first,root)),'track_count':len(tracks),'file_ids':[row['file_id'] for row in tracks],'state':'local_tags_matched' if complete else 'needs_metadata','release_confirmed':False,'updated_at':now},ensure_ascii=False)))
     return matches,albums
 
 

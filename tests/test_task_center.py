@@ -53,6 +53,16 @@ def window_for(base):
     return window,client
 
 
+def test_task_details_handle_null_optional_checkpoint_fields(app,tmp_path):
+    window,client=window_for(tmp_path)
+    client.rows=[job('nullable',message=None,detail=None)]
+    window.show_jobs({'jobs':client.rows,'total':1})
+    window.job_table.setCurrentItem(window.job_items['nullable'])
+    window.show_detail()
+    assert isinstance(window.job_detail.toPlainText(),str)
+    window.close()
+
+
 def test_identification_and_search_are_distinct_expandable_groups(app,tmp_path):
     window,client=window_for(tmp_path);client.rows=[job('identify-1'),job('search-1','search')];window.show_jobs({'jobs':client.rows,'total':2})
     assert [window.job_table.topLevelItem(i).text(0) for i in range(2)]==['识别任务','搜索任务']

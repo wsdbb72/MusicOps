@@ -116,6 +116,10 @@ jobs:
         run: |
           python packaging/smoke_parallel.py --bundle dist/MusicOps-Windows --profile "$env:RUNNER_TEMP/musicops-parallel-profile" --report dist/windows/reports/parallel-albums.json
           if ($LASTEXITCODE -ne 0) { throw 'Frozen parallel acceptance failed' }
+      - name: Verify frozen worker supervision after GUI and worker crashes
+        run: |
+          python packaging/smoke_supervision.py --bundle dist/MusicOps-Windows --profile "$env:RUNNER_TEMP/musicops-supervision-profile" --report dist/windows/reports/worker-supervision.json
+          if ($LASTEXITCODE -ne 0) { throw 'Frozen worker supervision acceptance failed' }
       - name: Install and upgrade the complete frozen payload in an isolated AppId
         run: |
           python packaging/smoke_windows_installer.py --bundle dist/MusicOps-Windows --compiler "$env:INNO_ISCC" --work "$env:RUNNER_TEMP/musicops-installer" --report dist/windows/reports/full-installer-smoke.json

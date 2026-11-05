@@ -108,6 +108,7 @@ def validate_config(values):
         clean_url(provider['base_url'],name+'站点',origin=True)
         if type(provider.get('timeout')) not in (int,float) or not 1<=provider['timeout']<=120:raise ValueError('来源超时需为1–120秒')
     ai=values.get('ai')
+    if values['quality'].get('dsd_policy') not in ('preserve','reject'):raise ValueError('DSD 策略须选择保留或拒绝下载')
     if ai:
         clean_url(ai['base_url'],'AI接口')
         if ai['protocol']!='responses':raise ValueError('AI协议目前仅支持Responses')

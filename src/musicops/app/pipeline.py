@@ -130,10 +130,13 @@ class Workflows:
                 if changes.get('stage')!='cancelled':changes.update(stage='cancelled',message='已在安全阶段取消；已经发布的内容和做种任务保留')
             if previous and 'paused' in previous and 'paused' not in changes:
                 job['paused']=previous['paused']
+            if changes.get('stage') and changes['stage']!=job.get('stage'):
+                job['stage_started_at']=utcnow()
             job.update(changes,updated_at=utcnow());self.store.put('evidence','workflow:'+job['job_id'],job)
             if job.get('stage') in ('needs_review','failed','skipped') and job.get('job_kind') not in ('batch','activity'):
                 config=self.s.config.current()['values']
-                if not config['offline'] and config['ai'].get('enabled'):
+                snapshot=job.get('config');snapshot_ai=snapshot.get('ai',{}) if isinstance(snapshot,dict) else None
+                if not config['offline'] and config['ai'].get('enabled') and isinstance(snapshot_ai,dict) and snapshot_ai.get('enabled') is not False:
                     from musicops.app.review_queue import register
                     register(self.s,job)
             return job
@@ -186,7 +189,7 @@ class Workflows:
                 AND stage NOT IN ('completed','failed','needs_review','cancelled','skipped','restored','running')
                 AND (identification_job_id IS NULL OR EXISTS (SELECT 1 FROM workflow_overview AS parent WHERE parent.id='workflow:'||current.identification_job_id AND parent.stage='completed'))
                 AND (search_job_id IS NULL OR coalesce(task_type,'')!='album' OR EXISTS (SELECT 1 FROM workflow_overview AS searched WHERE searched.id='workflow:'||current.search_job_id AND searched.stage='completed'))
-                AND next_poll<=?"""+network_clause+""" ORDER BY CASE stage WHEN 'publishing' THEN 0 WHEN 'retiring' THEN 0 WHEN 'notifying' THEN 0 WHEN 'validating' THEN 0
+                AND next_poll<=?"""+network_clause+""" ORDER BY CASE WHEN stage='enrich' AND julianday(updated_at)<julianday('now','-10 minutes') THEN -1 ELSE 0 END,CASE stage WHEN 'publishing' THEN 0 WHEN 'retiring' THEN 0 WHEN 'notifying' THEN 0 WHEN 'validating' THEN 0
                 WHEN 'downloading' THEN CASE WHEN ? THEN 3 ELSE 1 END WHEN 'requesting' THEN CASE WHEN ? THEN 3 ELSE 1 END
                 WHEN 'metadata' THEN 2 WHEN 'enrich' THEN 2 WHEN 'fallback' THEN CASE WHEN ? THEN 4 ELSE 3 END
                 WHEN 'searching' THEN CASE WHEN ? THEN 3 ELSE 4 END ELSE CASE WHEN ? THEN 3 ELSE 5 END END,updated_at,id LIMIT 1)""",args).fetchone()
@@ -421,15 +424,16 @@ class Workflows:
         return job['stage'] in ('searching','metadata') or job['stage']=='identifying' and job.get('scene')!='fill'
     def advance(self):
         # Keep one coordinator, and retain the existing task/safe-shutdown contract.
-        # File publication and token consumption stay exclusive; streaming uses
-        # separate job directories, with at most two albums fetching audio
-        # and at most two albums preparing their private metadata copies.
-        from concurrent.futures import ThreadPoolExecutor
+        # One file publication/retirement or token mutation at a time. A long
+        # private/file stage may share the wave with independent light jobs;
+        # streaming retains a two-fetch cap, and total slots remain bounded.
+        from concurrent.futures import ThreadPoolExecutor,wait,FIRST_COMPLETED
         with self._advance_lock:
             with self.s.mutex:
                 job=self.next_job()
                 if not job:return {'status':'OK','idle':True}
-                parallel=self._parallel_job(job)
+                heavy=job['stage'] in ('enrich','publishing','validating','notifying')
+                parallel=self._parallel_job(job) or heavy
                 jobs=[job];stage=job['stage']
                 if stage in ('downloading','requesting'):self._io_turns=getattr(self,'_io_turns',0)+1
                 elif stage in ('metadata','enrich'):self._io_turns=0
@@ -441,16 +445,30 @@ class Workflows:
                         fallback_count=sum(row['resume_stage']=='fallback' for row in jobs)
                         metadata_count=sum(row['resume_stage']=='metadata' for row in jobs)
                         peer=self.next_job(network_only=True) if len(jobs)==1 and stage in ('metadata','fallback') else None
-                        if not peer:peer=self.next_job(network_only=True,include_fallback=fallback_count<2,include_metadata=metadata_count<2)
+                        if not peer:peer=self.next_job(network_only=True,include_fallback=not heavy and fallback_count<2,include_metadata=metadata_count<self.parallel_limit())
                         if peer and not self._parallel_job(peer):peer=self.next_job(network_only=True)
                         if not peer:break
                         if peer['stage']=='fallback':self._fallback_turns=getattr(self,'_fallback_turns',0)+1
                         self.put(peer,stage='running',resume_stage=peer['stage']);jobs.append(peer)
             task_id=getattr(self.s._task_local,'task_id',None) or self.s.active
             if len(jobs)==1:return self._advance_job(job,task_id)
-            with ThreadPoolExecutor(max_workers=len(jobs),thread_name_prefix='MusicOpsAlbums') as pool:
-                futures=[pool.submit(self._advance_job,row,task_id) for row in jobs]
-                results=[future.result() for future in futures]
+            with ThreadPoolExecutor(max_workers=self.parallel_limit(),thread_name_prefix='MusicOpsAlbums') as pool:
+                futures={pool.submit(self._advance_job,row,task_id):row for row in jobs}
+                heavy_future=next((f for f,row in futures.items() if heavy and row is job),None)
+                results=[]
+                while futures:
+                    done,_=wait(futures,return_when=FIRST_COMPLETED)
+                    for future in done:
+                        futures.pop(future);results.append(future.result())
+                    # One large album may take an hour. Refill the independent
+                    # light lane while it runs instead of stopping after 3 peers.
+                    if heavy_future and not heavy_future.done() and not self.s.stop.is_set() and not self.s.paused:
+                        with self.s.mutex:
+                            while len(futures)<self.parallel_limit():
+                                peer=self.next_job(network_only=True,include_metadata=True)
+                                if not peer or not self._parallel_job(peer):break
+                                self.put(peer,stage='running',resume_stage=peer['stage'])
+                                futures[pool.submit(self._advance_job,peer,task_id)]=peer
             return {'status':'OK','job_id':job['job_id'],'job_ids':[r['job_id'] for r in results],'parallel_count':len(jobs)}
     def _advance_job(self,job,task_id):
         previous=getattr(self.s._task_local,'task_id',None)
@@ -468,6 +486,10 @@ class Workflows:
             from musicops.config.schema import upgrade_config
             if not isinstance(job.get('config'),dict):raise PolicyBlocked('历史任务缺少配置快照，请重新创建本批次')
             job['config']=upgrade_config(job['config'],self.s.base)
+            from musicops.app.runtime_config import refresh
+            previous_revision=job.get('config_revision')
+            refreshed=refresh(job,self.s.config.current(),getattr(self.s,'_policy_baseline_revision',None))
+            if refreshed or previous_revision!=job['config_revision']:self.put(job,config_revision=job['config_revision'])
             from musicops.app.storage_migration import prepare
             # Older snapshots may move cached files or torrent locations.
             with self._migration_lock:
@@ -635,6 +657,10 @@ class Workflows:
                 if edition_conflict(c['title'],' '.join(artists)+' '+album) and not compatible(c['title'],album):exact=False
                 candidates.append({**c,'identity_exact':exact})
         candidates=list({(c['source'],c['candidate_id']):c for c in candidates}.values())
+        from musicops.domain.download_formats import allowed
+        excluded=sum(not allowed(c,cfg) for c in candidates)
+        candidates=[c for c in candidates if allowed(c,cfg)]
+        if excluded:job['format_notes']=f'已按设置排除 {excluded} 个 DSD / SACD 音源'
         summary=summarize(outcomes);job['pt_search_contract']=2;job['outcomes']=outcomes;job['choices']=candidates;job['search_summary']=summary;job['detail']=search_detail(summary)
         if not any(c.get('identity_exact') for c in candidates) and (summary['successful_sites'] or not summary['unavailable_sites']):
             from musicops.app.source_identity import recover
@@ -704,6 +730,9 @@ class Workflows:
         self.put(job,stage='skipped',message='可用站点未找到匹配发行，当前音源保留',detail=search_detail(summary))
     def _requesting(self,job):
         cfg=job['config'];candidate=job.get('selected') or {}
+        from musicops.domain.download_formats import allowed
+        if not allowed(candidate,cfg):
+            self.put(job,stage='skipped',message='该资源为 DSD / SACD，已按设置跳过；未使用令牌或创建下载');return
         if not isinstance(candidate,dict) or candidate.get('source') not in cfg['providers'] or any(not isinstance(candidate.get(key),(str,int)) or isinstance(candidate.get(key),bool) or not str(candidate[key]).strip() for key in ('candidate_id','resource_id')):
             raise PolicyBlocked('所选资源缺少有效的站点或种子编号，请重新搜索并选择专辑资源')
         cache=Path(cfg['paths']['source'])/'torrents'/(hashlib.sha256(str(candidate['candidate_id']).encode()).hexdigest()+'.torrent')
@@ -857,10 +886,12 @@ class Workflows:
                     self.put(job,stage='completed',progress=100,message='资料已齐全 · 已整理到音乐人文件夹',detail=str(Path(job['relocation']['to']).relative_to(library)));return
                 self.put(job,stage='skipped',message='专辑、艺人、封面和同步歌词已齐全',detail=('未移动文件夹：'+job['relocation']['reason']) if (job.get('relocation') or {}).get('reason') else '');return
         if work.exists():raise PolicyBlocked('已存在未发布的整理副本，请核对后继续')
-        work.mkdir(parents=True);job['prepared_root']=str(work);job['engine_paths']=paths
         sources=job['old_files'] if job['scene']=='complete' else index_library(job['source_path'],metadata_only=True,checkpoint=lambda:self.checkpoint(job,'download_index'))
         if not sources:raise PolicyBlocked('没有识别到音频文件')
         if len(sources)>2000:raise PolicyBlocked('单张发行超过 2000 个音频文件，需要核对资源范围')
+        if job['scene']!='complete' and cfg['quality'].get('dsd_policy')=='reject' and any(Path(r['path']).suffix.lower() in ('.dsf','.dff') for r in sources):
+            self.put(job,stage='skipped',message='实际音源包含 DSD，已按设置跳过整理；下载原件保留，未启动转码');return
+        work.mkdir(parents=True);self.put(job,prepared_root=str(work),engine_paths=paths)
         prepared=[]
         for i,row in enumerate(sources):
             self.checkpoint(job,'prepare_audio');source=Path(row['path']);reject_reparse_chain(source)
@@ -1127,13 +1158,17 @@ class Workflows:
             with self.store.connection() as connection:existing=connection.execute("SELECT 1 FROM transactions WHERE json_extract(payload,'$.plan_id')=? LIMIT 1",(job['publication_plan']['plan_id'],)).fetchone()
             if existing:return self._commit_publication(job,job['publication_plan'])
         if job.get('resource_contract')!=RESOURCE_CONTRACT and not job.get('publication_plan'):return self._validating(job)
+        from musicops.app.existing_album import offer
+        if offer(self,job):return
         from musicops.app.artist_folders import folder_artist
         cfg=job['config'];root=Path(cfg['paths']['library']);operations=[];verified={};album=job['album'];artist=folder_artist(job['albumartists']);suffix=''
         if job['scene'] in ('upgrade','expand'):suffix=' [升级 '+job['job_id'][:8]+']'
+        elif job.get('existing_album_decision')=='separate':suffix=' [独立版本 '+job['job_id'][:8]+']'
         elif job.get('selected_edition'):
             from musicops.domain.editions import describe
             version=describe(job['selected']);suffix=' ['+compact_segment(str(version['year'] or '')+' '+version['label'],40)+' '+job['job_id'][:8]+']'
         release=release_directory(root,artist,album+suffix,job['total_discs'])
+        if job.get('existing_album_directory'):release=Path(job['existing_album_directory'])
         for i,row in enumerate(job['prepared']):
             self.checkpoint(job,'build_publication');src=Path(row['path']);tags=read_tag_fields(src)
             if job['scene']=='fill' or job.get('existing_album_files'):
@@ -1142,7 +1177,17 @@ class Workflows:
                 if original:
                     if original.get('original_hash') and sha256_file(original['path'])!=original['original_hash'] or (Path(original['path']).stat().st_size,Path(original['path']).stat().st_mtime_ns)!=(original['size'],original['mtime_ns']):raise PolicyBlocked('补全前原音源已改变，请重新检查；不会覆盖现有歌曲')
                     tags_before=read_tag_fields(original['path'])
-                    if strict_text((tags_before.get('album') or [''])[0])!=strict_text(job['album']):raise PolicyBlocked('原音源与新版专辑标签不一致，请先核对发行或完成资料补全；不会混合不同版本')
+                    if alias_title((tags_before.get('album') or [''])[0])!=alias_title(job['album']):raise PolicyBlocked('原音源与新版专辑标签不一致，请先核对发行或完成资料补全；不会混合不同版本')
+                    if job.get('existing_album_decision')=='reuse':
+                        validation=self.s._validator(cfg).validate(original['path'])
+                        if validation.get('decode_state')!='passed':raise PolicyBlocked('既有录音未通过完整音频检查，下载副本保留，请先修复或选择独立版本')
+                        relative=Path(original['path']).relative_to(root);verified[str(relative)]=sha256_file(original['path'])
+                        for sidecar in row.get('sidecars',[]):
+                            target=relative.with_suffix('.lrc');existing=root/target;expected=sha256_file(sidecar)
+                            if existing.is_file():
+                                if sha256_file(existing)!=expected:raise PolicyBlocked('既有目录歌词与新副本不同，请先在资料补全中核对；原文件与下载副本均保留')
+                                verified[str(target)]=expected
+                            else:operations.append({'operation_id':job['job_id']+':existing-lrc:'+str(i),'kind':'publish','source':sidecar,'source_hash':expected,'destination':str(target),'before_hash':None})
                     continue
                 release=album_root(preserved[0],root).relative_to(root)
             disc=int((tags.get('discnumber') or ['1'])[0].split('/')[0]);track=(tags.get('tracknumber') or [str(i+1)])[0].split('/')[0]
@@ -1233,6 +1278,7 @@ class Workflows:
             if plex['state']!='skipped':message+='；'+plex['message']
         except (HttpError,ValueError):message+='；Plex 通知失败，请检查连接设置（音频已入库）'
         relocation=job.get('relocation') or {}
+        if job.get('warnings'):message+='；'+ '；'.join(n.get('message','') for n in job['warnings'])
         place='已整理到音乐人文件夹：'+str(Path(relocation['to']).relative_to(library))+'。' if relocation.get('state')=='done' else '未移动文件夹：'+relocation['reason']+'。' if relocation.get('reason') else ''
         self.put(job,stage='completed',progress=100,message='已完成 · '+message,detail=place+f"暂无匹配歌词：{job.get('lyrics_missing',0)} 首；未找到可靠封面：{job.get('cover_missing',0)} 首。恢复副本保存在音乐库外，不影响 Roon 分组。")
     def review(self,job_id,choice=None,metadata=None,cover_path=None,query=None,sites=None,expected_revision=None):
@@ -1241,6 +1287,9 @@ class Workflows:
         if expected_revision is not None:
             from musicops.app.assistance import review_revision
             if not job or review_revision(job)!=expected_revision:raise PolicyBlocked('任务资料已改变，请重新打开核对窗口')
+        if job and job.get('stage')=='needs_review' and job.get('review_kind')=='existing_album':
+            from musicops.app.existing_album import choose
+            return choose(self,job,choice)
         if job and job.get('review_kind')=='album_scope':
             from musicops.app.playlist_album import choose
             if not isinstance(choice,str) or choice!='keep_single' and not choice.startswith('playlist_album:'):raise PolicyBlocked('请明确选择保留原单曲发行，或选择已核验的完整专辑')

@@ -29,6 +29,7 @@ class ReviewDialog(QDialog):
         layout = QVBoxLayout(self)
         self.summary = QPlainTextEdit(); self.summary.setReadOnly(True); self.summary.setMaximumHeight(100); layout.addWidget(self.summary)
         self.ai_note = QLabel(); self.ai_note.setTextFormat(Qt.PlainText); self.ai_note.setWordWrap(True); self.ai_note.setTextInteractionFlags(Qt.TextSelectableByMouse); layout.addWidget(self.ai_note)
+        self.existing_box=QWidget();self.existing_layout=QVBoxLayout(self.existing_box);layout.addWidget(self.existing_box)
         self.source_links = QLabel(); self.source_links.setWordWrap(True); self.source_links.setOpenExternalLinks(True); layout.addWidget(self.source_links)
         self.tabs = QTabWidget(); layout.addWidget(self.tabs, 1)
         page = QWidget(); form = QVBoxLayout(page)
@@ -61,6 +62,17 @@ class ReviewDialog(QDialog):
 
     def populate(self, job):
         self.job = job; proposal = job.get('ai_assistance') or {}
+        while self.existing_layout.count():
+            item=self.existing_layout.takeAt(0)
+            if item.widget():item.widget().deleteLater()
+        existing=job.get('review_kind')=='existing_album'
+        self.tabs.setVisible(not existing)
+        self.existing_box.setVisible(existing)
+        if existing:
+            for album in job.get('existing_album_choices',[]):
+                control=QPushButton('补入既有目录（保留已有录音）：'+album['directory']+' · '+str(album['track_count'])+' 首')
+                control.clicked.connect(lambda checked=False,ident=album['album_id']:self.send({'choice':'existing_album:'+ident}));self.existing_layout.addWidget(control)
+            control=QPushButton('保留为独立版本，不合并');control.clicked.connect(lambda:self.send({'choice':'separate_album_version'}));self.existing_layout.addWidget(control)
         valid = bool(job.get('review_revision')) and proposal.get('revision') == job.get('review_revision')
         if not valid: proposal={}
         self.summary.setPlainText(job.get('message', '') + '\n' + (job.get('detail') or ''))
@@ -129,7 +141,7 @@ class ReviewDialog(QDialog):
         self.candidate_use.setEnabled(job.get('stage') == 'needs_review' and job.get('review_kind') == 'candidate' and bool(choices))
         self.update_candidate_button()
         self.research.setEnabled(waiting and (job.get('task_type') == 'search' or job.get('review_kind') == 'search' or job.get('task_type') == 'manual_search'))
-        self.ai_button.setEnabled(waiting and not scope)
+        self.ai_button.setEnabled(waiting and not scope and not existing)
         self.fallback_button.setVisible(job.get('review_kind')=='search' and job.get('scene') in ('playlist','fill'))
         self.retry_processing.setVisible(job.get('review_kind') in ('error','interrupted') or job.get('stage') in ('failed','skipped'))
         kind = job.get('review_kind'); self.tabs.setCurrentIndex(1 if kind == 'candidate' else 2 if kind in {'search', 'error', 'interrupted'} or job.get('stage') in {'failed', 'skipped'} else 0)

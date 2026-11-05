@@ -158,6 +158,7 @@ class WebCatalog:
                     raise PolicyBlocked('网站未允许读取访问规则')
                 self.robots[source] = robot
             if not self.robots[source].can_fetch('MusicOps', url):
+                self.blocked[source]=(time.monotonic()+300,'POLICY_BLOCKED')
                 raise PolicyBlocked('网站访问规则不允许抓取此页面')
         response = self._request(url)
         if response.status_code in (401, 403, 429):
@@ -219,6 +220,10 @@ class WebCatalog:
         detail_budget = 6
         for link in lookup_links(query):
             source = link['source']; self.checkpoint('catalog_website_source')
+            with self.lock:blocked=self.blocked.get(source)
+            if blocked and blocked[0]>time.monotonic():
+                sources.append({'source':source,'mode':'public_website','status':'SKIPPED','reason':'访问规则或服务限制暂未恢复；已跳过重复访问'})
+                continue
             try:
                 page = self._page(source, link['url'])
                 urls = list(dict.fromkeys(checked[1] for href in page.links

@@ -20,6 +20,7 @@ from musicops.platforms import ipc_family,prepare_ipc_socket,secure_ipc_socket,p
 READ_COMMANDS = {'compilation_albums','duplicate_history','list_library_albums','attach', 'get_status', 'get_task', 'list_tasks', 'get_playlist_targets', 'list_library_files', 'events', 'parse_playlist','list_workflows','get_workflow','list_subscriptions'}
 QUEUED_COMMANDS = {'demo', 'index_library', 'compare', 'search', 'resources', 'prepare_fill', 'prepare_resource', 'prepare_repair', 'prepare_dedup', 'submit_plan', 'request_rollback', 'export_report', 'refresh_playlist', 'submit_download', 'recover', 'pt_preflight', 'qbt_preflight', 'ai_analyze', 'ai_plan', 'ai_test', 'lyrics_preflight','identify_metadata','resolve_metadata','accept_metadata','validate_selected_file','roon_preflight'}
 QUEUED_COMMANDS.update({'preview_compilation','merge_compilation','restore_duplicates','scan_duplicates','merge_duplicates','normalize_qbt_tags','queue_ai_reviews','browser_solver_preflight','assist_workflows','start_workflow','advance_workflows','restore_workflow','manual_album_search','check_subscription','check_subscription_now'})
+QUEUED_COMMANDS.add('archive_events')
 
 
 def request_signature(command, payload, key):
@@ -31,8 +32,18 @@ def request_signature(command, payload, key):
 
 def error_response(exc, request_id=None):
     category = getattr(exc, 'error_class', type(exc).__name__)
-    message = str(exc) if isinstance(exc, (RuntimeError, ValueError, KeyError)) else '后台请求失败，请查看本机业务事件。'
+    from musicops.domain.errors import MusicOpsError
+    message = str(exc) if isinstance(exc, (MusicOpsError, RuntimeError, ValueError, KeyError)) else '后台请求失败，请查看本机业务事件。'
     return {'ok': False, 'request_id': request_id, 'error': redact(message), 'error_class': category}
+
+
+def record_request_error(service,command,exc):
+    import traceback
+    from musicops.worker.lifecycle import append
+    base=getattr(service,'base',None)
+    if base is not None:
+        append(base,'request_failed',command=command,error_class=type(exc).__name__,
+               frames=[{'file':Path(f.filename).name,'line':f.lineno,'function':f.name} for f in traceback.extract_tb(exc.__traceback__)[-10:]])
 
 
 def encode_response(response):
@@ -80,6 +91,7 @@ def handle_request(service, req, key):
         try:
             return {'ok': True, 'request_id': request_id, 'result': service.dispatch(command, payload, request_id=request_id)}
         except Exception as exc:
+            record_request_error(service,command,exc)
             return error_response(exc, request_id)
     record = {'signature': signature, 'signature_version': 2, 'command': command, 'state': 'INTENT', 'response': None}
     service.store.put('ipc_requests', request_id, record)
@@ -89,6 +101,7 @@ def handle_request(service, req, key):
     except Exception as exc:
         # Failures may follow a partial mutation. Preserve their response to
         # prevent a retry from executing that mutation again.
+        record_request_error(service,command,exc)
         response = error_response(exc, request_id)
     service.store.put('ipc_requests', request_id, {**record, 'state': 'DONE', 'response': response})
     return response
@@ -126,6 +139,8 @@ def main(argv=None):
     args = parser.parse_args(argv)
     base = Path(args.base).resolve()
     private_directory(base)
+    from musicops.worker.lifecycle import install,append,monitor
+    fault_log=install(base,'worker')
     try:
         lock = WriterLock(base).acquire()
     except RuntimeError:
@@ -142,6 +157,8 @@ def main(argv=None):
         except Exception as exc:
             startup.write_text(json.dumps({'pid':os.getpid(),'failed':True,'message':'后台启动失败：'+type(exc).__name__+'。请查看 profile/state/worker-startup.log'}),encoding='utf-8')
             raise
+        monitor(service)
+        service.store.event('worker_started',{'pid':os.getpid()})
         key = auth_key(base)
         prepare_ipc_socket(base)
         address=pipe_address(base)
@@ -162,6 +179,7 @@ def main(argv=None):
                     # must not terminate the shared worker.
                     continue
     finally:
+        append(base,'worker_stopped',reason='server_finally')
         if service is not None:
             service.stop.set()
             service.thread.join()

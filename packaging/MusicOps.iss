@@ -5,7 +5,7 @@
 #ifndef AppIdentity
   #define AppIdentity "MusicOps.Desktop"
 #endif
-#define MusicOpsVersion "0.4.28"
+#define MusicOpsVersion "0.4.29"
 
 [Setup]
 AppId={#AppIdentity}
@@ -60,6 +60,10 @@ Name: "english"; MessagesFile: "compiler:Default.isl"
 
 [Tasks]
 Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm:AdditionalIcons}"
+Name: "autostart"; Description: "登录 Windows 后自动启动 MusicOps"; GroupDescription: "后台任务"; Flags: unchecked
+
+[Registry]
+Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: string; ValueName: "MusicOps"; ValueData: """{app}\MusicOps.exe"" --base ""{app}\profile"""; Tasks: autostart; Flags: uninsdeletevalue
 
 [Dirs]
 Name: "{app}\profile"; Flags: uninsneveruninstall

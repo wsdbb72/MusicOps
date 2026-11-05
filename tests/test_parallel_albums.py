@@ -38,16 +38,16 @@ def test_bounded_wave_claims_each_album_once_and_propagates_task_context(service
     assert flows.advance()['idle']
 
 
-def test_mutating_stage_keeps_exclusive_turn(service,monkeypatch):
+def test_publication_shares_wave_with_independent_identification(service,monkeypatch):
     flows=service.workflows;seed(service,4)
     row=copy.deepcopy(flows.rows()[0]);row.update(job_id='publication',stage='publishing');flows.put(row)
     monkeypatch.setattr(service,'_checkpoint',lambda phase:None)
     seen=[]
     monkeypatch.setattr(flows,'_publishing',lambda job:(seen.append(job['job_id']),flows.put(job,stage='completed')))
-    monkeypatch.setattr(flows,'_identifying',lambda job:seen.append('unsafe-overlap'))
+    monkeypatch.setattr(flows,'_identifying',lambda job:(seen.append(job['job_id']),flows.put(job,stage='completed')))
     assert flows.advance()['job_id']=='publication'
-    assert seen==['publication']
-    assert sum(j['stage']=='identifying' for j in flows.rows())==4
+    assert 'publication' in seen and len(seen)==4
+    assert sum(j['stage']=='identifying' for j in flows.rows())==1
 
 
 def test_failure_isolated_without_losing_other_claimed_albums(service,monkeypatch):
@@ -156,15 +156,15 @@ def test_coordinator_cancellation_cancels_each_claim_before_provider(service,mon
     assert {job['stage'] for job in flows.rows()}=={'cancelled'}
 
 
-def test_metadata_copies_use_two_slots_and_allow_network_peers(service,monkeypatch):
+def test_metadata_copies_fill_available_slots_with_network_peers(service,monkeypatch):
     flows=service.workflows;seed(service,5,stage='metadata')
     row=copy.deepcopy(flows.rows()[0]);row.update(job_id='waiting-search',stage='searching');flows.put(row)
     monkeypatch.setattr(flows,'parallel_limit',lambda:4)
     monkeypatch.setattr(service,'_checkpoint',lambda phase:None)
-    seen=[];barrier=threading.Barrier(3)
+    seen=[];barrier=threading.Barrier(4)
     def stage(job):
         seen.append(job['resume_stage']);barrier.wait(5);flows.put(job,stage='completed')
     monkeypatch.setattr(flows,'_metadata',stage);monkeypatch.setattr(flows,'_searching',stage)
-    assert flows.advance()['parallel_count']==3
-    assert sorted(seen)==['metadata','metadata','searching']
-    assert sum(j['stage']=='metadata' for j in flows.rows())==3
+    assert flows.advance()['parallel_count']==4
+    assert sorted(seen)==['metadata','metadata','metadata','searching']
+    assert sum(j['stage']=='metadata' for j in flows.rows())==2

@@ -80,6 +80,7 @@ def save_setup(service,payload):
         if not isinstance(settings,dict) or set(settings)-{'managed','enabled','base_url','timeout','executable','auto_start'}:raise ValueError('浏览器验证设置无效')
         values['browser_solver'].update(settings)
     if 'catalog_web' in payload:values['catalog']['web_enabled']=bool(payload['catalog_web'])
+    if 'dsd_policy' in payload:values['quality']['dsd_policy']=payload['dsd_policy']
     if 'prefer_simplified' in payload:values['metadata']['prefer_simplified']=bool(payload['prefer_simplified'])
     if payload.get('discogs_token'):secret('discogs','https://api.discogs.com',payload['discogs_token'],('catalog','discogs','credential_ref'))
     server=payload.get('servers',{})
@@ -122,7 +123,8 @@ def save_setup(service,payload):
     for platform,text in payload.get('playlist_credentials',{}).items():
         if text.strip():share(service,platform,text)
     saved=service.config.current()
-    if saved['values']['ai'].get('enabled'):
+    ai_changed=current['values']['ai']!=saved['values']['ai'] or any(path and path[0]=='ai' for _,_,_,path in pending)
+    if saved['values']['ai'].get('enabled') and ai_changed:
         from musicops.app.review_queue import submit
         submit(service,{'all':True})
     service.prepare_local_catalog()

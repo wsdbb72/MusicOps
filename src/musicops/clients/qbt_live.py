@@ -1,9 +1,33 @@
 """Authenticated, origin-bound WebAPI session; no global preference mutations."""
-import json
+import json,hashlib,threading,time
+from collections import OrderedDict
 from urllib.parse import urlsplit
 import httpx
 from musicops.clients.http import Response, HttpError, PolicyBlocked, local_service_host
 from musicops.clients.qbt import QbtClient
+
+_auth_lock=threading.RLock()
+_auth_failures=OrderedDict()
+
+def login(client,origin,creds):
+    key=hashlib.sha256((origin+'\n'+json.dumps(creds,sort_keys=True)).encode()).hexdigest()
+    # A simultaneous wave must not consume all five default failed-login tries.
+    # Changing either credential or origin naturally bypasses the old failure.
+    with _auth_lock:
+        cached=_auth_failures.get(key)
+        if cached and cached[0]>time.monotonic():raise HttpError(cached[1],cached[2]+'；已暂停重复登录 5 分钟，修改凭据后可立即重试')
+        r=client.post(origin+'/api/v2/auth/login',data={'username':creds['username'],'password':creds['password']})
+        if r.status_code>=500:raise HttpError('TRANSIENT_ERROR','qBittorrent 服务暂时不可用，请稍后重试')
+        error=None
+        if r.status_code==403:error=HttpError('ACCESS_BLOCKED','qBittorrent 拒绝访问：可能因多次登录失败临时封禁 IP，也可能是反向代理访问限制；请检查封禁列表和代理规则后重试')
+        elif r.status_code==401:error=HttpError('AUTH_FAILED','qBittorrent 用户名或密码不正确，请在连接与设置中重新填写')
+        elif r.status_code not in (200,204) or r.status_code==200 and r.text.strip()!='Ok.':error=HttpError('AUTH_FAILED','qBittorrent 登录失败，请检查登录资料与 WebUI 地址')
+        if error:
+            _auth_failures[key]=(time.monotonic()+300,error.error_class,str(error))
+            while len(_auth_failures)>32:_auth_failures.popitem(last=False)
+            raise error
+        _auth_failures.pop(key,None)
+        return r
 
 class QbtSession:
     authenticated_qbt = True
@@ -22,8 +46,7 @@ class QbtSession:
             raise HttpError('AUTH_FAILED','qBittorrent 登录资料缺少用户名或密码，请在连接与设置中重新填写')
         self.client=httpx.Client(follow_redirects=False,verify=True,trust_env=False,timeout=15,headers={'Referer':self.origin+'/'})
         try:
-            r=self.client.post(self.origin+'/api/v2/auth/login',data={'username':creds['username'],'password':creds['password']})
-            if r.status_code not in (200,204) or r.status_code==200 and r.text.strip()!='Ok.':raise HttpError('AUTH_FAILED','qBittorrent 登录失败')
+            login(self.client,self.origin,creds)
             self.version=self.request('GET',self.origin+'/api/v2/app/version').text.strip()
         except httpx.TimeoutException:
             self.client.close();raise HttpError('TRANSIENT_ERROR','连接 qBittorrent 超时，请检查 WebUI 地址与服务状态') from None

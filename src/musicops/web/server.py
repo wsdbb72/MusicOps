@@ -76,7 +76,12 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         path=urlsplit(self.path).path
         if path=='/healthz':
-            return self.respond(200,{'http':'ready'})
+            import time
+            try:
+                status=json.loads((self.server.client.base/'state'/'worker-health.json').read_text('utf-8'))
+                ready=time.time()-status['at']<30 and status['queue_alive'] and not status.get('queue_error')
+            except (OSError,ValueError,KeyError,TypeError):ready=False
+            return self.respond(200 if ready else 503,{'http':'ready','worker':'ready' if ready else 'unavailable'})
         if not self.authenticated():return self.respond(401,{'error':'请使用 musicops 用户及 /config/web-password 中的密码登录'})
         if path=='/api/bootstrap':
             return self.respond(200,{'csrf':self.server.csrf,'commands':sorted(COMMANDS),'version':__version__})

@@ -4,7 +4,7 @@ Build on each architecture with packaging/build_macos.py. No Developer ID
 identity is configured: PyInstaller applies ad-hoc signatures only.
 """
 from pathlib import Path
-import os,platform,tomllib
+import os,platform,tomllib,ssl
 from PyInstaller.utils.hooks import collect_data_files,collect_submodules
 
 root=Path(SPECPATH).parent
@@ -16,6 +16,8 @@ shared=collect_submodules('musicops')
 data=collect_data_files('PySide6',includes=['Qt/plugins/imageformats/*','Qt/translations/qtbase_zh_CN.qm'])
 data += [(str(root/'src/musicops/assets'),'musicops/assets')]
 data += collect_data_files('opencc')
+ssl_policy=Path(ssl.__file__).with_name('codex-rejected-cas.pem')
+if ssl_policy.is_file():data.append((str(ssl_policy),'.'))
 data += [(str(root/'src/musicops/providers/musicdl_runner.py'),'musicops/providers')]
 data += [(os.environ['MUSICOPS_MAC_LEGAL'],'musicops/legal')]
 

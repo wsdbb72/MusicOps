@@ -10,7 +10,7 @@ class Conflict(MusicOpsError):
     error_class = 'CONFLICT'
 
 
-class PolicyBlocked(MusicOpsError):
+class PolicyBlocked(MusicOpsError, RuntimeError):
     error_class = 'POLICY_BLOCKED'
 
 

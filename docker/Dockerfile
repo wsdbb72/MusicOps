@@ -43,6 +43,6 @@ USER 1000:1000
 WORKDIR /config
 EXPOSE 8080
 VOLUME ["/config", "/media"]
-HEALTHCHECK --interval=30s --timeout=15s --start-period=120s --retries=3 \
+HEALTHCHECK --interval=30s --timeout=15s --start-period=600s --retries=3 \
  CMD ["python", "/opt/musicops/docker/healthcheck.py"]
 ENTRYPOINT ["/usr/bin/tini", "-s", "--", "python", "/opt/musicops/docker/entrypoint.py"]

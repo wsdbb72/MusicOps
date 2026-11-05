@@ -3,8 +3,7 @@ import json,re,threading
 from dataclasses import dataclass,field
 from urllib.parse import urlparse
 
-class PolicyBlocked(RuntimeError):
-    error_class='POLICY_BLOCKED'
+from musicops.domain.errors import PolicyBlocked
 class HttpError(RuntimeError):
     def __init__(self,error_class,message=''): self.error_class=error_class; super().__init__(message or error_class)
 

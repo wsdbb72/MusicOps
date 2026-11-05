@@ -21,6 +21,7 @@ class AppService:
         self.base=Path(base).resolve(); self.base.mkdir(parents=True,exist_ok=True)
         self.offline=offline; self.store=StateStore(self.base/'state'/'musicops.sqlite',progress=progress)
         self.config=ConfigManager(self.store,self.base,initial_offline=offline); self.vault=Vault(self.base)
+        self._policy_baseline_revision=self.config.current()['version']
         from musicops.clients.managed_services import ManagedServices
         self.engines=ManagedServices(self.base,self.vault,self._managed_checkpoint)
         self.engines.default_tools=lambda:self.config.current()['values']['paths']['tools']
@@ -119,6 +120,8 @@ class AppService:
         if command in ('attach','get_status'):
             active_task=self.store.get('tasks',self.active) if self.active else None
             execution={key:active_task.get(key) for key in ('task_id','command','state','started_at','safe_phase')} if active_task else None
+            if execution:
+                execution.update(heartbeat_at=time.time(),progress_at=getattr(self,'_progress_at',None),safe_phase=getattr(self,'_last_phase',None),queue_alive=self.thread.is_alive(),queue_error=getattr(self,'_queue_error',None))
             if payload.get('compact'):
                 with self.store.connection() as c:rows=c.execute("SELECT json_remove(payload,'$.args','$.config_snapshot','$.result') FROM tasks ORDER BY updated_at DESC,id LIMIT 200").fetchall()
                 tasks=[json.loads(r[0]) for r in rows]
@@ -223,7 +226,10 @@ class AppService:
             return {'decision':decision}
         if command=='shutdown_worker':
             if self.active or getattr(self,'_playlist_active',None): raise RuntimeError('当前任务尚未到安全退出点，请先暂停流水线')
+            from musicops.worker.supervision import stop
+            stop(self.base)
             self.stop.set(); return {'stopped':True,'seeding_unchanged':True}
+        if command=='archive_events':return self.enqueue(command,payload,request_id=request_id)
         if command in ('preview_compilation','merge_compilation','scan_duplicates','merge_duplicates','restore_duplicates','normalize_qbt_tags','browser_solver_preflight','assist_workflows','manual_album_search','restore_workflow','start_workflow','advance_workflows','demo','index_library','compare','search','resources','prepare_fill','prepare_resource','prepare_repair','prepare_dedup','submit_plan','request_rollback','export_report','refresh_playlist','submit_download','recover','pt_preflight','qbt_preflight','ai_analyze','ai_plan','ai_test','lyrics_preflight','identify_metadata','resolve_metadata','accept_metadata','validate_selected_file','roon_preflight','check_subscription'):
             return self.enqueue(command,payload,request_id=request_id)
         raise ValueError('UNKNOWN_COMMAND:'+command)
@@ -275,8 +281,12 @@ class AppService:
         # Finalization/scheduler errors must not silently kill the only queue
         # thread while leaving a healthy-looking IPC server and active task.
         while not self.stop.is_set():
-            try:self._run_loop()
+            try:
+                if getattr(self,'_queue_recovery',None):raise self._queue_recovery
+                self._queue_error=None
+                self._run_loop()
             except Exception as exc:
+                self._queue_error=type(exc).__name__
                 import traceback
                 active=self.active
                 frames=[{'file':Path(f.filename).name,'line':f.lineno,'function':f.name} for f in traceback.extract_tb(exc.__traceback__)[-8:]]
@@ -293,8 +303,16 @@ class AppService:
                                 job.update(stage='needs_review',review_kind='interrupted',error_class=type(exc).__name__,message='后台阶段已保留，请核对后继续')
                                 self.store.put('evidence',row['id'],job)
                     self.store.event('queue_recovered',{'error_class':type(exc).__name__,'frames':frames},active)
-                finally:self.active=None
-                self.stop.wait(.2)
+                except Exception:
+                    # The recovery ledger can be unavailable for the same reason
+                    # as the original write. A second failure must not kill us.
+                    import logging
+                    logging.getLogger(__name__).exception('Queue recovery could not persist; retrying after storage failure')
+                    self._queue_recovery=exc
+                else:
+                    self._queue_recovery=None;self._queue_error=None;self.active=None
+                import sqlite3
+                self.stop.wait(5 if isinstance(exc,sqlite3.OperationalError) else .2)
     def _run_loop(self):
         while not self.stop.wait(.1):
             with self.mutex:
@@ -349,6 +367,15 @@ class AppService:
             self.enqueue('advance_workflows',{})
             self._workflow_waves=waves+1
             return True
+        if now-getattr(self,'_last_archive_check',0)>86400:
+            self._last_archive_check=now
+            from musicops.state.event_archive import ROUTINE
+            cutoff=(dt.datetime.now(dt.timezone.utc)-dt.timedelta(days=30)).isoformat()
+            with self.store.connection() as connection:
+                eligible=connection.execute('SELECT 1 FROM events WHERE phase IN (?,?,?) AND at<? LIMIT 1',(*ROUTINE,cutoff)).fetchone()
+            if eligible:
+                self.enqueue('archive_events',{})
+                return True
         return False
 
     @staticmethod
@@ -362,6 +389,7 @@ class AppService:
         if self.stop.is_set():raise TaskCancelled('后台正在退出，请在更新完成后重试连接')
         if threading.current_thread() is self.thread or getattr(self._task_local,'task_id',None):self._checkpoint(phase,wait_for_resume=phase!='managed_service_start')
     def _checkpoint(self,phase,*,wait_for_resume=True):
+        self._last_phase=phase;self._progress_at=time.time()
         task_id=getattr(getattr(self,'_task_local',None),'task_id',None) or self.active
         if not task_id or getattr(self,'_safe_finalizing',False):return
         marked=False
@@ -388,6 +416,9 @@ class AppService:
         for key in ('library','source','work','backup','quarantine'): self._safe_path(cfg['paths'][key])
         return TransactionEngine(self.store,cfg['paths'],validator=self._validator(cfg))
     def _execute(self,command,args,cfg):
+        if command=='archive_events':
+            from musicops.state.event_archive import archive
+            return archive(self.store,args.get('days',30))
         if command=='test_connection':
             from musicops.app.connection_tests import run
             return run(self,args,cfg)

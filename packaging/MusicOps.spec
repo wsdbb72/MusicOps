@@ -1,11 +1,17 @@
 # Folder distribution, shared bundled interpreter and Qt image plugins.
 from pathlib import Path
 import os
+import ssl
 from PyInstaller.utils.hooks import collect_data_files, collect_submodules
 root=Path(SPECPATH).parent
 pyside_data=collect_data_files('PySide6',includes=['Qt/plugins/imageformats/*','Qt/translations/qtbase_zh_CN.qm'])
 pyside_data += [(str(root/'src/musicops/assets'), 'musicops/assets')]
 pyside_data += collect_data_files('opencc')
+# Some managed Python distributions load an auxiliary CA policy beside ssl.py.
+# Preserve that policy when freezing; omitting it breaks even loopback HTTPX
+# initialization. Never bypass TLS verification to mask a packaging omission.
+ssl_policy=Path(ssl.__file__).with_name('codex-rejected-cas.pem')
+if ssl_policy.is_file():pyside_data.append((str(ssl_policy),'.'))
 pyside_data += [(str(root/'src/musicops/providers/musicdl_runner.py'),'musicops/providers')]
 pyside_binaries=[]
 pyside_hidden=[]

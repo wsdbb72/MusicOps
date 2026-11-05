@@ -226,6 +226,7 @@ class SetupWizard(QWizard):
         p.addRow('歌词接口地址',self.lyric_url);p.addRow('接口鉴权值',self.lyric_key);p.addRow(button('测试当前填写的歌词接口',lambda:self.test_connection('lyrics')));self.lyric_test_note=label('测试不写入音乐，也不保存新凭据。','hint');p.addRow(self.lyric_test_note);p.addRow(label('这里填服务给你的鉴权原文，无需填写“凭据引用”。没有服务可留空。','hint'))
         self.discogs=CredentialField('Discogs 设置中生成的个人 Token；可跳过',self.values.get('catalog',{}).get('discogs',{}).get('credential_ref') in self.saved_refs);p.addRow('Discogs Token',self.discogs)
         self.catalog_web=QCheckBox('API 无匹配时自动读取公开音乐资料网站');self.catalog_web.setChecked(self.values.get('catalog',{}).get('web_enabled',True));p.addRow(self.catalog_web)
+        self.reject_dsd=QCheckBox('不下载 DSD / SACD 音源（下载前过滤，不使用令牌）');self.reject_dsd.setChecked(self.values['quality'].get('dsd_policy')=='reject');p.addRow(self.reject_dsd)
         self.prefer_simplified=QCheckBox('已确认中文的资料优先简体；日文和语言不明的名称保持原文');self.prefer_simplified.setChecked(self.values.get('metadata',{}).get('prefer_simplified',True));p.addRow(self.prefer_simplified)
         ai=self.values.get('ai',{});self.ai_enabled=QCheckBox('启用 AI：API 和网站均无法匹配时联网搜索，并辅助核对');self.ai_enabled.setChecked(ai.get('enabled',False));p.addRow(self.ai_enabled)
         self.ai_url=line('' if '.example.invalid' in ai.get('base_url','') else ai.get('base_url',''),'兼容 Responses 的 API 地址');self.ai_model=line(ai.get('model',''),'服务提供的模型名称');self.ai_key=CredentialField('API Key',ai.get('auth_secret_ref') in self.saved_refs)
@@ -279,7 +280,7 @@ class SetupWizard(QWizard):
                  'playlist_credentials':{key:edit.text() for key,edit in self.playlist_credentials.items()},
                  'qbt':{'url':self.qbt_url.text().strip(),'username':self.qbt_user.text().strip(),'password':self.qbt_pass.text()},
                  'lyrics':{'url':self.lyric_url.text().strip(),'authorization':self.lyric_key.text()},'discogs_token':self.discogs.text(),
-                 'ai':{'enabled':self.ai_enabled.isChecked(),'url':self.ai_url.text().strip(),'model':self.ai_model.text().strip(),'key':self.ai_key.text()},'catalog_web':self.catalog_web.isChecked(),'prefer_simplified':self.prefer_simplified.isChecked(),
+                 'ai':{'enabled':self.ai_enabled.isChecked(),'url':self.ai_url.text().strip(),'model':self.ai_model.text().strip(),'key':self.ai_key.text()},'catalog_web':self.catalog_web.isChecked(),'prefer_simplified':self.prefer_simplified.isChecked(),'dsd_policy':'reject' if self.reject_dsd.isChecked() else 'preserve',
                  'servers':{'plex':{'enabled':self.plex_enabled.isChecked(),'url':self.plex_url.text().strip(),'section_id':self.plex_section.text().strip(),'token':self.plex_token.text()},'roon':self.roon.isChecked(),'navidrome':{'enabled':self.nav_enabled.isChecked(),'url':self.nav_url.text().strip(),'username':self.nav_user.text().strip(),'password':self.nav_pass.text()}},
                  'updates':{'enabled':self.auto_updates.isChecked()},'browser_solver':{'managed':self.solver_managed.isChecked(),'enabled':self.solver_enabled.isChecked(),'base_url':self.solver_url.text().strip(),'executable':self.solver_executable.text().strip(),'auto_start':self.solver_auto.isChecked()},
                  'workflow':{'netease_fallback':self.fallback.isChecked(),'netease_api_url':self.netease_api.text().strip(),'netease_import_dir':self.import_dir.text().strip(),'fl_per_batch':self.fl_limit.value(),'fl_unlimited':self.fl_unlimited.isChecked(),'artist_folders':self.artist_folders.isChecked(),'edition_policy':self.edition_policy.currentData()},
@@ -611,6 +612,10 @@ class Workbench(QMainWindow):
         self.pipeline_paused=bool(result.get('paused'));self.config=result['config']['values'];self.available_refs=[r['ref'] if isinstance(r,dict) else r for r in result.get('secret_refs',[])];self.timer.start();connected=[name for key,name,_ in SITES if self.config['providers'][key]['enabled'] and self.config['providers'][key]['credential_ref'] in self.available_refs]
         executing=result.get('execution') or {};names={'restore_duplicates':'恢复合并副本','scan_duplicates':'校验重复歌曲与专辑','merge_duplicates':'合并专辑副本','normalize_qbt_tags':'整理 MusicOps 下载标签','index_library':'扫描本地音乐库','advance_workflows':'推进专辑处理','assist_workflows':'AI 辅助核对','refresh_playlist':'读取歌单','start_workflow':'创建专辑队列','browser_solver_preflight':'验证浏览器连接'}
         self.execution_note.setText('后台已暂停，请继续后台后处理队列。' if self.pipeline_paused else '后台正在：'+names.get(executing.get('command'),'处理当前任务') if executing else '后台等待下一项可执行任务；失败和待核对专辑可按状态查看。')
+        if executing.get('queue_error'):self.execution_note.setText('后台正在等待存储恢复：'+executing['queue_error']+'；原音源与任务记录保留，不会盲目重放下载。')
+        elif executing and executing.get('progress_at'):
+            elapsed=max(0,int(__import__('time').time()-executing['progress_at']))
+            self.execution_note.setText(self.execution_note.text()+f' · 最近安全检查点 {elapsed} 秒前')
         performance=result.get('performance',{});self.performance=performance
         scheduling='小核后台' if performance.get('mode')=='efficiency' else '低优先级后台' if performance.get('low_priority') else '系统调度'
         self.execution_note.setToolTip(scheduling+'；文件校验最多 4 项并行，界面请求最多 8 项；音频解码每项 1 线程。')
@@ -736,7 +741,7 @@ class Workbench(QMainWindow):
             paused=bool(job.get('paused')) and stage not in ('completed','failed','cancelled','skipped','restored','needs_review')
             step='阶段结束后暂停' if paused and job.get('pause_pending') else '已暂停' if paused else STAGES.get(stage,stage)
             kind='检查本地库 · 批次' if batch else {'identification':'专辑识别','review_assistance':'AI 辅助核对','library_index':'本地专辑索引','catalog_identification':'在线资料识别','manual_search':'手动专辑检索','search':'专辑音源检索'}.get(job.get('task_type'),SCENES.get(job.get('scene'),job.get('scene','专辑任务')))
-            values=[job.get('label','音乐库'),kind,step,progress,job.get('message','')+(' · '+job['ai_review_message'] if job.get('ai_review_message') else '')+(' · AI 建议待核对' if (job.get('ai_assistance') or {}).get('status')=='READY' else '')]
+            values=[job.get('label') or '音乐库',kind,step,progress,str(job.get('message') or '')+(' · '+str(job['ai_review_message']) if job.get('ai_review_message') else '')+(' · AI 建议待核对' if (job.get('ai_assistance') or {}).get('status')=='READY' else '')]
             item=self.job_items[job_id] if reuse else QTreeWidgetItem(self.job_groups[group_key],values)
             for column,value in enumerate(values):item.setText(column,value)
             item.setData(0,Qt.UserRole,job_id);item.setData(0,Qt.UserRole+1,'job');item.setFlags(Qt.ItemIsEnabled|Qt.ItemIsSelectable|Qt.ItemIsUserCheckable);item.setCheckState(0,Qt.Checked if job_id in self.checked_jobs else Qt.Unchecked);self.job_items[job_id]=item
@@ -833,7 +838,7 @@ class Workbench(QMainWindow):
                 oldest=next(iter(self.job_detail_cache));self.job_detail_cache.pop(oldest);self.job_detail_notes.pop(oldest,None)
             current=self.job_items.get(job_id)
             if current:self.fill_job_tracks(current,self.job_detail_cache[job_id])
-            text=job.get('message','')+'\n'+job.get('detail','');names={key:name for key,name,_ in SITES};outcomes=job.get('source_outcomes') or job.get('outcomes') or {}
+            text=str(job.get('message') or '')+'\n'+str(job.get('detail') or '');names={key:name for key,name,_ in SITES};outcomes=job.get('source_outcomes') or job.get('outcomes') or {}
             if isinstance(outcomes,dict):
                 states={'OK':'检索有结果','NO_RESOURCE':'检索完成，未找到资源','DISABLED':'未启用','AUTH_FAILED':'登录失效','AUTH_REQUIRED':'需要登录','RATE_LIMITED':'访问限流','NETWORK_ERROR':'网络连接失败','TRANSIENT_ERROR':'站点暂时不可用','PARSE_ERROR':'页面内容未识别','ACCESS_BLOCKED':'访问受限','SNAPSHOT_INCOMPLETE':'已读取的结果有限'}
                 for source,outcome in outcomes.items():
@@ -941,7 +946,7 @@ class Workbench(QMainWindow):
         if job_id!=getattr(self,'_detail_job_id',None):self.detail_pinned=False;self._detail_job_id=job_id
         if job and not getattr(self,'detail_pinned',False):
             chain=' → '.join({'identification':'识别','search':'搜索','album':'下载与入库'}.get(r.get('task_type'),'任务')+'：'+STAGES.get(r['stage'],r['stage']) for r in job.get('chain',[]))
-            self.job_detail.setPlainText((chain+'\n' if chain else '')+self.job_detail_notes.get(job_id,job.get('message','')+'\n'+job.get('detail','')))
+            self.job_detail.setPlainText((chain+'\n' if chain else '')+self.job_detail_notes.get(job_id,str(job.get('message') or '')+'\n'+str(job.get('detail') or '')))
     def cancel(self):
         self.bulk_action('cancel')
     def bulk_action(self,action,job_ids=None):
@@ -1034,14 +1039,14 @@ class Workbench(QMainWindow):
             if QMessageBox.question(self,'继续处理','确认已处理连接或工具问题后继续。已有下载会先核对，不会重复请求未知状态的 FL。')!=QMessageBox.Yes:return
             payload['choice']='retry'
         else:
-            QMessageBox.information(self,'需要补充资料',job.get('message','')+'\n'+job.get('detail',''));return
+            QMessageBox.information(self,'需要补充资料',str(job.get('message') or '')+'\n'+str(job.get('detail') or ''));return
         self.call('review_workflow',payload,lambda _:(self.refresh(),on_saved() if on_saved else None))
     def token_prompt(self,job_id,on_saved=None):
         self.token_prompt_open=True
         def received(result):
             job=result['job']
             if job.get('stage')!='needs_review' or job.get('review_kind')!='token':self.token_prompt_open=False;return
-            prompt=QMessageBox(self);prompt.setWindowTitle('FL 令牌下载未通过');prompt.setText(job.get('label','')+'\n'+job.get('detail',''))
+            prompt=QMessageBox(self);prompt.setWindowTitle('FL 令牌下载未通过');prompt.setText(str(job.get('label') or '')+'\n'+str(job.get('detail') or ''))
             prompt.setInformativeText('默认仅使用令牌免费方式。普通下载可能计入站点下载量，且不消耗 FL。只有在此明确选择才授权；本批次授权不会保存为以后任务的默认设置。')
             retry=prompt.addButton('重新检查并使用 FL 令牌',QMessageBox.ActionRole);once=prompt.addButton('仅此次普通下载',QMessageBox.ActionRole);batch=prompt.addButton('本批次全部普通下载',QMessageBox.ActionRole);wait=prompt.addButton('保持令牌下载，暂不下载',QMessageBox.RejectRole);prompt.setDefaultButton(wait);prompt.setEscapeButton(wait)
             def chosen(_):

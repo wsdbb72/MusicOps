@@ -1,5 +1,5 @@
 from __future__ import annotations
-import contextlib, datetime as dt, json, math, sqlite3, uuid
+import contextlib, datetime as dt, json, math, sqlite3, uuid, time
 from pathlib import Path
 
 TABLES = ('config_versions','evidence','playlist_snapshots','target_tracks','library_files','match_decisions','candidates','download_tasks','media_validations','resource_candidates','change_plans','transactions','transaction_files','field_locks','suppressions','scheduler_runs','tasks','ipc_requests')
@@ -30,6 +30,11 @@ class StateStore:
             c.execute("CREATE INDEX IF NOT EXISTS task_state_queue ON tasks(json_extract(payload,'$.state'),updated_at,id)")
             c.execute('CREATE INDEX IF NOT EXISTS task_recent ON tasks(updated_at DESC,id)')
             c.execute('CREATE INDEX IF NOT EXISTS event_phase ON events(phase,seq)')
+            c.execute('CREATE INDEX IF NOT EXISTS event_retention ON events(phase,at,seq)')
+            if progress:progress('正在更新入库事务与事件索引；首次升级大档案可能需要几分钟，请勿重复启动')
+            c.execute('CREATE INDEX IF NOT EXISTS event_task ON events(task_id,seq)')
+            c.execute('CREATE INDEX IF NOT EXISTS event_transaction ON events(tx_id,seq)')
+            c.execute("CREATE INDEX IF NOT EXISTS idx_transactions_plan_id ON transactions(json_extract(payload,'$.plan_id'))")
             c.execute("CREATE INDEX IF NOT EXISTS workflow_summary ON evidence(coalesce(json_extract(payload,'$.hidden'),0),json_extract(payload,'$.stage'),coalesce(json_extract(payload,'$.job_kind'),'album'),coalesce(json_extract(payload,'$.paused'),0)) WHERE id LIKE 'workflow:%'")
             c.execute("CREATE INDEX IF NOT EXISTS workflow_page ON evidence(coalesce(json_extract(payload,'$.hidden'),0),coalesce(json_extract(payload,'$.created_at'),updated_at) DESC,id) WHERE id LIKE 'workflow:%'")
             c.execute("CREATE INDEX IF NOT EXISTS ai_review_job ON evidence(json_extract(payload,'$.job_id')) WHERE id LIKE 'ai-review:%'")
@@ -37,6 +42,12 @@ class StateStore:
             c.execute('CREATE TABLE IF NOT EXISTS library_matches (root_key TEXT NOT NULL,file_id TEXT NOT NULL,title_key TEXT NOT NULL,artist_key TEXT NOT NULL,album_key TEXT NOT NULL,duration REAL NOT NULL,album_id TEXT NOT NULL,PRIMARY KEY(root_key,file_id))')
             c.execute('CREATE INDEX IF NOT EXISTS library_match_identity ON library_matches(root_key,title_key,artist_key,album_key)')
             c.execute('CREATE TABLE IF NOT EXISTS library_albums (root_key TEXT NOT NULL,album_id TEXT NOT NULL,payload TEXT NOT NULL,PRIMARY KEY(root_key,album_id))')
+            c.execute("CREATE INDEX IF NOT EXISTS library_album_directory ON library_albums(root_key,json_extract(payload,'$.directory'))")
+            lookup_index=c.execute("SELECT 1 FROM sqlite_master WHERE name='library_album_lookup'").fetchone()
+            if not lookup_index:
+                from musicops.library.album_lookup import migrate
+                migrate(c)
+            c.execute("CREATE INDEX IF NOT EXISTS library_album_lookup ON library_albums(root_key,json_extract(payload,'$.lookup_key'))")
             c.execute('PRAGMA user_version=1')
             from musicops.state.projections import initialize
             if progress:progress('正在更新任务摘要索引；首次升级大档案可能需要几十秒，历史记录会保留')
@@ -57,27 +68,36 @@ class StateStore:
                 c.execute("INSERT OR IGNORE INTO transaction_operations SELECT t.id,json_extract(op.value,'$.operation_id'),json_extract(t.payload,'$.state') FROM transactions AS t,json_each(t.payload,'$.operations') AS op WHERE json_extract(op.value,'$.operation_id') IS NOT NULL")
     @contextlib.contextmanager
     def connection(self):
-        c=sqlite3.connect(self.path,timeout=15)
+        c=sqlite3.connect(self.path,timeout=30)
         try:
             c.row_factory=sqlite3.Row
-            c.execute('PRAGMA busy_timeout=15000'); c.execute('PRAGMA synchronous=FULL')
+            c.execute('PRAGMA busy_timeout=30000'); c.execute('PRAGMA synchronous=FULL')
             yield c; c.commit()
         except BaseException: c.rollback(); raise
         finally: c.close()
     def put(self,kind,id,data):
         if kind not in TABLES: raise ValueError('INVALID_TABLE')
         value=dict(data); value.setdefault('schema_version',1); value.setdefault('id',id)
-        with self.connection() as c:
-            c.execute(f'INSERT INTO {kind} VALUES (?,?,?) ON CONFLICT(id) DO UPDATE SET payload=excluded.payload,updated_at=excluded.updated_at',(id,json.dumps(value,ensure_ascii=False),utcnow()))
+        self._write(f'INSERT INTO {kind} VALUES (?,?,?) ON CONFLICT(id) DO UPDATE SET payload=excluded.payload,updated_at=excluded.updated_at',(id,json.dumps(value,ensure_ascii=False),utcnow()))
         return value
+    def _write(self,sql,args,many=False):
+        # Retry only rolled-back busy/locked statements. I/O/corruption and
+        # unknown results remain explicit failures; external actions never replay.
+        for attempt in range(3):
+            try:
+                with self.connection() as c:
+                    return (c.executemany if many else c.execute)(sql,args)
+            except sqlite3.OperationalError as exc:
+                code=getattr(exc,'sqlite_errorcode',0)&255
+                if code not in (sqlite3.SQLITE_BUSY,sqlite3.SQLITE_LOCKED) or attempt==2:raise
+                time.sleep(.2*(attempt+1))
     def put_many(self,kind,items):
         if kind not in TABLES:raise ValueError('INVALID_TABLE')
         rows=[];stamp=utcnow()
         for ident,data in items:
             value=dict(data);value.setdefault('schema_version',1);value.setdefault('id',ident)
             rows.append((ident,json.dumps(value,ensure_ascii=False),stamp))
-        with self.connection() as c:
-            c.executemany(f'INSERT INTO {kind} VALUES(?,?,?) ON CONFLICT(id) DO UPDATE SET payload=excluded.payload,updated_at=excluded.updated_at',rows)
+        self._write(f'INSERT INTO {kind} VALUES(?,?,?) ON CONFLICT(id) DO UPDATE SET payload=excluded.payload,updated_at=excluded.updated_at',rows,many=True)
     def get(self,kind,id):
         if kind not in TABLES and kind!='token_reservations': raise ValueError('INVALID_TABLE')
         with self.connection() as c: row=c.execute(f'SELECT payload FROM {kind} WHERE id=?',(id,)).fetchone()

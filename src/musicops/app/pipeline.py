@@ -117,9 +117,12 @@ class Workflows:
         self._advance_lock=threading.Lock()
         self._migration_lock=threading.Lock()
         self._site_locks={site:threading.Lock() for site in SITE_NAMES}
-    def rows(self,include_batches=False):
-        where=" AND coalesce(json_extract(payload,'$.hidden'),0)=0" + ('' if include_batches else " AND coalesce(json_extract(payload,'$.job_kind'),'album')!='batch'")
-        with self.store.connection() as c:rows=c.execute("SELECT payload FROM evidence WHERE id LIKE 'workflow:%'"+where+" ORDER BY updated_at DESC,id").fetchall()
+    def rows(self,include_batches=False,stages=None):
+        where='hidden=0'+('' if include_batches else " AND job_kind!='batch'");args=()
+        if stages is not None:
+            if not stages:return []
+            where+=' AND stage IN ('+','.join('?' for _ in stages)+')';args=tuple(stages)
+        with self.store.connection() as c:rows=c.execute('SELECT payload FROM evidence WHERE id IN (SELECT id FROM workflow_overview WHERE '+where+') ORDER BY updated_at DESC,id',args).fetchall()
         return [json.loads(r[0]) for r in rows]
     def put(self,job,**changes):
         with self.s.mutex:
@@ -161,7 +164,7 @@ class Workflows:
             filtered=c.execute("SELECT COUNT(*) FROM workflow_overview WHERE hidden=0"+clause,parameters).fetchone()[0]
             counts=c.execute("SELECT stage,job_kind,COUNT(*),paused FROM workflow_overview WHERE hidden=0 GROUP BY 1,2,4").fetchall()
             token_prompts=[r[0] for r in c.execute("SELECT job_id FROM workflow_overview WHERE hidden=0 AND stage='needs_review' AND review_kind='token' ORDER BY updated_at,id LIMIT 100").fetchall()]
-            rows=c.execute("SELECT json_remove(payload,'$.config','$.targets','$.old_files','$.prepared','$.choices','$.outcomes','$.publication_plan','$.catalog_choices','$.lookup_links','$.engine_paths') FROM workflow_overview AS w JOIN evidence AS e ON e.id=w.id WHERE w.id IN (SELECT id FROM workflow_overview WHERE hidden=0"+clause+" ORDER BY created_at DESC,id LIMIT 200 OFFSET ?) ORDER BY w.created_at DESC,w.id",(*parameters,offset)).fetchall()
+            rows=c.execute("SELECT summary FROM workflow_overview WHERE hidden=0"+clause+" ORDER BY created_at DESC,id LIMIT 200 OFFSET ?",(*parameters,offset)).fetchall()
         public=[self.public_row(json.loads(r[0])) for r in rows]
         return {'jobs':public,'token_prompts':token_prompts,'total':filtered,'all_total':sum(r[2] for r in counts),'offset':offset,'active':sum(r[2] for r in counts if r[0] not in TERMINAL and not r[3]),'paused_count':sum(r[2] for r in counts if r[0] not in TERMINAL and r[3]),'total_active':sum(r[2] for r in counts if r[0] not in TERMINAL),'finished':sum(r[2] for r in counts if r[0]=='completed' and r[1]!='batch'),'preparing_count':sum(r[2] for r in counts if r[1]=='batch' and r[0] not in TERMINAL)}
     def public_row(self,j):
@@ -473,7 +476,9 @@ class Workflows:
     def _advance_job(self,job,task_id):
         previous=getattr(self.s._task_local,'task_id',None)
         self.s._task_local.task_id=task_id
-        try:return self._run_stage(job,job['resume_stage'])
+        try:
+            from musicops.performance import io_checkpoints
+            with io_checkpoints(lambda:self.checkpoint(job,'waiting_disk_slot')):return self._run_stage(job,job['resume_stage'])
         finally:self.s._task_local.task_id=previous
     def _run_stage(self,job,stage):
         try:
@@ -802,7 +807,7 @@ class Workflows:
         cfg=job['config'];library=Path(cfg['paths']['library']).resolve()
         if library==library.parent:raise PolicyBlocked('请选择音乐库子目录，不使用整个磁盘根目录')
         from musicops.library.storage import storage_paths
-        work=Path(storage_paths(library)['work'])
+        work=Path(storage_paths(library,cfg.get('temporary_storage'))['work'])
         if job.get('prepared_root') and job.get('engine_paths'):work=Path(job['engine_paths']['work'])
         for watched in cfg['music_servers']['roon'].get('watched_folders',[]):
             if work.is_relative_to(Path(watched).resolve()):raise PolicyBlocked('整理工作区也被 Roon 监听，请将监听目录限定为音乐库')

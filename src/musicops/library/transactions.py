@@ -10,6 +10,7 @@ from pathlib import Path
 
 from musicops.domain.errors import Conflict, PathBlocked, RecoveryRequired, ValidationFailed
 from musicops.media.validation import MediaValidator
+from musicops.performance import io_bound
 from .index import AUDIO_EXTENSIONS, file_version, sha256_file
 from .paths import reject_reparse_chain, safe_destination, validate_roots, within
 from .resources import companion_relations
@@ -38,6 +39,7 @@ def atomic_json(path, data):
     os.replace(temporary, path)
 
 
+@io_bound
 def durable_copy(source, destination):
     """Always copy bytes: neither link nor move the source."""
     source, destination = Path(source), Path(destination)
@@ -55,6 +57,17 @@ def durable_copy(source, destination):
 
 
 class TransactionEngine:
+    @staticmethod
+    def _volume(path):
+        path=Path(path)
+        while not path.exists():path=path.parent
+        return path.stat().st_dev
+
+    def _directory_staging_candidates(self,tx_id):
+        from musicops.library.storage import storage_paths
+        adjacent=Path(storage_paths(self.roots['library'])['work'])/'publication'
+        return (self.roots['work']/tx_id/'release_directory',adjacent/tx_id/'release_directory')
+
     def __init__(self, store, paths, validator=None):
         self.store, self.paths = store, dict(paths)
         self.roots = validate_roots(paths)
@@ -186,13 +199,9 @@ class TransactionEngine:
             common = Path(os.path.commonpath([str(Path(op['destination']).parent) for op in operations]))
             if common != self.roots['library'] and not common.exists():
                 # Complete new directory is prepared outside the watched root and renamed once.
-                group_staging = safe_destination(self.roots['work'], f'{tx_id}/release_directory')
-                def volume(path):
-                    while not path.exists():
-                        path = path.parent
-                    return path.stat().st_dev
-                if volume(self.roots['work']) != volume(self.roots['library']):
-                    raise ValidationFailed('新发行整目录原子发布要求工作根与主库同卷；跨卷先配置同卷工作区')
+                group_staging=next((p for p in self._directory_staging_candidates(tx_id) if self._volume(p)==self._volume(self.roots['library'])),None)
+                if group_staging is None:raise ValidationFailed('音乐库同盘缺少安全的发布暂存目录，请将音乐库父目录及同级 MusicOps 目录挂载在同一磁盘')
+                reject_reparse_chain(group_staging)
                 group = {'destination': str(common), 'staging': str(group_staging), 'renamed': False}
         affected = {}
         for op in operations:
@@ -379,7 +388,8 @@ class TransactionEngine:
     def _publish_directory(self, tx):
         group = tx['directory_publication']
         staging, destination = Path(group['staging']), Path(group['destination'])
-        safe_destination(self.roots['work'], staging.relative_to(self.roots['work']))
+        if staging not in self._directory_staging_candidates(tx['tx_id']):raise PathBlocked('整目录发布暂存路径不属于本事务')
+        reject_reparse_chain(staging)
         safe_destination(self.roots['library'], destination.relative_to(self.roots['library']))
         if staging.exists() or destination.exists():
             raise Conflict('新发行发布目录已有内容，不能合并或覆盖')
@@ -478,7 +488,7 @@ class TransactionEngine:
             reject_reparse_chain(item['backup'])
         if tx.get('directory_publication'):
             group = tx['directory_publication']
-            if not within(group['staging'], self.roots['work'] / tx_id) or not within(group['destination'], self.roots['library']):
+            if Path(group['staging']) not in self._directory_staging_candidates(tx_id) or not within(group['destination'], self.roots['library']):
                 raise PathBlocked('manifest整目录发布边界无效')
             reject_reparse_chain(group['staging'])
             reject_reparse_chain(group['destination'])

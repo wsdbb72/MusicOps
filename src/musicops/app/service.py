@@ -22,6 +22,8 @@ class AppService:
         self.offline=offline; self.store=StateStore(self.base/'state'/'musicops.sqlite',progress=progress)
         self.config=ConfigManager(self.store,self.base,initial_offline=offline); self.vault=Vault(self.base)
         self._policy_baseline_revision=self.config.current()['version']
+        from musicops.performance import configure_io_limit
+        configure_io_limit(self.config.current()['values']['performance']['io_concurrency'])
         from musicops.clients.managed_services import ManagedServices
         self.engines=ManagedServices(self.base,self.vault,self._managed_checkpoint)
         self.engines.default_tools=lambda:self.config.current()['values']['paths']['tools']
@@ -66,6 +68,11 @@ class AppService:
         p=raw.resolve()
         cfg=self.config.current()['values']
         roots=[self.base] if cfg['offline'] else [self.base,*[Path(cfg['paths'][key]).resolve() for key in ('library','source','work','backup','quarantine','reports')]]
+        if not cfg['offline']:
+            # Existing HDD jobs keep their recorded ownership when a user opts
+            # into SSD storage for new jobs; never force active torrents across.
+            from musicops.library.storage import storage_paths
+            roots.extend(Path(p).resolve() for p in storage_paths(cfg['paths']['library']).values())
         if not any(p.is_relative_to(root) for root in roots): raise PolicyBlocked('文件不属于设置中的音乐库或工作目录')
         for parent in [p,*p.parents]:
             if parent==self.base.parent: break
@@ -123,10 +130,10 @@ class AppService:
             if execution:
                 execution.update(heartbeat_at=time.time(),progress_at=getattr(self,'_progress_at',None),safe_phase=getattr(self,'_last_phase',None),queue_alive=self.thread.is_alive(),queue_error=getattr(self,'_queue_error',None))
             if payload.get('compact'):
-                with self.store.connection() as c:rows=c.execute("SELECT json_remove(payload,'$.args','$.config_snapshot','$.result') FROM tasks ORDER BY updated_at DESC,id LIMIT 200").fetchall()
+                with self.store.connection() as c:rows=c.execute("SELECT summary FROM task_queue_overview ORDER BY updated_at DESC,id LIMIT 200").fetchall()
                 tasks=[json.loads(r[0]) for r in rows]
             else:tasks=self.store.list('tasks')
-            with self.store.connection() as c:counts={r[0]:r[1] for r in c.execute("SELECT json_extract(payload,'$.state'),COUNT(*) FROM tasks GROUP BY json_extract(payload,'$.state')")}
+            with self.store.connection() as c:counts={r[0]:r[1] for r in c.execute("SELECT state,COUNT(*) FROM task_queue_overview GROUP BY state")}
             config=self.config.current();offline=config['values']['offline']
             with self.store.connection() as c:
                 file_count=c.execute('SELECT COUNT(*) FROM library_files').fetchone()[0]
@@ -164,7 +171,11 @@ class AppService:
             targets=self.store.list('target_tracks')
             return {'targets':targets,'complete':bool(targets) and all(t.get('snapshot_complete') for t in targets),'from_cache':True,'network_used':False}
         if command=='events': return {'events':self.store.events(payload.get('after',0))}
-        if command=='update_config': return {'config':self.config.save(payload['values'],payload['expected_version'])}
+        if command=='update_config':
+            saved=self.config.save(payload['values'],payload['expected_version'])
+            from musicops.performance import configure_io_limit
+            configure_io_limit(saved['values']['performance']['io_concurrency'])
+            return {'config':saved}
         if command=='export_config':
             data=self.config.export()
             if payload.get('path'):
@@ -172,7 +183,10 @@ class AppService:
             return {'config':data,'path':payload.get('path')}
         if command=='import_config':
             data=json.loads(Path(payload['path']).read_text(encoding='utf-8-sig')) if payload.get('path') else payload['data']
-            return {'config':self.config.import_config(data,payload['expected_version'])}
+            saved=self.config.import_config(data,payload['expected_version'])
+            from musicops.performance import configure_io_limit
+            configure_io_limit(saved['values']['performance']['io_concurrency'])
+            return {'config':saved}
         if command=='set_secret': return self.vault.set(payload['ref'],payload['value'],payload['host'])
         if command=='import_pt_cookies':
             from musicops.clients.vault import import_cookies
@@ -317,7 +331,7 @@ class AppService:
         while not self.stop.wait(.1):
             with self.mutex:
                 if self.paused: continue
-                with self.store.connection() as c:row=c.execute("SELECT payload FROM tasks WHERE json_extract(payload,'$.state')='queued' ORDER BY CASE json_extract(payload,'$.command') WHEN 'refresh_playlist' THEN 0 WHEN 'manual_album_search' THEN 1 WHEN 'identify_metadata' THEN 1 WHEN 'resolve_metadata' THEN 1 WHEN 'accept_metadata' THEN 1 WHEN 'assist_workflows' THEN 3 WHEN 'advance_workflows' THEN 4 ELSE 2 END,updated_at,id LIMIT 1").fetchone()
+                with self.store.connection() as c:row=c.execute("SELECT payload FROM tasks WHERE id=(SELECT id FROM task_queue_overview WHERE state='queued' ORDER BY priority,updated_at,id LIMIT 1)").fetchone()
                 if row is None:
                     self._schedule_background()
                     continue

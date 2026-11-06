@@ -72,10 +72,13 @@ def test_slow_go_start_does_not_block_browser_engine(service,tmp_path,monkeypatc
     finally:release.set();manager.close()
 
 
-def test_sqlite_connection_is_closed_when_initial_pragma_fails(tmp_path,monkeypatch):
+@pytest.mark.parametrize('failure_phase', ['create_function', 'pragma'])
+def test_sqlite_connection_is_closed_when_initial_pragma_fails(tmp_path,monkeypatch,failure_phase):
     from musicops.state.store import StateStore
     class Connection:
         closed=False
+        def create_function(self,*_,**__):
+            if failure_phase=='create_function':raise sqlite3.OperationalError('synthetic function setup failure')
         def execute(self,*_):raise sqlite3.OperationalError('synthetic locked database')
         def rollback(self):pass
         def close(self):self.closed=True

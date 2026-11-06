@@ -1050,9 +1050,13 @@ function settings() {
   };
   let p = card(
     "音乐库与媒体工具",
-    "下载临时文件放在音乐库同级的 MusicOps 目录；升级保留现有设置。",
+    "音乐库可放在 HDD。默认同级临时处理，也可选择 SSD 临时目录；校验入库后清理临时音频。",
   );
   field(p, "library", "音乐库路径", config.paths.library);
+  const fastTemp=field(p,"fast-temp","启用独立临时下载与处理目录（可选，建议 SSD）",config.temporary_storage?.enabled || false,"checkbox");
+  const fastPath=field(p,"fast-temp-dir","临时目录（容器内可访问的完整路径）",config.temporary_storage?.directory || "","text","没有 SSD 可不启用。建议至少有 20 GB 空闲；备份与做种原件仍在音乐库同级。入库和做种迁移校验后自动清理本任务临时音频；现有任务沿用原目录。");
+  fastPath.disabled=!fastTemp.checked;fastTemp.onchange=()=>{fastPath.disabled=!fastTemp.checked;};
+  const diskSlots=field(p,"disk-slots","同时读写磁盘的任务数（HDD 推荐 2）",config.performance?.io_concurrency || 2,"number","限制复制、哈希、解密和解码；网络检索仍独立并发。SSD 可适当提高。");diskSlots.min=1;diskSlots.max=8;
   for (const key of ["ffmpeg", "ffprobe"])
     field(p, key, key + " 程序", config.paths.tools[key]);
   field(
@@ -1390,6 +1394,8 @@ async function saveSettings() {
     playlist_credentials[s] = val("playlist-" + s);
   const r = await api("save_setup", {
     library: val("library"),
+    temporary_storage:{enabled:checked("fast-temp"),directory:val("fast-temp-dir")},
+    io_concurrency:Number(val("disk-slots")),
     ffmpeg: val("ffmpeg"),
     ffprobe: val("ffprobe"),
     sites,

@@ -386,13 +386,13 @@ class QbtClient:
         record['source_path']=str(destination);intent['state']='VERIFIED';self._put(task_id,record)
         return _result('OK',source_path=str(destination),verified_files=len(intent['hashes']),seeding='preserved')
 
-    def relocate_active(self,task_id,library):
+    def relocate_active(self,task_id,library,*,download_root=None):
         """Repair an unfinished download through qBittorrent, without add/start."""
         from musicops.library.storage import storage_paths
         from musicops.library.paths import reject_reparse_chain
         record=self._get(task_id)
         if not record or not re.fullmatch(r'[A-Za-z0-9_-]{1,120}',task_id) or self.capabilities()['status']!='OK':return _result('POLICY_BLOCKED')
-        destination=Path(storage_paths(library)['source'])/task_id;reject_reparse_chain(destination)
+        destination=Path(download_root or storage_paths(library)['source'])/task_id;reject_reparse_chain(destination)
         row=self._query(record)
         if not row:return _result('POLICY_BLOCKED')
         intent=record.get('active_relocation')

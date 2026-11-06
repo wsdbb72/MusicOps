@@ -14,7 +14,7 @@ def approve(workflows,job,scope):
     if scope=='batch':workflows.store.put('evidence','batch-nonfree:'+job['batch_id'],{'consent_id':consent_id})
     workflows.put(job,nonfree_consent_id=consent_id,stage='requesting',review_kind=None,message='已收到普通下载授权，继续核对所选资源')
     if scope=='batch':
-        for other in workflows.rows():
+        for other in workflows.rows(stages=('needs_review',)):
             if other.get('batch_id')==job['batch_id'] and other.get('stage')=='needs_review' and other.get('review_kind')=='token':
                 workflows.put(other,nonfree_consent_id=consent_id,stage='requesting',review_kind=None,message='已收到本批次普通下载授权，等待核对资源')
     return {'status':'OK'}

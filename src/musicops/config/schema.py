@@ -27,6 +27,8 @@ def default_config(base,offline=True):
       dedup=dict(mode='report',same_release_required=True,permanent_delete=False),
       scheduler=dict(enabled=False,mode='report',timezone='Asia/Shanghai',playlist_time='06:30',health_weekday=6,health_time='07:00',missed='report_once',notify='meaningful_changes'),
       worker=dict(concurrency=1,keep_background=True,decode_timeout=60),
+      performance=dict(io_concurrency=2),
+      temporary_storage=dict(enabled=False,directory=''),
       netease=dict(batch_size=150,timeout=15,max_attempts=2,credential_ref='',strip_layers=['VipSongsDownload']),
       updates=dict(enabled=True),
       streaming=dict(musicdl=dict(enabled=False,python_path='',credential_refs={}),managed=True,enabled=False,base_url='http://127.0.0.1:8080/music',credential_ref='',order=['netease','qqmusic','kuwo','kugou','migu','qishui','bilibili','applemusic'],timeout=30),
@@ -50,6 +52,9 @@ def upgrade_config(values,base):
             previous['managed']=previous.get('base_url')==defaults[section]['base_url'] and not previous.get('executable')
     merge(fresh,defaults)
     fresh['qbt']['tag_prefix']='MusicOps'
+    if isinstance(fresh.get('temporary_storage'),dict) and fresh['temporary_storage'].get('enabled') is True and not fresh['offline']:
+        from musicops.library.storage import storage_paths
+        fresh['paths'].update(storage_paths(fresh['paths']['library'],fresh['temporary_storage']))
     return fresh
 
 def validate_config(values):
@@ -104,6 +109,9 @@ def validate_config(values):
         for b,q in roots[i+1:]:
             if Path(p).drive.lower()!=Path(q).drive.lower(): continue
             if os.path.commonpath([p,q]) in (p,q): raise ValueError(f'路径重叠：{a}/{b}')
+    if values['temporary_storage']['enabled']:
+        from musicops.library.storage import storage_paths
+        storage_paths(values['paths']['library'],values['temporary_storage'])
     for name,provider in values['providers'].items():
         clean_url(provider['base_url'],name+'站点',origin=True)
         if type(provider.get('timeout')) not in (int,float) or not 1<=provider['timeout']<=120:raise ValueError('来源超时需为1–120秒')
@@ -136,6 +144,7 @@ def validate_config(values):
     bounded(values['qbt'],'poll_seconds',1,300,'qBittorrent轮询间隔')
     bounded(values['worker'],'concurrency',1,1,'后台并发')
     bounded(values['worker'],'decode_timeout',1,3600,'解码超时')
+    bounded(values['performance'],'io_concurrency',1,8,'磁盘同时读写任务数')
     flow=values['workflow']
     for key,low,high in [('fl_per_batch',0,100),('max_albums',1,500),('backup_days',1,365)]:bounded(flow,key,low,high,'工作流 '+key)
     if set(flow['source_order'])!={'open.cd','dicmusic','orpheus','redacted'} or len(flow['source_order'])!=4:raise ValueError('资源站顺序必须包含四个不同站点')
@@ -174,7 +183,7 @@ class ConfigManager:
             current=self.current();upgraded=upgrade_config(current['values'],base)
             if not upgraded['offline'] and upgraded['workflow'].get('setup_done'):
                 from musicops.library.storage import storage_paths
-                upgraded['paths'].update(storage_paths(upgraded['paths']['library']))
+                upgraded['paths'].update(storage_paths(upgraded['paths']['library'],upgraded['temporary_storage']))
             if upgraded!=current['values']:self.save(upgraded,current['version'])
     def current(self):
         with self.store.connection() as c:row=c.execute('SELECT payload FROM config_versions ORDER BY CAST(id AS INTEGER) DESC LIMIT 1').fetchone()

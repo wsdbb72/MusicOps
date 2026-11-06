@@ -9,6 +9,7 @@ import uuid
 from pathlib import Path
 
 from musicops.domain.identity import search_text
+from musicops.performance import io_bound
 from musicops.domain.errors import PathBlocked
 from .paths import reparse, reject_reparse_chain, within
 from .resources import companion_relations
@@ -18,6 +19,7 @@ AUDIO_EXTENSIONS = {'.flac', '.mp3', '.m4a', '.mp4', '.aac', '.ogg', '.opus', '.
 METADATA_INDEX_VERSION = 3
 
 
+@io_bound
 def sha256_file(path):
     result = hashlib.sha256()
     with Path(path).open('rb') as stream:

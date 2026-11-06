@@ -7,46 +7,47 @@ from musicops.app.task_filters import STATES, TERMINAL
 def listing(workflows, offset, state, selection, query=''):
     if state not in ('all', 'active', *STATES):
         raise ValueError('任务分类无效')
+    where="hidden=0 AND NOT (coalesce(stage,'')='completed' AND (coalesce(task_type,'') IN ('identification','search') OR job_kind='batch'))"
+    args=()
+    if query.strip():where+=' AND instr(musicops_casefold(label),?)>0';args=(query.strip().casefold(),)
+    filtered=where;filtered_args=args
+    if state!='all':
+        stages=tuple(TERMINAL if state=='active' else STATES[state])
+        filtered+=' AND coalesce(stage,\'\') '+('NOT IN' if state=='active' else 'IN')+' ('+','.join('?' for _ in stages)+')'
+        filtered_args=(*args,*stages)
+    order="paused,CASE stage WHEN 'running' THEN 0 WHEN 'downloading' THEN 0 WHEN 'validating' THEN 0 WHEN 'publishing' THEN 0 WHEN 'retiring' THEN 0 WHEN 'notifying' THEN 0 WHEN 'requesting' THEN 1 WHEN 'fallback' THEN 1 WHEN 'searching' THEN 2 WHEN 'identifying' THEN 3 WHEN 'snapshotting' THEN 3 WHEN 'metadata' THEN 4 WHEN 'enrich' THEN 4 ELSE 5 END,created_at DESC,workflow_id DESC"
     with workflows.store.connection() as connection:
-        rows = connection.execute("SELECT * FROM workflow_overview WHERE job_kind!='activity' ORDER BY created_at DESC,id").fetchall()
-        chains = collections.defaultdict(list)
-        for row in rows:
-            chains[row['root_id']].append(dict(row))
-        priority = {'album': 2, 'search': 1, 'identification': 0}
-        current = [max(chain, key=lambda r: (priority.get(r['task_type'], 0), r['created_at'], r['id'])) for chain in chains.values()]
-        # Deleting a successor must not resurrect its completed prerequisite.
-        # Prerequisites without successors are stage history, never an import.
-        current = [r for r in current if not r['hidden'] and not (r['stage']=='completed' and (r['task_type'] in ('identification','search') or r['job_kind']=='batch'))]
-        current.sort(key=lambda r: (r['created_at'], r['id']), reverse=True)
-        order={'running':0,'downloading':0,'validating':0,'publishing':0,'retiring':0,'notifying':0,'requesting':1,'fallback':1,'searching':2,'identifying':3,'snapshotting':3,'metadata':4,'enrich':4}
-        current.sort(key=lambda r: (bool(r['paused']),order.get(r['stage'],5)))
-        if query.strip():current=[r for r in current if query.strip().casefold() in r['label'].casefold()]
-        def matches(row):
-            if state == 'all': return True
-            if state == 'active': return row['stage'] not in TERMINAL
-            return row['stage'] in STATES[state]
-        filtered = [row for row in current if matches(row)]
         if selection:
-            ids = [r['job_id'] for r in filtered if r['job_kind'] != 'batch']
-            return {'job_ids': ids, 'total': len(ids)}
-        page = filtered[offset:offset + 200]
-        payloads = {}
+            rows=connection.execute("SELECT job_id FROM album_workflow_heads WHERE "+filtered+" AND job_kind!='batch' ORDER BY "+order,filtered_args).fetchall()
+            ids=[r[0] for r in rows];return {'job_ids':ids,'total':len(ids)}
+        total=connection.execute('SELECT COUNT(*) FROM album_workflow_heads WHERE '+filtered,filtered_args).fetchone()[0]
+        page=[dict(row) for row in connection.execute('SELECT * FROM album_workflow_heads WHERE '+filtered+' ORDER BY '+order+' LIMIT 200 OFFSET ?',(*filtered_args,offset))]
+        counts=collections.Counter();scene_counts=collections.Counter();active_count=paused_count=0
+        for row in connection.execute('SELECT stage,scene,paused,COUNT(*) FROM album_workflow_heads WHERE '+where+' GROUP BY stage,scene,paused',args):
+            counts[row[0]]+=row[3]
+            if row[0] not in TERMINAL:
+                scene_counts[row[1]]+=row[3]
+                if row[2]:paused_count+=row[3]
+                else:active_count+=row[3]
+        token_prompts=[r[0] for r in connection.execute("SELECT job_id FROM album_workflow_heads WHERE "+where+" AND stage='needs_review' AND review_kind='token' ORDER BY "+order+' LIMIT 100',args)]
+        payloads={};chains=collections.defaultdict(list)
         if page:
-            placeholders = ','.join('?' for _ in page)
-            for row in connection.execute("SELECT id,json_remove(payload,'$.config','$.targets','$.old_files','$.prepared','$.choices','$.outcomes','$.publication_plan','$.catalog_choices','$.lookup_links','$.engine_paths','$.selected') FROM evidence WHERE id IN (" + placeholders + ')', [r['id'] for r in page]):
-                payloads[row[0]] = json.loads(row[1])
+            placeholders=','.join('?' for _ in page)
+            payloads={r[0]:json.loads(r[1]) for r in connection.execute('SELECT id,summary FROM workflow_overview WHERE id IN ('+placeholders+')',[r['workflow_id'] for r in page])}
+            roots=[r['root_id'] for r in page if r['root_id'] is not None]
+            root_clause='root_id IN ('+','.join('?' for _ in roots)+')' if roots else '0'
+            if any(r['root_id'] is None for r in page):root_clause='('+root_clause+' OR root_id IS NULL)'
+            for row in connection.execute("SELECT root_id,job_id,stage,task_type,paused FROM workflow_overview WHERE hidden=0 AND job_kind!='activity' AND "+root_clause+' ORDER BY task_priority,created_at DESC,id DESC',roots):chains[row['root_id']].append(dict(row))
     jobs = []
     for row in page:
-        job = workflows.public_row(payloads[row['id']])
-        chain = sorted((r for r in chains[row['root_id']] if not r['hidden']), key=lambda r: priority.get(r['task_type'], 0))
+        job = workflows.public_row(payloads[row['workflow_id']])
+        chain = chains[row['root_id']]
         job['chain'] = [{k: r[k] for k in ('job_id','stage','task_type','paused')} for r in chain]
         job['overview'] = True
         jobs.append(job)
-    counts = collections.Counter(row['stage'] for row in current)
-    active = [r for r in current if r['stage'] not in TERMINAL]
-    return {'jobs': jobs, 'view': 'albums', 'offset': offset, 'total': len(filtered),
-            'all_total': len(current), 'active': sum(not r['paused'] for r in active),
-            'paused_count': sum(bool(r['paused']) for r in active), 'total_active': len(active),
+    return {'jobs': jobs, 'view': 'albums', 'offset': offset, 'total': total,
+            'all_total': sum(counts.values()), 'active': active_count,
+            'paused_count': paused_count, 'total_active': active_count+paused_count,
             'finished': counts['completed'], 'preparing_count': counts['preparing'],
-            'scene_active_counts':dict(collections.Counter(row['scene'] for row in active)),
-            'stage_counts': dict(counts), 'token_prompts': [r['job_id'] for r in current if r['stage']=='needs_review' and r['review_kind']=='token'][:100]}
+            'scene_active_counts':dict(scene_counts),
+            'stage_counts': dict(counts), 'token_prompts': token_prompts}

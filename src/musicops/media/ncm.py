@@ -10,6 +10,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+from musicops.performance import io_bound
 import struct
 import tempfile
 
@@ -102,6 +103,7 @@ def _hash_file(path):
     return digest.hexdigest()
 
 
+@io_bound
 def decrypt_ncm(source, destination, tag_writer=None) -> dict:
     try:
         reject_reparse_chain(source)

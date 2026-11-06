@@ -16,6 +16,7 @@ from collections import OrderedDict
 from musicops.domain.errors import Conflict, ValidationFailed
 from musicops.library.index import file_version, sha256_file
 from musicops.library.paths import reject_reparse_chain
+from musicops.performance import io_bound
 
 DECODE_ARGS = ['-nostdin', '-v', 'error', '-xerror', '-err_detect', 'explode', '-threads', '1', '-filter_threads', '1']
 SUPPORTED_SUFFIXES = {'.flac', '.m4a', '.aac', '.aif', '.aiff', '.mp3', '.wav', '.ogg', '.dsf', '.dff'}
@@ -25,6 +26,7 @@ SUFFIX_CODECS = {'.flac': {'flac'}, '.m4a': {'alac', 'aac'}, '.aac': {'aac'}, '.
                  '.dsf': {'dsd_lsbf', 'dsd_lsbf_planar'}, '.dff': {'dsd_msbf', 'dsd_msbf_planar'}}
 
 
+@io_bound
 def _run(command, timeout):
     return subprocess.run(command, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                           timeout=timeout, creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0) | getattr(subprocess, 'BELOW_NORMAL_PRIORITY_CLASS', 0))
@@ -149,6 +151,7 @@ class MediaValidator:
         return line.split('=', 1)[1]
 
 
+@io_bound
 def prepare_media_copy(source, destination, validator, *, convert_to=None):
     """Copy/conversion only; never modifies the seeding source. Caller supplies approved work path."""
     source, destination = Path(source), Path(destination)

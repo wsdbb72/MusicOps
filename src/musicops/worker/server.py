@@ -133,7 +133,7 @@ def serve_connection(service,conn,key,mutation_lock,address,family):
 
 def main(argv=None):
     from musicops.performance import apply_background_policy
-    apply_background_policy()
+    apply_background_policy(io_background=True)
     parser = argparse.ArgumentParser()
     parser.add_argument('--base', required=True)
     args = parser.parse_args(argv)

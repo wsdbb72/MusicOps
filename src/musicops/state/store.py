@@ -18,7 +18,8 @@ class StateStore:
             # payload. SQLite validates accessed pages; full integrity checks
             # belong to explicit maintenance, not every worker startup.
             version=c.execute('PRAGMA user_version').fetchone()[0]
-            if version>1: raise RuntimeError('SCHEMA_TOO_NEW')
+            if version>2: raise RuntimeError('SCHEMA_TOO_NEW')
+            c.execute('BEGIN IMMEDIATE')
             for table in TABLES:
                 c.execute(f'CREATE TABLE IF NOT EXISTS {table} (id TEXT PRIMARY KEY, payload TEXT NOT NULL, updated_at TEXT NOT NULL)')
             c.execute('CREATE TABLE IF NOT EXISTS events (seq INTEGER PRIMARY KEY AUTOINCREMENT, at TEXT NOT NULL, phase TEXT NOT NULL, task_id TEXT, tx_id TEXT, payload TEXT NOT NULL)')
@@ -48,13 +49,17 @@ class StateStore:
                 from musicops.library.album_lookup import migrate
                 migrate(c)
             c.execute("CREATE INDEX IF NOT EXISTS library_album_lookup ON library_albums(root_key,json_extract(payload,'$.lookup_key'))")
-            c.execute('PRAGMA user_version=1')
+            c.execute('PRAGMA user_version=2')
             from musicops.state.projections import initialize
             if progress:progress('正在更新任务摘要索引；首次升级大档案可能需要几十秒，历史记录会保留')
             # DDL must be atomic with backfill: interruption cannot leave an
             # existing but empty task/operation ownership projection.
             if not c.in_transaction:c.execute('BEGIN IMMEDIATE')
-            initialize(c)
+            changed=initialize(c)
+            from musicops.state.album_projection import initialize as initialize_albums
+            initialize_albums(c,rebuild=changed)
+            from musicops.state.task_projection import initialize as initialize_tasks
+            initialize_tasks(c)
             # Exact-path and operation ownership lookups must not deserialize
             # every historical file/transaction for each album publication.
             c.execute("CREATE INDEX IF NOT EXISTS library_file_path ON library_files(json_extract(payload,'$.path'))")
@@ -71,6 +76,7 @@ class StateStore:
         c=sqlite3.connect(self.path,timeout=30)
         try:
             c.row_factory=sqlite3.Row
+            c.create_function('musicops_casefold',1,lambda value:str(value or '').casefold(),deterministic=True)
             c.execute('PRAGMA busy_timeout=30000'); c.execute('PRAGMA synchronous=FULL')
             yield c; c.commit()
         except BaseException: c.rollback(); raise

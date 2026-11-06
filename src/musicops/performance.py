@@ -2,10 +2,54 @@
 import ctypes
 import os
 import struct
+import threading,contextlib,functools,time
 from concurrent.futures import ThreadPoolExecutor
 from collections import deque
 
 _POLICY = None
+_IO_CONDITION=threading.Condition()
+_IO_LIMIT=2
+_IO_ACTIVE=0
+_IO_LOCAL=threading.local()
+
+def configure_io_limit(limit):
+    global _IO_LIMIT
+    if type(limit) is not int or not 1<=limit<=8:raise ValueError('磁盘同时读写任务数须为 1–8')
+    with _IO_CONDITION:_IO_LIMIT=limit;_IO_CONDITION.notify_all()
+
+@contextlib.contextmanager
+def io_checkpoints(callback):
+    previous=getattr(_IO_LOCAL,'checkpoint',None);_IO_LOCAL.checkpoint=callback
+    try:yield
+    finally:_IO_LOCAL.checkpoint=previous
+
+@contextlib.contextmanager
+def io_slot():
+    global _IO_ACTIVE
+    if getattr(_IO_LOCAL,'depth',0):
+        _IO_LOCAL.depth+=1
+        try:yield
+        finally:_IO_LOCAL.depth-=1
+        return
+    checked=0
+    while True:
+        with _IO_CONDITION:
+            if _IO_ACTIVE<_IO_LIMIT:_IO_ACTIVE+=1;break
+            _IO_CONDITION.wait(.1)
+        callback=getattr(_IO_LOCAL,'checkpoint',None)
+        if callback and time.monotonic()-checked>=1:
+            callback();checked=time.monotonic()
+    _IO_LOCAL.depth=1
+    try:yield
+    finally:
+        _IO_LOCAL.depth=0
+        with _IO_CONDITION:_IO_ACTIVE-=1;_IO_CONDITION.notify_all()
+
+def io_bound(function):
+    @functools.wraps(function)
+    def run(*args,**kwargs):
+        with io_slot():return function(*args,**kwargs)
+    return run
 
 def parse_cpu_sets(data):
     rows=[];offset=0
@@ -44,7 +88,32 @@ def _kernel():
         if fn is not None:fn.argtypes=args;fn.restype=result
     return k
 
-def apply_background_policy(pid=None,process=None):
+def background_io_priority(handle):
+    """Lower only the supplied owned process; verify the actual NT I/O hint.
+
+    ProcessIoPriority=33 / IoPriorityVeryLow=0 (phnt ntpsapi/ntioapi).
+    Native API support varies: failure is visible and never blocks startup.
+    """
+    result={'io_priority':'unavailable'}
+    try:
+        from ctypes import wintypes as w
+        nt=ctypes.WinDLL('ntdll',use_last_error=True)
+        nt.NtSetInformationProcess.argtypes=[w.HANDLE,ctypes.c_int,ctypes.c_void_p,w.ULONG]
+        nt.NtSetInformationProcess.restype=ctypes.c_int32
+        nt.NtQueryInformationProcess.argtypes=[w.HANDLE,ctypes.c_int,ctypes.c_void_p,w.ULONG,ctypes.c_void_p]
+        nt.NtQueryInformationProcess.restype=ctypes.c_int32
+        value=w.ULONG(0)
+        status=nt.NtSetInformationProcess(handle,33,ctypes.byref(value),ctypes.sizeof(value))
+        result['io_set_status']=f'0x{status & 0xffffffff:08x}'
+        if status<0:return result
+        actual=w.ULONG()
+        status=nt.NtQueryInformationProcess(handle,33,ctypes.byref(actual),ctypes.sizeof(actual),None)
+        if status>=0:result.update(io_priority='very_low' if actual.value==0 else 'other',io_priority_value=actual.value)
+    except (OSError,AttributeError,ValueError):pass
+    return result
+
+
+def apply_background_policy(pid=None,process=None,*,io_background=False):
     global _POLICY
     result={'mode':'system','logical_processors':os.cpu_count() or 1,'efficiency_processors':0,'affinity':'system','low_priority':False}
     if os.name!='nt':
@@ -59,6 +128,7 @@ def apply_background_policy(pid=None,process=None):
         k=_kernel();handle=int(process._handle) if process is not None else k.OpenProcess(0x0200|0x0400|0x1000|0x2000,False,pid) if pid else k.GetCurrentProcess()
         if not handle:return result
         result['low_priority']=bool(k.SetPriorityClass(handle,0x4000)) # BELOW_NORMAL
+        if io_background:result.update(background_io_priority(handle))
         size=w.ULONG();k.GetSystemCpuSetInformation(None,0,ctypes.byref(size),handle,0)
         if not 0<size.value<=1024*1024:return result
         buffer=ctypes.create_string_buffer(size.value)
@@ -92,10 +162,13 @@ def apply_background_policy(pid=None,process=None):
 def configure_child(process):
     # Use the handle returned by our own Popen: a PID can exit and be reused.
     if os.name=='nt' and getattr(process,'_handle',None) is not None:
-        return apply_background_policy(process=process)
+        return apply_background_policy(process=process,io_background=True)
     return {'mode':'inherited'}
 
-def policy_status():return dict(_POLICY or {'mode':'system','efficiency_processors':0,'affinity':'system','low_priority':False})
+def policy_status():
+    result=dict(_POLICY or {'mode':'system','efficiency_processors':0,'affinity':'system','low_priority':False})
+    with _IO_CONDITION:result.update(io_concurrency=_IO_LIMIT,io_active=_IO_ACTIVE)
+    return result
 
 def io_workers():
     count=policy_status().get('efficiency_processors') or os.cpu_count() or 2

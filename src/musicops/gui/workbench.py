@@ -107,12 +107,17 @@ class SetupWizard(QWizard):
         self.setButtonText(QWizard.NextButton,'继续');self.setButtonText(QWizard.BackButton,'上一步');self.setButtonText(QWizard.FinishButton,'保存并开始使用');self.setButtonText(QWizard.CancelButton,'稍后设置')
         self.setOption(QWizard.HaveCustomButton1,True);self.setButtonText(QWizard.CustomButton1,'跳过本步');self.setOption(QWizard.HaveCustomButton2,True);self.setButtonText(QWizard.CustomButton2,'保存设置');self.customButtonClicked.connect(lambda which:self.accept() if which==QWizard.CustomButton2.value or self.currentId()==self.pageIds()[-1] else self.next())
         self.fields={};self.site_fields={};self.saved_refs=set(getattr(owner,'available_refs',[]))
-        p=self._add_page('音乐放在哪里','选择 Roon / Navidrome 读取的音乐库。临时下载、整理和恢复数据放在音乐库同级的 MusicOps 文件夹；入库后清理临时副本。需要持续做种的原始文件保存在 MusicOps/seeding，避免补写标签破坏种子校验。')
+        p=self._add_page('音乐放在哪里','音乐库可放在大容量 HDD。默认在音乐库同级临时处理，也可选用 SSD 加速；入库校验完成后清理临时音频。做种原件保留在音乐库同级 MusicOps/seeding。')
         performance=getattr(owner,'performance',{})
-        scheduling=('已绑定 '+str(performance.get('efficiency_processors'))+' 个小核' if performance.get('mode')=='efficiency' else '由系统选择处理器')+'；后台使用较低优先级，文件校验最多 4 项并行。'
+        scheduling=('已绑定 '+str(performance.get('efficiency_processors'))+' 个小核' if performance.get('mode')=='efficiency' else '由系统选择处理器')+'；后台使用较低优先级，网络识别并行，磁盘读写单独限流。'
         p.addRow(label('后台资源：'+scheduling,'hint'))
         p.addRow(button('浏览器验证与内置 FlareSolverr 设置',lambda:self.open_solver_settings()))
         row,self.library=browse_field(self.values.get('paths',{}).get('library',''));p.addRow('音乐库目录',row)
+        temporary=self.values.get('temporary_storage',{})
+        self.fast_temp=QCheckBox('启用独立临时下载与处理目录（可选，建议 SSD）');self.fast_temp.setChecked(temporary.get('enabled',False));p.addRow(self.fast_temp)
+        temp_row,self.fast_temp_dir=browse_field(temporary.get('directory',''));temp_row.setEnabled(self.fast_temp.isChecked());self.fast_temp.toggled.connect(temp_row.setEnabled);p.addRow('临时目录',temp_row)
+        p.addRow(label('没有 SSD 可不启用。建议选择至少有 20 GB 空闲的 SSD 专用文件夹；最终库、备份和做种仍在 HDD。仅在入库和做种迁移均校验通过后清理本任务的临时音频；现有任务继续使用原目录。','hint'))
+        self.disk_slots=QSpinBox();self.disk_slots.setRange(1,8);self.disk_slots.setValue(self.values.get('performance',{}).get('io_concurrency',2));self.disk_slots.setToolTip('只限制复制、哈希、解密和解码等重磁盘操作；网络检索不受此限制。HDD 推荐 2，SSD 可适当增加。');p.addRow('同时读写磁盘的任务数（HDD 推荐 2）',self.disk_slots)
         self.roon=QCheckBox('让 Roon 读取这个目录');self.roon.setChecked(self.values.get('music_servers',{}).get('roon',{}).get('enabled',False));p.addRow(self.roon)
         p.addRow(label('如果使用 Roon，请在 Roon → 设置 → 存储中添加同一目录。可以稍后再连接。','hint'))
         p=self._add_page('连接四个资源站','有账号的站点才需要填写。没有账号就保持关闭，之后可以随时添加。')
@@ -282,7 +287,7 @@ class SetupWizard(QWizard):
                  'lyrics':{'url':self.lyric_url.text().strip(),'authorization':self.lyric_key.text()},'discogs_token':self.discogs.text(),
                  'ai':{'enabled':self.ai_enabled.isChecked(),'url':self.ai_url.text().strip(),'model':self.ai_model.text().strip(),'key':self.ai_key.text()},'catalog_web':self.catalog_web.isChecked(),'prefer_simplified':self.prefer_simplified.isChecked(),'dsd_policy':'reject' if self.reject_dsd.isChecked() else 'preserve',
                  'servers':{'plex':{'enabled':self.plex_enabled.isChecked(),'url':self.plex_url.text().strip(),'section_id':self.plex_section.text().strip(),'token':self.plex_token.text()},'roon':self.roon.isChecked(),'navidrome':{'enabled':self.nav_enabled.isChecked(),'url':self.nav_url.text().strip(),'username':self.nav_user.text().strip(),'password':self.nav_pass.text()}},
-                 'updates':{'enabled':self.auto_updates.isChecked()},'browser_solver':{'managed':self.solver_managed.isChecked(),'enabled':self.solver_enabled.isChecked(),'base_url':self.solver_url.text().strip(),'executable':self.solver_executable.text().strip(),'auto_start':self.solver_auto.isChecked()},
+                 'updates':{'enabled':self.auto_updates.isChecked()},'temporary_storage':{'enabled':self.fast_temp.isChecked(),'directory':self.fast_temp_dir.text().strip()},'io_concurrency':self.disk_slots.value(),'browser_solver':{'managed':self.solver_managed.isChecked(),'enabled':self.solver_enabled.isChecked(),'base_url':self.solver_url.text().strip(),'executable':self.solver_executable.text().strip(),'auto_start':self.solver_auto.isChecked()},
                  'workflow':{'netease_fallback':self.fallback.isChecked(),'netease_api_url':self.netease_api.text().strip(),'netease_import_dir':self.import_dir.text().strip(),'fl_per_batch':self.fl_limit.value(),'fl_unlimited':self.fl_unlimited.isChecked(),'artist_folders':self.artist_folders.isChecked(),'edition_policy':self.edition_policy.currentData()},
                  'streaming':{'musicdl':{'enabled':self.musicdl_enabled.isChecked(),'python_path':self.musicdl_python.text().strip(),'cookies':{p:e.text() for p,e in self.musicdl_cookies.items()}},'managed':self.streaming_managed.isChecked(),'enabled':self.streaming_enabled.isChecked(),'base_url':self.streaming_url.text().strip(),'cookie_json':self.streaming_cookie.text(),'order':[s.strip() for s in self.streaming_order.text().split(',') if s.strip()]},
                  **{k:w.text().strip() for k,w in self.fields.items()}}
@@ -618,7 +623,7 @@ class Workbench(QMainWindow):
             self.execution_note.setText(self.execution_note.text()+f' · 最近安全检查点 {elapsed} 秒前')
         performance=result.get('performance',{});self.performance=performance
         scheduling='小核后台' if performance.get('mode')=='efficiency' else '低优先级后台' if performance.get('low_priority') else '系统调度'
-        self.execution_note.setToolTip(scheduling+'；文件校验最多 4 项并行，界面请求最多 8 项；音频解码每项 1 线程。')
+        self.execution_note.setToolTip(scheduling+'；磁盘读写最多 '+str(performance.get('io_concurrency',2))+' 项，界面请求独立处理；音频解码每项 1 线程。')
 
         catalog=result.get('local_catalog') or {};self.catalog_note.setText('本地专辑资料库：'+str(catalog.get('album_count',0))+' 张专辑 · '+str(catalog.get('matched_track_count',0))+' 首已预匹配'+(' · 扫描时增量更新' if catalog.get('updated_at') else ' · 首次扫描后自动建立'))
         self.connection.setText('音乐库：'+self.config['paths']['library']+'     ·     '+('已配置 '+', '.join(connected) if connected else '尚未连接资源站；可在“连接与设置”添加'))

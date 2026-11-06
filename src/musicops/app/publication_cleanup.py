@@ -1,6 +1,6 @@
 """Remove only journaled, verified temporary copies after committed publication."""
 from pathlib import Path
-import re
+import re,uuid
 from musicops.clients.http import PolicyBlocked
 from musicops.library.index import sha256_file
 from musicops.library.paths import reject_reparse_chain
@@ -55,6 +55,20 @@ def finish(workflows,job):
             if defer_changed(workflows,job,target):deferred=True
             else:raise PolicyBlocked('已核验现有文件发生改变，暂不清理临时副本')
     if deferred:return True
+    transaction_root=None;staging_files={}
+    tx_id=job.get('transaction_id')
+    if tx_id:
+        expected_tx=str(uuid.uuid5(uuid.NAMESPACE_URL,'musicops:transaction:workflow:'+job['job_id']))
+        if tx_id!=expected_tx:raise PolicyBlocked('入库事务与临时清理任务不对应，保留副本')
+        transaction=store.get('transactions',tx_id)
+        if not transaction or transaction.get('state')!='COMMITTED' or transaction.get('plan_id')!='workflow:'+job['job_id']:
+            raise PolicyBlocked('入库事务尚未确认提交，保留全部临时副本')
+        transaction_root=Path(job.get('engine_paths',cfg['paths'])['work'])/tx_id/'staging'
+        reject_reparse_chain(transaction_root)
+        for row in transaction.get('staging_manifest',[]):
+            path=Path(row['path']);reject_reparse_chain(path)
+            if not path.resolve().is_relative_to(transaction_root.resolve()):raise PolicyBlocked('事务暂存清单越过本任务目录')
+            staging_files[str(path.resolve())]=row['hash']
     manifest=job.get('temporary_cleanup')
     if manifest is None:
         manifest={}
@@ -80,9 +94,12 @@ def finish(workflows,job):
                         reject_reparse_chain(item)
                         if item.is_file():manifest.setdefault(str(item.resolve()),sha256_file(item))
         workflows.put(job,temporary_cleanup=manifest)
+    if any(manifest.get(path)!=value for path,value in staging_files.items()):
+        manifest={**manifest,**staging_files};workflows.put(job,temporary_cleanup=manifest)
     for name,expected in manifest.items():
         path=Path(name);reject_reparse_chain(path)
         roots=[work]
+        if transaction_root:roots.append(transaction_root)
         if not record and job['scene']!='complete':roots.extend([Path(cfg['paths']['work'])/'streaming'/job['job_id'],Path(cfg['paths']['source'])/job['job_id']])
         if not any(path.resolve().is_relative_to(root.resolve()) for root in roots):raise PolicyBlocked('清理记录越过本任务临时目录')
         if path.is_file():

@@ -11,8 +11,13 @@ def save_setup(service,payload):
     library=Path(payload.get('library') or values['paths']['library'])
     if not library.is_absolute():raise ValueError('请选择完整的音乐库目录')
     values['offline']=False;values['paths']['library']=str(library)
+    if 'temporary_storage' in payload:
+        selected=payload['temporary_storage']
+        if not isinstance(selected,dict) or set(selected)-{'enabled','directory'}:raise ValueError('临时下载设置无效')
+        if 'enabled' in selected and type(selected['enabled']) is not bool or 'directory' in selected and not isinstance(selected['directory'],str):raise ValueError('临时下载开关须为勾选值，目录须为完整路径文本')
+        values['temporary_storage'].update(selected)
     from musicops.library.storage import storage_paths
-    values['paths'].update(storage_paths(library))
+    values['paths'].update(storage_paths(library,values['temporary_storage']))
     for key in ('ffmpeg','ffprobe'):
         if payload.get(key):values['paths']['tools'][key]=payload[key]
     sites=payload.get('sites',{})
@@ -81,6 +86,7 @@ def save_setup(service,payload):
         values['browser_solver'].update(settings)
     if 'catalog_web' in payload:values['catalog']['web_enabled']=bool(payload['catalog_web'])
     if 'dsd_policy' in payload:values['quality']['dsd_policy']=payload['dsd_policy']
+    if 'io_concurrency' in payload:values['performance']['io_concurrency']=payload['io_concurrency']
     if 'prefer_simplified' in payload:values['metadata']['prefer_simplified']=bool(payload['prefer_simplified'])
     if payload.get('discogs_token'):secret('discogs','https://api.discogs.com',payload['discogs_token'],('catalog','discogs','credential_ref'))
     server=payload.get('servers',{})
@@ -123,6 +129,8 @@ def save_setup(service,payload):
     for platform,text in payload.get('playlist_credentials',{}).items():
         if text.strip():share(service,platform,text)
     saved=service.config.current()
+    from musicops.performance import configure_io_limit
+    configure_io_limit(saved['values']['performance']['io_concurrency'])
     ai_changed=current['values']['ai']!=saved['values']['ai'] or any(path and path[0]=='ai' for _,_,_,path in pending)
     if saved['values']['ai'].get('enabled') and ai_changed:
         from musicops.app.review_queue import submit

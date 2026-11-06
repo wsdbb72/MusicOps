@@ -12,7 +12,8 @@ def prepare(workflows,job):
     cfg=job['config']
     if cfg['offline'] or not cfg['workflow'].get('setup_done'):return True
     if not re.fullmatch(r'[A-Za-z0-9_-]{1,120}',job['job_id']):return True
-    desired=storage_paths(cfg['paths']['library']);record=workflows.store.get('download_tasks','qbt:'+job['job_id'])
+    desired=storage_paths(cfg['paths']['library'],cfg.get('temporary_storage'));record=workflows.store.get('download_tasks','qbt:'+job['job_id'])
+    active_options={'download_root':desired['source']} if cfg.get('temporary_storage',{}).get('enabled') else {}
     mappings={}
     if record:
         old=Path(record['source_path']).resolve()
@@ -24,10 +25,10 @@ def prepare(workflows,job):
             client=live_client(cfg['qbt'],desired['source'],workflows.store,workflows.s.vault.get)
             try:
                 if record.get('relocation'):result=client.archive_completed(job['job_id'],cfg['paths']['library'])
-                elif record.get('active_relocation') and record['active_relocation'].get('state')!='VERIFIED':result=client.relocate_active(job['job_id'],cfg['paths']['library'])
+                elif record.get('active_relocation') and record['active_relocation'].get('state')!='VERIFIED':result=client.relocate_active(job['job_id'],cfg['paths']['library'],**active_options)
                 else:
                     polled=client.poll(job['job_id'])
-                    result=client.archive_completed(job['job_id'],cfg['paths']['library']) if polled.get('complete') else client.relocate_active(job['job_id'],cfg['paths']['library'])
+                    result=client.archive_completed(job['job_id'],cfg['paths']['library']) if polled.get('complete') else client.relocate_active(job['job_id'],cfg['paths']['library'],**active_options)
             finally:client.transport.close()
             if result['status']=='WAITING':
                 workflows.put(job,stage=job.get('resume_stage',job['stage']),next_poll=__import__('time').time()+5,message='正在将旧下载迁移到音乐库同级目录');return False

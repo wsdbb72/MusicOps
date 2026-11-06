@@ -29,9 +29,9 @@ def archive_failed_preparation(workflows,job,cfg):
     """Explicit retry retains an owned, unpublished failed work copy for audit."""
     from musicops.library.paths import reject_reparse_chain
     from musicops.library.storage import storage_paths
-    expected=Path(storage_paths(cfg['paths']['library'])['work'])
+    expected=Path(storage_paths(cfg['paths']['library'],cfg.get('temporary_storage'))['work'])
     configured=Path(workflows.work_paths({**job,'config':cfg})['work'])
-    if configured.absolute()!=expected.absolute():raise PolicyBlocked('旧工作目录与音乐库同级目录不一致，请先核对副本位置')
+    if configured.absolute()!=expected.absolute():raise PolicyBlocked('旧工作目录与此任务的临时目录设置不一致，请先核对副本位置')
     work=expected/'prepared'/job['job_id']
     reject_reparse_chain(work)
     if not work.exists():return None
@@ -74,7 +74,7 @@ def descendants(workflows, job):
         identifiers=['workflow:'+r['job_id'] for r in rows if r['job_id'] in found]
         for offset in range(0,len(identifiers),500):
             page=identifiers[offset:offset+500]
-            result.extend(json.loads(row[0]) for row in connection.execute('SELECT payload FROM evidence WHERE id IN ('+','.join('?' for _ in page)+') ORDER BY updated_at DESC,id',page))
+            result.extend(json.loads(row[0]) for row in connection.execute('SELECT payload FROM evidence WHERE id IN ('+','.join('?' for _ in page)+') ORDER BY updated_at DESC,id',page).fetchall())
     return result
 
 

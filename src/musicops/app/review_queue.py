@@ -30,7 +30,7 @@ def register(service, job, apply_verified=True, retry=False):
 
 def submit(service, args):
     if args.get('all') is True:
-        jobs = service.workflows.rows()
+        jobs = service.workflows.rows(stages=('needs_review','failed','skipped'))
     else:
         from musicops.app.workflow_actions import selection
         ids = selection(args.get('job_ids'), 10000)
@@ -39,7 +39,7 @@ def submit(service, args):
     # Thousands of registrations form one durable transaction, rather than
     # opening/fsyncing the SQLite database twice for every album over IPC.
     with service.store.connection() as connection:
-        previous={row['id']:json.loads(row['payload']) for row in connection.execute("SELECT id,payload FROM evidence WHERE id LIKE 'ai-review:%'")}
+        previous={row['id']:json.loads(row['payload']) for row in connection.execute("SELECT id,payload FROM evidence WHERE id LIKE 'ai-review:%'").fetchall()}
         rounds=collections.Counter(row['job_id'] for row in previous.values())
         connection.execute('BEGIN IMMEDIATE')
         for job in jobs:

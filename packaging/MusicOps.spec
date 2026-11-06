@@ -1,9 +1,11 @@
 # Folder distribution, shared bundled interpreter and Qt image plugins.
 from pathlib import Path
 import os
+import runpy
 import ssl
 from PyInstaller.utils.hooks import collect_data_files, collect_submodules
 root=Path(SPECPATH).parent
+windows_version=runpy.run_path(str(root/'packaging/windows_version.py'))['windows_version']
 pyside_data=collect_data_files('PySide6',includes=['Qt/plugins/imageformats/*','Qt/translations/qtbase_zh_CN.qm'])
 pyside_data += [(str(root/'src/musicops/assets'), 'musicops/assets')]
 pyside_data += collect_data_files('opencc')
@@ -30,6 +32,6 @@ for analysis in (gui,worker):
 gui_pyz=PYZ(gui.pure)
 worker_pyz=PYZ(worker.pure)
 diagnostic=os.environ.get('MUSICOPS_BUILD_DIAGNOSTIC')=='1'
-gui_exe=EXE(gui_pyz,gui.scripts,[],exclude_binaries=True,name='MusicOps',icon=str(root/'src/musicops/assets/musicops.ico'),version=str(root/'packaging/windows-version.txt'),debug=False,bootloader_ignore_signals=False,strip=False,upx=False,console=diagnostic,disable_windowed_traceback=False)
-worker_exe=EXE(worker_pyz,worker.scripts,[],exclude_binaries=True,name='MusicOps-worker',icon=str(root/'src/musicops/assets/musicops.ico'),version=str(root/'packaging/windows-version.txt'),debug=False,bootloader_ignore_signals=False,strip=False,upx=False,console=diagnostic,disable_windowed_traceback=False)
+gui_exe=EXE(gui_pyz,gui.scripts,[],exclude_binaries=True,name='MusicOps',icon=str(root/'src/musicops/assets/musicops.ico'),version=windows_version(root,'MusicOps.exe'),debug=False,bootloader_ignore_signals=False,strip=False,upx=False,console=diagnostic,disable_windowed_traceback=False)
+worker_exe=EXE(worker_pyz,worker.scripts,[],exclude_binaries=True,name='MusicOps-worker',icon=str(root/'src/musicops/assets/musicops.ico'),version=windows_version(root,'MusicOps-worker.exe'),debug=False,bootloader_ignore_signals=False,strip=False,upx=False,console=diagnostic,disable_windowed_traceback=False)
 bundle=COLLECT(gui_exe,worker_exe,gui.binaries,gui.datas,worker.binaries,worker.datas,strip=False,upx=False,name='MusicOps-Windows')

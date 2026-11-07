@@ -103,8 +103,8 @@ const appJS = `(function () {
       detailFields.replaceChildren();
       field("进度", body.progress);
       field("说明", body.headline);
-      field("下载", "未下载");
-      field("入库", "未入库");
+      field("下载", body.downloaded ? "已下载" : "未下载");
+      field("入库", body.library_published ? "已入库" : "未入库");
       status.textContent = "";
     } catch (err) {
       status.textContent = "读取中断。";

@@ -14,19 +14,21 @@ func scrub(value string) string {
 }
 
 type jobView struct {
-	ID         string `json:"job_id"`
-	RootID     string `json:"root_id,omitempty"`
-	ParentID   string `json:"parent_job_id,omitempty"`
-	Scene      string `json:"scene"`
-	Stage      string `json:"stage"`
-	Progress   string `json:"progress"`
-	Headline   string `json:"headline"`
-	Label      string `json:"label,omitempty"`
-	Message    string `json:"message,omitempty"`
-	ReviewKind string `json:"review_kind,omitempty"`
-	ErrorClass string `json:"error_class,omitempty"`
-	Paused     bool   `json:"paused,omitempty"`
-	UpdatedNS  int64  `json:"updated_ns"`
+	ID               string `json:"job_id"`
+	RootID           string `json:"root_id,omitempty"`
+	ParentID         string `json:"parent_job_id,omitempty"`
+	Scene            string `json:"scene"`
+	Stage            string `json:"stage"`
+	Progress         string `json:"progress"`
+	Headline         string `json:"headline"`
+	Label            string `json:"label,omitempty"`
+	Message          string `json:"message,omitempty"`
+	ReviewKind       string `json:"review_kind,omitempty"`
+	ErrorClass       string `json:"error_class,omitempty"`
+	Paused           bool   `json:"paused,omitempty"`
+	Downloaded       bool   `json:"downloaded,omitempty"`
+	LibraryPublished bool   `json:"library_published,omitempty"`
+	UpdatedNS        int64  `json:"updated_ns"`
 }
 
 func publicJob(job workflow.Job) jobView {
@@ -55,6 +57,29 @@ func presentJobs(jobs []jobView) []jobView {
 			root = job.ID
 		}
 		job.Progress, job.Headline = albumProgress(groups[root])
+		out[i] = job
+	}
+	return out
+}
+
+// markReleased shows business completion only after a verified audio file is in the library.
+// An internal handoff stage stays untouched when that record is absent.
+func markReleased(jobs []jobView, albums map[string]bool) []jobView {
+	if len(albums) == 0 {
+		return jobs
+	}
+	out := make([]jobView, len(jobs))
+	for i, job := range jobs {
+		root := job.RootID
+		if root == "" {
+			root = job.ID
+		}
+		if albums[root] {
+			job.Progress = "已完成"
+			job.Headline = "音乐已校验并放入库中。"
+			job.Downloaded = true
+			job.LibraryPublished = true
+		}
 		out[i] = job
 	}
 	return out

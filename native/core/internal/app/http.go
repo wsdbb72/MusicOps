@@ -1,16 +1,20 @@
 package app
 
 import (
+	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
+	"os"
 	"path/filepath"
 	"strings"
 	"time"
 
+	"github.com/wsdbb72/MusicOps/native/core/internal/audiorelease"
 	"github.com/wsdbb72/MusicOps/native/core/internal/dataengine"
 	"github.com/wsdbb72/MusicOps/native/core/internal/sqlitemigrate"
 	"github.com/wsdbb72/MusicOps/native/core/internal/workflow"
@@ -56,6 +60,7 @@ func (a *App) Handler() http.Handler {
 	mux.HandleFunc("POST /v1/archive/rollback", a.rollbackArchive)
 	mux.HandleFunc("GET /v1/archive/record", a.archiveRecord)
 	mux.HandleFunc("POST /v1/search", a.startSearch)
+	mux.HandleFunc("POST /v1/audio/release", a.releaseAudio)
 	mux.HandleFunc("POST /v1/tokens/recheck", a.recheckToken)
 	mux.HandleFunc("GET /v1/jobs/{id}", a.job)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -122,12 +127,23 @@ func (a *App) jobs(w http.ResponseWriter, r *http.Request) {
 		jobs = append(jobs, publicJob(job))
 	}
 	jobs = presentJobs(jobs)
+	albums, err := audiorelease.Albums(a.engine)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "code": "JOBS_UNAVAILABLE"})
+		return
+	}
+	jobs = markReleased(jobs, albums)
 	next := ""
 	if len(page.Next) > 0 {
 		next = base64.RawURLEncoding.EncodeToString(page.Next)
 	}
+	downloaded, published := false, false
+	for _, job := range jobs {
+		downloaded = downloaded || job.Downloaded
+		published = published || job.LibraryPublished
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"ok": true, "jobs": jobs, "next": next, "downloaded": false, "production_verified": false, "python": false,
+		"ok": true, "jobs": jobs, "next": next, "downloaded": downloaded, "library_published": published, "production_verified": false, "python": false,
 	})
 }
 
@@ -278,15 +294,78 @@ func (a *App) job(w http.ResponseWriter, r *http.Request) {
 		views = append(views, publicJob(job))
 	}
 	views = presentJobs(views)
+	albums, err := audiorelease.Albums(a.engine)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "code": "JOBS_UNAVAILABLE"})
+		return
+	}
+	views = markReleased(views, albums)
 	progress, headline := "", ""
+	downloaded, published := false, false
 	for _, job := range views {
 		if job.ID == inspection.Job.ID {
 			progress, headline = job.Progress, job.Headline
+			downloaded, published = job.Downloaded, job.LibraryPublished
 		}
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"ok": true, "inspection": scrubInspection(inspection), "progress": progress, "headline": headline,
-		"downloaded": false, "production_verified": false,
+		"downloaded": downloaded, "library_published": published, "production_verified": false,
+	})
+}
+
+func (a *App) releaseAudio(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		JobID      string `json:"job_id"`
+		Artist     string `json:"artist"`
+		Album      string `json:"album"`
+		Title      string `json:"title"`
+		Track      int    `json:"track"`
+		SourceName string `json:"source_name"`
+	}
+	if err := decode(r, &body); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "code": "INVALID_REQUEST", "downloaded": false, "library_published": false, "production_verified": false})
+		return
+	}
+	job, err := a.flows.Job(body.JobID)
+	if err != nil || job == nil {
+		writeJSON(w, http.StatusNotFound, map[string]any{"ok": false, "code": "NOT_FOUND", "downloaded": false, "library_published": false, "production_verified": false})
+		return
+	}
+	root := job.RootID
+	if root == "" {
+		root = job.ID
+	}
+	incoming, library := filepath.Join(a.Dir, "incoming"), filepath.Join(a.Dir, "library-audio")
+	if err = os.MkdirAll(incoming, 0o700); err != nil || os.MkdirAll(library, 0o700) != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "code": "LIBRARY_UNAVAILABLE", "downloaded": false, "library_published": false, "production_verified": false})
+		return
+	}
+	sum := sha256.Sum256([]byte("album-audio/" + root))
+	result, err := audiorelease.Release(r.Context(), a.engine, audiorelease.Request{
+		RequestID: "audio-" + hex.EncodeToString(sum[:16]), RootID: root, Artist: body.Artist, Album: body.Album, Title: body.Title,
+		Track: body.Track, SourceName: body.SourceName, Incoming: incoming, Library: library, Decoder: audiorelease.SystemDecoder(),
+	})
+	if err != nil {
+		status, code := http.StatusBadRequest, "INVALID_REQUEST"
+		switch {
+		case errors.Is(err, audiorelease.ErrMissing):
+			status, code = http.StatusNotFound, "AUDIO_MISSING"
+		case errors.Is(err, audiorelease.ErrRejected):
+			status, code = http.StatusUnprocessableEntity, "AUDIO_REJECTED"
+		case errors.Is(err, audiorelease.ErrTool):
+			status, code = http.StatusUnprocessableEntity, "DECODER_MISSING"
+		case errors.Is(err, audiorelease.ErrConflict):
+			status, code = http.StatusConflict, "LIBRARY_CONFLICT"
+		}
+		writeJSON(w, status, map[string]any{
+			"ok": false, "code": code, "class": result.Class, "downloaded": false, "library_published": false, "production_verified": false,
+		})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"ok": true, "format": result.Format, "decode_state": result.DecodeState, "sha256": result.SHA256,
+		"downloaded": result.Downloaded, "library_published": result.LibraryPublished, "production_verified": false,
 	})
 }
 

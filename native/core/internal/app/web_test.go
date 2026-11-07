@@ -24,12 +24,12 @@ func TestOperationsBoardReadsStoredJobsAndHidesSecrets(t *testing.T) {
 		t.Fatal(home.Code, script.Code, style.Code)
 	}
 	pageText := home.Body.String() + script.Body.String()
-	for _, leaked := range []string{"Python", "python", "种子字节", "执行器", "此进程", "站点回执", "已完成", "authkey", "Pebble", "usetoken", "cookie-secret"} {
+	for _, leaked := range []string{"Python", "python", "种子字节", "执行器", "此进程", "站点回执", "authkey", "Pebble", "usetoken", "cookie-secret"} {
 		if strings.Contains(pageText, leaked) {
 			t.Fatal(leaked)
 		}
 	}
-	if !strings.Contains(home.Body.String(), "还不能修改连接") || !strings.Contains(home.Body.String(), "还不能查看或整理") || !strings.Contains(home.Body.String(), "还没有单独的运行记录") || !strings.Contains(home.Body.String(), "disabled") || !strings.Contains(script.Body.String(), "job.headline") || !strings.Contains(script.Body.String(), "job.progress") || !strings.Contains(style.Body.String(), "max-width:720px") {
+	if !strings.Contains(home.Body.String(), "还不能修改连接") || !strings.Contains(home.Body.String(), "还不能查看或整理") || !strings.Contains(home.Body.String(), "还没有单独的运行记录") || !strings.Contains(home.Body.String(), "disabled") || !strings.Contains(script.Body.String(), "job.headline") || !strings.Contains(script.Body.String(), "job.progress") || !strings.Contains(script.Body.String(), "body.downloaded") || !strings.Contains(script.Body.String(), "body.library_published") || !strings.Contains(style.Body.String(), "max-width:720px") {
 		t.Fatal("page controls")
 	}
 	if got := scrub("authkey=sentinel-dic-auth&torrent_pass=sentinel-orpheus-pass"); strings.Contains(got, "sentinel") || !strings.Contains(got, "authkey=redacted") {

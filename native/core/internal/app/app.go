@@ -46,12 +46,7 @@ func Open(dir, backup, password string) (*App, error) {
 	app := &App{Dir: dir, Backup: backup, password: password, engine: engine, tasks: taskrepo.New(engine), searcher: &trackersearch.Client{}, now: time.Now, secrets: map[string]string{}}
 	app.ledger = tokenledger.New(engine)
 	app.flows = workflow.New(engine, app.tasks)
-	runner, err := scheduler.New(app.tasks, map[string]scheduler.Handler{
-		workflow.CommandIdentify: app.identify,
-		workflow.CommandSnapshot: app.identify,
-		workflow.CommandSearch:   app.search,
-		workflow.CommandProcess:  app.acquire,
-	}, scheduler.DefaultConfig())
+	runner, err := scheduler.New(app.tasks, app.handlers(), scheduler.DefaultConfig())
 	if err != nil {
 		engine.Close()
 		return nil, err
@@ -75,6 +70,17 @@ func Open(dir, backup, password string) (*App, error) {
 	}
 	app.runner = runner
 	return app, nil
+}
+
+// handlers are the executors this process runs. publish_album stays absent:
+// saving a torrent or a fixture must not be registered as an audio download.
+func (a *App) handlers() map[string]scheduler.Handler {
+	return map[string]scheduler.Handler{
+		workflow.CommandIdentify: a.identify,
+		workflow.CommandSnapshot: a.identify,
+		workflow.CommandSearch:   a.search,
+		workflow.CommandProcess:  a.acquire,
+	}
 }
 
 // Close stops workers and closes Pebble. It does not delete imported rows.

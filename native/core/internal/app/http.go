@@ -22,7 +22,7 @@ const page = `<!doctype html>
 </head><body>
 <h1>MusicOps</h1>
 <p>这是 Go 应用进程。它使用 Pebble 保存状态，并在本进程内调度只读检索和 SQLite 档案导入。此进程不启动 Python。</p>
-<p>下载、付费令牌扣费和用户音乐库发布还没有执行器。检索命中只会进入获取队列，回执保持未下载。</p>
+<p>检索命中后，只有调用方已经确认免费，或令牌账本预留成立，才会保存种子字节。保存种子不是专辑下载，也不是入库。流媒体获取和音乐库发布还没有执行器。</p>
 <p>健康检查：<a href="/healthz"><code>/healthz</code></a></p>
 </body></html>`
 
@@ -32,6 +32,7 @@ func (a *App) Handler() http.Handler {
 	mux.HandleFunc("GET /healthz", a.health)
 	mux.HandleFunc("GET /{$}", a.home)
 	mux.HandleFunc("POST /v1/archive/import", a.importArchive)
+	mux.HandleFunc("POST /v1/archive/project", a.projectArchive)
 	mux.HandleFunc("POST /v1/archive/verify", a.verifyArchive)
 	mux.HandleFunc("POST /v1/archive/rollback", a.rollbackArchive)
 	mux.HandleFunc("GET /v1/archive/record", a.archiveRecord)
@@ -85,6 +86,19 @@ func (a *App) importArchive(w http.ResponseWriter, r *http.Request) {
 	writeMigration(w, report, err)
 }
 
+func (a *App) projectArchive(w http.ResponseWriter, r *http.Request) {
+	if err := decode(r, &struct{}{}); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "code": "INVALID_REQUEST"})
+		return
+	}
+	report, err := sqlitemigrate.Project(a.engine, 0)
+	if err != nil {
+		writeMigration(w, sqlitemigrate.Report{}, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "report": report, "live_profile": false})
+}
+
 func (a *App) verifyArchive(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		Source string `json:"source"`
@@ -133,6 +147,12 @@ func (a *App) startSearch(w http.ResponseWriter, r *http.Request) {
 		BaseURL          string   `json:"base_url"`
 		Cookie           string   `json:"cookie"`
 		MatchedCount     uint64   `json:"matched_count"`
+		FreeConfirmed    bool     `json:"free_confirmed"`
+		TokenCost        int      `json:"token_cost"`
+		BalanceKnown     bool     `json:"balance_known"`
+		Balance          int      `json:"balance"`
+		Budget           int      `json:"budget"`
+		SafetyMargin     int      `json:"safety_margin"`
 		Identity         Identity `json:"identity"`
 	}
 	if err := decode(r, &body); err != nil || strings.ContainsAny(body.Cookie, "\r\n") {
@@ -146,6 +166,8 @@ func (a *App) startSearch(w http.ResponseWriter, r *http.Request) {
 	plan := SearchPlan{
 		RootJobID: body.JobID, Query: body.Query, ExpectedTitle: body.ExpectedTitle, EnabledSites: body.EnabledSites,
 		StreamingEnabled: body.StreamingEnabled, Synthetic: body.Synthetic, BaseURL: body.BaseURL, Identity: body.Identity,
+		FreeConfirmed: body.FreeConfirmed, TokenCost: body.TokenCost, BalanceKnown: body.BalanceKnown,
+		Balance: body.Balance, Budget: body.Budget, SafetyMargin: body.SafetyMargin,
 	}
 	raw, err := json.Marshal(plan)
 	if err != nil {

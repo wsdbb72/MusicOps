@@ -50,7 +50,7 @@ func TestSearchHitQueuesAcquisitionWithoutADownloadExecutor(t *testing.T) {
 		t.Fatal(searchJob)
 	}
 	child := waitJob(t, application, "process:search:album-exact", "needs_review")
-	if child.ErrorClass != "UNSUPPORTED_COMMAND" || strings.Contains(child.Message, "已下载") && !strings.Contains(child.Message, "尚未") {
+	if !strings.Contains(child.Message, "尚未下载") || strings.Contains(child.Message, "已入库") {
 		t.Fatal(child)
 	}
 	if dirContains(t, application.Dir, "cookie-secret-not-stored") {
@@ -115,6 +115,88 @@ func TestAlbumSceneStartsWithoutPlaylistCounts(t *testing.T) {
 	job := waitJob(t, application, "search:album-upgrade", "needs_review")
 	if job.SearchAction != "review_search" {
 		t.Fatal(job)
+	}
+}
+
+func TestFreeTorrentIsStoredWithoutPublishingTheAlbum(t *testing.T) {
+	torrent := []byte("d8:announce12:http://a.com4:infod6:lengthi1e4:name4:test12:piece lengthi16384e6:pieces20:01234567890123456789ee")
+	var downloads atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasPrefix(r.URL.Path, "/download.php") {
+			downloads.Add(1)
+			if r.URL.Query().Get("usetoken") != "" {
+				t.Fatal("free download used a token")
+			}
+			w.Write(torrent)
+			return
+		}
+		io.WriteString(w, `<html><a href="logout.php">logout</a><table><tr><td><table><tr><td><a href="details.php?id=11" title="Album">Album</a></td></tr></table></td><td>100 MiB</td></tr></table></html>`)
+	}))
+	defer server.Close()
+	application := newApp(t)
+	body := searchBody("album-free", server.URL, []string{"open.cd"}, false)
+	body["expected_title"] = "Album"
+	body["free_confirmed"] = true
+	post(t, application, "/v1/search", body)
+	searchJob := waitJob(t, application, "search:album-free", "completed")
+	if searchJob.SearchAction != "queue_request" {
+		t.Fatal(searchJob)
+	}
+	job := waitJob(t, application, "process:search:album-free", "needs_review")
+	if downloads.Load() != 1 || job.ReviewKind != "candidate" || !strings.Contains(job.Message, "尚未入库") || strings.Contains(job.Message, "已入库") {
+		t.Fatal(downloads.Load(), job)
+	}
+	matches, err := filepath.Glob(filepath.Join(application.Dir, "torrents", "*.torrent"))
+	if err != nil || len(matches) != 1 {
+		t.Fatal(matches, err)
+	}
+}
+
+func TestUnknownBalanceDoesNotRequestATokenDownload(t *testing.T) {
+	var downloads atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Query().Get("action") == "download" {
+			downloads.Add(1)
+		}
+		io.WriteString(w, `{"status":"success","response":{"currentPage":1,"pages":1,"results":[{"groupId":10,"groupName":"Example &amp; Test","artist":"Artist","torrents":[{"torrentId":11,"format":"FLAC","encoding":"Lossless","seeders":3}]}]}}`)
+	}))
+	defer server.Close()
+	application := newApp(t)
+	body := searchBody("album-token", server.URL, []string{"dicmusic"}, false)
+	body["token_cost"] = 1
+	post(t, application, "/v1/search", body)
+	job := waitJob(t, application, "process:search:album-token", "needs_review")
+	if downloads.Load() != 0 || job.ReviewKind != "token" || !strings.Contains(job.Message, "尚未下载") {
+		t.Fatal(downloads.Load(), job)
+	}
+}
+
+func TestTokenFetchStaysUnreconciled(t *testing.T) {
+	torrent := []byte("d8:announce12:http://a.com4:infod6:lengthi1e4:name4:test12:piece lengthi16384e6:pieces20:01234567890123456789ee")
+	var query string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Query().Get("action") == "download" {
+			query = r.URL.RawQuery
+			w.Write(torrent)
+			return
+		}
+		io.WriteString(w, `{"status":"success","response":{"currentPage":1,"pages":1,"results":[{"groupId":10,"groupName":"Example &amp; Test","artist":"Artist","torrents":[{"torrentId":11,"format":"FLAC","encoding":"Lossless","seeders":3}]}]}}`)
+	}))
+	defer server.Close()
+	application := newApp(t)
+	body := searchBody("album-spend", server.URL, []string{"dicmusic"}, false)
+	body["token_cost"] = 1
+	body["balance_known"] = true
+	body["balance"] = 3
+	body["budget"] = 5
+	post(t, application, "/v1/search", body)
+	job := waitJob(t, application, "process:search:album-spend", "needs_review")
+	if query != "action=download&id=11&usetoken=1" || job.ErrorClass != "REQUEST_UNKNOWN" || job.ReviewKind != "token" || !strings.Contains(job.Message, "尚未下载") {
+		t.Fatal(query, job)
+	}
+	matches, err := filepath.Glob(filepath.Join(application.Dir, "torrents", "*.torrent"))
+	if err != nil || len(matches) != 1 {
+		t.Fatal(matches, err)
 	}
 }
 

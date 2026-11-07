@@ -18,14 +18,22 @@ import (
 
 // SearchPlan is the durable, secret-free description of one tracker read.
 type SearchPlan struct {
-	RootJobID        string   `json:"root_job_id"`
-	Query            string   `json:"query"`
-	ExpectedTitle    string   `json:"expected_title"`
-	EnabledSites     []string `json:"enabled_sites"`
-	StreamingEnabled bool     `json:"streaming_enabled"`
-	Synthetic        bool     `json:"synthetic"`
-	BaseURL          string   `json:"base_url,omitempty"`
-	Identity         Identity `json:"identity"`
+	RootJobID           string   `json:"root_job_id"`
+	Query               string   `json:"query"`
+	ExpectedTitle       string   `json:"expected_title"`
+	EnabledSites        []string `json:"enabled_sites"`
+	StreamingEnabled    bool     `json:"streaming_enabled"`
+	Synthetic           bool     `json:"synthetic"`
+	BaseURL             string   `json:"base_url,omitempty"`
+	FreeConfirmed       bool     `json:"free_confirmed,omitempty"`
+	TokenCost           int      `json:"token_cost,omitempty"`
+	BalanceKnown        bool     `json:"balance_known,omitempty"`
+	Balance             int      `json:"balance,omitempty"`
+	Budget              int      `json:"budget,omitempty"`
+	SafetyMargin        int      `json:"safety_margin,omitempty"`
+	SelectedSite        string   `json:"selected_site,omitempty"`
+	SelectedCandidateID string   `json:"selected_candidate_id,omitempty"`
+	Identity            Identity `json:"identity"`
 }
 
 // Identity is caller-supplied catalogue evidence. AI cannot confirm it.
@@ -101,12 +109,19 @@ func (a *App) search(ctx context.Context, execution *scheduler.Execution, payloa
 	}
 	complete.Evidence = evidence
 	complete.Result = payload
+	if complete.Edge == workflow.EdgeQueueProcess {
+		plan.SelectedSite = report.SelectedSite
+		plan.SelectedCandidateID = report.SelectedCandidateID
+		if enriched, err := json.Marshal(plan); err == nil {
+			complete.Result = enriched
+		}
+	}
 	complete.Search = &report
 	complete.NowNS = a.now().UnixNano()
 	if _, err = a.flows.Complete(intentID("search", token.ID, token.Fence), token, complete); err != nil {
 		return scheduler.Outcome{}, err
 	}
-	if complete.Edge != workflow.EdgeDefer {
+	if complete.Edge != workflow.EdgeDefer && complete.Edge != workflow.EdgeQueueProcess {
 		a.forget(plan.RootJobID)
 	}
 	return scheduler.Outcome{State: complete.TaskState, Message: complete.Message}, nil

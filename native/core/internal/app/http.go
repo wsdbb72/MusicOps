@@ -17,13 +17,29 @@ import (
 )
 
 const page = `<!doctype html>
-<html lang="zh-CN"><head><meta charset="utf-8"><title>MusicOps</title>
-<style>body{font-family:sans-serif;max-width:42rem;margin:2rem auto;line-height:1.5}code{background:#f3f3f3;padding:0 .2rem}</style>
-</head><body>
-<h1>MusicOps</h1>
-<p>这是 Go 应用进程。它使用 Pebble 保存状态，并在本进程内调度只读检索和 SQLite 档案导入。此进程不启动 Python。</p>
-<p>检索命中后，只有调用方已经确认免费，或令牌账本预留成立，才会保存种子字节。保存种子不是专辑下载，也不是入库。流媒体获取和音乐库发布还没有执行器。</p>
-<p>健康检查：<a href="/healthz"><code>/healthz</code></a></p>
+<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>MusicOps</title><link rel="stylesheet" href="/app.css"></head>
+<body>
+<header><div><p class="mark">MusicOps</p><h1>任务</h1></div><p class="quiet">此进程不启动 Python。种子字节不是专辑下载，也不是入库。</p></header>
+<nav id="nav" aria-label="功能">
+<button type="button" data-view="tasks" aria-current="page">任务</button>
+<button type="button" data-view="queue">队列</button>
+<button type="button" data-view="review">核对</button>
+<button type="button" data-view="sites">站点</button>
+<button type="button" data-view="library">库</button>
+<button type="button" data-view="log">日志</button>
+</nav>
+<main>
+<p id="status" role="status">正在读取</p>
+<div id="list"></div>
+<section id="note" hidden></section>
+<section id="detail" hidden>
+<button type="button" id="back">返回列表</button>
+<h2 id="detail-title"></h2>
+<dl id="detail-fields"></dl>
+</section>
+</main>
+<script src="/app.js"></script>
 </body></html>`
 
 // Handler is the local application API. Request bodies are not written to the log.
@@ -31,6 +47,9 @@ func (a *App) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", a.health)
 	mux.HandleFunc("GET /{$}", a.home)
+	mux.HandleFunc("GET /app.css", a.asset("text/css; charset=utf-8", appCSS))
+	mux.HandleFunc("GET /app.js", a.asset("text/javascript; charset=utf-8", appJS))
+	mux.HandleFunc("GET /v1/jobs", a.jobs)
 	mux.HandleFunc("POST /v1/archive/import", a.importArchive)
 	mux.HandleFunc("POST /v1/archive/project", a.projectArchive)
 	mux.HandleFunc("POST /v1/archive/verify", a.verifyArchive)
@@ -43,7 +62,7 @@ func (a *App) Handler() http.Handler {
 		w.Header().Set("Cache-Control", "no-store")
 		w.Header().Set("X-Content-Type-Options", "nosniff")
 		w.Header().Set("Referrer-Policy", "no-referrer")
-		w.Header().Set("Content-Security-Policy", "default-src 'self'; style-src 'unsafe-inline'; img-src 'none'; frame-ancestors 'none'; base-uri 'none'")
+		w.Header().Set("Content-Security-Policy", "default-src 'none'; style-src 'self'; script-src 'self'; connect-src 'self'; img-src 'none'; frame-ancestors 'none'; base-uri 'none'")
 		if r.URL.Path != "/healthz" && !a.authorized(r) {
 			w.Header().Set("WWW-Authenticate", `Basic realm="MusicOps", charset="UTF-8"`)
 			writeJSON(w, http.StatusUnauthorized, map[string]any{"ok": false, "code": "AUTH_REQUIRED"})
@@ -73,6 +92,42 @@ func (a *App) home(w http.ResponseWriter, _ *http.Request) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.WriteHeader(http.StatusOK)
 	_, _ = io.WriteString(w, page)
+}
+
+func (a *App) asset(contentType, body string) http.HandlerFunc {
+	return func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", contentType)
+		w.WriteHeader(http.StatusOK)
+		_, _ = io.WriteString(w, body)
+	}
+}
+
+func (a *App) jobs(w http.ResponseWriter, r *http.Request) {
+	var after []byte
+	if raw := r.URL.Query().Get("after"); raw != "" {
+		decoded, err := base64.RawURLEncoding.DecodeString(raw)
+		if err != nil || len(decoded) > 4096 || !strings.HasPrefix(string(decoded), "workflow-root/") {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "code": "INVALID_REQUEST"})
+			return
+		}
+		after = decoded
+	}
+	page, err := a.flows.List(after, 100)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "code": "JOBS_UNAVAILABLE"})
+		return
+	}
+	jobs := make([]jobView, 0, len(page.Jobs))
+	for _, job := range page.Jobs {
+		jobs = append(jobs, publicJob(job))
+	}
+	next := ""
+	if len(page.Next) > 0 {
+		next = base64.RawURLEncoding.EncodeToString(page.Next)
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"ok": true, "jobs": jobs, "next": next, "downloaded": false, "production_verified": false, "python": false,
+	})
 }
 
 func (a *App) importArchive(w http.ResponseWriter, r *http.Request) {
@@ -212,7 +267,7 @@ func (a *App) job(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, status, map[string]any{"ok": false, "code": "NOT_FOUND"})
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "inspection": inspection, "downloaded": false, "production_verified": false})
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "inspection": scrubInspection(inspection), "downloaded": false, "production_verified": false})
 }
 
 func (a *App) allowSource(path string) error {

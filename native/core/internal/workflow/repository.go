@@ -865,6 +865,32 @@ func (r *Repository) EvidenceData(id string) ([]byte, bool, error) {
 	return payload, found, err
 }
 
+// List reads the root index. Each stored job is present, including child jobs.
+// The cursor is the previous storage key. This does not read evidence payloads.
+func (r *Repository) List(after []byte, limit int) (JobPage, error) {
+	if limit < 1 || limit > 200 {
+		return JobPage{}, dataengine.ErrInvalidRequest
+	}
+	prefix := []byte("workflow-root/")
+	page := JobPage{Jobs: []Job{}}
+	err := r.engine.View(func(v *dataengine.View) error {
+		scanned, err := v.Scan(prefix, after, limit)
+		if err != nil {
+			return err
+		}
+		page.Next = scanned.Next
+		for _, item := range scanned.Items {
+			var job Job
+			if json.Unmarshal(item.Value, &job) != nil || !validJob(job) {
+				return ErrIntegrity
+			}
+			page.Jobs = append(page.Jobs, job)
+		}
+		return nil
+	})
+	return page, err
+}
+
 func (r *Repository) Children(parent string, after []byte, limit int) (JobPage, error) {
 	if !validID(parent) {
 		return JobPage{}, dataengine.ErrInvalidRequest

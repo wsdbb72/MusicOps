@@ -3,8 +3,10 @@ package workflow
 import (
 	"encoding/json"
 	"errors"
+	"strconv"
 
 	"github.com/wsdbb72/MusicOps/native/core/internal/dataengine"
+	"github.com/wsdbb72/MusicOps/native/core/internal/searchdecision"
 	"github.com/wsdbb72/MusicOps/native/core/internal/taskrepo"
 )
 
@@ -211,7 +213,14 @@ func (r *Repository) completeOnce(requestID string, token taskrepo.Token, in Com
 		return Result{}, err
 	}
 	cancelled := current.CancelRequested || task.CancelRequested
-	followups, owners, childPlan, err := planFollowups(*current, in)
+	var decision *searchdecision.Decision
+	if !cancelled {
+		decision, err = gateSearch(*current, in)
+		if err != nil {
+			return Result{}, err
+		}
+	}
+	followups, owners, childPlan, err := planFollowups(*current, in, decision)
 	if err != nil {
 		return Result{}, err
 	}
@@ -227,10 +236,18 @@ func (r *Repository) completeOnce(requestID string, token taskrepo.Token, in Com
 	if cancelled && in.TaskState != "completed" && in.TaskState != "cancelled" {
 		return Result{}, dataengine.ErrInvalidRequest
 	}
+	var decisionIntent []byte
+	if decision != nil {
+		decisionIntent, err = json.Marshal(decision)
+		if err != nil {
+			return Result{}, err
+		}
+	}
 	extra, err := json.Marshal(struct {
 		JobID, Edge, NextStage, ReviewKind, TaskState string
 		Evidence                                      []evidenceRef
-	}{in.JobID, in.Edge, in.NextStage, in.ReviewKind, in.TaskState, refs})
+		Decision                                      json.RawMessage `json:",omitempty"`
+	}{in.JobID, in.Edge, in.NextStage, in.ReviewKind, in.TaskState, refs, decisionIntent})
 	if err != nil {
 		return Result{}, err
 	}
@@ -245,7 +262,7 @@ func (r *Repository) completeOnce(requestID string, token taskrepo.Token, in Com
 		}
 	}
 	result, err := r.tasks.FinishOwned(requestID, token, taskrepo.Completion{State: endState, NowNS: in.NowNS, ErrorClass: in.ErrorClass, Message: in.Message, Payload: in.Result}, followups, owners, paused && !cancelled, extra, func(v *dataengine.View, before, _ *taskrepo.Task, children []taskrepo.Task) ([]dataengine.Condition, []dataengine.Mutation, json.RawMessage, error) {
-		return r.finishDomain(v, *current, in, evidence, payloads, childPlan, before, children)
+		return r.finishDomain(v, *current, in, evidence, payloads, childPlan, decision, before, children)
 	})
 	return decode(result, err)
 }
@@ -257,7 +274,7 @@ type childPlan struct {
 
 func taskStateMatches(in Complete) bool {
 	switch in.Edge {
-	case edgeQueueSearch, edgeQueueProcess, edgeAdvance:
+	case edgeQueueSearch, edgeQueueProcess, edgeAdvance, edgeDefer:
 		return in.TaskState == "completed"
 	case edgeTerminal:
 		switch in.NextStage {
@@ -291,8 +308,65 @@ func evidenceAllows(edge string, items []Evidence) error {
 	return nil
 }
 
-func planFollowups(job Job, in Complete) ([]taskrepo.NewTask, map[string]string, *childPlan, error) {
-	id, command, lane, taskType, group, stage, newJob, err := successor(job, in.Edge, in.NextStage)
+func gateSearch(job Job, in Complete) (*searchdecision.Decision, error) {
+	searchEdge := job.TaskType == "search" && (in.Edge == edgeQueueProcess || in.Edge == edgeDefer || in.Edge == edgeTerminal)
+	if in.Search != nil && !searchEdge {
+		return nil, dataengine.ErrInvalidRequest
+	}
+	if !searchEdge {
+		return nil, nil
+	}
+	if in.Search == nil || in.Search.Scene != job.Scene {
+		return nil, dataengine.ErrInvalidRequest
+	}
+	decision, err := searchdecision.Decide(*in.Search)
+	if err != nil {
+		return nil, err
+	}
+	switch in.Edge {
+	case edgeQueueProcess:
+		switch in.NextStage {
+		case "requesting":
+			if decision.Action != searchdecision.ActionQueueRequest || job.IdentificationJobID == "" {
+				return nil, dataengine.ErrInvalidRequest
+			}
+		case "fallback":
+			if decision.Action != searchdecision.ActionFallback || job.IdentificationJobID == "" {
+				return nil, dataengine.ErrInvalidRequest
+			}
+		default:
+			return nil, dataengine.ErrInvalidRequest
+		}
+	case edgeDefer:
+		if decision.Action != searchdecision.ActionRetry && decision.Action != searchdecision.ActionResearch {
+			return nil, dataengine.ErrInvalidRequest
+		}
+	case edgeTerminal:
+		switch in.NextStage {
+		case "completed":
+			return nil, dataengine.ErrInvalidRequest
+		case "skipped":
+			if decision.Action != searchdecision.ActionSkip {
+				return nil, dataengine.ErrInvalidRequest
+			}
+		case "needs_review":
+			if decision.Action == searchdecision.ActionReviewSearch && in.ReviewKind != "search" || decision.Action == searchdecision.ActionReviewCandidate && in.ReviewKind != "candidate" || decision.Action != searchdecision.ActionReviewSearch && decision.Action != searchdecision.ActionReviewCandidate {
+				return nil, dataengine.ErrInvalidRequest
+			}
+		case "failed":
+			if decision.Action == searchdecision.ActionQueueRequest || decision.Action == searchdecision.ActionFallback {
+				return nil, dataengine.ErrInvalidRequest
+			}
+		case "cancelled":
+		default:
+			return nil, dataengine.ErrInvalidRequest
+		}
+	}
+	return &decision, nil
+}
+
+func planFollowups(job Job, in Complete, decision *searchdecision.Decision) ([]taskrepo.NewTask, map[string]string, *childPlan, error) {
+	id, command, lane, taskType, group, stage, newJob, err := successor(job, in, decision)
 	if err != nil {
 		return nil, nil, nil, err
 	}
@@ -336,8 +410,19 @@ func planFollowups(job Job, in Complete) ([]taskrepo.NewTask, map[string]string,
 		if in.Edge == edgeQueueProcess {
 			next.IdentificationJobID = job.IdentificationJobID
 			next.SearchJobID = job.ID
-			if in.Message != "" {
-				next.Message = in.Message
+			next.SearchRetryCount = 0
+			next.AIResearchCount = 0
+			next.SearchRetryAfterSec = 0
+			next.SearchAction = ""
+			if decision != nil {
+				next.SearchAction = decision.Action
+			}
+			next.Message = messageOr(in.Message, "等待执行")
+			if stage == "requesting" {
+				next.Message = messageOr(in.Message, "检索命中，等待获取；尚未下载、尚未入库")
+			}
+			if stage == "fallback" {
+				next.Message = messageOr(in.Message, "已排队流媒体回退；尚未下载、尚未入库")
 			}
 		}
 		child = &next
@@ -356,8 +441,15 @@ func legalEdge(job Job, edge, next string) error {
 			return ErrStale
 		}
 		switch next {
-		case "requesting", "downloading", "metadata":
+		case "requesting", "fallback":
 		default:
+			return dataengine.ErrInvalidRequest
+		}
+	case edgeDefer:
+		if job.TaskType != "search" || job.Stage != "searching" {
+			return ErrStale
+		}
+		if next != "" && next != "searching" {
 			return dataengine.ErrInvalidRequest
 		}
 	case edgeAdvance:
@@ -371,6 +463,9 @@ func legalEdge(job Job, edge, next string) error {
 			return ErrStale
 		}
 	case edgeTerminal:
+		if job.TaskType == "search" && next == "completed" {
+			return dataengine.ErrInvalidRequest
+		}
 		if !terminalStage(next) || job.Stage == next {
 			return ErrStale
 		}
@@ -380,39 +475,52 @@ func legalEdge(job Job, edge, next string) error {
 	return nil
 }
 
-func successor(job Job, edge, next string) (id, command, lane, taskType, group, stage string, newJob bool, err error) {
-	switch edge {
+func successor(job Job, in Complete, decision *searchdecision.Decision) (id, command, lane, taskType, group, stage string, newJob bool, err error) {
+	switch in.Edge {
 	case edgeQueueSearch:
 		return searchJobID(job.ID), cmdSearch, "identify", "search", "search", "searching", true, nil
 	case edgeQueueProcess:
-		switch next {
-		case "requesting", "downloading":
-			return processJobID(job.ID), cmdProcess, "aux", "album", "process", next, true, nil
-		case "metadata":
-			return processJobID(job.ID), cmdRepair, "aux", "album", "repair", next, true, nil
+		switch in.NextStage {
+		case "requesting", "fallback":
+			return processJobID(job.ID), cmdProcess, "aux", "album", "process", in.NextStage, true, nil
 		default:
 			return "", "", "", "", "", "", false, dataengine.ErrInvalidRequest
 		}
+	case edgeDefer:
+		if decision == nil || in.Search == nil {
+			return "", "", "", "", "", "", false, dataengine.ErrInvalidRequest
+		}
+		var kind string
+		var nextCount int
+		switch decision.Action {
+		case searchdecision.ActionRetry:
+			kind, nextCount = "retry", int(in.Search.RetryCount)+1
+		case searchdecision.ActionResearch:
+			kind, nextCount = "research", int(in.Search.AIResearchCount)+1
+		default:
+			return "", "", "", "", "", "", false, dataengine.ErrInvalidRequest
+		}
+		return stageTaskID(job.ID, kind+":"+strconv.Itoa(nextCount)), cmdSearch, "identify", job.TaskType, job.TaskGroup, "searching", false, nil
 	case edgeAdvance:
-		switch next {
+		switch in.NextStage {
 		case "validating", "downloading":
-			return stageTaskID(job.ID, next), cmdProcess, "aux", job.TaskType, job.TaskGroup, next, false, nil
+			return stageTaskID(job.ID, in.NextStage), cmdProcess, "aux", job.TaskType, job.TaskGroup, in.NextStage, false, nil
 		case "publishing", "notifying":
-			return stageTaskID(job.ID, next), cmdPublish, "publish", job.TaskType, job.TaskGroup, next, false, nil
+			return stageTaskID(job.ID, in.NextStage), cmdPublish, "publish", job.TaskType, job.TaskGroup, in.NextStage, false, nil
 		default:
 			return "", "", "", "", "", "", false, dataengine.ErrInvalidRequest
 		}
 	case edgeTerminal:
-		if !terminalStage(next) {
+		if !terminalStage(in.NextStage) {
 			return "", "", "", "", "", "", false, dataengine.ErrInvalidRequest
 		}
-		return "", "", "", "", "", next, false, nil
+		return "", "", "", "", "", in.NextStage, false, nil
 	default:
 		return "", "", "", "", "", "", false, dataengine.ErrInvalidRequest
 	}
 }
 
-func (r *Repository) finishDomain(v *dataengine.View, planned Job, in Complete, evidence []Evidence, payloads [][]byte, child *childPlan, before *taskrepo.Task, children []taskrepo.Task) ([]dataengine.Condition, []dataengine.Mutation, json.RawMessage, error) {
+func (r *Repository) finishDomain(v *dataengine.View, planned Job, in Complete, evidence []Evidence, payloads [][]byte, child *childPlan, decision *searchdecision.Decision, before *taskrepo.Task, children []taskrepo.Task) ([]dataengine.Condition, []dataengine.Mutation, json.RawMessage, error) {
 	live, raw, err := readJob(v, planned.ID)
 	if err != nil || live == nil {
 		if err != nil {
@@ -441,18 +549,24 @@ func (r *Repository) finishDomain(v *dataengine.View, planned Job, in Complete, 
 		if err = legalEdge(*live, in.Edge, in.NextStage); err != nil {
 			return nil, nil, nil, err
 		}
+		if decision != nil && (decision.Action == searchdecision.ActionQueueRequest || decision.Action == searchdecision.ActionFallback) && live.IdentificationJobID == "" {
+			return nil, nil, nil, dataengine.ErrInvalidRequest
+		}
+		if in.Edge == edgeDefer && (decision == nil || in.Search == nil || live.SearchRetryCount != in.Search.RetryCount || live.AIResearchCount != in.Search.AIResearchCount) {
+			return nil, nil, nil, ErrStale
+		}
 	}
 	if cancelled {
 		if len(children) != 0 {
 			return nil, nil, nil, errRetry
 		}
-		return r.commitJob(v, raw, rootRaw, *live, in, evidence, payloads, nil, "", true)
+		return r.commitJob(v, raw, rootRaw, *live, in, evidence, payloads, nil, "", decision, true)
 	}
 	if in.Edge == edgeTerminal {
 		if len(children) != 0 {
 			return nil, nil, nil, errRetry
 		}
-		return r.commitJob(v, raw, rootRaw, *live, in, evidence, payloads, nil, "", false)
+		return r.commitJob(v, raw, rootRaw, *live, in, evidence, payloads, nil, "", decision, false)
 	}
 	if child == nil || len(children) != 1 || children[0].ID != child.TaskID {
 		return nil, nil, nil, errRetry
@@ -466,15 +580,15 @@ func (r *Repository) finishDomain(v *dataengine.View, planned Job, in Complete, 
 			return nil, nil, nil, errRetry
 		}
 		child.Job.Paused = paused || live.Paused || rootPaused
-		return r.commitJob(v, raw, rootRaw, *live, in, evidence, payloads, child.Job, "", false)
+		return r.commitJob(v, raw, rootRaw, *live, in, evidence, payloads, child.Job, "", decision, false)
 	}
 	if children[0].WorkflowJobID != live.ID {
 		return nil, nil, nil, errRetry
 	}
-	return r.commitJob(v, raw, rootRaw, *live, in, evidence, payloads, nil, children[0].ID, false)
+	return r.commitJob(v, raw, rootRaw, *live, in, evidence, payloads, nil, children[0].ID, decision, false)
 }
 
-func (r *Repository) commitJob(v *dataengine.View, raw, rootRaw []byte, live Job, in Complete, evidence []Evidence, payloads [][]byte, child *Job, nextTaskID string, cancelled bool) ([]dataengine.Condition, []dataengine.Mutation, json.RawMessage, error) {
+func (r *Repository) commitJob(v *dataengine.View, raw, rootRaw []byte, live Job, in Complete, evidence []Evidence, payloads [][]byte, child *Job, nextTaskID string, decision *searchdecision.Decision, cancelled bool) ([]dataengine.Condition, []dataengine.Mutation, json.RawMessage, error) {
 	next := live
 	var stage string
 	switch {
@@ -490,6 +604,30 @@ func (r *Repository) commitJob(v *dataengine.View, raw, rootRaw []byte, live Job
 		stage = "completed"
 		next.ProcessingJobID = child.ID
 		next.Message = messageOr(in.Message, "检索完成，已创建独立处理任务")
+		if decision != nil && decision.Action == searchdecision.ActionFallback {
+			next.Message = messageOr(in.Message, "检索未命中，已排队流媒体回退；尚未下载、尚未入库")
+		}
+		if decision != nil && decision.Action == searchdecision.ActionQueueRequest {
+			next.Message = messageOr(in.Message, "检索命中，已创建获取任务；尚未下载、尚未入库")
+		}
+	case in.Edge == edgeDefer:
+		stage = "searching"
+		next.ActiveTaskID = nextTaskID
+		if decision == nil {
+			return nil, nil, nil, ErrIntegrity
+		}
+		switch decision.Action {
+		case searchdecision.ActionRetry:
+			next.SearchRetryCount = live.SearchRetryCount + 1
+			next.SearchRetryAfterSec = decision.RetryAfterSec
+			next.Message = messageOr(in.Message, "站点暂时不可用，已安排重新检索；尚未回退流媒体")
+		case searchdecision.ActionResearch:
+			next.AIResearchCount = live.AIResearchCount + 1
+			next.SearchRetryAfterSec = 0
+			next.Message = messageOr(in.Message, "使用目录别名重新检索；别名未确认新身份")
+		default:
+			return nil, nil, nil, ErrIntegrity
+		}
 	case in.Edge == edgeAdvance:
 		stage = in.NextStage
 		next.ActiveTaskID = nextTaskID
@@ -510,6 +648,8 @@ func (r *Repository) commitJob(v *dataengine.View, raw, rootRaw []byte, live Job
 	}
 	if cancelled {
 		updated.CancelRequested = true
+	} else if decision != nil {
+		updated.SearchAction = decision.Action
 	}
 	conditions, writes, err := writeEvidence(v, evidence, payloads)
 	if err != nil {
@@ -543,7 +683,7 @@ func (r *Repository) commitJob(v *dataengine.View, raw, rootRaw []byte, live Job
 	for i := range evidence {
 		evidence[i].JobID = live.ID
 	}
-	attached, err := json.Marshal(Result{Job: &updated, Evidence: evidence, Children: children})
+	attached, err := json.Marshal(Result{Job: &updated, Evidence: evidence, Children: children, Search: decision})
 	if err != nil {
 		return nil, nil, nil, err
 	}

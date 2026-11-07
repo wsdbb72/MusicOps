@@ -10,6 +10,7 @@ import (
 	"sort"
 
 	"github.com/wsdbb72/MusicOps/native/core/internal/dataengine"
+	"github.com/wsdbb72/MusicOps/native/core/internal/searchdecision"
 	"github.com/wsdbb72/MusicOps/native/core/internal/taskrepo"
 )
 
@@ -23,6 +24,7 @@ var (
 const (
 	edgeQueueSearch  = "queue_search"
 	edgeQueueProcess = "queue_process"
+	edgeDefer        = "defer_search"
 	edgeAdvance      = "advance"
 	edgeTerminal     = "terminal"
 
@@ -47,7 +49,7 @@ var (
 var scenes = map[string]bool{"playlist": true, "complete": true, "upgrade": true, "fill": true, "expand": true}
 var stages = map[string]bool{
 	"preparing": true, "identifying": true, "snapshotting": true, "metadata": true, "searching": true,
-	"requesting": true, "downloading": true, "validating": true, "publishing": true, "notifying": true,
+	"requesting": true, "downloading": true, "fallback": true, "validating": true, "publishing": true, "notifying": true,
 	"needs_review": true, "completed": true, "failed": true, "cancelled": true, "skipped": true,
 }
 var reviewKinds = map[string]bool{
@@ -80,6 +82,10 @@ type Job struct {
 	Message             string `json:"message,omitempty"`
 	ReviewKind          string `json:"review_kind,omitempty"`
 	ErrorClass          string `json:"error_class,omitempty"`
+	SearchAction        string `json:"search_action,omitempty"`
+	SearchRetryCount    uint8  `json:"search_retry_count,omitempty"`
+	AIResearchCount     uint8  `json:"ai_research_count,omitempty"`
+	SearchRetryAfterSec int    `json:"search_retry_after_sec,omitempty"`
 	Revision            uint64 `json:"revision"`
 	CreatedNS           int64  `json:"created_ns"`
 	UpdatedNS           int64  `json:"updated_ns"`
@@ -126,26 +132,28 @@ type Start struct {
 }
 
 type Complete struct {
-	JobID      string          `json:"job_id"`
-	Edge       string          `json:"edge"`
-	NextStage  string          `json:"next_stage,omitempty"`
-	ReviewKind string          `json:"review_kind,omitempty"`
-	Message    string          `json:"message,omitempty"`
-	TaskState  string          `json:"task_state"`
-	ErrorClass string          `json:"error_class,omitempty"`
-	Result     []byte          `json:"result,omitempty"`
-	Evidence   []EvidenceInput `json:"evidence,omitempty"`
-	NowNS      int64           `json:"now_ns"`
+	JobID      string                 `json:"job_id"`
+	Edge       string                 `json:"edge"`
+	NextStage  string                 `json:"next_stage,omitempty"`
+	ReviewKind string                 `json:"review_kind,omitempty"`
+	Message    string                 `json:"message,omitempty"`
+	TaskState  string                 `json:"task_state"`
+	ErrorClass string                 `json:"error_class,omitempty"`
+	Result     []byte                 `json:"result,omitempty"`
+	Evidence   []EvidenceInput        `json:"evidence,omitempty"`
+	Search     *searchdecision.Report `json:"search,omitempty"`
+	NowNS      int64                  `json:"now_ns"`
 }
 
 type Result struct {
-	Job       *Job            `json:"job,omitempty"`
-	Evidence  []Evidence      `json:"evidence,omitempty"`
-	Children  []Job           `json:"children,omitempty"`
-	Task      *taskrepo.Task  `json:"task,omitempty"`
-	Followups []taskrepo.Task `json:"followups,omitempty"`
-	Replayed  bool            `json:"replayed"`
-	Changed   bool            `json:"changed"`
+	Job       *Job                     `json:"job,omitempty"`
+	Evidence  []Evidence               `json:"evidence,omitempty"`
+	Children  []Job                    `json:"children,omitempty"`
+	Search    *searchdecision.Decision `json:"search,omitempty"`
+	Task      *taskrepo.Task           `json:"task,omitempty"`
+	Followups []taskrepo.Task          `json:"followups,omitempty"`
+	Replayed  bool                     `json:"replayed"`
+	Changed   bool                     `json:"changed"`
 }
 
 type Status struct {
@@ -270,6 +278,19 @@ func validJob(job Job) bool {
 		return false
 	}
 	if job.ReviewKind != "" && !reviewKinds[job.ReviewKind] {
+		return false
+	}
+	switch job.SearchAction {
+	case "", searchdecision.ActionQueueRequest, searchdecision.ActionRetry, searchdecision.ActionResearch, searchdecision.ActionReviewSearch, searchdecision.ActionReviewCandidate, searchdecision.ActionFallback, searchdecision.ActionSkip:
+	default:
+		return false
+	}
+	if job.SearchRetryCount > 3 || job.AIResearchCount > 1 {
+		return false
+	}
+	switch job.SearchRetryAfterSec {
+	case 0, 600, 1800, 3600:
+	default:
 		return false
 	}
 	switch job.Kind {

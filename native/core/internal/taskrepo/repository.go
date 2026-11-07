@@ -430,19 +430,51 @@ func (r *Repository) Children(parent string, after []byte, limit int) (Page, err
 	return r.page([]byte("task-child/"+digest([]byte(parent))+"/"), after, limit)
 }
 
+type zlibPacker struct {
+	buf *bytes.Buffer
+	w   *zlib.Writer
+}
+
+// Reuse the compressor. A new BestSpeed writer allocates about a megabyte,
+// which dominated enqueue cost for small task payloads.
+var zlibPackers sync.Pool
+
+func borrowPacker() (*zlibPacker, error) {
+	if item := zlibPackers.Get(); item != nil {
+		return item.(*zlibPacker), nil
+	}
+	buf := new(bytes.Buffer)
+	writer, err := zlib.NewWriterLevel(buf, zlib.BestSpeed)
+	if err != nil {
+		return nil, err
+	}
+	return &zlibPacker{buf: buf, w: writer}, nil
+}
+
 func pack(payload []byte) (string, []byte, error) {
 	if len(payload) > maxPayload {
 		return "", nil, dataengine.ErrInvalidRequest
 	}
-	var output bytes.Buffer
-	writer, _ := zlib.NewWriterLevel(&output, zlib.BestSpeed)
-	if _, err := writer.Write(payload); err != nil {
+	packer, err := borrowPacker()
+	if err != nil {
 		return "", nil, err
 	}
-	if err := writer.Close(); err != nil {
+	packer.buf.Reset()
+	packer.w.Reset(packer.buf)
+	_, err = packer.w.Write(payload)
+	if err == nil {
+		err = packer.w.Close()
+	}
+	var compressed []byte
+	if err == nil {
+		compressed = bytes.Clone(packer.buf.Bytes())
+	}
+	packer.buf.Reset()
+	zlibPackers.Put(packer)
+	if err != nil {
 		return "", nil, err
 	}
-	return digest(payload), output.Bytes(), nil
+	return digest(payload), compressed, nil
 }
 func blobWrites(v *dataengine.View, hash string, compressed []byte) ([]dataengine.Mutation, error) {
 	marker := []byte("task-blob-info/" + hash)

@@ -179,3 +179,58 @@ def test_workflow_stage_evidence_and_successor_share_one_response(executable, tm
             client.workflow_complete(
                 "handoff", token, job_id="album1", edge="queue_search", task_state="completed",
                 result=b"identity", evidence=[changed], now_ns=3000)
+
+
+def _tracker_sites(**overrides):
+    rows = []
+    for site in ("open.cd", "dicmusic", "orpheus", "redacted"):
+        row = {"site": site, "status": "NO_RESOURCE", "attempted": True, "candidate_count": 0}
+        row.update(overrides.get(site, {}))
+        rows.append(row)
+    return rows
+
+
+def test_search_outcome_gate_blocks_streaming_and_direct_download(executable, tmp_path):
+    evidence = {"evidence_id": "evidence-1", "kind": "api", "source": "musicbrainz", "subject_id": "release1",
+                "tracklist_verified": True, "identity_confirmed": True, "payload": b"synthetic tracklist"}
+    observed = {"evidence_id": "search-evidence", "kind": "catalog", "source": "redacted", "payload": b"synthetic candidates"}
+    matched = {"scene": "playlist", "identity_confirmed": True, "selected_site": "redacted", "selected_candidate_id": "torrent-1",
+               "sites": _tracker_sites(**{"redacted": {"status": "OK", "attempted": True, "candidate_count": 1, "exact": True,
+                                                      "observed_title": "Kind of Blue", "expected_title": "Kind of Blue",
+                                                      "seeders": 4, "seeders_known": True}})}
+    limited = {"scene": "playlist", "identity_confirmed": True, "streaming_enabled": True,
+               "sites": _tracker_sites(**{"redacted": {"status": "RATE_LIMITED", "attempted": True, "candidate_count": 0}})}
+    with NativeDataClient(executable, tmp_path / "data", tmp_path / "backups") as client:
+        client.workflow_start(
+            "start", job_id="album1", batch_id="batch1", scene="playlist", stage="identifying",
+            source_track_ids=["track-1"], payload=b"synthetic playlist", now_ns=1000)
+        claim = client.claim("claim", "identify", "transport-owner", 2000)
+        token = client.token(claim["task"])
+        client.begin("begin", token, 2100)
+        client.workflow_complete(
+            "identify", token, job_id="album1", edge="queue_search", task_state="completed",
+            result=b"identity", evidence=[evidence], now_ns=3000)
+        search_claim = client.claim("claim-search", "identify", "transport-owner", 4000)
+        search = client.token(search_claim["task"])
+        assert search["task_id"] == "search:album1"
+        client.begin("begin-search", search, 4100)
+        with pytest.raises(NativeDataError, match="INVALID_REQUEST"):
+            client.workflow_complete(
+                "download-now", search, job_id="search:album1", edge="queue_process", next_stage="downloading",
+                task_state="completed", evidence=[observed], search=matched, now_ns=5000)
+        with pytest.raises(NativeDataError, match="INVALID_REQUEST"):
+            client.workflow_complete(
+                "stream-now", search, job_id="search:album1", edge="queue_process", next_stage="fallback",
+                task_state="completed", evidence=[observed], search=limited, now_ns=5000)
+        queued = client.workflow_complete(
+            "request", search, job_id="search:album1", edge="queue_process", next_stage="requesting",
+            task_state="completed", evidence=[observed], search=matched, now_ns=5000)
+        assert queued["job"]["search_action"] == "queue_request"
+        assert queued["children"][0]["stage"] == "requesting"
+        assert queued["children"][0]["message"] == "检索命中，等待获取；尚未下载、尚未入库"
+        assert queued["search"]["action"] == "queue_request"
+        replay = client.workflow_complete(
+            "request", search, job_id="search:album1", edge="queue_process", next_stage="requesting",
+            task_state="completed", evidence=[observed], search=matched, now_ns=5000)
+        assert replay["replayed"] is True
+        assert client.task(queued["children"][0]["job_id"])["state"] == "queued"

@@ -398,7 +398,8 @@ func TestSearchHandoffCreatesProcessTaskWithoutRunningIt(t *testing.T) {
 		t.Fatal(err)
 	}
 	searchToken := begin(t, tasks, "search:album1", "identify")
-	result, err := repo.Complete("search", searchToken, Complete{JobID: "search:album1", Edge: edgeQueueProcess, NextStage: "requesting", TaskState: "completed", NowNS: 4000, Result: []byte("candidates"), Evidence: []EvidenceInput{{ID: "search-evidence", Kind: "catalog", Source: "redacted", Payload: []byte("observed candidates")}}})
+	matched := matchedReport()
+	result, err := repo.Complete("search", searchToken, Complete{JobID: "search:album1", Edge: edgeQueueProcess, NextStage: "requesting", TaskState: "completed", NowNS: 4000, Result: []byte("candidates"), Evidence: []EvidenceInput{{ID: "search-evidence", Kind: "catalog", Source: "redacted", Payload: []byte("observed candidates")}}, Search: &matched})
 	if err != nil || result.Job.Stage != "completed" || len(result.Children) != 1 || result.Children[0].Stage != "requesting" {
 		t.Fatal(result, err)
 	}

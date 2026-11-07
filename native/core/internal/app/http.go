@@ -37,6 +37,7 @@ func (a *App) Handler() http.Handler {
 	mux.HandleFunc("POST /v1/archive/rollback", a.rollbackArchive)
 	mux.HandleFunc("GET /v1/archive/record", a.archiveRecord)
 	mux.HandleFunc("POST /v1/search", a.startSearch)
+	mux.HandleFunc("POST /v1/tokens/recheck", a.recheckToken)
 	mux.HandleFunc("GET /v1/jobs/{id}", a.job)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Cache-Control", "no-store")
@@ -165,11 +166,14 @@ func (a *App) startSearch(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "code": "IDENTITY_EVIDENCE_REJECTED"})
 		return
 	}
+	// balance and balance_known are accepted so an older client is not rejected.
+	// They are not stored and cannot authorize a token request.
+	body.Balance = 0
+	body.BalanceKnown = false
 	plan := SearchPlan{
 		RootJobID: body.JobID, Query: body.Query, ExpectedTitle: body.ExpectedTitle, EnabledSites: body.EnabledSites,
 		StreamingEnabled: body.StreamingEnabled, Synthetic: body.Synthetic, BaseURL: body.BaseURL, Identity: body.Identity,
-		FreeConfirmed: body.FreeConfirmed, TokenCost: body.TokenCost, BalanceKnown: body.BalanceKnown,
-		Balance: body.Balance, Budget: body.Budget, SafetyMargin: body.SafetyMargin,
+		FreeConfirmed: body.FreeConfirmed, TokenCost: body.TokenCost, Budget: body.Budget, SafetyMargin: body.SafetyMargin,
 	}
 	raw, err := json.Marshal(plan)
 	if err != nil {

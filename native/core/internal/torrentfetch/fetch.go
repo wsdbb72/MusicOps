@@ -81,9 +81,17 @@ func Fetch(ctx context.Context, req Request) (Receipt, error) {
 	if timeout <= 0 {
 		timeout = 30 * time.Second
 	}
-	client := &http.Client{Timeout: timeout, CheckRedirect: func(*http.Request, []*http.Request) error {
-		return http.ErrUseLastResponse
-	}}
+	client := &http.Client{
+		Timeout: timeout,
+		CheckRedirect: func(*http.Request, []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+		// A dropped keep-alive connection must not make the HTTP stack send usetoken twice.
+		Transport: &http.Transport{DisableKeepAlives: true},
+	}
+	if transport, ok := client.Transport.(*http.Transport); ok {
+		defer transport.CloseIdleConnections()
+	}
 	response, err := client.Do(httpReq)
 	if err != nil {
 		if ctx.Err() != nil {

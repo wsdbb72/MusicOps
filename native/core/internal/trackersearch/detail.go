@@ -50,22 +50,22 @@ func (c *Client) ReadDetail(ctx context.Context, q Query, path string, values ur
 
 // ReadAccount fetches the Gazelle account document used for token balance.
 // It rejects download parameters and does not follow redirects.
-func (c *Client) ReadAccount(ctx context.Context, q Query, values url.Values) ([]byte, int, error) {
+func (c *Client) ReadAccount(ctx context.Context, q Query, values url.Values) ([]byte, int, string, error) {
 	if q.Site != "dicmusic" && q.Site != "orpheus" || strings.ContainsAny(q.Cookie, "\r\n") || strings.TrimSpace(q.Cookie) == "" {
-		return nil, 0, fmt.Errorf("%w: account", dataengine.ErrInvalidRequest)
+		return nil, 0, "", fmt.Errorf("%w: account", dataengine.ErrInvalidRequest)
 	}
 	if !allowedAccount(values) {
-		return nil, 0, fmt.Errorf("%w: account path", dataengine.ErrInvalidRequest)
+		return nil, 0, "", fmt.Errorf("%w: account path", dataengine.ErrInvalidRequest)
 	}
 	endpoint, err := endpointURL(q)
 	if err != nil {
-		return nil, 0, err
+		return nil, 0, "", err
 	}
 	endpoint.Path = "/ajax.php"
 	endpoint.RawQuery = values.Encode()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint.String(), nil)
 	if err != nil {
-		return nil, 0, errorsNewAccount()
+		return nil, 0, "", errorsNewAccount()
 	}
 	req.Header.Set("Cookie", q.Cookie)
 	req.Header.Set("Accept", "application/json")
@@ -75,19 +75,19 @@ func (c *Client) ReadAccount(ctx context.Context, q Query, values url.Values) ([
 	response, err := c.doer(q.Timeout).Do(req)
 	if err != nil {
 		if ctx.Err() != nil {
-			return nil, 0, ctx.Err()
+			return nil, 0, "", ctx.Err()
 		}
-		return nil, 0, errorsNewAccount()
+		return nil, 0, "", errorsNewAccount()
 	}
 	defer response.Body.Close()
 	body, err := io.ReadAll(io.LimitReader(response.Body, maxBody+1))
 	if err != nil {
-		return nil, response.StatusCode, errorsNewAccount()
+		return nil, response.StatusCode, response.Header.Get("Retry-After"), errorsNewAccount()
 	}
 	if len(body) > maxBody {
-		return nil, response.StatusCode, errorsNewAccount()
+		return nil, response.StatusCode, response.Header.Get("Retry-After"), errorsNewAccount()
 	}
-	return body, response.StatusCode, nil
+	return body, response.StatusCode, response.Header.Get("Retry-After"), nil
 }
 
 func allowedAccount(values url.Values) bool {

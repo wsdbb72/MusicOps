@@ -72,6 +72,18 @@ func (l *Ledger) Reconcile(now time.Time, site string, proof SpendProof) (Result
 	if !found || current.AccountID != proof.AccountID || current.ResourceID != proof.ResourceID || current.RequestID != proof.RequestID {
 		return Result{Class: ClassUncertain, Scope: "request", Basis: "扣费记录与预约的账号或资源不一致，不改账"}, nil
 	}
+	switch current.State {
+	case StateConfirmed:
+		if proof.State == "CONSUMED" {
+			return resultFrom(current), nil
+		}
+		return Result{Class: ClassUncertain, State: current.State, Scope: "request", Basis: "已确认的消耗不接受相反的扣费记录"}, nil
+	case StateReleased, StateRejected:
+		if current.State == StateReleased && proof.State == "NOT_CONSUMED" {
+			return resultFrom(current), nil
+		}
+		return Result{Class: ClassUncertain, State: current.State, Scope: "request", Basis: "已结束的预约不接受相反的扣费记录"}, nil
+	}
 	switch proof.State {
 	case "CONSUMED":
 		return l.Advance(now, site, proof.RequestID, StateConfirmed, "fixture-correlated")

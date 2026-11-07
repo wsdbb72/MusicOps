@@ -27,8 +27,6 @@ type SearchPlan struct {
 	BaseURL             string   `json:"base_url,omitempty"`
 	FreeConfirmed       bool     `json:"free_confirmed,omitempty"`
 	TokenCost           int      `json:"token_cost,omitempty"`
-	BalanceKnown        bool     `json:"balance_known,omitempty"`
-	Balance             int      `json:"balance,omitempty"`
 	Budget              int      `json:"budget,omitempty"`
 	SafetyMargin        int      `json:"safety_margin,omitempty"`
 	SelectedSite        string   `json:"selected_site,omitempty"`

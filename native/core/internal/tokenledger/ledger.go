@@ -31,6 +31,7 @@ const (
 	ClassAlreadyReserved = "already_reserved"
 	ClassAuthorization   = "authorization"
 	ClassUncertain       = "token_uncertain"
+	ClassSpent           = "token_spent"
 
 	balanceTTL = 300 * time.Second
 )
@@ -41,11 +42,12 @@ var TokenSites = [2]string{"dicmusic", "orpheus"}
 
 var ErrReconciliation = errors.New("token reconciliation required")
 
-// Quote is a caller-supplied observation. Balance is used only when BalanceKnown
-// is set; a missing observation is not treated as zero tokens.
+// Quote carries a spend request. ReserveObserved replaces Balance with the
+// stored site observation; a number on this struct is not a site balance.
 type Quote struct {
 	Site              string
 	AccountID         string
+	CookieID          string
 	ResourceID        string
 	RequestID         string
 	Cost              int
@@ -142,7 +144,7 @@ func (l *Ledger) Reserve(now time.Time, quote Quote) (Result, error) {
 			return existing, err
 		}
 		next, item, reject := decide(now, quote, snap)
-		if reject.Class == ClassAlreadyReserved || reject.Class == ClassPending || reject.Class == ClassAccountHold || reject.Class == ClassTokenBudget || reject.Class == ClassBalanceUnknown || reject.Class == ClassBalanceStale || reject.Class == ClassAuthorization {
+		if reject.Class == ClassAlreadyReserved || reject.Class == ClassPending || reject.Class == ClassAccountHold || reject.Class == ClassTokenBudget || reject.Class == ClassBalanceUnknown || reject.Class == ClassBalanceStale || reject.Class == ClassAuthorization || reject.Class == ClassSpent {
 			next = rejection(now, quote, reject.Class)
 			next.Scope = reject.Scope
 			next.Basis = reject.Basis
@@ -304,6 +306,33 @@ func (l *Ledger) replay(quote Quote) (Result, bool, error) {
 	return result, found, err
 }
 
+// Get reads one reservation. It does not contact a site or change the ledger.
+func (l *Ledger) Get(site, requestID string) (Result, bool, error) {
+	var result Result
+	var found bool
+	err := l.engine.View(func(v *dataengine.View) error {
+		id, ok, err := readRequest(v, site, requestID)
+		if err != nil || !ok {
+			return err
+		}
+		raw, ok, err := v.Get(rowKey(id))
+		if err != nil || !ok {
+			if err == nil {
+				err = dataengine.ErrInvalidRequest
+			}
+			return err
+		}
+		var current row
+		if json.Unmarshal(raw, &current) != nil {
+			return dataengine.ErrInvalidRequest
+		}
+		result = resultFrom(current)
+		found = true
+		return nil
+	})
+	return result, found, err
+}
+
 func decide(now time.Time, quote Quote, snap indexDoc) (row, indexItem, Result) {
 	if !quote.BalanceKnown {
 		return row{}, indexItem{}, Result{Class: ClassBalanceUnknown}
@@ -313,6 +342,9 @@ func decide(now time.Time, quote Quote, snap indexDoc) (row, indexItem, Result) 
 	}
 	otherFlight := false
 	for _, item := range snap.Items {
+		if item.ResourceID == quote.ResourceID && (item.State == StateConfirmed || item.State == StateConsumed) {
+			return row{}, indexItem{}, Result{Class: ClassSpent, Scope: "resource", Basis: "该资源的令牌消耗已经确认，不重复扣费"}
+		}
 		if item.ResourceID == quote.ResourceID && (inFlight(item.State) || active(item.State)) {
 			if inFlight(item.State) {
 				return row{}, indexItem{}, Result{Class: ClassPending, Scope: "resource", Basis: "该资源已有未完成的令牌请求，不重发，也不把限制扩大到整站"}

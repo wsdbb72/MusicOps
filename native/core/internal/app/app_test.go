@@ -194,8 +194,8 @@ func TestTokenFetchStaysUnreconciled(t *testing.T) {
 	application := newApp(t)
 	body := searchBody("album-spend", server.URL, []string{"dicmusic"}, false)
 	body["token_cost"] = 1
-	body["balance_known"] = true
-	body["balance"] = 99
+	body["balance_known"] = false
+	body["balance"] = 0
 	body["dicmusic_authkey"] = "sentinel-dic-auth"
 	post(t, application, "/v1/search", body)
 	job := waitJob(t, application, "process:search:album-spend", "needs_review")

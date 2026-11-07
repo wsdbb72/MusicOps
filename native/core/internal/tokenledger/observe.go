@@ -1,6 +1,7 @@
 package tokenledger
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -29,8 +30,13 @@ type Observation struct {
 	Source             string `json:"source,omitempty"`
 	ObservedAtNS       int64  `json:"observed_at_ns,omitempty"`
 	Generation         uint64 `json:"generation"`
+	RecheckAtNS        int64  `json:"recheck_at_ns,omitempty"`
 	ErrorClass         string `json:"error_class,omitempty"`
 	ProductionVerified bool   `json:"production_verified"`
+	// ReadBase is the generation seen before this read. It is not stored.
+	// A response that started from an older generation cannot replace a newer one.
+	ReadBase    uint64 `json:"-"`
+	ReadBaseSet bool   `json:"-"`
 }
 
 var pageBalance = regexp.MustCompile(`(?i)(?:FL\s*令牌|令牌|Tokens?)\s*[:：]\s*([\d,]+(?:\s*\+\s*[\d,]+)*)`)
@@ -209,7 +215,13 @@ func obsKey(site, account string) []byte {
 	return []byte("fl/obs/" + site + "/" + account)
 }
 
-// CommitObservation stores a parsed balance. An older generation does not replace a newer one.
+func cookieKey(site, cookieID string) []byte {
+	return []byte("fl/cookie/" + site + "/" + cookieID)
+}
+
+// CommitObservation stores a parsed balance. An older generation, or a read that
+// started before the stored generation, does not replace a newer observation.
+// The same cookie fingerprint cannot be recorded as two account ids.
 func (l *Ledger) CommitObservation(obs Observation) (Observation, error) {
 	if l == nil || l.engine == nil || (obs.Site != "dicmusic" && obs.Site != "orpheus") {
 		return Observation{}, dataengine.ErrInvalidRequest
@@ -221,48 +233,85 @@ func (l *Ledger) CommitObservation(obs Observation) (Observation, error) {
 		account = "unbound"
 	}
 	key := obsKey(obs.Site, account)
-	var current Observation
-	var raw []byte
-	var found bool
-	err := l.engine.View(func(v *dataengine.View) error {
-		value, ok, err := v.Get(key)
-		if err != nil || !ok {
-			return err
+	for range 2 {
+		var current Observation
+		var raw []byte
+		var found bool
+		var bound string
+		var cookieRaw []byte
+		var cookieFound bool
+		err := l.engine.View(func(v *dataengine.View) error {
+			value, ok, err := v.Get(key)
+			if err != nil {
+				return err
+			}
+			if ok {
+				found = true
+				raw = bytes.Clone(value)
+				if json.Unmarshal(value, &current) != nil {
+					return dataengine.ErrInvalidRequest
+				}
+			}
+			if obs.CookieID == "" || obs.AccountID == "" {
+				return nil
+			}
+			value, ok, err = v.Get(cookieKey(obs.Site, obs.CookieID))
+			if err != nil || !ok {
+				return err
+			}
+			cookieFound = true
+			cookieRaw = bytes.Clone(value)
+			bound = string(value)
+			return nil
+		})
+		if err != nil {
+			return Observation{}, err
 		}
-		found = true
-		raw = append([]byte(nil), value...)
-		if json.Unmarshal(value, &current) != nil {
-			return dataengine.ErrInvalidRequest
+		if cookieFound && bound != obs.AccountID {
+			obs.Known = false
+			obs.Balance = 0
+			obs.ErrorClass = "binding"
+			obs.Generation = 0
+			return obs, nil
 		}
-		return nil
-	})
-	if err != nil {
-		return Observation{}, err
+		if obs.Generation == 0 {
+			if obs.ReadBaseSet && found && current.Generation != obs.ReadBase {
+				return current, nil
+			}
+			if obs.ReadBaseSet && !found && obs.ReadBase != 0 {
+				return current, nil
+			}
+			if found {
+				obs.Generation = current.Generation + 1
+			} else {
+				obs.Generation = 1
+			}
+		} else if found && obs.Generation <= current.Generation {
+			return current, nil
+		}
+		encoded, err := json.Marshal(obs)
+		if err != nil {
+			return Observation{}, err
+		}
+		conditions := []dataengine.Condition{{Key: key, Absent: !found, Value: raw}}
+		mutations := []dataengine.Mutation{{Key: key, Value: encoded}}
+		if obs.Known && obs.CookieID != "" && obs.AccountID != "" {
+			conditions = append(conditions, dataengine.Condition{Key: cookieKey(obs.Site, obs.CookieID), Absent: !cookieFound, Value: cookieRaw})
+			mutations = append(mutations, dataengine.Mutation{Key: cookieKey(obs.Site, obs.CookieID), Value: []byte(obs.AccountID)})
+		}
+		ok, err := l.engine.CompareAndSwap(conditions, mutations)
+		if err != nil {
+			return Observation{}, err
+		}
+		if ok {
+			return obs, nil
+		}
 	}
-	if found && obs.Generation > 0 && obs.Generation < current.Generation {
-		return current, nil
+	stored, found, err := l.Load(obs.Site, account)
+	if err != nil || found {
+		return stored, err
 	}
-	if found && current.CookieID != "" && obs.CookieID != "" && current.CookieID == obs.CookieID && current.AccountID != "" && obs.AccountID != "" && current.AccountID != obs.AccountID {
-		obs.Known = false
-		obs.Balance = 0
-		obs.ErrorClass = "binding"
-	}
-	if obs.Generation == 0 {
-		obs.Generation = current.Generation + 1
-	}
-	encoded, err := json.Marshal(obs)
-	if err != nil {
-		return Observation{}, err
-	}
-	condition := dataengine.Condition{Key: key, Absent: !found, Value: raw}
-	ok, err := l.engine.CompareAndSwap([]dataengine.Condition{condition}, []dataengine.Mutation{{Key: key, Value: encoded}})
-	if err != nil {
-		return Observation{}, err
-	}
-	if !ok {
-		return l.CommitObservation(obs)
-	}
-	return obs, nil
+	return Observation{}, dataengine.ErrInvalidRequest
 }
 
 // Load returns the stored observation. A caller-supplied number is not accepted here.
@@ -289,7 +338,8 @@ func (l *Ledger) ReserveObserved(now time.Time, quote Quote, accountID string) (
 	if err != nil {
 		return Result{}, err
 	}
-	if !found || !obs.Known || obs.ErrorClass != "" || obs.AccountID != accountID {
+	cookieMismatch := quote.CookieID != "" && obs.CookieID != "" && quote.CookieID != obs.CookieID
+	if !found || !obs.Known || obs.ErrorClass != "" || obs.AccountID != accountID || cookieMismatch {
 		quote.BalanceKnown = false
 		quote.Balance = 0
 		return l.Reserve(now, quote)

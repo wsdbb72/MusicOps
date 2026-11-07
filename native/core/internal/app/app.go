@@ -108,8 +108,21 @@ func (a *App) secret(jobID string) string {
 	return a.secrets[jobID]
 }
 
+func (a *App) rememberDownload(jobID, site, value string) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	key := jobID + "/" + site
+	if value == "" {
+		delete(a.secrets, key)
+		return
+	}
+	a.secrets[key] = value
+}
+
 func (a *App) forget(jobID string) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	delete(a.secrets, jobID)
+	delete(a.secrets, jobID+"/dicmusic")
+	delete(a.secrets, jobID+"/orpheus")
 }

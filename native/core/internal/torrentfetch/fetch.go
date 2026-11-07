@@ -25,16 +25,20 @@ import (
 
 var positiveID = regexp.MustCompile(`^[1-9][0-9]*$`)
 
-// Request is one torrent GET. UseToken adds the Gazelle free-token parameter and nothing else.
+// Request is one torrent GET. DicMusic uses AuthKey and Orpheus uses TorrentPass.
+// Those values are never returned in errors or receipt fields. UseToken adds usetoken=1
+// only when the caller has already decided this request spends a token.
 type Request struct {
-	Site      string
-	Resource  string
-	Cookie    string
-	Synthetic bool
-	BaseURL   string
-	UseToken  bool
-	Directory string
-	Timeout   time.Duration
+	Site        string
+	Resource    string
+	Cookie      string
+	AuthKey     string
+	TorrentPass string
+	Synthetic   bool
+	BaseURL     string
+	UseToken    bool
+	Directory   string
+	Timeout     time.Duration
 }
 
 // Receipt describes stored torrent bytes. Downloaded and library publication stay false.
@@ -82,7 +86,10 @@ func Fetch(ctx context.Context, req Request) (Receipt, error) {
 	}}
 	response, err := client.Do(httpReq)
 	if err != nil {
-		return Receipt{}, err
+		if ctx.Err() != nil {
+			return Receipt{}, ctx.Err()
+		}
+		return Receipt{}, errors.New("torrent request failed")
 	}
 	defer response.Body.Close()
 	body, err := io.ReadAll(io.LimitReader(response.Body, 8<<20+1))
@@ -117,7 +124,8 @@ func downloadURL(req Request) (*url.URL, bool, error) {
 		parsed.Path = ""
 		parsed.RawQuery = ""
 		parsed.Fragment = ""
-		return withDownloadQuery(parsed, req), false, nil
+		endpoint, err := withDownloadQuery(parsed, req)
+		return endpoint, false, err
 	}
 	if !official || host == "" {
 		return nil, false, dataengine.ErrInvalidRequest
@@ -126,46 +134,97 @@ func downloadURL(req Request) (*url.URL, bool, error) {
 	if err != nil {
 		return nil, false, err
 	}
-	return withDownloadQuery(endpoint, req), true, nil
+	built, err := withDownloadQuery(endpoint, req)
+	return built, true, err
 }
 
-func withDownloadQuery(endpoint *url.URL, req Request) *url.URL {
+func withDownloadQuery(endpoint *url.URL, req Request) (*url.URL, error) {
+	if !positiveID.MatchString(req.Resource) || strings.ContainsAny(req.AuthKey, "\r\n") || strings.ContainsAny(req.TorrentPass, "\r\n") {
+		return nil, dataengine.ErrInvalidRequest
+	}
 	values := url.Values{}
-	if req.Site == "open.cd" {
+	switch req.Site {
+	case "open.cd":
+		if req.AuthKey != "" || req.TorrentPass != "" || req.UseToken {
+			return nil, dataengine.ErrInvalidRequest
+		}
 		endpoint.Path = "/download.php"
 		values.Set("id", req.Resource)
-	} else {
+	case "dicmusic":
+		if req.AuthKey == "" || req.TorrentPass != "" {
+			return nil, dataengine.ErrInvalidRequest
+		}
+		endpoint.Path = "/torrents.php"
+		values.Set("action", "download")
+		values.Set("id", req.Resource)
+		values.Set("authkey", req.AuthKey)
+		if req.UseToken {
+			values.Set("usetoken", "1")
+		}
+	case "orpheus":
+		if req.TorrentPass == "" || req.AuthKey != "" {
+			return nil, dataengine.ErrInvalidRequest
+		}
+		endpoint.Path = "/torrents.php"
+		values.Set("action", "download")
+		values.Set("id", req.Resource)
+		values.Set("torrent_pass", req.TorrentPass)
+		if req.UseToken {
+			values.Set("usetoken", "1")
+		}
+	case "redacted":
+		if req.AuthKey != "" || req.TorrentPass != "" {
+			return nil, dataengine.ErrInvalidRequest
+		}
 		endpoint.Path = "/torrents.php"
 		values.Set("action", "download")
 		values.Set("id", req.Resource)
 		if req.UseToken {
 			values.Set("usetoken", "1")
 		}
+	default:
+		return nil, dataengine.ErrInvalidRequest
 	}
 	endpoint.RawQuery = values.Encode()
-	return endpoint
+	return endpoint, nil
 }
 
 func allowedDownload(site string, endpoint *url.URL) bool {
 	values := endpoint.Query()
 	switch site {
 	case "open.cd":
-		return endpoint.Path == "/download.php" && values.Get("id") != "" && len(values) == 1
-	case "dicmusic", "orpheus", "redacted":
-		if endpoint.Path != "/torrents.php" || values.Get("action") != "download" || values.Get("id") == "" {
-			return false
-		}
-		switch len(values) {
-		case 2:
-			return values.Get("usetoken") == ""
-		case 3:
-			return values.Get("usetoken") == "1"
-		default:
-			return false
-		}
+		loopback := endpoint.Hostname() == "127.0.0.1" && endpoint.Scheme == "http"
+		official := endpoint.Hostname() == "www.open.cd" && endpoint.Scheme == "https"
+		return (loopback || official) && endpoint.Path == "/download.php" && values.Get("id") != "" && len(values) == 1
+	case "dicmusic":
+		return gazelleDownload(endpoint, "dicmusic.com", values) && values.Get("authkey") != "" && values.Get("torrent_pass") == "" && len(values) == tokenWidth(values, 3)
+	case "orpheus":
+		return gazelleDownload(endpoint, "orpheus.network", values) && values.Get("torrent_pass") != "" && values.Get("authkey") == "" && len(values) == tokenWidth(values, 3)
+	case "redacted":
+		return gazelleDownload(endpoint, "redacted.sh", values) && values.Get("authkey") == "" && values.Get("torrent_pass") == "" && len(values) == tokenWidth(values, 2)
 	default:
 		return false
 	}
+}
+
+func gazelleDownload(endpoint *url.URL, host string, values url.Values) bool {
+	if endpoint.Path != "/torrents.php" || values.Get("action") != "download" || values.Get("id") == "" {
+		return false
+	}
+	if values.Get("usetoken") != "" && values.Get("usetoken") != "1" {
+		return false
+	}
+	if endpoint.Hostname() == "127.0.0.1" && endpoint.Scheme == "http" {
+		return true
+	}
+	return endpoint.Scheme == "https" && endpoint.Hostname() == host
+}
+
+func tokenWidth(values url.Values, base int) int {
+	if values.Get("usetoken") == "1" {
+		return base + 1
+	}
+	return base
 }
 
 func looksLikeHTML(body []byte) bool {

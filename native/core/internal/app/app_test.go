@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -189,10 +190,15 @@ func TestTokenFetchStaysUnreconciled(t *testing.T) {
 	body["balance_known"] = true
 	body["balance"] = 3
 	body["budget"] = 5
+	body["dicmusic_authkey"] = "sentinel-dic-auth"
 	post(t, application, "/v1/search", body)
 	job := waitJob(t, application, "process:search:album-spend", "needs_review")
-	if query != "action=download&id=11&usetoken=1" || job.ErrorClass != "REQUEST_UNKNOWN" || job.ReviewKind != "token" || !strings.Contains(job.Message, "尚未下载") {
-		t.Fatal(query, job)
+	parsed, err := url.ParseQuery(query)
+	if err != nil || parsed.Get("action") != "download" || parsed.Get("id") != "11" || parsed.Get("usetoken") != "1" || parsed.Get("authkey") != "sentinel-dic-auth" || parsed.Get("torrent_pass") != "" || job.ErrorClass != "REQUEST_UNKNOWN" || job.ReviewKind != "token" || !strings.Contains(job.Message, "尚未下载") {
+		t.Fatal(job.ErrorClass, job.ReviewKind, job.Message)
+	}
+	if dirContains(t, application.Dir, "sentinel-dic-auth") {
+		t.Fatal("download authenticator was written")
 	}
 	matches, err := filepath.Glob(filepath.Join(application.Dir, "torrents", "*.torrent"))
 	if err != nil || len(matches) != 1 {

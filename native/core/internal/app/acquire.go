@@ -98,10 +98,17 @@ func (a *App) fetchTorrent(ctx context.Context, execution *scheduler.Execution, 
 	if err := execution.Checkpoint(ctx, phase, 0, site); err != nil {
 		return torrentfetch.Receipt{}, err
 	}
-	return torrentfetch.Fetch(ctx, torrentfetch.Request{
+	request := torrentfetch.Request{
 		Site: site, Resource: resource, Cookie: a.secret(plan.RootJobID), Synthetic: plan.Synthetic, BaseURL: plan.BaseURL,
 		UseToken: useToken, Directory: filepath.Join(a.Dir, "torrents"),
-	})
+	}
+	switch site {
+	case "dicmusic":
+		request.AuthKey = a.secret(plan.RootJobID + "/dicmusic")
+	case "orpheus":
+		request.TorrentPass = a.secret(plan.RootJobID + "/orpheus")
+	}
+	return torrentfetch.Fetch(ctx, request)
 }
 
 func (a *App) finishAcquire(held taskrepo.Token, job workflow.Job, review, message, class string, receipt *torrentfetch.Receipt) (scheduler.Outcome, error) {

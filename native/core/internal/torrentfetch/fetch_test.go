@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -47,9 +48,37 @@ func TestTokenDownloadUsesTheCanonicalParameter(t *testing.T) {
 		w.Write(body)
 	}))
 	defer server.Close()
-	receipt, err := Fetch(context.Background(), Request{Site: "dicmusic", Resource: "11", Cookie: "session=a", Synthetic: true, BaseURL: server.URL, UseToken: true, Directory: t.TempDir()})
-	if err != nil || !receipt.UseToken || seen != "/torrents.php?action=download&id=11&usetoken=1" {
-		t.Fatal(seen, receipt, err)
+	receipt, err := Fetch(context.Background(), Request{Site: "dicmusic", Resource: "11", Cookie: "session=a", AuthKey: "sentinel-dic", Synthetic: true, BaseURL: server.URL, UseToken: true, Directory: t.TempDir()})
+	if err != nil || !receipt.UseToken {
+		t.Fatal(receipt, err)
+	}
+	parsed, err := url.ParseRequestURI(seen)
+	if err != nil || parsed.Path != "/torrents.php" || parsed.Query().Get("action") != "download" || parsed.Query().Get("id") != "11" || parsed.Query().Get("usetoken") != "1" || parsed.Query().Get("authkey") != "sentinel-dic" || parsed.Query().Get("torrent_pass") != "" {
+		t.Fatal("dicmusic query mismatch")
+	}
+}
+
+func TestOrpheusTokenQueryDoesNotUseDicMusicParameters(t *testing.T) {
+	body := []byte("d8:announce12:http://a.com4:infod6:lengthi1e4:name4:test12:piece lengthi16384e6:pieces20:01234567890123456789ee")
+	var seen string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		seen = r.URL.RequestURI()
+		w.Write(body)
+	}))
+	defer server.Close()
+	_, err := Fetch(context.Background(), Request{Site: "orpheus", Resource: "11", Cookie: "session=a", TorrentPass: "sentinel-ops", Synthetic: true, BaseURL: server.URL, UseToken: true, Directory: t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	parsed, err := url.ParseRequestURI(seen)
+	if err != nil || parsed.Query().Get("torrent_pass") != "sentinel-ops" || parsed.Query().Get("authkey") != "" || parsed.Query().Get("usetoken") != "1" {
+		t.Fatal("orpheus query mismatch")
+	}
+	hits := 0
+	rejected := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { hits++ }))
+	defer rejected.Close()
+	if _, err = Fetch(context.Background(), Request{Site: "dicmusic", Resource: "11", Cookie: "session=a", TorrentPass: "sentinel-ops", Synthetic: true, BaseURL: rejected.URL, UseToken: true, Directory: t.TempDir()}); err == nil || hits != 0 {
+		t.Fatal(err, hits)
 	}
 }
 

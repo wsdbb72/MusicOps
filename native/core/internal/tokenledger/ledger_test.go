@@ -137,8 +137,16 @@ func TestInFlightReservationBlocksAnotherSpend(t *testing.T) {
 		t.Fatal(asking, err)
 	}
 	blocked, err := ledger.Reserve(now.Add(2*time.Second), quote("dicmusic", "resource-2", "request-2", 1, 5, 3, 1))
-	if err != nil || blocked.Class != ClassPending || blocked.Spent || blocked.FallbackAllowed || !blocked.LedgerRecorded {
+	if err != nil || blocked.Class != ClassAccountHold || blocked.Scope != "account" || blocked.Spent || blocked.FallbackAllowed || !blocked.LedgerRecorded {
 		t.Fatal(blocked, err)
+	}
+	same, err := ledger.Reserve(now.Add(2*time.Second), quote("dicmusic", "resource-1", "request-1b", 1, 5, 3, 1))
+	if err != nil || same.Class != ClassPending || same.Scope != "resource" || same.Spent {
+		t.Fatal(same, err)
+	}
+	otherSite, err := ledger.Reserve(now.Add(2*time.Second), quote("orpheus", "resource-9", "request-9", 1, 5, 3, 1))
+	if err != nil || !otherSite.Spent || otherSite.Class != ClassReserved {
+		t.Fatal(otherSite, err)
 	}
 	if _, err = ledger.Advance(now.Add(3*time.Second), "dicmusic", "request-1", StateReleased, ""); err != ErrReconciliation {
 		t.Fatal(err)

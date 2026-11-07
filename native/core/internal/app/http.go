@@ -135,27 +135,29 @@ func (a *App) archiveRecord(w http.ResponseWriter, r *http.Request) {
 
 func (a *App) startSearch(w http.ResponseWriter, r *http.Request) {
 	var body struct {
-		JobID            string   `json:"job_id"`
-		BatchID          string   `json:"batch_id"`
-		Scene            string   `json:"scene"`
-		Query            string   `json:"query"`
-		ExpectedTitle    string   `json:"expected_title"`
-		SourceTrackIDs   []string `json:"source_track_ids"`
-		EnabledSites     []string `json:"enabled_sites"`
-		StreamingEnabled bool     `json:"streaming_enabled"`
-		Synthetic        bool     `json:"synthetic"`
-		BaseURL          string   `json:"base_url"`
-		Cookie           string   `json:"cookie"`
-		MatchedCount     uint64   `json:"matched_count"`
-		FreeConfirmed    bool     `json:"free_confirmed"`
-		TokenCost        int      `json:"token_cost"`
-		BalanceKnown     bool     `json:"balance_known"`
-		Balance          int      `json:"balance"`
-		Budget           int      `json:"budget"`
-		SafetyMargin     int      `json:"safety_margin"`
-		Identity         Identity `json:"identity"`
+		JobID              string   `json:"job_id"`
+		BatchID            string   `json:"batch_id"`
+		Scene              string   `json:"scene"`
+		Query              string   `json:"query"`
+		ExpectedTitle      string   `json:"expected_title"`
+		SourceTrackIDs     []string `json:"source_track_ids"`
+		EnabledSites       []string `json:"enabled_sites"`
+		StreamingEnabled   bool     `json:"streaming_enabled"`
+		Synthetic          bool     `json:"synthetic"`
+		BaseURL            string   `json:"base_url"`
+		Cookie             string   `json:"cookie"`
+		MatchedCount       uint64   `json:"matched_count"`
+		FreeConfirmed      bool     `json:"free_confirmed"`
+		TokenCost          int      `json:"token_cost"`
+		BalanceKnown       bool     `json:"balance_known"`
+		Balance            int      `json:"balance"`
+		Budget             int      `json:"budget"`
+		SafetyMargin       int      `json:"safety_margin"`
+		DicmusicAuthKey    string   `json:"dicmusic_authkey"`
+		OrpheusTorrentPass string   `json:"orpheus_torrent_pass"`
+		Identity           Identity `json:"identity"`
 	}
-	if err := decode(r, &body); err != nil || strings.ContainsAny(body.Cookie, "\r\n") {
+	if err := decode(r, &body); err != nil || strings.ContainsAny(body.Cookie+body.DicmusicAuthKey+body.OrpheusTorrentPass, "\r\n") {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "code": "INVALID_REQUEST"})
 		return
 	}
@@ -179,6 +181,8 @@ func (a *App) startSearch(w http.ResponseWriter, r *http.Request) {
 		matched = uint64(len(body.SourceTrackIDs))
 	}
 	a.remember(body.JobID, body.Cookie)
+	a.rememberDownload(body.JobID, "dicmusic", body.DicmusicAuthKey)
+	a.rememberDownload(body.JobID, "orpheus", body.OrpheusTorrentPass)
 	_, err = a.flows.Start("start-"+body.JobID, workflow.Start{
 		JobID: body.JobID, BatchID: body.BatchID, Scene: body.Scene, Stage: "identifying", Label: body.ExpectedTitle,
 		SourceTrackIDs: body.SourceTrackIDs, MatchedCount: matched, Payload: raw, Evidence: []workflow.EvidenceInput{plan.evidence()},

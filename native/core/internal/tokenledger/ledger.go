@@ -27,8 +27,10 @@ const (
 	ClassBalanceUnknown  = "balance_unknown"
 	ClassBalanceStale    = "balance_stale"
 	ClassPending         = "token_pending"
+	ClassAccountHold     = "account_token_hold"
 	ClassAlreadyReserved = "already_reserved"
 	ClassAuthorization   = "authorization"
+	ClassUncertain       = "token_uncertain"
 
 	balanceTTL = 300 * time.Second
 )
@@ -68,6 +70,8 @@ type Result struct {
 	FallbackAllowed    bool   `json:"fallback_allowed"`
 	Downloaded         bool   `json:"downloaded"`
 	ProductionVerified bool   `json:"production_verified"`
+	Scope              string `json:"scope,omitempty"`
+	Basis              string `json:"basis,omitempty"`
 }
 
 type Ledger struct{ engine *dataengine.Engine }
@@ -94,6 +98,8 @@ type row struct {
 	Scene             string `json:"scene,omitempty"`
 	IdentityConfirmed bool   `json:"identity_confirmed,omitempty"`
 	StreamingEnabled  bool   `json:"streaming_enabled,omitempty"`
+	Scope             string `json:"scope,omitempty"`
+	Basis             string `json:"basis,omitempty"`
 }
 
 type indexItem struct {
@@ -134,8 +140,10 @@ func (l *Ledger) Reserve(now time.Time, quote Quote) (Result, error) {
 			return existing, err
 		}
 		next, item, reject := decide(now, quote, snap)
-		if reject.Class == ClassAlreadyReserved || reject.Class == ClassPending || reject.Class == ClassTokenBudget || reject.Class == ClassBalanceUnknown || reject.Class == ClassBalanceStale || reject.Class == ClassAuthorization {
+		if reject.Class == ClassAlreadyReserved || reject.Class == ClassPending || reject.Class == ClassAccountHold || reject.Class == ClassTokenBudget || reject.Class == ClassBalanceUnknown || reject.Class == ClassBalanceStale || reject.Class == ClassAuthorization {
 			next = rejection(now, quote, reject.Class)
+			next.Scope = reject.Scope
+			next.Basis = reject.Basis
 			item = indexItem{ID: next.ID, ResourceID: next.ResourceID, RequestID: next.RequestID, State: next.State, Cost: 0, BudgetRef: next.BudgetRef, UpdatedNS: next.UpdatedNS}
 		}
 		encodedRow, err := json.Marshal(next)
@@ -301,13 +309,20 @@ func decide(now time.Time, quote Quote, snap indexDoc) (row, indexItem, Result) 
 	if quote.ObservedAt.IsZero() || now.Before(quote.ObservedAt) || now.Sub(quote.ObservedAt) > balanceTTL {
 		return row{}, indexItem{}, Result{Class: ClassBalanceStale}
 	}
+	otherFlight := false
 	for _, item := range snap.Items {
+		if item.ResourceID == quote.ResourceID && (inFlight(item.State) || active(item.State)) {
+			if inFlight(item.State) {
+				return row{}, indexItem{}, Result{Class: ClassPending, Scope: "resource", Basis: "该资源已有未完成的令牌请求，不重发，也不把限制扩大到整站"}
+			}
+			return row{}, indexItem{}, Result{Class: ClassAlreadyReserved, Scope: "resource", Basis: "该资源已有活动预留"}
+		}
 		if inFlight(item.State) {
-			return row{}, indexItem{}, Result{Class: ClassPending}
+			otherFlight = true
 		}
-		if item.ResourceID == quote.ResourceID && active(item.State) {
-			return row{}, indexItem{}, Result{Class: ClassAlreadyReserved}
-		}
+	}
+	if otherFlight {
+		return row{}, indexItem{}, Result{Class: ClassAccountHold, Scope: "account", Basis: "站点只返回账号总余额，无法把未对账扣费分到单个资源；暂停新的令牌请求。只读检索和已证明不消费令牌的获取不在此限制内"}
 	}
 	spendable := quote.Balance - quote.SafetyMargin
 	outstanding, used := totals(snap, quote, quote.ObservedAt.UnixNano())
@@ -365,7 +380,7 @@ func resultFrom(current row) Result {
 	spent := current.Cost > 0 && current.State != StateRejected && current.State != StateReleased
 	return Result{
 		Class: current.Class, State: current.State, ReservationID: current.ID, Cost: current.Cost,
-		Spent: spent, LedgerRecorded: true,
+		Spent: spent, LedgerRecorded: true, Scope: current.Scope, Basis: current.Basis,
 		FallbackAllowed: current.Class == ClassTokenBudget && current.Cost == 0 && current.State == StateRejected && current.IdentityConfirmed && current.StreamingEnabled && fallbackScene(current.Scene),
 	}
 }

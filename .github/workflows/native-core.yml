@@ -3,6 +3,9 @@ on:
   push:
     branches: ['refactor/go-core']
     paths: ['native/**', 'src/musicops/state/native_client.py', 'tests/test_native_data_transport.py', '.github/workflows/native-core.yml']
+  pull_request:
+    branches: ['refactor/go-core']
+    paths: ['native/**', 'src/musicops/state/native_client.py', 'tests/test_native_data_transport.py', '.github/workflows/native-core.yml']
   workflow_dispatch:
 permissions:
   contents: read

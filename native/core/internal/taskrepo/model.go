@@ -4,6 +4,7 @@ package taskrepo
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"regexp"
@@ -14,9 +15,15 @@ var (
 	ErrRequestConflict = errors.New("request ID reused with different intent")
 	ErrNotFound        = errors.New("task not found")
 	ErrIntegrity       = errors.New("task storage integrity failed")
+	// ErrWorkflowOwned means this task belongs to a workflow job. Generic
+	// completion and control must not write it without that job.
+	ErrWorkflowOwned = errors.New("workflow task commits only with its job")
 )
 
 const maxPayload = 64 << 20
+
+// PayloadLimit is the maximum raw argument, result or evidence body.
+const PayloadLimit = maxPayload
 
 var namePattern = regexp.MustCompile(`^[a-zA-Z][a-zA-Z0-9_]{0,79}$`)
 var lanes = []string{"identify", "publish", "transcode", "aux"}
@@ -50,6 +57,7 @@ type Task struct {
 	Message          string  `json:"message,omitempty"`
 	ErrorClass       string  `json:"error_class,omitempty"`
 	FollowupCount    int     `json:"followup_count,omitempty"`
+	WorkflowJobID    string  `json:"workflow_job_id,omitempty"`
 }
 type Token struct {
 	ID    string `json:"task_id"`
@@ -66,10 +74,11 @@ type Attempt struct {
 	ErrorClass string `json:"error_class,omitempty"`
 }
 type Result struct {
-	Task      *Task  `json:"task,omitempty"`
-	Replayed  bool   `json:"replayed"`
-	Changed   bool   `json:"changed"`
-	Followups []Task `json:"followups,omitempty"`
+	Task      *Task           `json:"task,omitempty"`
+	Replayed  bool            `json:"replayed"`
+	Changed   bool            `json:"changed"`
+	Followups []Task          `json:"followups,omitempty"`
+	Domain    json.RawMessage `json:"domain,omitempty"`
 }
 type Receipt struct {
 	Intent string `json:"intent"`
@@ -157,6 +166,13 @@ func recentKey(t Task) []byte {
 	return []byte(fmt.Sprintf("task-recent/%020d/%s", int64(^uint64(0)>>1)-t.UpdatedNS, digest([]byte(t.ID))))
 }
 func countKey(lane, state string) []byte { return []byte("task-count/" + lane + "/" + state) }
+func cloneTask(task *Task) *Task {
+	if task == nil {
+		return nil
+	}
+	copied := *task
+	return &copied
+}
 func matches(t *Task, token Token) bool {
 	return t != nil && t.Owner == token.Owner && t.Fence == token.Fence
 }

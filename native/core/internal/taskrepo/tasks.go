@@ -26,7 +26,7 @@ func (r *Repository) Enqueue(requestID string, spec Spec, payload []byte) (Resul
 		}
 		extra, err := blobWrites(v, hash, compressed)
 		return &Task{Spec: spec, State: "queued", UpdatedNS: spec.CreatedNS, PayloadHash: hash}, extra, err
-	})
+	}, nil)
 }
 
 func (r *Repository) Claim(requestID, lane, owner string, nowNS int64) (Result, error) {
@@ -159,7 +159,7 @@ func (r *Repository) Begin(requestID string, token Token, nowNS int64) (Result, 
 		attempt.StartedNS = next.UpdatedNS
 		raw, _ := json.Marshal(attempt)
 		return &next, []dataengine.Mutation{{Key: attemptKey(token), Value: raw}}, nil
-	})
+	}, nil)
 }
 
 func decision(task Task) string {
@@ -252,46 +252,9 @@ func (r *Repository) Finish(requestID string, token Token, end Completion, follo
 	default:
 		return Result{}, dataengine.ErrInvalidRequest
 	}
-	hash := ""
-	var compressed []byte
-	var err error
-	if end.Payload != nil {
-		hash, compressed, err = pack(end.Payload)
-		if err != nil {
-			return Result{}, err
-		}
-	}
-	if len(followups) > 1000 || len(followups) > 0 && end.State != "completed" {
-		return Result{}, dataengine.ErrInvalidRequest
-	}
-	total := len(end.Payload)
-	seen := map[string]bool{token.ID: true}
-	prepared := make([]preparedTask, 0, len(followups))
-	for _, child := range followups {
-		if !validSpec(child.Spec) || seen[child.Spec.ID] || (child.Spec.ParentID != "" && child.Spec.ParentID != token.ID) {
-			return Result{}, dataengine.ErrInvalidRequest
-		}
-		total += len(child.Payload)
-		if total > maxPayload {
-			return Result{}, dataengine.ErrInvalidRequest
-		}
-		seen[child.Spec.ID] = true
-		child.Spec.ParentID = token.ID
-		childHash, childBlob, err := pack(child.Payload)
-		if err != nil {
-			return Result{}, err
-		}
-		prepared = append(prepared, preparedTask{Task: Task{Spec: child.Spec, State: "queued", UpdatedNS: child.Spec.CreatedNS, Revision: 1, PayloadHash: childHash}, Compressed: childBlob})
-	}
-	childIntents := make([]struct {
-		Spec Spec
-		Hash string
-	}, 0, len(prepared))
-	for _, child := range prepared {
-		childIntents = append(childIntents, struct {
-			Spec Spec
-			Hash string
-		}{child.Task.Spec, child.Task.PayloadHash})
+	hash, compressed, prepared, childIntents, err := prepareFinish(token, end, followups)
+	if err != nil {
+		return Result{}, err
 	}
 	intent := struct {
 		Operation                        string
@@ -301,44 +264,51 @@ func (r *Repository) Finish(requestID string, token Token, end Completion, follo
 	}{"finish", token, end.State, hash, end.ErrorClass, end.Message, childIntents}
 
 	return r.apply(requestID, token.ID, intent, func(v *dataengine.View, current *Task) (*Task, []dataengine.Mutation, error) {
-		if !matches(current, token) || current.Execution != "started" || (current.State != "running" && current.State != "paused") {
-			return nil, nil, ErrStale
-		}
-		next := *current
-		next.State = end.State
-		next.Execution = "finished"
-		next.PauseRequested = false
-		next.ResultHash = hash
-		next.ErrorClass = end.ErrorClass
-		next.Message = end.Message
-		next.UpdatedNS = effectiveTime(end.NowNS, current)
-		if end.State == "completed" {
-			next.Progress = 100
-		}
-		if end.State == "cancelled" {
-			next.CancelOutcome = "cancelled_at_checkpoint"
-		} else if next.CancelRequested && end.State == "completed" {
-			next.CancelOutcome = "completed_with_cancel_request"
-		}
-		attempt, err := readAttempt(v, token)
+		return finishDecision(v, current, token, end, hash, compressed, false)
+	}, nil, prepared...)
+}
+
+func finishDecision(v *dataengine.View, current *Task, token Token, end Completion, hash string, compressed []byte, allowOwned bool) (*Task, []dataengine.Mutation, error) {
+	if current != nil && current.WorkflowJobID != "" && !allowOwned {
+		return nil, nil, ErrWorkflowOwned
+	}
+	if !matches(current, token) || current.Execution != "started" || (current.State != "running" && current.State != "paused") {
+		return nil, nil, ErrStale
+	}
+	next := *current
+	next.State = end.State
+	next.Execution = "finished"
+	next.PauseRequested = false
+	next.ResultHash = hash
+	next.ErrorClass = end.ErrorClass
+	next.Message = end.Message
+	next.UpdatedNS = effectiveTime(end.NowNS, current)
+	if end.State == "completed" {
+		next.Progress = 100
+	}
+	if end.State == "cancelled" {
+		next.CancelOutcome = "cancelled_at_checkpoint"
+	} else if next.CancelRequested && end.State == "completed" {
+		next.CancelOutcome = "completed_with_cancel_request"
+	}
+	attempt, err := readAttempt(v, token)
+	if err != nil {
+		return nil, nil, err
+	}
+	attempt.State = end.State
+	attempt.FinishedNS = next.UpdatedNS
+	attempt.ResultHash = hash
+	attempt.ErrorClass = end.ErrorClass
+	raw, _ := json.Marshal(attempt)
+	extra := []dataengine.Mutation{{Key: attemptKey(token), Value: raw}}
+	if hash != "" {
+		writes, err := blobWrites(v, hash, compressed)
 		if err != nil {
 			return nil, nil, err
 		}
-		attempt.State = end.State
-		attempt.FinishedNS = next.UpdatedNS
-		attempt.ResultHash = hash
-		attempt.ErrorClass = end.ErrorClass
-		raw, _ := json.Marshal(attempt)
-		extra := []dataengine.Mutation{{Key: attemptKey(token), Value: raw}}
-		if hash != "" {
-			writes, err := blobWrites(v, hash, compressed)
-			if err != nil {
-				return nil, nil, err
-			}
-			extra = append(extra, writes...)
-		}
-		return &next, extra, nil
-	}, prepared...)
+		extra = append(extra, writes...)
+	}
+	return &next, extra, nil
 }
 
 func (r *Repository) Control(requestID, id, action string, nowNS int64) (Result, error) {
@@ -352,84 +322,91 @@ func (r *Repository) Control(requestID, id, action string, nowNS int64) (Result,
 	}
 	intent := struct{ Operation, ID, Action string }{"control", id, action}
 	return r.apply(requestID, id, intent, func(v *dataengine.View, current *Task) (*Task, []dataengine.Mutation, error) {
-		if current == nil {
-			return nil, nil, ErrNotFound
+		return controlDecision(v, current, id, action, nowNS, false)
+	}, nil)
+}
+
+func controlDecision(v *dataengine.View, current *Task, id, action string, nowNS int64, allowOwned bool) (*Task, []dataengine.Mutation, error) {
+	if current != nil && current.WorkflowJobID != "" && !allowOwned {
+		return nil, nil, ErrWorkflowOwned
+	}
+	if current == nil {
+		return nil, nil, ErrNotFound
+	}
+	next := *current
+	var extra []dataengine.Mutation
+	switch action {
+	case "pause":
+		if current.State == "paused" || current.PauseRequested {
+			return &next, nil, nil
 		}
-		next := *current
-		var extra []dataengine.Mutation
-		switch action {
-		case "pause":
-			if current.State == "paused" || current.PauseRequested {
-				return &next, nil, nil
-			}
-			if current.State != "queued" && current.State != "running" {
-				return nil, nil, ErrStale
-			}
-			next.PauseRequested = true
-			if current.State == "queued" || current.Execution == "claimed" {
-				next.State = "paused"
-			}
-		case "resume":
-			if (current.State == "running" || current.State == "queued") && !current.PauseRequested {
-				return &next, nil, nil
-			}
-			if current.State != "paused" && current.State != "running" {
-				return nil, nil, ErrStale
-			}
-			next.PauseRequested = false
-			if current.Owner == "" {
-				next.State = "queued"
-			} else {
-				next.State = "running"
-			}
-		case "cancel":
-			if current.State == "cancelled" || current.CancelRequested {
-				return &next, nil, nil
-			}
-			if terminal(current.State) {
-				return nil, nil, ErrStale
-			}
-			next.CancelRequested = true
-			if current.Owner == "" || current.Execution == "claimed" {
-				next.State = "cancelled"
-				next.Execution = "finished"
-				next.PauseRequested = false
-				next.CancelOutcome = "cancelled_before_start"
-				if current.Owner != "" {
-					token := Token{ID: id, Owner: current.Owner, Fence: current.Fence}
-					attempt, err := readAttempt(v, token)
-					if err != nil {
-						return nil, nil, err
-					}
-					attempt.State = "cancelled"
-					attempt.FinishedNS = effectiveTime(nowNS, current)
-					raw, _ := json.Marshal(attempt)
-					extra = append(extra, dataengine.Mutation{Key: attemptKey(token), Value: raw})
-				}
-			}
-		case "retry":
-			if current.State != "failed" && current.State != "cancelled" && current.State != "blocked" {
-				return nil, nil, ErrStale
-			}
+		if current.State != "queued" && current.State != "running" {
+			return nil, nil, ErrStale
+		}
+		next.PauseRequested = true
+		if current.State == "queued" || current.Execution == "claimed" {
+			next.State = "paused"
+		}
+	case "resume":
+		if (current.State == "running" || current.State == "queued") && !current.PauseRequested {
+			return &next, nil, nil
+		}
+		if current.State != "paused" && current.State != "running" {
+			return nil, nil, ErrStale
+		}
+		next.PauseRequested = false
+		if current.Owner == "" {
 			next.State = "queued"
-			next.Owner = ""
-			next.Execution = ""
+		} else {
+			next.State = "running"
+		}
+	case "cancel":
+		if current.State == "cancelled" || current.CancelRequested {
+			return &next, nil, nil
+		}
+		if terminal(current.State) {
+			return nil, nil, ErrStale
+		}
+		next.CancelRequested = true
+		if current.Owner == "" || current.Execution == "claimed" {
+			next.State = "cancelled"
+			next.Execution = "finished"
 			next.PauseRequested = false
-			next.CancelRequested = false
-			next.CancelOutcome = ""
-			next.Progress = 0
-			next.ProgressSequence = 0
-			next.ProgressHash = ""
-			next.Phase = ""
-			next.Message = ""
-			next.ErrorClass = ""
-			next.ResultHash = ""
+			next.CancelOutcome = "cancelled_before_start"
+			if current.Owner != "" {
+				token := Token{ID: id, Owner: current.Owner, Fence: current.Fence}
+				attempt, err := readAttempt(v, token)
+				if err != nil {
+					return nil, nil, err
+				}
+				attempt.State = "cancelled"
+				attempt.FinishedNS = effectiveTime(nowNS, current)
+				raw, _ := json.Marshal(attempt)
+				extra = append(extra, dataengine.Mutation{Key: attemptKey(token), Value: raw})
+			}
 		}
-		if next != *current {
-			next.UpdatedNS = effectiveTime(nowNS, current)
+	case "retry":
+		if current.State != "failed" && current.State != "cancelled" && current.State != "blocked" {
+			return nil, nil, ErrStale
 		}
-		return &next, extra, nil
-	})
+		next.State = "queued"
+		next.Owner = ""
+		next.Execution = ""
+		next.PauseRequested = false
+		next.CancelRequested = false
+		next.CancelOutcome = ""
+		next.Progress = 0
+		next.ProgressSequence = 0
+		next.ProgressHash = ""
+		next.Phase = ""
+		next.Message = ""
+		next.ErrorClass = ""
+		next.ResultHash = ""
+	}
+	if next != *current {
+		next.UpdatedNS = effectiveTime(nowNS, current)
+	}
+	return &next, extra, nil
 }
 
 // Interrupt is called after an owned executor is confirmed stopped, never just
@@ -444,30 +421,37 @@ func (r *Repository) Interrupt(requestID string, token Token, nowNS int64, reaso
 		Token     Token
 		Reason    string
 	}{"interrupt", token, reason}, func(v *dataengine.View, current *Task) (*Task, []dataengine.Mutation, error) {
-		if !matches(current, token) || (current.State != "running" && current.State != "paused") {
-			return nil, nil, ErrStale
-		}
-		if current.Fence == math.MaxUint64 {
-			return nil, nil, ErrIntegrity
-		}
-		next := *current
-		next.State = "recovery_required"
-		next.Execution = "interrupted"
-		next.Owner = ""
-		next.Fence++
-		next.PauseRequested = false
-		next.UpdatedNS = effectiveTime(nowNS, current)
-		next.ErrorClass = "RECOVERY_REQUIRED"
-		next.Message = reason
-		attempt, err := readAttempt(v, token)
-		if err != nil {
-			return nil, nil, err
-		}
-		attempt.State = "recovery_required"
-		attempt.FinishedNS = next.UpdatedNS
-		raw, _ := json.Marshal(attempt)
-		return &next, []dataengine.Mutation{{Key: attemptKey(token), Value: raw}}, nil
-	})
+		return interruptDecision(v, current, token, nowNS, reason, false)
+	}, nil)
+}
+
+func interruptDecision(v *dataengine.View, current *Task, token Token, nowNS int64, reason string, allowOwned bool) (*Task, []dataengine.Mutation, error) {
+	if current != nil && current.WorkflowJobID != "" && !allowOwned {
+		return nil, nil, ErrWorkflowOwned
+	}
+	if !matches(current, token) || (current.State != "running" && current.State != "paused") {
+		return nil, nil, ErrStale
+	}
+	if current.Fence == math.MaxUint64 {
+		return nil, nil, ErrIntegrity
+	}
+	next := *current
+	next.State = "recovery_required"
+	next.Execution = "interrupted"
+	next.Owner = ""
+	next.Fence++
+	next.PauseRequested = false
+	next.UpdatedNS = effectiveTime(nowNS, current)
+	next.ErrorClass = "RECOVERY_REQUIRED"
+	next.Message = reason
+	attempt, err := readAttempt(v, token)
+	if err != nil {
+		return nil, nil, err
+	}
+	attempt.State = "recovery_required"
+	attempt.FinishedNS = next.UpdatedNS
+	raw, _ := json.Marshal(attempt)
+	return &next, []dataengine.Mutation{{Key: attemptKey(token), Value: raw}}, nil
 }
 
 // ReleaseClaim yields a ticket that never reached Begin. No external action may
@@ -503,5 +487,5 @@ func (r *Repository) ReleaseClaim(requestID string, token Token, nowNS int64) (R
 		attempt.FinishedNS = next.UpdatedNS
 		raw, _ := json.Marshal(attempt)
 		return &next, []dataengine.Mutation{{Key: attemptKey(token), Value: raw}}, nil
-	})
+	}, nil)
 }

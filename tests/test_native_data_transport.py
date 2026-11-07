@@ -137,3 +137,45 @@ def test_completion_and_search_enqueue_share_one_durable_response(executable, tm
         replay = client.finish("handoff", token, "completed", 2300, payload=b"identity evidence", followups=[child])
         assert replay["replayed"] is True
         assert client.counts()["states"]["queued"] == 1
+
+
+def test_workflow_stage_evidence_and_successor_share_one_response(executable, tmp_path):
+    evidence = {"evidence_id": "evidence-1", "kind": "api", "source": "musicbrainz", "subject_id": "release1",
+                "tracklist_verified": True, "identity_confirmed": True, "payload": b"synthetic tracklist"}
+    with NativeDataClient(executable, tmp_path / "data", tmp_path / "backups") as client:
+        started = client.workflow_start(
+            "start", job_id="album1", batch_id="batch1", scene="playlist", stage="identifying",
+            source_track_ids=["track-1", "track-2"], library_file_count=9, matched_count=1,
+            payload=b"synthetic playlist", now_ns=1000)
+        assert started["job"]["stage"] == "identifying"
+        assert started["job"]["source_track_count"] == 2
+        assert started["job"]["library_file_count"] == 9
+        claim = client.claim("claim", "identify", "transport-owner", 2000)
+        token = client.token(claim["task"])
+        client.begin("begin", token, 2100)
+        with pytest.raises(NativeDataError, match="WORKFLOW_OWNED"):
+            client.finish("bare", token, "completed", 2200)
+        done = client.workflow_complete(
+            "handoff", token, job_id="album1", edge="queue_search", task_state="completed",
+            message="识别完成", result=b"identity", evidence=[evidence], now_ns=3000)
+        assert done["replayed"] is False
+        assert done["job"]["stage"] == "completed"
+        assert done["children"][0]["stage"] == "searching"
+        assert done["children"][0]["source_track_count"] == 2
+        assert done["children"][0]["library_file_count"] == 9
+        assert client.workflow_evidence("evidence-1") == b"synthetic tracklist"
+        replay = client.workflow_complete(
+            "handoff", token, job_id="album1", edge="queue_search", task_state="completed",
+            message="识别完成", result=b"identity", evidence=[evidence], now_ns=3000)
+        assert replay["replayed"] is True
+        assert client.counts()["states"]["queued"] == 1
+        assert client.task("search:album1")["command"] == "search_release"
+        inspected = client.workflow_inspect("album1")
+        assert inspected["job"]["stage"] == "completed"
+        assert inspected["children"][0]["job_id"] == "search:album1"
+        assert inspected["task"]["state"] == "completed"
+        with pytest.raises(NativeDataError, match="REQUEST_ID_CONFLICT"):
+            changed = dict(evidence, payload=b"different tracklist")
+            client.workflow_complete(
+                "handoff", token, job_id="album1", edge="queue_search", task_state="completed",
+                result=b"identity", evidence=[changed], now_ns=3000)

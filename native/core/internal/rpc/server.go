@@ -15,6 +15,7 @@ import (
 
 	"github.com/wsdbb72/MusicOps/native/core/internal/dataengine"
 	"github.com/wsdbb72/MusicOps/native/core/internal/taskrepo"
+	"github.com/wsdbb72/MusicOps/native/core/internal/workflow"
 )
 
 const maxBody = 96 << 20
@@ -28,6 +29,7 @@ type Handler struct {
 	slots           chan struct{}
 	bodyBytes       atomic.Int64
 	Tasks           *taskrepo.Repository
+	Workflows       *workflow.Repository
 }
 
 type Request struct {
@@ -56,7 +58,8 @@ func New(engine *dataengine.Engine, token, backups string) (*Handler, error) {
 	if engine == nil || len(token) < 32 || backups == "" {
 		return nil, errors.New("private local data service needs an engine, authentication and backup directory")
 	}
-	return &Handler{Engine: engine, Token: token, BackupDirectory: backups, slots: make(chan struct{}, 16), Tasks: taskrepo.New(engine)}, nil
+	tasks := taskrepo.New(engine)
+	return &Handler{Engine: engine, Token: token, BackupDirectory: backups, slots: make(chan struct{}, 16), Tasks: tasks, Workflows: workflow.New(engine, tasks)}, nil
 }
 
 func reply(w http.ResponseWriter, status int, value any) {
@@ -152,6 +155,9 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		if errors.Is(err, taskrepo.ErrStale) {
 			status, code = 409, "TASK_CHANGED"
+		}
+		if errors.Is(err, taskrepo.ErrWorkflowOwned) {
+			status, code = 409, "WORKFLOW_OWNED"
 		}
 		reply(w, status, map[string]any{"ok": false, "code": code})
 		return
@@ -314,6 +320,85 @@ func (h *Handler) dispatch(request Request) (any, error) {
 			return nil, err
 		}
 		return tasks.Request(request.RequestID)
+	case "workflow_start":
+		var p workflow.Start
+		if err := decodeParams(request.Params, &p); err != nil {
+			return nil, err
+		}
+		return h.Workflows.Start(request.RequestID, p)
+	case "workflow_complete":
+		var p struct {
+			Token taskrepo.Token    `json:"token"`
+			Input workflow.Complete `json:"input"`
+		}
+		if err := decodeParams(request.Params, &p); err != nil {
+			return nil, err
+		}
+		return h.Workflows.Complete(request.RequestID, p.Token, p.Input)
+	case "workflow_control":
+		var p struct {
+			JobID  string `json:"job_id"`
+			Action string `json:"action"`
+			NowNS  int64  `json:"now_ns"`
+		}
+		if err := decodeParams(request.Params, &p); err != nil {
+			return nil, err
+		}
+		return h.Workflows.Control(request.RequestID, p.JobID, p.Action, p.NowNS)
+	case "workflow_get":
+		var p struct {
+			ID string `json:"job_id"`
+		}
+		if err := decodeParams(request.Params, &p); err != nil {
+			return nil, err
+		}
+		job, err := h.Workflows.Job(p.ID)
+		return map[string]any{"found": job != nil, "job": job}, err
+	case "workflow_inspect":
+		var p struct {
+			ID string `json:"job_id"`
+		}
+		if err := decodeParams(request.Params, &p); err != nil {
+			return nil, err
+		}
+		return h.Workflows.Inspect(p.ID)
+	case "workflow_evidence":
+		var p struct {
+			ID string `json:"evidence_id"`
+		}
+		if err := decodeParams(request.Params, &p); err != nil {
+			return nil, err
+		}
+		item, err := h.Workflows.Evidence(p.ID)
+		return map[string]any{"found": item != nil, "evidence": item}, err
+	case "workflow_evidence_data":
+		var p struct {
+			ID string `json:"evidence_id"`
+		}
+		if err := decodeParams(request.Params, &p); err != nil {
+			return nil, err
+		}
+		data, found, err := h.Workflows.EvidenceData(p.ID)
+		return map[string]any{"found": found, "data": data}, err
+	case "workflow_children":
+		var p struct {
+			ID    string `json:"job_id"`
+			After []byte `json:"after,omitempty"`
+			Limit int    `json:"limit,omitempty"`
+		}
+		if err := decodeParams(request.Params, &p); err != nil {
+			return nil, err
+		}
+		if p.Limit == 0 {
+			p.Limit = 200
+		}
+		return h.Workflows.Children(p.ID, p.After, p.Limit)
+	case "workflow_request":
+		var p struct{}
+		if err := decodeParams(request.Params, &p); err != nil {
+			return nil, err
+		}
+		return h.Workflows.Request(request.RequestID)
 	case "checkpoint":
 		var p struct {
 			ID string `json:"checkpoint_id"`

@@ -2,6 +2,7 @@ package app
 
 import (
 	"regexp"
+	"strings"
 
 	"github.com/wsdbb72/MusicOps/native/core/internal/workflow"
 )
@@ -14,9 +15,12 @@ func scrub(value string) string {
 
 type jobView struct {
 	ID         string `json:"job_id"`
+	RootID     string `json:"root_id,omitempty"`
 	ParentID   string `json:"parent_job_id,omitempty"`
 	Scene      string `json:"scene"`
 	Stage      string `json:"stage"`
+	Progress   string `json:"progress"`
+	Headline   string `json:"headline"`
 	Label      string `json:"label,omitempty"`
 	Message    string `json:"message,omitempty"`
 	ReviewKind string `json:"review_kind,omitempty"`
@@ -27,10 +31,125 @@ type jobView struct {
 
 func publicJob(job workflow.Job) jobView {
 	return jobView{
-		ID: job.ID, ParentID: job.ParentJobID, Scene: job.Scene, Stage: job.Stage,
+		ID: job.ID, RootID: job.RootID, ParentID: job.ParentJobID, Scene: job.Scene, Stage: job.Stage,
 		Label: scrub(job.Label), Message: scrub(job.Message), ReviewKind: job.ReviewKind,
 		ErrorClass: job.ErrorClass, Paused: job.Paused, UpdatedNS: job.UpdatedNS,
 	}
+}
+
+// presentJobs gives every record in one album the same current progress.
+// A handed-off record keeps its own stage, and that stage is not shown as the album being finished.
+func presentJobs(jobs []jobView) []jobView {
+	groups := map[string][]jobView{}
+	for _, job := range jobs {
+		root := job.RootID
+		if root == "" {
+			root = job.ID
+		}
+		groups[root] = append(groups[root], job)
+	}
+	out := make([]jobView, len(jobs))
+	for i, job := range jobs {
+		root := job.RootID
+		if root == "" {
+			root = job.ID
+		}
+		job.Progress, job.Headline = albumProgress(groups[root])
+		out[i] = job
+	}
+	return out
+}
+
+func albumProgress(tree []jobView) (string, string) {
+	rank := map[string]int{
+		"preparing": 1, "identifying": 1, "snapshotting": 1, "metadata": 1,
+		"searching": 2, "fallback": 3, "requesting": 4, "validating": 4,
+		"downloading": 5, "publishing": 5, "notifying": 5,
+	}
+	labels := map[string]string{
+		"preparing": "准备中", "identifying": "识别中", "snapshotting": "识别中", "metadata": "整理资料",
+		"searching": "检索中", "fallback": "已排队流媒体", "requesting": "获取中", "validating": "正在核对文件",
+		"downloading": "获取中", "publishing": "正在入库", "notifying": "正在收尾",
+	}
+	var active, review, failed, cancelled, skipped *jobView
+	best := 0
+	for i := range tree {
+		job := &tree[i]
+		switch job.Stage {
+		case "needs_review":
+			if review == nil || job.UpdatedNS >= review.UpdatedNS {
+				review = job
+			}
+		case "failed":
+			if failed == nil || job.UpdatedNS >= failed.UpdatedNS {
+				failed = job
+			}
+		case "cancelled":
+			if cancelled == nil || job.UpdatedNS >= cancelled.UpdatedNS {
+				cancelled = job
+			}
+		case "skipped":
+			if skipped == nil || job.UpdatedNS >= skipped.UpdatedNS {
+				skipped = job
+			}
+		default:
+			if rank[job.Stage] > best || (rank[job.Stage] == best && rank[job.Stage] > 0 && (active == nil || job.UpdatedNS >= active.UpdatedNS)) {
+				if rank[job.Stage] > 0 {
+					best = rank[job.Stage]
+					active = job
+				}
+			}
+		}
+	}
+	switch {
+	case active != nil:
+		return labels[active.Stage], withUndownloaded(active.Message, labels[active.Stage])
+	case review != nil:
+		return "待核对", withUndownloaded(review.Message, "待核对")
+	case failed != nil:
+		return "未能继续", withUndownloaded(failed.Message, "未能继续")
+	case cancelled != nil:
+		return "已取消", withUndownloaded(cancelled.Message, "已取消")
+	case skipped != nil:
+		return "已跳过", withUndownloaded(skipped.Message, "已跳过")
+	default:
+		return "未下载", "音乐还没有下载到库里。"
+	}
+}
+
+func withUndownloaded(message, fallback string) string {
+	message = userFacing(strings.TrimSpace(message))
+	if message == "" {
+		message = fallback
+	}
+	if strings.Contains(message, "没有下载") || strings.Contains(message, "尚未下载") {
+		return message
+	}
+	return message + "。音乐还没有下载。"
+}
+
+func userFacing(message string) string {
+	switch {
+	case strings.Contains(message, "检索需要核对"), strings.Contains(message, "候选需要核对"):
+		return "需要核对。音乐还没有下载。"
+	case strings.Contains(message, "对账"), strings.Contains(message, "结果还不确定"):
+		return "这次请求的结果还不确定。音乐还没有下载。"
+	case strings.Contains(message, "种子"):
+		return "音乐还没有下载，需要核对。"
+	case developerCopy(message):
+		return ""
+	default:
+		return strings.ReplaceAll(message, "尚未下载、尚未入库", "音乐还没有下载。")
+	}
+}
+
+func developerCopy(message string) bool {
+	for _, word := range []string{"Python", "python", "执行器", "进程", "四站", "authkey", "Pebble", "usetoken"} {
+		if strings.Contains(message, word) {
+			return true
+		}
+	}
+	return false
 }
 
 func scrubInspection(in workflow.Inspection) workflow.Inspection {

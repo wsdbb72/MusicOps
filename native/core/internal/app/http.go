@@ -20,14 +20,14 @@ const page = `<!doctype html>
 <html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
 <title>MusicOps</title><link rel="stylesheet" href="/app.css"></head>
 <body>
-<header><div><p class="mark">MusicOps</p><h1>任务</h1></div><p class="quiet">此进程不启动 Python。种子字节不是专辑下载，也不是入库。</p></header>
+<header><p class="mark">MusicOps</p><h1>任务</h1></header>
 <nav id="nav" aria-label="功能">
 <button type="button" data-view="tasks" aria-current="page">任务</button>
 <button type="button" data-view="queue">队列</button>
 <button type="button" data-view="review">核对</button>
-<button type="button" data-view="sites">站点</button>
-<button type="button" data-view="library">库</button>
-<button type="button" data-view="log">日志</button>
+<span class="unavailable"><button type="button" disabled>站点</button><span>还不能修改连接</span></span>
+<span class="unavailable"><button type="button" disabled>库</button><span>还不能查看或整理</span></span>
+<span class="unavailable"><button type="button" disabled>日志</button><span>还没有单独的运行记录</span></span>
 </nav>
 <main>
 <p id="status" role="status">正在读取</p>
@@ -121,6 +121,7 @@ func (a *App) jobs(w http.ResponseWriter, r *http.Request) {
 	for _, job := range page.Jobs {
 		jobs = append(jobs, publicJob(job))
 	}
+	jobs = presentJobs(jobs)
 	next := ""
 	if len(page.Next) > 0 {
 		next = base64.RawURLEncoding.EncodeToString(page.Next)
@@ -267,7 +268,26 @@ func (a *App) job(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, status, map[string]any{"ok": false, "code": "NOT_FOUND"})
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "inspection": scrubInspection(inspection), "downloaded": false, "production_verified": false})
+	family, err := a.flows.Family(inspection.Job.RootID)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "code": "JOBS_UNAVAILABLE"})
+		return
+	}
+	views := make([]jobView, 0, len(family))
+	for _, job := range family {
+		views = append(views, publicJob(job))
+	}
+	views = presentJobs(views)
+	progress, headline := "", ""
+	for _, job := range views {
+		if job.ID == inspection.Job.ID {
+			progress, headline = job.Progress, job.Headline
+		}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"ok": true, "inspection": scrubInspection(inspection), "progress": progress, "headline": headline,
+		"downloaded": false, "production_verified": false,
+	})
 }
 
 func (a *App) allowSource(path string) error {

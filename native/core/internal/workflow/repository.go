@@ -891,6 +891,31 @@ func (r *Repository) List(after []byte, limit int) (JobPage, error) {
 	return page, err
 }
 
+// Family reads every job that belongs to one root, including the root itself.
+func (r *Repository) Family(root string) ([]Job, error) {
+	if !validID(root) {
+		return nil, dataengine.ErrInvalidRequest
+	}
+	prefix := []byte("workflow-root/" + digestBytes([]byte(root)) + "/")
+	var jobs []Job
+	err := r.engine.View(func(v *dataengine.View) error {
+		raws, err := collectValues(v, prefix)
+		if err != nil {
+			return err
+		}
+		jobs = make([]Job, 0, len(raws))
+		for _, raw := range raws {
+			var job Job
+			if json.Unmarshal(raw, &job) != nil || !validJob(job) || job.RootID != root {
+				return ErrIntegrity
+			}
+			jobs = append(jobs, job)
+		}
+		return nil
+	})
+	return jobs, err
+}
+
 func (r *Repository) Children(parent string, after []byte, limit int) (JobPage, error) {
 	if !validID(parent) {
 		return JobPage{}, dataengine.ErrInvalidRequest

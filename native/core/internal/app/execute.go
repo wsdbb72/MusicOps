@@ -10,6 +10,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/wsdbb72/MusicOps/native/core/internal/reviewai"
+	"github.com/wsdbb72/MusicOps/native/core/internal/reviewmatch"
 	"github.com/wsdbb72/MusicOps/native/core/internal/scheduler"
 	"github.com/wsdbb72/MusicOps/native/core/internal/searchdecision"
 	"github.com/wsdbb72/MusicOps/native/core/internal/trackersearch"
@@ -21,6 +23,7 @@ type SearchPlan struct {
 	RootJobID           string   `json:"root_job_id"`
 	Query               string   `json:"query"`
 	ExpectedTitle       string   `json:"expected_title"`
+	ExpectedArtist      string   `json:"expected_artist,omitempty"`
 	EnabledSites        []string `json:"enabled_sites"`
 	StreamingEnabled    bool     `json:"streaming_enabled"`
 	Synthetic           bool     `json:"synthetic"`
@@ -88,7 +91,7 @@ func (a *App) search(ctx context.Context, execution *scheduler.Execution, payloa
 			return scheduler.Outcome{}, err
 		}
 	}
-	report, evidence, err := a.observe(ctx, execution, *job, plan, token.ID)
+	report, evidence, adviseClass, err := a.observe(ctx, execution, *job, plan, token.ID)
 	if errors.Is(err, scheduler.ErrCancelled) {
 		return scheduler.Outcome{}, a.stop(execution)
 	}
@@ -102,6 +105,9 @@ func (a *App) search(ctx context.Context, execution *scheduler.Execution, payloa
 	complete, err := completion(decision)
 	if err != nil {
 		return scheduler.Outcome{}, err
+	}
+	if adviseClass == "infrastructure" && (decision.Action == searchdecision.ActionReviewSearch || decision.Action == searchdecision.ActionReviewCandidate) {
+		complete.Message = "检索服务暂时没有完成自动核对；尚未下载"
 	}
 	complete.Evidence = evidence
 	complete.Result = payload
@@ -123,7 +129,7 @@ func (a *App) search(ctx context.Context, execution *scheduler.Execution, payloa
 	return scheduler.Outcome{State: complete.TaskState, Message: complete.Message}, nil
 }
 
-func (a *App) observe(ctx context.Context, execution *scheduler.Execution, job workflow.Job, plan SearchPlan, taskID string) (searchdecision.Report, []workflow.EvidenceInput, error) {
+func (a *App) observe(ctx context.Context, execution *scheduler.Execution, job workflow.Job, plan SearchPlan, taskID string) (searchdecision.Report, []workflow.EvidenceInput, string, error) {
 	enabled := map[string]bool{}
 	for _, site := range plan.EnabledSites {
 		enabled[site] = true
@@ -133,9 +139,8 @@ func (a *App) observe(ctx context.Context, execution *scheduler.Execution, job w
 		RetryCount: job.SearchRetryCount, Query: plan.Query, Sites: make([]searchdecision.SiteReport, 0, 4),
 	}
 	evidence := []workflow.EvidenceInput{}
-	var chosen string
-	var chosenID string
-	qualified := 0
+	var picks []identityPick
+	var pool []reviewai.Candidate
 	for _, site := range searchdecision.TrackerSites {
 		row := searchdecision.SiteReport{Site: site, ExpectedTitle: plan.ExpectedTitle}
 		if !enabled[site] {
@@ -145,21 +150,31 @@ func (a *App) observe(ctx context.Context, execution *scheduler.Execution, job w
 		}
 		phase := "search_" + strings.ReplaceAll(site, ".", "_")
 		if err := execution.Checkpoint(ctx, phase, 0, site); err != nil {
-			return report, nil, err
+			return report, nil, "", err
 		}
 		observation, err := a.searcher.Search(ctx, trackersearch.Query{
 			Site: site, Text: plan.Query, Cookie: a.secret(plan.RootJobID), Synthetic: plan.Synthetic, BaseURL: plan.BaseURL,
 		})
 		if err != nil {
-			return report, nil, err
+			return report, nil, "", err
+		}
+		if observation.Status == "OK" && !observation.SearchComplete && observation.Pages != nil && observation.Page > 0 && *observation.Pages > observation.Page {
+			next, nextErr := a.searcher.Search(ctx, trackersearch.Query{
+				Site: site, Text: plan.Query, Page: observation.Page + 1, Cookie: a.secret(plan.RootJobID), Synthetic: plan.Synthetic, BaseURL: plan.BaseURL,
+			})
+			if nextErr == nil && next.Status == "OK" {
+				observation.Candidates = append(observation.Candidates, next.Candidates...)
+			}
 		}
 		row.Status = observation.Status
 		row.Attempted = true
 		row.CandidateCount = len(observation.Candidates)
 		row.Limited = observation.Status == "OK" && !observation.SearchComplete
-		exactID := ""
+		var seeded *identityPick
 		for _, candidate := range observation.Candidates {
-			if !titlesMatch(candidate.Title, plan.ExpectedTitle) {
+			hit := releaseHit(candidate)
+			pool = append(pool, reviewai.Candidate{ID: hit.ID, Title: hit.Title, Artists: hit.Artists, Aliases: hit.Aliases, Edition: hit.Edition})
+			if !reviewmatch.Compare(plan.ExpectedTitle, plan.ExpectedArtist, hit).Pass {
 				continue
 			}
 			row.Exact = true
@@ -168,22 +183,17 @@ func (a *App) observe(ctx context.Context, execution *scheduler.Execution, job w
 				row.Seeders = *candidate.Seeders
 				row.SeedersKnown = true
 			}
-			exactID = candidate.CandidateID
-			break
-		}
-		if row.Exact && (site == "open.cd" || row.SeedersKnown && row.Seeders > 0) {
-			qualified++
-			if qualified == 1 {
-				chosen = site
-				chosenID = exactID
-			} else {
-				chosen, chosenID = "", ""
+			if seeded == nil && (site == "open.cd" || row.SeedersKnown && row.Seeders > 0) {
+				seeded = &identityPick{site: site, id: candidate.CandidateID, hit: hit}
 			}
+		}
+		if seeded != nil {
+			picks = append(picks, *seeded)
 		}
 		report.Sites = append(report.Sites, row)
 		body, err := json.Marshal(observation)
 		if err != nil {
-			return report, nil, err
+			return report, nil, "", err
 		}
 		kind := "api"
 		if site == "open.cd" {
@@ -191,11 +201,54 @@ func (a *App) observe(ctx context.Context, execution *scheduler.Execution, job w
 		}
 		evidence = append(evidence, workflow.EvidenceInput{ID: evidenceID(taskID, site), Kind: kind, Source: site, Payload: body})
 	}
-	if qualified == 1 {
+	chosen, chosenID := selectIdentity(picks)
+	adviseClass := ""
+	if chosen == "" && a.reviewModel != nil && a.reviews != nil && len(pool) > 0 {
+		advice := a.reviews.Advise(ctx, a.reviewModel, reviewai.Request{
+			ExpectedTitle: plan.ExpectedTitle, ExpectedArtist: plan.ExpectedArtist, Candidates: pool,
+		})
+		adviseClass = advice.Class
+		if advice.Pass {
+			for _, item := range picks {
+				if item.id == advice.CandidateID {
+					chosen, chosenID = item.site, item.id
+				}
+			}
+		}
+	}
+	if chosen != "" {
 		report.SelectedSite = chosen
 		report.SelectedCandidateID = chosenID
 	}
-	return report, evidence, nil
+	return report, evidence, adviseClass, nil
+}
+
+type identityPick struct {
+	site string
+	id   string
+	hit  reviewmatch.Hit
+}
+
+func selectIdentity(picks []identityPick) (string, string) {
+	if len(picks) == 0 {
+		return "", ""
+	}
+	for _, item := range picks[1:] {
+		if !reviewmatch.Same(picks[0].hit, item.hit) {
+			return "", ""
+		}
+	}
+	return picks[0].site, picks[0].id
+}
+
+func releaseHit(candidate trackersearch.Candidate) reviewmatch.Hit {
+	edition := ""
+	if candidate.Release != nil {
+		if value, ok := candidate.Release["edition"].(string); ok && value != "unknown" {
+			edition = value
+		}
+	}
+	return reviewmatch.Hit{ID: candidate.CandidateID, Title: candidate.Title, Artists: candidate.Artists, Aliases: candidate.Aliases, Edition: edition}
 }
 
 func (a *App) cancelled(ctx context.Context, execution *scheduler.Execution) error {
@@ -274,15 +327,6 @@ func (plan SearchPlan) evidence() workflow.EvidenceInput {
 		TracklistVerified: plan.Identity.TracklistVerified, IdentityConfirmed: plan.Identity.IdentityConfirmed,
 		Payload: []byte(plan.Identity.Payload),
 	}
-}
-
-func titlesMatch(observed, expected string) bool {
-	observed = strings.TrimSpace(observed)
-	expected = strings.TrimSpace(expected)
-	if observed == "" || expected == "" || !strings.EqualFold(observed, expected) {
-		return false
-	}
-	return !searchdecision.TitlesConflict(observed, expected)
 }
 
 func evidenceID(taskID, site string) string {

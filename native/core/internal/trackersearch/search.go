@@ -61,6 +61,7 @@ type Candidate struct {
 	TorrentID          string              `json:"torrent_id"`
 	Title              string              `json:"title"`
 	Artists            []string            `json:"artists"`
+	Aliases            []string            `json:"aliases,omitempty"`
 	Eligibility        map[string]string   `json:"eligibility"`
 	EstimatedCost      *int                `json:"estimated_cost"`
 	Evidence           []map[string]string `json:"evidence"`
@@ -587,6 +588,7 @@ func groupCandidates(q Query, group map[string]any) ([]Candidate, error) {
 			return nil, err
 		}
 		row.GroupID = groupID
+		row.Aliases = optionalStrings(group["aliases"])
 		seeders := 0
 		if raw, ok := torrent["seeders"]; ok {
 			parsed, good := integer(raw)
@@ -623,6 +625,25 @@ var errShape = errString("shape")
 type errString string
 
 func (e errString) Error() string { return string(e) }
+
+func optionalStrings(raw any) []string {
+	list, ok := raw.([]any)
+	if !ok {
+		return nil
+	}
+	names := []string{}
+	for _, item := range list {
+		text, ok := item.(string)
+		if !ok {
+			continue
+		}
+		text = strings.TrimSpace(unescape(text))
+		if text != "" {
+			names = append(names, text)
+		}
+	}
+	return names
+}
 
 func artistNames(raw any, fallback string) ([]string, error) {
 	list, ok := raw.([]any)

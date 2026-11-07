@@ -213,6 +213,7 @@ func (a *App) startSearch(w http.ResponseWriter, r *http.Request) {
 		Scene              string   `json:"scene"`
 		Query              string   `json:"query"`
 		ExpectedTitle      string   `json:"expected_title"`
+		ExpectedArtist     string   `json:"expected_artist"`
 		SourceTrackIDs     []string `json:"source_track_ids"`
 		EnabledSites       []string `json:"enabled_sites"`
 		StreamingEnabled   bool     `json:"streaming_enabled"`
@@ -245,7 +246,7 @@ func (a *App) startSearch(w http.ResponseWriter, r *http.Request) {
 	body.FreeConfirmed = false
 	body.TokenCost = 0
 	plan := SearchPlan{
-		RootJobID: body.JobID, Query: body.Query, ExpectedTitle: body.ExpectedTitle, EnabledSites: body.EnabledSites,
+		RootJobID: body.JobID, Query: body.Query, ExpectedTitle: body.ExpectedTitle, ExpectedArtist: body.ExpectedArtist, EnabledSites: body.EnabledSites,
 		StreamingEnabled: body.StreamingEnabled, Synthetic: body.Synthetic, BaseURL: body.BaseURL, Identity: body.Identity,
 		Budget: body.Budget, SafetyMargin: body.SafetyMargin,
 	}

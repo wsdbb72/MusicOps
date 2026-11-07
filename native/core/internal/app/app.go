@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/wsdbb72/MusicOps/native/core/internal/dataengine"
+	"github.com/wsdbb72/MusicOps/native/core/internal/reviewai"
 	"github.com/wsdbb72/MusicOps/native/core/internal/scheduler"
 	"github.com/wsdbb72/MusicOps/native/core/internal/taskrepo"
 	"github.com/wsdbb72/MusicOps/native/core/internal/tokenledger"
@@ -18,19 +19,21 @@ import (
 
 // App owns one native directory and its scheduler. Secrets stay in memory.
 type App struct {
-	Dir      string
-	Backup   string
-	password string
-	engine   *dataengine.Engine
-	tasks    *taskrepo.Repository
-	flows    *workflow.Repository
-	runner   *scheduler.Coordinator
-	searcher *trackersearch.Client
-	ledger   *tokenledger.Ledger
-	now      func() time.Time
-	Wait     func(context.Context, time.Duration) error
-	mu       sync.Mutex
-	secrets  map[string]string
+	Dir         string
+	Backup      string
+	password    string
+	engine      *dataengine.Engine
+	tasks       *taskrepo.Repository
+	flows       *workflow.Repository
+	runner      *scheduler.Coordinator
+	searcher    *trackersearch.Client
+	ledger      *tokenledger.Ledger
+	reviews     *reviewai.Cache
+	reviewModel reviewai.Completer
+	now         func() time.Time
+	Wait        func(context.Context, time.Duration) error
+	mu          sync.Mutex
+	secrets     map[string]string
 }
 
 // Open creates the native store and starts the scheduler. Library publication
@@ -45,6 +48,7 @@ func Open(dir, backup, password string) (*App, error) {
 	}
 	app := &App{Dir: dir, Backup: backup, password: password, engine: engine, tasks: taskrepo.New(engine), searcher: &trackersearch.Client{}, now: time.Now, secrets: map[string]string{}}
 	app.ledger = tokenledger.New(engine)
+	app.reviews = reviewai.NewCache(2)
 	app.flows = workflow.New(engine, app.tasks)
 	runner, err := scheduler.New(app.tasks, app.handlers(), scheduler.DefaultConfig())
 	if err != nil {

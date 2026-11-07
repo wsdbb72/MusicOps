@@ -48,6 +48,69 @@ func (c *Client) ReadDetail(ctx context.Context, q Query, path string, values ur
 	return body, nil
 }
 
+// ReadAccount fetches the Gazelle account document used for token balance.
+// It rejects download parameters and does not follow redirects.
+func (c *Client) ReadAccount(ctx context.Context, q Query, values url.Values) ([]byte, int, error) {
+	if q.Site != "dicmusic" && q.Site != "orpheus" || strings.ContainsAny(q.Cookie, "\r\n") || strings.TrimSpace(q.Cookie) == "" {
+		return nil, 0, fmt.Errorf("%w: account", dataengine.ErrInvalidRequest)
+	}
+	if !allowedAccount(values) {
+		return nil, 0, fmt.Errorf("%w: account path", dataengine.ErrInvalidRequest)
+	}
+	endpoint, err := endpointURL(q)
+	if err != nil {
+		return nil, 0, err
+	}
+	endpoint.Path = "/ajax.php"
+	endpoint.RawQuery = values.Encode()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint.String(), nil)
+	if err != nil {
+		return nil, 0, errorsNewAccount()
+	}
+	req.Header.Set("Cookie", q.Cookie)
+	req.Header.Set("Accept", "application/json")
+	if q.Synthetic {
+		req.Header.Set("X-MusicOps-Site", q.Site)
+	}
+	response, err := c.doer(q.Timeout).Do(req)
+	if err != nil {
+		if ctx.Err() != nil {
+			return nil, 0, ctx.Err()
+		}
+		return nil, 0, errorsNewAccount()
+	}
+	defer response.Body.Close()
+	body, err := io.ReadAll(io.LimitReader(response.Body, maxBody+1))
+	if err != nil {
+		return nil, response.StatusCode, errorsNewAccount()
+	}
+	if len(body) > maxBody {
+		return nil, response.StatusCode, errorsNewAccount()
+	}
+	return body, response.StatusCode, nil
+}
+
+func allowedAccount(values url.Values) bool {
+	action := values.Get("action")
+	for key := range values {
+		switch key {
+		case "action", "id":
+		default:
+			return false
+		}
+	}
+	switch action {
+	case "index":
+		return len(values) == 1
+	case "user":
+		return len(values) == 2 && values.Get("id") != ""
+	default:
+		return false
+	}
+}
+
+func errorsNewAccount() error { return fmt.Errorf("account read failed") }
+
 func allowedDetail(site, path string, values url.Values) bool {
 	keys := map[string]bool{}
 	for key := range values {

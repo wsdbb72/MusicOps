@@ -45,6 +45,7 @@ var ErrReconciliation = errors.New("token reconciliation required")
 // is set; a missing observation is not treated as zero tokens.
 type Quote struct {
 	Site              string
+	AccountID         string
 	ResourceID        string
 	RequestID         string
 	Cost              int
@@ -81,6 +82,7 @@ func New(engine *dataengine.Engine) *Ledger { return &Ledger{engine: engine} }
 type row struct {
 	ID                string `json:"id"`
 	Site              string `json:"site"`
+	AccountID         string `json:"account_id,omitempty"`
 	ResourceID        string `json:"resource_id"`
 	RequestID         string `json:"request_id"`
 	Cost              int    `json:"cost"`
@@ -330,7 +332,7 @@ func decide(now time.Time, quote Quote, snap indexDoc) (row, indexItem, Result) 
 		return row{}, indexItem{}, Result{Class: ClassTokenBudget}
 	}
 	next := row{
-		ID: quote.RequestID, Site: quote.Site, ResourceID: quote.ResourceID, RequestID: quote.RequestID,
+		ID: quote.RequestID, Site: quote.Site, AccountID: quote.AccountID, ResourceID: quote.ResourceID, RequestID: quote.RequestID,
 		Cost: quote.Cost, RequestedCost: quote.Cost, State: StateReserved, Class: ClassReserved, BudgetRef: quote.BudgetRef,
 		Balance: quote.Balance, BalanceKnown: true, Budget: quote.Budget, SafetyMargin: quote.SafetyMargin,
 		ObservedAtNS: quote.ObservedAt.UnixNano(), UpdatedNS: now.UnixNano(),

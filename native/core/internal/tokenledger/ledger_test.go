@@ -12,12 +12,18 @@ import (
 
 func openLedger(t *testing.T) *Ledger {
 	t.Helper()
-	engine, err := dataengine.Open(filepath.Join(t.TempDir(), "data"))
+	engine := openAt(t, filepath.Join(t.TempDir(), "data"))
+	t.Cleanup(func() { engine.Close() })
+	return New(engine)
+}
+
+func openAt(t *testing.T, dir string) *dataengine.Engine {
+	t.Helper()
+	engine, err := dataengine.Open(dir)
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { engine.Close() })
-	return New(engine)
+	return engine
 }
 
 func quote(site, resource, request string, cost, balance, budget, margin int) Quote {

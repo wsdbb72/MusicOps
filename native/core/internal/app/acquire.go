@@ -6,10 +6,13 @@ import (
 	"path/filepath"
 	"strings"
 
+	"net/url"
+
 	"github.com/wsdbb72/MusicOps/native/core/internal/scheduler"
 	"github.com/wsdbb72/MusicOps/native/core/internal/taskrepo"
 	"github.com/wsdbb72/MusicOps/native/core/internal/tokenledger"
 	"github.com/wsdbb72/MusicOps/native/core/internal/torrentfetch"
+	"github.com/wsdbb72/MusicOps/native/core/internal/trackersearch"
 	"github.com/wsdbb72/MusicOps/native/core/internal/workflow"
 )
 
@@ -61,15 +64,19 @@ func (a *App) acquireWithToken(ctx context.Context, execution *scheduler.Executi
 	if site != "dicmusic" && site != "orpheus" {
 		return a.finishAcquire(held, job, "token", "该站不使用这条令牌账本；尚未下载、尚未入库", "", nil)
 	}
-	if !plan.BalanceKnown {
-		return a.finishAcquire(held, job, "token", "无法确认可用 FL 数量；尚未下载、尚未入库", "", nil)
+	observation, err := a.observeBalance(ctx, plan, site)
+	if err != nil {
+		return a.finishAcquire(held, job, "token", "余额读取失败，未发令牌请求；尚未下载、尚未入库", observation.ErrorClass, nil)
+	}
+	if !observation.Known || observation.ErrorClass != "" {
+		return a.finishAcquire(held, job, "token", "站点余额未知或无法绑定账号，未发令牌请求；尚未下载、尚未入库", tokenledger.ClassBalanceUnknown, nil)
 	}
 	quote := tokenledger.Quote{
-		Site: site, ResourceID: resource, RequestID: job.ID, Cost: plan.TokenCost, BalanceKnown: true, Balance: plan.Balance,
-		Budget: plan.Budget, SafetyMargin: plan.SafetyMargin, ObservedAt: a.now(), BudgetRef: job.BatchID, Scene: job.Scene,
+		Site: site, AccountID: observation.AccountID, ResourceID: resource, RequestID: job.ID, Cost: plan.TokenCost,
+		SafetyMargin: plan.SafetyMargin, BudgetRef: job.BatchID, Scene: job.Scene,
 		IdentityConfirmed: plan.Identity.IdentityConfirmed, StreamingEnabled: plan.StreamingEnabled,
 	}
-	reserved, err := a.ledger.Reserve(a.now(), quote)
+	reserved, err := a.ledger.ReserveObserved(a.now(), quote, observation.AccountID)
 	if err != nil {
 		return scheduler.Outcome{}, err
 	}
@@ -91,6 +98,32 @@ func (a *App) acquireWithToken(ctx context.Context, execution *scheduler.Executi
 		return a.finishAcquire(held, job, "token", "获取未完成，令牌状态待对账；尚未下载、尚未入库", "REQUEST_UNKNOWN", nil)
 	}
 	return a.finishAcquire(held, job, "token", "种子字节已保存，免费是否生效尚未对账；尚未下载、尚未入库", "REQUEST_UNKNOWN", &receipt)
+}
+
+func (a *App) observeBalance(ctx context.Context, plan SearchPlan, site string) (tokenledger.Observation, error) {
+	query := trackersearch.Query{Site: site, Cookie: a.secret(plan.RootJobID), Synthetic: plan.Synthetic, BaseURL: plan.BaseURL}
+	body, status, err := a.searcher.ReadAccount(ctx, query, url.Values{"action": {"index"}})
+	obs := tokenledger.ParseBalance(site, body)
+	obs.CookieID = tokenledger.Fingerprint(a.secret(plan.RootJobID))
+	obs.ObservedAtNS = a.now().UnixNano()
+	if err != nil || status == 0 {
+		obs.Known = false
+		obs.Balance = 0
+		obs.ErrorClass = "network"
+	} else if status == 401 || status == 403 {
+		obs.Known = false
+		obs.Balance = 0
+		obs.ErrorClass = "auth"
+	} else if status == 429 {
+		obs.Known = false
+		obs.Balance = 0
+		obs.ErrorClass = "rate_limited"
+	} else if status != 200 {
+		obs.Known = false
+		obs.Balance = 0
+		obs.ErrorClass = "parse"
+	}
+	return a.ledger.CommitObservation(obs)
 }
 
 func (a *App) fetchTorrent(ctx context.Context, execution *scheduler.Execution, plan SearchPlan, site, resource string, useToken bool) (torrentfetch.Receipt, error) {

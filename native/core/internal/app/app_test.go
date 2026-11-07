@@ -176,6 +176,13 @@ func TestTokenFetchStaysUnreconciled(t *testing.T) {
 	torrent := []byte("d8:announce12:http://a.com4:infod6:lengthi1e4:name4:test12:piece lengthi16384e6:pieces20:01234567890123456789ee")
 	var query string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Query().Get("action") == "index" {
+			if r.URL.Query().Get("usetoken") != "" {
+				t.Fatal("balance read used a token")
+			}
+			io.WriteString(w, `{"status":"success","response":{"id":7,"userstats":{"tokens":4}}}`)
+			return
+		}
 		if r.URL.Query().Get("action") == "download" {
 			query = r.URL.RawQuery
 			w.Write(torrent)
@@ -188,8 +195,7 @@ func TestTokenFetchStaysUnreconciled(t *testing.T) {
 	body := searchBody("album-spend", server.URL, []string{"dicmusic"}, false)
 	body["token_cost"] = 1
 	body["balance_known"] = true
-	body["balance"] = 3
-	body["budget"] = 5
+	body["balance"] = 99
 	body["dicmusic_authkey"] = "sentinel-dic-auth"
 	post(t, application, "/v1/search", body)
 	job := waitJob(t, application, "process:search:album-spend", "needs_review")

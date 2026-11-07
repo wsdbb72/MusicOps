@@ -23,15 +23,15 @@ var (
 // Decision is one offline reading of a detail response. Kind is empty when the
 // page does not prove free or a single token button for this resource.
 type Decision struct {
-	Site        string    `json:"site"`
-	ResourceID  string    `json:"resource_id"`
-	Personal    bool      `json:"personal"`
-	Global      bool      `json:"global"`
-	TokenCost   int       `json:"token_cost,omitempty"`
-	Balance     *int      `json:"balance,omitempty"`
-	ObservedAt  time.Time `json:"observed_at"`
-	Source      string    `json:"source"`
-	Mode        string    `json:"mode"`
+	Site       string    `json:"site"`
+	ResourceID string    `json:"resource_id"`
+	Personal   bool      `json:"personal"`
+	Global     bool      `json:"global"`
+	TokenCost  int       `json:"token_cost,omitempty"`
+	Balance    *int      `json:"balance,omitempty"`
+	ObservedAt time.Time `json:"observed_at"`
+	Source     string    `json:"source"`
+	Mode       string    `json:"mode"`
 }
 
 // Read merges Gazelle JSON and the torrent row HTML. observedAt is the time
@@ -88,13 +88,8 @@ func readGazelle(decision *Decision, body []byte) {
 	}
 	response, _ := data["response"].(map[string]any)
 	torrent, _ := response["torrent"].(map[string]any)
-	if torrent == nil {
+	if torrent == nil || !sameID(torrent["id"], decision.ResourceID) {
 		return
-	}
-	if id, _ := torrent["id"].(string); id != "" && id != decision.ResourceID {
-		if number, ok := torrent["id"].(float64); !ok || strconv.Itoa(int(number)) != decision.ResourceID {
-			return
-		}
 	}
 	if torrent["isPersonalFreeleech"] == true || personalValue(torrent["freeTorrent"]) {
 		decision.Personal = true
@@ -358,6 +353,38 @@ func integer(value any) (int, bool) {
 func looksJSON(body []byte) bool {
 	trimmed := strings.TrimSpace(string(body))
 	return strings.HasPrefix(trimmed, "{")
+}
+
+// GroupID returns the Gazelle group id when the torrent document names this resource.
+func GroupID(body []byte, resource string) string {
+	var data map[string]any
+	if json.Unmarshal(body, &data) != nil || data["status"] != "success" {
+		return ""
+	}
+	response, _ := data["response"].(map[string]any)
+	torrent, _ := response["torrent"].(map[string]any)
+	group, _ := response["group"].(map[string]any)
+	if torrent == nil || group == nil || !sameID(torrent["id"], resource) {
+		return ""
+	}
+	if !sameID(group["id"], stringify(group["id"])) {
+		return ""
+	}
+	return stringify(group["id"])
+}
+
+func sameID(value any, resource string) bool {
+	switch typed := value.(type) {
+	case string:
+		return typed == resource && positiveID.MatchString(typed)
+	case float64:
+		if typed != float64(int(typed)) || typed < 1 {
+			return false
+		}
+		return strconv.Itoa(int(typed)) == resource
+	default:
+		return false
+	}
 }
 
 func known(site string) bool {

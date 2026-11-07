@@ -25,8 +25,6 @@ type SearchPlan struct {
 	StreamingEnabled    bool     `json:"streaming_enabled"`
 	Synthetic           bool     `json:"synthetic"`
 	BaseURL             string   `json:"base_url,omitempty"`
-	FreeConfirmed       bool     `json:"free_confirmed,omitempty"`
-	TokenCost           int      `json:"token_cost,omitempty"`
 	Budget              int      `json:"budget,omitempty"`
 	SafetyMargin        int      `json:"safety_margin,omitempty"`
 	SelectedSite        string   `json:"selected_site,omitempty"`

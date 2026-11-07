@@ -120,7 +120,7 @@ func TestAlbumSceneStartsWithoutPlaylistCounts(t *testing.T) {
 }
 
 func TestFreeTorrentIsStoredWithoutPublishingTheAlbum(t *testing.T) {
-	torrent := []byte("d8:announce12:http://a.com4:infod6:lengthi1e4:name4:test12:piece lengthi16384e6:pieces20:01234567890123456789ee")
+	torrent := []byte(sampleTorrent)
 	var downloads atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if strings.HasPrefix(r.URL.Path, "/download.php") {
@@ -131,13 +131,17 @@ func TestFreeTorrentIsStoredWithoutPublishingTheAlbum(t *testing.T) {
 			w.Write(torrent)
 			return
 		}
+		if r.URL.Path == "/details.php" {
+			io.WriteString(w, `<tr id="torrent11"><td><strong class="tl_free">免费</strong></td></tr>`)
+			return
+		}
 		io.WriteString(w, `<html><a href="logout.php">logout</a><table><tr><td><table><tr><td><a href="details.php?id=11" title="Album">Album</a></td></tr></table></td><td>100 MiB</td></tr></table></html>`)
 	}))
 	defer server.Close()
 	application := newApp(t)
 	body := searchBody("album-free", server.URL, []string{"open.cd"}, false)
 	body["expected_title"] = "Album"
-	body["free_confirmed"] = true
+	body["free_confirmed"] = false
 	post(t, application, "/v1/search", body)
 	searchJob := waitJob(t, application, "search:album-free", "completed")
 	if searchJob.SearchAction != "queue_request" {
@@ -156,10 +160,13 @@ func TestFreeTorrentIsStoredWithoutPublishingTheAlbum(t *testing.T) {
 func TestUnknownBalanceDoesNotRequestATokenDownload(t *testing.T) {
 	var downloads atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if noteTokenEvidence(w, r) {
+			return
+		}
 		if r.URL.Query().Get("action") == "download" {
 			downloads.Add(1)
 		}
-		io.WriteString(w, `{"status":"success","response":{"currentPage":1,"pages":1,"results":[{"groupId":10,"groupName":"Example &amp; Test","artist":"Artist","torrents":[{"torrentId":11,"format":"FLAC","encoding":"Lossless","seeders":3}]}]}}`)
+		io.WriteString(w, gazelleHit("11"))
 	}))
 	defer server.Close()
 	application := newApp(t)
@@ -176,6 +183,9 @@ func TestTokenFetchStaysUnreconciled(t *testing.T) {
 	torrent := []byte("d8:announce12:http://a.com4:infod6:lengthi1e4:name4:test12:piece lengthi16384e6:pieces20:01234567890123456789ee")
 	var query string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if noteTokenEvidence(w, r) {
+			return
+		}
 		if r.URL.Query().Get("action") == "index" {
 			if r.URL.Query().Get("usetoken") != "" {
 				t.Fatal("balance read used a token")
@@ -188,7 +198,7 @@ func TestTokenFetchStaysUnreconciled(t *testing.T) {
 			w.Write(torrent)
 			return
 		}
-		io.WriteString(w, `{"status":"success","response":{"currentPage":1,"pages":1,"results":[{"groupId":10,"groupName":"Example &amp; Test","artist":"Artist","torrents":[{"torrentId":11,"format":"FLAC","encoding":"Lossless","seeders":3}]}]}}`)
+		io.WriteString(w, gazelleHit("11"))
 	}))
 	defer server.Close()
 	application := newApp(t)

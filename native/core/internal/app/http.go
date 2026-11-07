@@ -166,14 +166,16 @@ func (a *App) startSearch(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "code": "IDENTITY_EVIDENCE_REJECTED"})
 		return
 	}
-	// balance and balance_known are accepted so an older client is not rejected.
-	// They are not stored and cannot authorize a token request.
+	// Caller flags are accepted so an older client is not rejected.
+	// They are not stored. A page and the account document decide the download.
 	body.Balance = 0
 	body.BalanceKnown = false
+	body.FreeConfirmed = false
+	body.TokenCost = 0
 	plan := SearchPlan{
 		RootJobID: body.JobID, Query: body.Query, ExpectedTitle: body.ExpectedTitle, EnabledSites: body.EnabledSites,
 		StreamingEnabled: body.StreamingEnabled, Synthetic: body.Synthetic, BaseURL: body.BaseURL, Identity: body.Identity,
-		FreeConfirmed: body.FreeConfirmed, TokenCost: body.TokenCost, Budget: body.Budget, SafetyMargin: body.SafetyMargin,
+		Budget: body.Budget, SafetyMargin: body.SafetyMargin,
 	}
 	raw, err := json.Marshal(plan)
 	if err != nil {

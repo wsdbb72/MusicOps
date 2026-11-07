@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/wsdbb72/MusicOps/native/core/internal/scheduler"
+	"github.com/wsdbb72/MusicOps/native/core/internal/sitefree"
 	"github.com/wsdbb72/MusicOps/native/core/internal/taskrepo"
 	"github.com/wsdbb72/MusicOps/native/core/internal/tokenledger"
 	"github.com/wsdbb72/MusicOps/native/core/internal/torrentfetch"
@@ -48,20 +49,50 @@ func (a *App) acquire(ctx context.Context, execution *scheduler.Execution, paylo
 	if a.secret(plan.RootJobID) == "" {
 		return a.finishAcquire(held, *job, "candidate", "没有可用的登录状态，不能获取；尚未下载、尚未入库", "", nil)
 	}
-	if plan.TokenCost > 0 {
-		return a.acquireWithToken(ctx, execution, held, *job, plan, site, resource)
-	}
-	if !plan.FreeConfirmed {
-		return a.finishAcquire(held, *job, "candidate", "没有可确认的免费或令牌授权；尚未下载、尚未入库", "", nil)
-	}
-	receipt, err := a.fetchTorrent(ctx, execution, plan, site, resource, false)
+	decision, err := a.readEvidence(ctx, plan, site, resource)
 	if err != nil {
-		return a.finishAcquire(held, *job, "candidate", "种子响应不是有效元信息；尚未下载、尚未入库", "PARSE_ERROR", nil)
+		return a.finishAcquire(held, *job, "candidate", "站点详情读取失败，未发下载或令牌请求；尚未下载、尚未入库", "detail", nil)
 	}
-	return a.finishAcquire(held, *job, "candidate", "种子字节已保存，专辑尚未下载、尚未入库", "", &receipt)
+	if decision.Personal || (site != "dicmusic" && site != "orpheus" && decision.Global) {
+		receipt, err := a.fetchTorrent(ctx, execution, plan, site, resource, false)
+		if err != nil {
+			return a.finishAcquire(held, *job, "candidate", "种子响应不是有效元信息；尚未下载、尚未入库", "PARSE_ERROR", nil)
+		}
+		return a.finishAcquire(held, *job, "candidate", "种子字节已保存，专辑尚未下载、尚未入库", "", &receipt)
+	}
+	if (site == "dicmusic" || site == "orpheus") && decision.TokenCost > 0 {
+		return a.acquireWithToken(ctx, execution, held, *job, plan, site, resource, decision)
+	}
+	return a.finishAcquire(held, *job, "token", "站点页面没有个人免费，也没有唯一的令牌按钮，未发令牌请求；尚未下载、尚未入库", "evidence", nil)
 }
 
-func (a *App) acquireWithToken(ctx context.Context, execution *scheduler.Execution, held taskrepo.Token, job workflow.Job, plan SearchPlan, site, resource string) (scheduler.Outcome, error) {
+func (a *App) readEvidence(ctx context.Context, plan SearchPlan, site, resource string) (sitefree.Decision, error) {
+	query := trackersearch.Query{Site: site, Cookie: a.secret(plan.RootJobID), Synthetic: plan.Synthetic, BaseURL: plan.BaseURL}
+	var bodies [][]byte
+	if site == "open.cd" {
+		body, err := a.searcher.ReadDetail(ctx, query, "/details.php", url.Values{"id": {resource}})
+		if err != nil {
+			return sitefree.Decision{}, err
+		}
+		bodies = append(bodies, body)
+	} else {
+		body, err := a.searcher.ReadDetail(ctx, query, "/ajax.php", url.Values{"action": {"torrent"}, "id": {resource}})
+		if err != nil {
+			return sitefree.Decision{}, err
+		}
+		bodies = append(bodies, body)
+		if group := sitefree.GroupID(body, resource); group != "" {
+			page, err := a.searcher.ReadDetail(ctx, query, "/torrents.php", url.Values{"id": {group}, "torrentid": {resource}})
+			if err != nil {
+				return sitefree.Decision{}, err
+			}
+			bodies = append(bodies, page)
+		}
+	}
+	return sitefree.Read(site, resource, bodies, a.now())
+}
+
+func (a *App) acquireWithToken(ctx context.Context, execution *scheduler.Execution, held taskrepo.Token, job workflow.Job, plan SearchPlan, site, resource string, decision sitefree.Decision) (scheduler.Outcome, error) {
 	if site != "dicmusic" && site != "orpheus" {
 		return a.finishAcquire(held, job, "token", "该站不使用这条令牌账本；尚未下载、尚未入库", "", nil)
 	}
@@ -81,9 +112,12 @@ func (a *App) acquireWithToken(ctx context.Context, execution *scheduler.Executi
 		}
 		return a.finishAcquire(held, job, "token", message, class, nil)
 	}
+	if decision.Balance != nil && *decision.Balance != observation.Balance {
+		return a.finishAcquire(held, job, "token", "页面令牌数与账号余额不一致，未发令牌请求；尚未下载、尚未入库", "balance_conflict", nil)
+	}
 	quote := tokenledger.Quote{
 		Site: site, AccountID: observation.AccountID, CookieID: tokenledger.Fingerprint(a.secret(plan.RootJobID)),
-		ResourceID: resource, RequestID: job.ID, Cost: plan.TokenCost,
+		ResourceID: resource, RequestID: job.ID, Cost: decision.TokenCost,
 		SafetyMargin: plan.SafetyMargin, BudgetRef: job.BatchID, Scene: job.Scene,
 		IdentityConfirmed: plan.Identity.IdentityConfirmed, StreamingEnabled: plan.StreamingEnabled,
 	}

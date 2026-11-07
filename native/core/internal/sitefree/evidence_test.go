@@ -56,6 +56,18 @@ func TestGlobalFreeDoesNotSpendDicMusicTokens(t *testing.T) {
 	}
 }
 
+func TestTorrentIdentityMustMatch(t *testing.T) {
+	body := []byte(`{"status":"success","response":{"group":{"id":10},"torrent":{"id":99,"isPersonalFreeleech":true}}}`)
+	decision, err := Read("dicmusic", "11", [][]byte{body}, time.Unix(10, 0))
+	if err != nil || decision.Personal || decision.Mode != "" || GroupID(body, "11") != "" {
+		t.Fatal(decision, err, GroupID(body, "11"))
+	}
+	matched := []byte(`{"status":"success","response":{"group":{"id":10},"torrent":{"id":11,"isPersonalFreeleech":true}}}`)
+	if GroupID(matched, "11") != "10" {
+		t.Fatal(GroupID(matched, "11"))
+	}
+}
+
 func TestCallerClockIsRequired(t *testing.T) {
 	if _, err := Read("open.cd", "11", [][]byte{[]byte(`<tr id="torrent11"><strong class="tl_free">免费</strong></tr>`)}, time.Time{}); err == nil {
 		t.Fatal("missing observation time accepted")

@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"strings"
 
 	"github.com/wsdbb72/MusicOps/native/core/internal/dataengine"
@@ -431,6 +432,11 @@ func fileExists(path string) bool {
 }
 
 func syncDir(dir string) error {
+	// Windows FlushFileBuffers rejects directories. The file itself is already
+	// synced, so a directory flush is not required for the publication to be durable.
+	if runtime.GOOS == "windows" {
+		return nil
+	}
 	file, err := os.Open(dir)
 	if err != nil {
 		return err

@@ -153,6 +153,22 @@ func TestNonSyntheticAndOutsideNamesAreRejected(t *testing.T) {
 	}
 }
 
+func TestDirectorySyncLeavesTheWrittenFile(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "nested", "track.flac")
+	body := []byte("synthetic-fixture-audio")
+	if err := writeSame(path, body); err != nil {
+		t.Fatal(err)
+	}
+	if err := syncDir(dir); err != nil {
+		t.Fatal(err)
+	}
+	got, err := os.ReadFile(path)
+	if err != nil || !bytes.Equal(got, body) {
+		t.Fatal(got, err)
+	}
+}
+
 func TestStagedIntentPublishesAfterReopen(t *testing.T) {
 	store, engine, parent := openStore(t)
 	body := []byte("resume-after-stop")

@@ -201,6 +201,18 @@ class NativeDataClient:
         result = self._rpc("workflow_evidence_data", evidence_id=evidence_id)
         return base64.b64decode(result["data"], validate=True) if result["found"] else None
 
+    def media_stage(self, request_id, name, content, *, replace=False):
+        return self._rpc("media_stage", request_id, name=name, content=self._bytes(content), replace=replace, synthetic=True)
+
+    def media_publish(self, request_id):
+        return self._rpc("media_publish", request_id)
+
+    def media_rollback(self, request_id):
+        return self._rpc("media_rollback", request_id)
+
+    def media_get(self, request_id):
+        return self._rpc("media_get", request_id)
+
     def checkpoint(self, checkpoint_id):
         return self._rpc("checkpoint", checkpoint_id=checkpoint_id, timeout=120)
 

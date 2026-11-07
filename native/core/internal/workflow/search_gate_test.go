@@ -211,3 +211,27 @@ func TestAliasResearchDefersAndDoesNotConfirmANewIdentity(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestExhaustedTransientSearchRecoversWithoutADownload(t *testing.T) {
+	repo, tasks, token := openSearch(t)
+	report := searchdecision.Report{
+		Scene: "playlist", IdentityConfirmed: true, StreamingEnabled: true, RetryCount: 3,
+		Sites: fourSites(map[string]searchdecision.SiteReport{"redacted": {Status: "RATE_LIMITED", Attempted: true}}),
+	}
+	early := report
+	early.RetryCount = 2
+	if _, err := repo.Complete("too-soon", token, Complete{JobID: "search:album1", Edge: edgeQueueProcess, NextStage: "fallback", TaskState: "completed", NowNS: 4000, Evidence: searchEvidence(), Search: &early}); !errors.Is(err, dataengine.ErrInvalidRequest) {
+		t.Fatal(err)
+	}
+	result, err := repo.Complete("recover", token, Complete{JobID: "search:album1", Edge: edgeQueueProcess, NextStage: "fallback", TaskState: "completed", NowNS: 4000, Evidence: searchEvidence(), Search: &report})
+	if err != nil || len(result.Children) != 1 || result.Children[0].Stage != "fallback" || result.Children[0].SearchAction != searchdecision.ActionFallback {
+		t.Fatal(result, err)
+	}
+	if result.Children[0].Message != "已排队流媒体回退；尚未下载、尚未入库" || result.Search == nil || result.Search.Reason != "transient_recovered" {
+		t.Fatal(result.Children[0].Message, result.Search)
+	}
+	task, err := tasks.Get(result.Children[0].ID)
+	if err != nil || task == nil || task.State != "queued" {
+		t.Fatal(task, err)
+	}
+}

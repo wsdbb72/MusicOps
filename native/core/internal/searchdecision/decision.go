@@ -282,6 +282,9 @@ func blocked(in classified) (string, string, bool) {
 		case ClassContract:
 			return ActionReviewSearch, "contract_error", true
 		case ClassRateLimited, ClassNetwork, ClassTransient:
+			if recoverableTransient(in) {
+				return ActionFallback, "transient_recovered", true
+			}
 			return ActionReviewSearch, "transient_exhausted", true
 		case ClassNoResult:
 		case ClassMatched, ClassMismatch:
@@ -297,6 +300,23 @@ func blocked(in classified) (string, string, bool) {
 		return ActionReviewSearch, "no_sites_enabled", true
 	}
 	return "", "", false
+}
+
+func recoverableTransient(in classified) bool {
+	if !in.report.IdentityConfirmed || !in.report.StreamingEnabled || !fallbackScene(in.report.Scene) || in.report.RetryCount < 3 {
+		return false
+	}
+	saw := false
+	for _, site := range TrackerSites {
+		switch in.classes[site] {
+		case ClassRateLimited, ClassNetwork, ClassTransient:
+			saw = true
+		case ClassNoResult, ClassDisabled:
+		default:
+			return false
+		}
+	}
+	return saw
 }
 
 func autoFallback(in classified) bool {

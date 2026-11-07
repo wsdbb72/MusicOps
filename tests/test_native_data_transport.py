@@ -234,3 +234,24 @@ def test_search_outcome_gate_blocks_streaming_and_direct_download(executable, tm
             task_state="completed", evidence=[observed], search=matched, now_ns=5000)
         assert replay["replayed"] is True
         assert client.task(queued["children"][0]["job_id"])["state"] == "queued"
+
+
+def test_media_publication_replays_and_rollback_keeps_the_source(executable, tmp_path):
+    body = b"synthetic-fixture-audio"
+    with NativeDataClient(executable, tmp_path / "data", tmp_path / "backups") as client:
+        staged = client.media_stage("pub-1", "track.flac", body)
+        assert staged["state"] == "staged" and staged["synthetic"] is True
+        assert staged["downloaded"] is False and staged["production_verified"] is False
+        published = client.media_publish("pub-1")
+        assert published["state"] == "published" and published["sha256"] == staged["sha256"]
+        assert published["downloaded"] is False and published["production_verified"] is False
+        replay = client.media_publish("pub-1")
+        assert replay["replayed"] is True and replay["sha256"] == staged["sha256"]
+        library = tmp_path / "media-fixture" / "library" / "track.flac"
+        incoming = tmp_path / "media-fixture" / "incoming" / "pub-1.bin"
+        assert library.read_bytes() == body
+        assert incoming.read_bytes() == body
+        rolled = client.media_rollback("pub-1")
+        assert rolled["state"] == "rolled_back" and rolled["downloaded"] is False
+        assert not library.exists()
+        assert incoming.read_bytes() == body

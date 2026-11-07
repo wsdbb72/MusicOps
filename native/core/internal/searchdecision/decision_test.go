@@ -118,7 +118,20 @@ func TestOfflineSamplesCoverSearchClassesWithoutClaimingDownloads(t *testing.T) 
 			r.RetryCount = 3
 			r.Sites = sites(map[string]SiteReport{"redacted": {Status: "RATE_LIMITED", Attempted: true}})
 			return r
-		}(), action: ActionReviewSearch, reason: "transient_exhausted", deferStream: true},
+		}(), action: ActionFallback, reason: "transient_recovered"},
+		{name: "transient-exhausted-outside-fallback-scene", report: func() Report {
+			r := base()
+			r.Scene = "complete"
+			r.RetryCount = 3
+			r.Sites = sites(map[string]SiteReport{"redacted": {Status: "NETWORK_ERROR", Attempted: true}})
+			return r
+		}(), action: ActionReviewSearch, reason: "transient_exhausted"},
+		{name: "auth-remains-review-after-retries", report: func() Report {
+			r := base()
+			r.RetryCount = 3
+			r.Sites = sites(map[string]SiteReport{"dicmusic": {Status: "AUTH_FAILED", Attempted: true}})
+			return r
+		}(), action: ActionReviewSearch, reason: "auth_blocked", deferStream: true},
 		{name: "auth-is-not-an-empty-search", report: func() Report {
 			r := base()
 			r.Sites = sites(map[string]SiteReport{"dicmusic": {Status: "AUTH_FAILED", Attempted: true}})

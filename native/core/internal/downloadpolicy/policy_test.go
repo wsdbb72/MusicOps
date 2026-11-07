@@ -110,7 +110,7 @@ func TestFixtureObservationIsNotADownload(t *testing.T) {
 		{Source: "tidal", Class: ClassAuth},
 		{Source: "applemusic", Class: ClassNoResult},
 		{Source: "qqmusic", Class: ClassFixture, Synthetic: true},
-	})
+	}, 0)
 	if err != nil || !walk.FixtureObserved || walk.Downloaded || walk.Imported || walk.ProductionVerified || walk.FailureClass != "" || len(walk.Next) != 0 {
 		t.Fatal(walk, err)
 	}
@@ -122,11 +122,30 @@ func TestFixtureObservationIsNotADownload(t *testing.T) {
 		{Source: "applemusic", Class: ClassDownload},
 		{Source: "qqmusic", Class: ClassAuthorization},
 		{Source: "netease", Class: ClassImport},
-	})
+	}, 0)
 	if err != nil || failed.FailureClass != ClassImport || failed.FixtureObserved || failed.Downloaded || failed.Imported || len(failed.Next) != 0 {
 		t.Fatal(failed, err)
 	}
-	if _, err = Apply(plan, []Outcome{{Source: "tidal", Class: ClassFixture}}); err != dataengine.ErrInvalidRequest {
+	if _, err = Apply(plan, []Outcome{{Source: "tidal", Class: ClassFixture}}, 0); err != dataengine.ErrInvalidRequest {
 		t.Fatal(err)
+	}
+}
+
+func TestTransientStreamingRetriesThenAsksForReview(t *testing.T) {
+	plan, err := Plan(DefaultSources(), Track{SourceKnown: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	outcomes := make([]Outcome, len(plan))
+	for i, step := range plan {
+		outcomes[i] = Outcome{Source: step.Name, Class: ClassNetwork}
+	}
+	first, err := Apply(plan, outcomes, 0)
+	if err != nil || !first.Recoverable || first.RetryAfterSec != 600 || first.Downloaded || first.ReviewRequired || !equal(names(first.Next), names(plan)) {
+		t.Fatal(first, err)
+	}
+	last, err := Apply(plan, outcomes, 3)
+	if err != nil || last.Recoverable || !last.ReviewRequired || len(last.Next) != 0 || last.Downloaded || last.FailureClass != ClassNetwork {
+		t.Fatal(last, err)
 	}
 }

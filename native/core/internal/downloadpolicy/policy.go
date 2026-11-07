@@ -75,6 +75,9 @@ type Walk struct {
 	Attempts           []string `json:"attempts,omitempty"`
 	Next               []Step   `json:"next,omitempty"`
 	FixtureObserved    bool     `json:"fixture_observed,omitempty"`
+	Recoverable        bool     `json:"recoverable,omitempty"`
+	ReviewRequired     bool     `json:"review_required,omitempty"`
+	RetryAfterSec      int      `json:"retry_after_sec,omitempty"`
 	Downloaded         bool     `json:"downloaded"`
 	Imported           bool     `json:"imported"`
 	ProductionVerified bool     `json:"production_verified"`
@@ -162,13 +165,18 @@ func AllowStreaming(gate Gate) bool {
 	}
 }
 
+var streamRetrySec = [3]int{600, 1800, 3600}
+
 // Apply walks outcomes in plan order. Import stops the walk. A synthetic
-// observation stops it too, without becoming a download or an import.
-func Apply(plan []Step, outcomes []Outcome) (Walk, error) {
-	if len(outcomes) > len(plan) {
+// observation stops it too, without becoming a download or an import. A plan
+// that ends only in network or rate-limit failures is retried up to three
+// times, then marked for review instead of being left without a next step.
+func Apply(plan []Step, outcomes []Outcome, retryCount int) (Walk, error) {
+	if len(outcomes) > len(plan) || retryCount < 0 || retryCount > 3 {
 		return Walk{}, dataengine.ErrInvalidRequest
 	}
 	walk := Walk{Next: append([]Step(nil), plan...)}
+	transient := true
 	for i, outcome := range outcomes {
 		if outcome.Source != plan[i].Name {
 			return Walk{}, dataengine.ErrInvalidRequest
@@ -185,10 +193,24 @@ func Apply(plan []Step, outcomes []Outcome) (Walk, error) {
 			walk.Next = nil
 			return walk, nil
 		}
+		if class != ClassNetwork && class != ClassRateLimited {
+			transient = false
+		}
 		walk.FailureClass = class
 		if class == ClassImport {
+			walk.ReviewRequired = true
 			walk.Next = nil
 			return walk, nil
+		}
+	}
+	if len(outcomes) == len(plan) && len(plan) > 0 && transient {
+		if retryCount < 3 {
+			walk.Recoverable = true
+			walk.RetryAfterSec = streamRetrySec[retryCount]
+			walk.Next = append([]Step(nil), plan...)
+		} else {
+			walk.ReviewRequired = true
+			walk.Next = nil
 		}
 	}
 	return walk, nil

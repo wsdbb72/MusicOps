@@ -14,6 +14,7 @@ import (
 	"sync/atomic"
 
 	"github.com/wsdbb72/MusicOps/native/core/internal/dataengine"
+	"github.com/wsdbb72/MusicOps/native/core/internal/mediatx"
 	"github.com/wsdbb72/MusicOps/native/core/internal/taskrepo"
 	"github.com/wsdbb72/MusicOps/native/core/internal/workflow"
 )
@@ -30,6 +31,7 @@ type Handler struct {
 	bodyBytes       atomic.Int64
 	Tasks           *taskrepo.Repository
 	Workflows       *workflow.Repository
+	Media           *mediatx.Store
 }
 
 type Request struct {
@@ -59,7 +61,15 @@ func New(engine *dataengine.Engine, token, backups string) (*Handler, error) {
 		return nil, errors.New("private local data service needs an engine, authentication and backup directory")
 	}
 	tasks := taskrepo.New(engine)
-	return &Handler{Engine: engine, Token: token, BackupDirectory: backups, slots: make(chan struct{}, 16), Tasks: tasks, Workflows: workflow.New(engine, tasks)}, nil
+	roots, err := mediatx.OpenRoots(filepath.Join(filepath.Dir(backups), "media-fixture"))
+	if err != nil {
+		return nil, err
+	}
+	media, err := mediatx.New(engine, roots)
+	if err != nil {
+		return nil, err
+	}
+	return &Handler{Engine: engine, Token: token, BackupDirectory: backups, slots: make(chan struct{}, 16), Tasks: tasks, Workflows: workflow.New(engine, tasks), Media: media}, nil
 }
 
 func reply(w http.ResponseWriter, status int, value any) {
@@ -399,6 +409,54 @@ func (h *Handler) dispatch(request Request) (any, error) {
 			return nil, err
 		}
 		return h.Workflows.Request(request.RequestID)
+	case "media_stage":
+		var p struct {
+			Name      string `json:"name"`
+			Content   []byte `json:"content"`
+			Replace   bool   `json:"replace"`
+			Synthetic bool   `json:"synthetic"`
+		}
+		if err := decodeParams(request.Params, &p); err != nil {
+			return nil, err
+		}
+		return h.Media.Stage(mediatx.Request{RequestID: request.RequestID, Name: p.Name, Content: p.Content, Replace: p.Replace, Synthetic: p.Synthetic})
+	case "media_publish":
+		var p struct {
+			ID string `json:"request_id"`
+		}
+		if err := decodeParams(request.Params, &p); err != nil {
+			return nil, err
+		}
+		id := p.ID
+		if id == "" {
+			id = request.RequestID
+		}
+		return h.Media.Publish(id)
+	case "media_rollback":
+		var p struct {
+			ID string `json:"request_id"`
+		}
+		if err := decodeParams(request.Params, &p); err != nil {
+			return nil, err
+		}
+		id := p.ID
+		if id == "" {
+			id = request.RequestID
+		}
+		return h.Media.Rollback(id)
+	case "media_get":
+		var p struct {
+			ID string `json:"request_id"`
+		}
+		if err := decodeParams(request.Params, &p); err != nil {
+			return nil, err
+		}
+		id := p.ID
+		if id == "" {
+			id = request.RequestID
+		}
+		result, found, err := h.Media.Get(id)
+		return map[string]any{"found": found, "publication": result}, err
 	case "checkpoint":
 		var p struct {
 			ID string `json:"checkpoint_id"`

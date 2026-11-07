@@ -186,6 +186,38 @@ func TestConcurrentReservationsSpendAtMostTheObservedBalance(t *testing.T) {
 	}
 }
 
+func TestRejectionSurvivesReopen(t *testing.T) {
+	parent := t.TempDir()
+	directory := filepath.Join(parent, "engine")
+	engine, err := dataengine.Open(directory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Unix(1_700_000_100, 0)
+	got, err := New(engine).Reserve(now, Quote{
+		Site: "dicmusic", ResourceID: "resource-1", RequestID: "request-1", Cost: 1,
+		BalanceKnown: false, Balance: 40, Budget: 3, SafetyMargin: 1,
+		BudgetRef: "batch-1", Scene: "playlist", IdentityConfirmed: true, StreamingEnabled: true,
+	})
+	if err != nil || got.Class != ClassBalanceUnknown || got.Spent {
+		t.Fatal(got, err)
+	}
+	engine.Close()
+	reopened, err := dataengine.Open(directory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reopened.Close()
+	again, err := New(reopened).Reserve(now, Quote{
+		Site: "dicmusic", ResourceID: "resource-1", RequestID: "request-1", Cost: 1,
+		BalanceKnown: false, Budget: 3, SafetyMargin: 1,
+		BudgetRef: "batch-1", Scene: "playlist", IdentityConfirmed: true, StreamingEnabled: true,
+	})
+	if err != nil || again.ReservationID != got.ReservationID || again.Class != ClassBalanceUnknown || again.Spent || again.Cost != 0 || again.FallbackAllowed {
+		t.Fatal(again, err)
+	}
+}
+
 func jsonUnmarshal(raw []byte, dest *row) error {
 	return json.Unmarshal(raw, dest)
 }

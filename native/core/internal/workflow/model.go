@@ -35,9 +35,21 @@ const (
 	cmdRepair   = "repair_album"
 	cmdProcess  = "process_release"
 	cmdPublish  = "publish_album"
+
+	EdgeQueueSearch  = edgeQueueSearch
+	EdgeQueueProcess = edgeQueueProcess
+	EdgeDefer        = edgeDefer
+	EdgeAdvance      = edgeAdvance
+	EdgeTerminal     = edgeTerminal
+
+	CommandIdentify = cmdIdentify
+	CommandSnapshot = cmdSnapshot
+	CommandSearch   = cmdSearch
+	CommandProcess  = cmdProcess
 )
 
-// Commands are durable queue names. No executor is registered for them.
+// Commands are durable queue names. The Go application registers identify and
+// search. Download, repair and publish stay unregistered until those effects exist.
 var Commands = []string{cmdPrepare, cmdIdentify, cmdSnapshot, cmdSearch, cmdRepair, cmdProcess, cmdPublish}
 
 var (

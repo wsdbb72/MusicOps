@@ -403,6 +403,11 @@ func qualified(site SiteReport) bool {
 	return site.SeedersKnown && site.Seeders > 0
 }
 
+// TitlesConflict reports an edition marker that is present only on the observed title.
+func TitlesConflict(observed, expected string) bool {
+	return titlesConflict(observed, expected)
+}
+
 func titlesConflict(observed, expected string) bool {
 	if observed == "" {
 		return false

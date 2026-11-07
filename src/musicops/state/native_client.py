@@ -1,7 +1,8 @@
-"""Private transport to the bundled engine; no SQL translation or fallback.
+"""Legacy transport used by the Python 0.4.31 data client.
 
-Not wired into production until repository migration is verified. A lost write
-response is ambiguous: retain its request ID and query/replay that same intent.
+The standalone application is `native/core/cmd/musicops`. It does not import
+this module and it does not start a Python runtime. A lost write response is
+ambiguous: retain its request ID and query or replay that same intent.
 """
 from __future__ import annotations
 

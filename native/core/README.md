@@ -1,0 +1,28 @@
+# MusicOps Go 核心（开发中）
+
+当前正式版仍为0.4.31；本目录没有接管真实档案。完整迁移边界见[架构契约](ARCHITECTURE.md)。
+
+Go1.26.3与Pebble v2.1.7，存储及数据服务可用CGO_ENABLED=0构建，无须用户安装数据库服务。
+
+已实现：
+
+- 原生格式2、自有目录与独占锁保护；128MiB有界条件批写、同步WAL、一致性快照、最多200项/约4MiB游标分页、独立checkpoint。
+- 任务参数/结果按内容压缩，最大原始64MiB；结果按执行尝试保留。列表只读小摘要，计数固定读取32个键；相同内容共用一份blob。
+- 领取、Begin、暂停/继续/取消/重试、进度、完成、中断与历史结果查询。关键请求的回执与业务变化一起提交，进度使用单调sequence去重，避免轮询日志膨胀。重试使用新的fence，旧回调不能覆盖。
+- 四个独立队列默认identify4/publish1/transcode1/aux2，空闲槽持续补充；安全检查点处理控制请求，退出期限到达不会偷走尚在运行的任务。
+- 阶段完成与后继任务创建同一批原子提交，支持扇出、父子查询、计数聚合、回执重查及并发完成竞争；没有“先完成识别，再碰运气排入搜索”的两个写入窗口。
+- 认证本机RPC仅暴露明确的业务方法，旧原型的raw apply/get/scan接口及check-only启动入口已经移除。RPC16请求槽、96MiB单体限制、128MiB聚合输入预算；输入预算不等于堆内存上限。
+- 拥有父进程管道、随机端口、环境密钥、退出时排空已接收请求；Python原生客户端只作为过渡传输和集成验证入口，不翻译SQL、不回退第二数据库。
+
+当前数据服务只启动存储API，**没有把尚未迁移的媒体/下载功能注册成假成功handler**。独立调度器在隔离测试里使用受控handler验证。真实工作流、文件/FL账本、自动对账、迁移工具、完整应用HTTP接口及桌面壳仍待实现。完成后仅保留一个Go后端；Python旧业务和实验SQL压缩代码不进入最终路径。
+
+```sh
+cd native/core
+go test ./... -count=1
+go vet ./...
+CGO_ENABLED=0 go build -trimpath -o musicops-data ./cmd/musicops-data
+```
+
+数据服务由应用自动配置私有路径、备份目录、认证密钥和父管道；不是用户要单独安装或配置的数据库。开发目录不能指向正在运行的正式profile/library。
+
+参考：[Pebble官方实现](https://github.com/cockroachdb/pebble)、[同步批写契约](https://pkg.go.dev/github.com/cockroachdb/pebble/v2#Batch.Commit)。

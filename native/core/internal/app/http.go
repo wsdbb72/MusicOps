@@ -30,7 +30,9 @@ const page = `<!doctype html>
 <button type="button" data-view="tasks" aria-current="page">任务</button>
 <button type="button" data-view="queue">队列</button>
 <button type="button" data-view="review">核对</button>
+<button type="button" data-view="search">搜索</button>
 <button type="button" data-view="sites">站点</button>
+<button type="button" data-view="settings">设置</button>
 <button type="button" data-view="library">库</button>
 <button type="button" data-view="logs">日志</button>
 </nav>
@@ -46,7 +48,9 @@ const page = `<!doctype html>
 <button type="button" id="pause-job">暂停</button>
 <button type="button" id="resume-job">继续</button>
 <button type="button" id="cancel-job">取消</button>
+<button type="button" id="retry-job">重试</button>
 </p>
+<div id="review-box" class="review-box" hidden></div>
 </section>
 </main>
 <script src="/app.js"></script>
@@ -75,6 +79,12 @@ func (a *App) Handler() http.Handler {
 	mux.HandleFunc("POST /v1/tokens/recheck", a.recheckToken)
 	mux.HandleFunc("GET /v1/jobs/{id}", a.job)
 	mux.HandleFunc("POST /v1/jobs/{id}/control", a.controlJob)
+	mux.HandleFunc("GET /v1/jobs/{id}/review", a.reviewData)
+	mux.HandleFunc("POST /v1/jobs/{id}/review", a.reviewJob)
+	mux.HandleFunc("POST /v1/jobs/batch", a.batchJobs)
+	mux.HandleFunc("POST /v1/sites/preflight", a.preflightSite)
+	mux.HandleFunc("GET /v1/settings/download", a.downloadSettings)
+	mux.HandleFunc("POST /v1/settings/download", a.saveDownload)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Cache-Control", "no-store")
 		w.Header().Set("X-Content-Type-Options", "nosniff")
@@ -228,7 +238,7 @@ func (a *App) startSearch(w http.ResponseWriter, r *http.Request) {
 		ExpectedArtist     string   `json:"expected_artist"`
 		SourceTrackIDs     []string `json:"source_track_ids"`
 		EnabledSites       []string `json:"enabled_sites"`
-		StreamingEnabled   bool     `json:"streaming_enabled"`
+		StreamingEnabled   *bool    `json:"streaming_enabled"`
 		Synthetic          bool     `json:"synthetic"`
 		BaseURL            string   `json:"base_url"`
 		Cookie             string   `json:"cookie"`
@@ -266,9 +276,18 @@ func (a *App) startSearch(w http.ResponseWriter, r *http.Request) {
 			body.EnabledSites = settings.EnabledSites
 		}
 	}
+	// Streaming follows the same rule: an explicit value wins, omitting it
+	// falls back to the saved download default, and a settings read failure
+	// keeps streaming off rather than blocking the search.
+	streaming := false
+	if body.StreamingEnabled != nil {
+		streaming = *body.StreamingEnabled
+	} else if settings, err := a.loadDownloadSettings(); err == nil {
+		streaming = settings.StreamingEnabled
+	}
 	plan := SearchPlan{
 		RootJobID: body.JobID, Query: body.Query, ExpectedTitle: body.ExpectedTitle, ExpectedArtist: body.ExpectedArtist, EnabledSites: body.EnabledSites,
-		StreamingEnabled: body.StreamingEnabled, Synthetic: body.Synthetic, BaseURL: body.BaseURL, Identity: body.Identity,
+		StreamingEnabled: streaming, Synthetic: body.Synthetic, BaseURL: body.BaseURL, Identity: body.Identity,
 		Budget: body.Budget, SafetyMargin: body.SafetyMargin,
 	}
 	raw, err := json.Marshal(plan)

@@ -86,6 +86,7 @@ func (a *App) handlers() map[string]scheduler.Handler {
 		workflow.CommandSearch:   a.search,
 		workflow.CommandProcess:  a.acquire,
 		workflow.CommandPublish:  a.publish,
+		transcodeCommand:         a.transcode,
 	}
 }
 

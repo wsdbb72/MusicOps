@@ -26,6 +26,7 @@ type jobView struct {
 	ReviewKind       string `json:"review_kind,omitempty"`
 	ErrorClass       string `json:"error_class,omitempty"`
 	Paused           bool   `json:"paused,omitempty"`
+	CancelRequested  bool   `json:"cancel_requested,omitempty"`
 	Downloaded       bool   `json:"downloaded,omitempty"`
 	LibraryPublished bool   `json:"library_published,omitempty"`
 	UpdatedNS        int64  `json:"updated_ns"`
@@ -35,7 +36,7 @@ func publicJob(job workflow.Job) jobView {
 	return jobView{
 		ID: job.ID, RootID: job.RootID, ParentID: job.ParentJobID, Scene: job.Scene, Stage: job.Stage,
 		Label: scrub(job.Label), Message: scrub(job.Message), ReviewKind: job.ReviewKind,
-		ErrorClass: job.ErrorClass, Paused: job.Paused, UpdatedNS: job.UpdatedNS,
+		ErrorClass: job.ErrorClass, Paused: job.Paused, CancelRequested: job.CancelRequested, UpdatedNS: job.UpdatedNS,
 	}
 }
 

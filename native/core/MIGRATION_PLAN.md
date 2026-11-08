@@ -82,11 +82,11 @@
 ### 阶段 3 — 执行器（从“检索到已入库”之间的全部执行侧链路）
 
 - 真实下载：Go qBittorrent 客户端（先停着加种、免费证据匹配、标签归一化、所有权校验、完成归档、活动迁移），接 `process_release` 后的 `downloading` 边。
-- 真实扣费确认：需先拿到经核对的线上逐笔扣费格式（目前只有 `musicops.fixture.v1`）——见阻塞项。
+- 真实扣费确认：~~需先拿到经核对的线上逐笔扣费格式（目前只有 `musicops.fixture.v1`）——见阻塞项。~~ **确认路径已接通（2026-11-09，阶段 3 第 3 片），线上格式仍阻塞（见 §4）**：`tokenledger.SpendSource` 接口 + `FileSpendSource`（读 `<state>/spend-proofs.jsonl`，每行一个 fixture 证明，文件缺失即无证明、行为不变；行解析失败跳过）；`App.spendSource` 默认即此文件源。获取任务在下载种子后查源：有匹配证明时 `Reconcile` 直接结算（CONSUMED→`SPEND_CONFIRMED`，NOT_CONSUMED→`SPEND_NOT_CONSUMED`，仍进 `needs_review/token` 由用户决定下一步）；证明不匹配、状态 UNKNOWN 或源出错时回落到原 `REQUEST_UNKNOWN` 流程。API 确认路径沿用已有的 `POST /v1/tokens/recheck`（`proof` 字段，严格 `ParseSpend` + `Reconcile`），未另加重复接口。线上逐笔扣费格式仍未核实：只有 `musicops.fixture.v1` 可结算，`production_verified` 恒 false。
 - 流媒体执行：按 `downloadpolicy` 顺序接通 Tidal/Apple Music/QQ/网易云/歌单平台文件下载器（现在只有顺序策略，未接线）。
 - 转码：~~给 `transcode` 队列接命令与 handler（WAV→FLAC 等，现在是 `media/validation.py` 的 `prepare_media_copy`）~~ **已完成（2026-11-09，阶段 3 第 1 片）**：`transcode_audio` 命令（`transcode` 队列，容量 1），`POST /v1/library/transcode`（202，`transcode:<requestID>`，重复 409）与 `GET /v1/library/transcode`（回执列表），WebUI 库页有转码表单与转码记录。只支持 PCM WAV→FLAC（与 Python `prepare_media_copy` 同一契约）；源文件须在应用数据目录内（解析符号链接后校验，拒绝越界）；无解码器时 400；全解码校验源与输出、PCM 内容逐字节比对（s16le 44.1kHz 立体声哈希），源文件不动、输出已存在时拒绝覆盖、写临时文件后原子改名；回执存 Pebble `transcode/receipt/<requestID>`（按请求 ID + 源哈希幂等重放）。**调试中发现的两个坑（已修，测试覆盖）**：(1) `taskrepo.Progress` 要求 phase 名匹配 `^[a-zA-Z][a-zA-Z0-9_]{0,79}$`（连字符非法）、percent 是 0–100 不是 0–1，违规返回 `invalid data request`，协调器随即把任务中断进 `recovery_required` 且不记日志；(2) ffmpeg 靠输出文件扩展名猜格式，无扩展名的临时文件须显式 `-f flac`。
 - 叶子包已建好待接线（2026-11-09，`go vet` + `go test` 全过，均只用标准库、均有 fake 服务/合成文件测试，尚未接线、尚未推送）：`internal/qbittorrent`（Web API v2 客户端：cookie 登录、add-stopped、info/files/start/setLocation/setDownloadPath/tags、metainfo bencode 解析 + infohash v1/v2、归属校验、free-evidence 匹配、标签归一化、轮询分类）、`internal/ncm`（NCM 解密 + 格式探测）、`internal/flactags`（FLAC 元数据块解析、Vorbis comment 读写，保留其他块与音频字节）+ `internal/lrc`（LRC 解析/格式化/边车）、`internal/musicbrainz`（真实 MusicBrainz API 客户端：1 req/s 限流、429/5xx 重试、Lucene 转义、MBID 校验，映射到 `releaseidentity.Observation` 形状）。
-- 用户库发布/做种迁移：把 `publish_album` 从“校验本地导入记录”扩展到真实发布与做种迁移；接通 `audiopublish`（现在零调用方）。
+- 用户库发布/做种迁移：~~把 `publish_album` 从“校验本地导入记录”扩展到真实发布与做种迁移；接通 `audiopublish`（现在零调用方）。~~ **已完成大半（2026-11-09，阶段 3 第 2 片）**：`publishPayload` 增加受控音频路径（`source_url` + 艺人/专辑/曲名/曲号，走 `audiopublish.Publish` 到 `library-audio`，再从磁盘复核哈希）与多曲目回执路径（`receipts`，逐条 `audiorelease.Verify`）；`POST /v1/audio/publish` 建发布任务（两种形态二选一，`source_url` 仅限 `http://127.0.0.1:<port>`，请求 ID 确定性派生、可重放）。**顺手修掉的潜伏 bug**：原发布执行器校验失败时直接返回裸 `failed` Outcome，但协调器无法 Finish 工作流任务（`ErrWorkflowOwned`），任务会永远卡在 `running`；现全部失败路径改走 `flows.Complete{EdgeTerminal, NextStage:"failed"}`（任务失败、任务进 `failed` 阶段、可从核对页重试）。做种迁移（qBittorrent 归档后发布）待阶段 3 第 5 片（下载执行器）接上。
 - 目录与歌单：MusicBrainz/Discogs、网易云只读/下载/匹配、国内外歌单解析与订阅、歌单文件导入。
 - AI 核对：接通 `reviewai`（现在 `reviewModel` 恒为 nil）——见阻塞项（需真实模型服务）。
 - 媒体处理：NCM 解密、mutagen 标签读写、OpenCC、歌词边车/内嵌、封面校验。
@@ -117,7 +117,7 @@
    - C. Go 原生 GUI 框架（Wails/Fyne/Gio）：单 Go 技术栈；Wails 本质仍是 webview 壳，Fyne/Gio 则要重写一套与 WebUI 平行的原生界面，违反“同一套页面”的既定方向，工作量与分叉风险最大。**已选此项（桌面端），但按用户决定：原生 GUI 与 Docker WebUI 共用同一套界面设计，不做两套分叉实现。**
    - D. 保留 Qt 壳、只把后端换成 Go：现有工作台/安装器/更新链路可复用；但 Qt 仍需 Python 运行时，与“安装包里不能再依赖 Python 运行时”的硬门槛直接冲突，只能作过渡、不能作终态。
 2. **真实 AI 模型服务**：`reviewai` 需要可用的模型服务/凭证，现在没有；`reviewModel` 恒为 nil。
-3. **线上逐笔扣费格式**：没有经核对的真实格式，`musicops.fixture.v1` 只是测试协议；真实扣费确认做不了。
+3. **线上逐笔扣费格式**：没有经核对的真实格式，`musicops.fixture.v1` 只是测试协议；确认路径已接通（`SpendSource` 接口 + 文件源 + 已有 `POST /v1/tokens/recheck` 的 `proof` 字段），但真实扣费确认仍做不了——只有拿到经核对的线上格式、接一个读它的源，才能结算真实扣费。
 4. **真实四站凭证与 qBittorrent**：真实下载/扣费/流媒体的端到端验证需要真实凭证与可接的 qBittorrent，现在没有；未尝试、未伪造。
 5. **Muse Wonder 终审**：只是文档里的门，无代码、无 CI 步骤；发布前需真实走终审与复审。
 

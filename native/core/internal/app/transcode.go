@@ -259,20 +259,35 @@ func resolveInDir(dir, raw string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	rel, err := filepath.Rel(root, abs)
-	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
-		return "", dataengine.ErrInvalidRequest
+	// The root must be resolved the same way the file path is: on macOS
+	// the state directory can sit under a symlinked parent (for example
+	// /var, which points at /private/var), and a caller may hand in a
+	// path that a previous resolveInDir call already resolved, so the
+	// comparison has to happen on resolved paths on both sides. A purely
+	// lexical pre-filter cannot do this: an absolute input may be spelled
+	// through any symlinked ancestor, so the resolved comparison below is
+	// the only gate. A missing file fails EvalSymlinks and is rejected
+	// just the same; a symlink inside the directory that points outside
+	// it fails the resolved comparison.
+	resolvedRoot := root
+	if r, err := filepath.EvalSymlinks(root); err == nil {
+		resolvedRoot = r
 	}
-	// A symlink inside the directory must not point outside it.
 	resolved, err := filepath.EvalSymlinks(abs)
 	if err != nil {
 		return "", err
 	}
-	rel, err = filepath.Rel(root, resolved)
-	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+	if !insideDir(resolvedRoot, resolved) {
 		return "", dataengine.ErrInvalidRequest
 	}
 	return resolved, nil
+}
+
+// insideDir reports whether path is inside root (or is root itself),
+// lexically. Both arguments must already be clean.
+func insideDir(root, path string) bool {
+	rel, err := filepath.Rel(root, path)
+	return err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
 }
 
 // checkWAVPCM rejects anything that is not a PCM WAV: the Python

@@ -84,7 +84,8 @@
 - 真实下载：Go qBittorrent 客户端（先停着加种、免费证据匹配、标签归一化、所有权校验、完成归档、活动迁移），接 `process_release` 后的 `downloading` 边。
 - 真实扣费确认：需先拿到经核对的线上逐笔扣费格式（目前只有 `musicops.fixture.v1`）——见阻塞项。
 - 流媒体执行：按 `downloadpolicy` 顺序接通 Tidal/Apple Music/QQ/网易云/歌单平台文件下载器（现在只有顺序策略，未接线）。
-- 转码：给 `transcode` 队列接命令与 handler（WAV→FLAC 等，现在是 `media/validation.py` 的 `prepare_media_copy`）。
+- 转码：~~给 `transcode` 队列接命令与 handler（WAV→FLAC 等，现在是 `media/validation.py` 的 `prepare_media_copy`）~~ **已完成（2026-11-09，阶段 3 第 1 片）**：`transcode_audio` 命令（`transcode` 队列，容量 1），`POST /v1/library/transcode`（202，`transcode:<requestID>`，重复 409）与 `GET /v1/library/transcode`（回执列表），WebUI 库页有转码表单与转码记录。只支持 PCM WAV→FLAC（与 Python `prepare_media_copy` 同一契约）；源文件须在应用数据目录内（解析符号链接后校验，拒绝越界）；无解码器时 400；全解码校验源与输出、PCM 内容逐字节比对（s16le 44.1kHz 立体声哈希），源文件不动、输出已存在时拒绝覆盖、写临时文件后原子改名；回执存 Pebble `transcode/receipt/<requestID>`（按请求 ID + 源哈希幂等重放）。**调试中发现的两个坑（已修，测试覆盖）**：(1) `taskrepo.Progress` 要求 phase 名匹配 `^[a-zA-Z][a-zA-Z0-9_]{0,79}$`（连字符非法）、percent 是 0–100 不是 0–1，违规返回 `invalid data request`，协调器随即把任务中断进 `recovery_required` 且不记日志；(2) ffmpeg 靠输出文件扩展名猜格式，无扩展名的临时文件须显式 `-f flac`。
+- 叶子包已建好待接线（2026-11-09，`go vet` + `go test` 全过，均只用标准库、均有 fake 服务/合成文件测试，尚未接线、尚未推送）：`internal/qbittorrent`（Web API v2 客户端：cookie 登录、add-stopped、info/files/start/setLocation/setDownloadPath/tags、metainfo bencode 解析 + infohash v1/v2、归属校验、free-evidence 匹配、标签归一化、轮询分类）、`internal/ncm`（NCM 解密 + 格式探测）、`internal/flactags`（FLAC 元数据块解析、Vorbis comment 读写，保留其他块与音频字节）+ `internal/lrc`（LRC 解析/格式化/边车）、`internal/musicbrainz`（真实 MusicBrainz API 客户端：1 req/s 限流、429/5xx 重试、Lucene 转义、MBID 校验，映射到 `releaseidentity.Observation` 形状）。
 - 用户库发布/做种迁移：把 `publish_album` 从“校验本地导入记录”扩展到真实发布与做种迁移；接通 `audiopublish`（现在零调用方）。
 - 目录与歌单：MusicBrainz/Discogs、网易云只读/下载/匹配、国内外歌单解析与订阅、歌单文件导入。
 - AI 核对：接通 `reviewai`（现在 `reviewModel` 恒为 nil）——见阻塞项（需真实模型服务）。

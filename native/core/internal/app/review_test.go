@@ -419,7 +419,7 @@ func TestDownloadSettingsDefaultAppliesToSearch(t *testing.T) {
 	}
 
 	data := getJSON(t, application, "/v1/settings/download")
-	if data["streaming_enabled"] != false || data["streaming_fallback_wired"] != false {
+	if data["streaming_enabled"] != false || data["streaming_fallback_wired"] != true {
 		t.Fatal(data)
 	}
 	sources, _ := data["streaming_sources"].([]any)

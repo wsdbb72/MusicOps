@@ -72,6 +72,8 @@ func (a *App) Handler() http.Handler {
 	mux.HandleFunc("POST /v1/search", a.startSearch)
 	mux.HandleFunc("POST /v1/audio/release", a.releaseAudio)
 	mux.HandleFunc("POST /v1/audio/incoming", a.uploadIncoming)
+	mux.HandleFunc("POST /v1/library/transcode", a.transcodeEnqueue)
+	mux.HandleFunc("GET /v1/library/transcode", a.transcodeList)
 	mux.HandleFunc("GET /v1/library", a.library)
 	mux.HandleFunc("GET /v1/logs", a.logs)
 	mux.HandleFunc("GET /v1/sites", a.sites)

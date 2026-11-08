@@ -35,7 +35,10 @@ var (
 )
 
 // Decoder checks one file that already passed the container rules.
-// A nil decoder means the host has no ffmpeg/ffprobe; FLAC then stays unpublished.
+// A nil decoder means the host has no ffmpeg/ffprobe; the file is then
+// accepted on its structural check alone and DecodeState stays "structural".
+// WAV and FLAC share this rule: the container check always runs, and a
+// decoder only upgrades the check to a full decode.
 type Decoder func(context.Context, string) error
 
 // Request names one file already stored under Incoming. Library is this process's
@@ -118,6 +121,11 @@ func Release(ctx context.Context, engine *dataengine.Engine, input Request) (Res
 	incoming, library, source, err := locate(input)
 	if err != nil {
 		if errors.Is(err, ErrMissing) {
+			// The source is gone but the release may already be committed:
+			// return the stored receipt instead of reporting a failure.
+			if receipt, ok, rerr := replayMissing(engine, input.RequestID); rerr == nil && ok {
+				return receipt, nil
+			}
 			empty.Class = "audio_missing"
 		}
 		if errors.Is(err, ErrRejected) {
@@ -133,6 +141,9 @@ func Release(ctx context.Context, engine *dataengine.Engine, input Request) (Res
 	body, err := os.ReadFile(source)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
+			if receipt, ok, rerr := replayMissing(engine, input.RequestID); rerr == nil && ok {
+				return receipt, nil
+			}
 			empty.Class = "audio_missing"
 			return empty, ErrMissing
 		}
@@ -145,11 +156,6 @@ func Release(ctx context.Context, engine *dataengine.Engine, input Request) (Res
 		return empty, ErrRejected
 	}
 	decodeState := "structural"
-	if format == "flac" && input.Decoder == nil {
-		empty.Class = "tool_missing"
-		empty.Format = format
-		return empty, ErrTool
-	}
 	if input.Decoder != nil {
 		if err = input.Decoder(ctx, source); err != nil {
 			empty.Class = "decode_failed"
@@ -230,10 +236,30 @@ func Release(ctx context.Context, engine *dataengine.Engine, input Request) (Res
 		}
 		return empty, ErrConflict
 	}
-	if err = sameFile(source, digest); err != nil {
-		return empty, err
+	// The file and the record are committed. A source that vanished after the
+	// copy is reported as not preserved, never as a failed release.
+	return resultFrom(rec, sameFile(source, digest) == nil, false), nil
+}
+
+// Verify re-checks a published library record: the stored file must still
+// hash to the stored digest. It copies nothing and does not look at the
+// original source file again, so SourcePreserved is left false: Verify
+// attests the library file, not the source.
+func Verify(engine *dataengine.Engine, requestID string) (Result, error) {
+	rec, found, err := readRelease(engine, requestID)
+	if err != nil {
+		return Result{}, err
 	}
-	return resultFrom(rec, true, false), nil
+	if !found {
+		return Result{}, ErrMissing
+	}
+	if rec.State != "published" || !rec.Verified || !rec.LibraryPublished {
+		return Result{}, ErrConflict
+	}
+	if err := sameFile(rec.Path, rec.SHA256); err != nil {
+		return Result{}, err
+	}
+	return resultFrom(rec, false, false), nil
 }
 
 // Albums returns root ids whose verified audio is in the library.
@@ -314,6 +340,25 @@ func replay(rec record, source string) (Result, error) {
 	}
 	preserved := sameFile(source, rec.SHA256) == nil
 	return resultFrom(rec, preserved, true), nil
+}
+
+// replayMissing returns the stored receipt when the source file is gone but
+// the library file still hashes to the stored digest. The release is
+// committed; the missing source is reported as not preserved, never as a
+// failed release. It returns ok=false when there is no committed release to
+// return, so the caller reports the missing file as usual.
+func replayMissing(engine *dataengine.Engine, requestID string) (Result, bool, error) {
+	rec, found, err := readRelease(engine, requestID)
+	if err != nil || !found {
+		return Result{}, false, err
+	}
+	if rec.State != "published" || !rec.Verified || !rec.LibraryPublished {
+		return Result{}, false, nil
+	}
+	if err := sameFile(rec.Path, rec.SHA256); err != nil {
+		return Result{}, false, nil
+	}
+	return resultFrom(rec, false, true), true, nil
 }
 
 func resultFrom(rec record, preserved, replayed bool) Result {

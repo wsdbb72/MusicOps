@@ -14,14 +14,33 @@ import (
 	"github.com/wsdbb72/MusicOps/native/core/internal/workflow"
 )
 
-func TestPublishExecutorStaysUnregistered(t *testing.T) {
+func TestPublishExecutorIsRegistered(t *testing.T) {
 	application := newApp(t)
 	handlers := application.handlers()
-	if len(handlers) != 4 || handlers[workflow.CommandProcess] == nil || handlers[workflow.CommandSearch] == nil {
+	if len(handlers) != 5 || handlers[workflow.CommandProcess] == nil || handlers[workflow.CommandSearch] == nil || handlers[workflow.CommandPublish] == nil {
 		t.Fatal(len(handlers))
 	}
-	if _, registered := handlers["publish_album"]; registered {
-		t.Fatal("publish executor registered")
+}
+
+func TestReleaseAllowedRejectsTerminalAndEarlyStages(t *testing.T) {
+	for _, stage := range []string{"preparing", "identifying", "snapshotting", "metadata", "searching", "failed", "cancelled", "skipped"} {
+		if err := releaseAllowed(&workflow.Job{Stage: stage}); err == nil {
+			t.Fatal(stage, "accepted")
+		}
+	}
+	for _, stage := range []string{"needs_review", "completed", "requesting", "downloading", "validating", "publishing", "fallback", "notifying"} {
+		if err := releaseAllowed(&workflow.Job{Stage: stage}); err != nil {
+			t.Fatal(stage, err)
+		}
+	}
+	if err := releaseAllowed(&workflow.Job{Stage: "completed", Paused: true}); err == nil {
+		t.Fatal("paused job accepted")
+	}
+	if err := releaseAllowed(&workflow.Job{Stage: "completed", CancelRequested: true}); err == nil {
+		t.Fatal("cancel-requested job accepted")
+	}
+	if err := releaseAllowed(nil); err == nil {
+		t.Fatal("nil job accepted")
 	}
 }
 
@@ -56,8 +75,14 @@ func TestVerifiedAudioIngestsLocallyAndTorrentDoesNot(t *testing.T) {
 	released := postCode(t, application, "/v1/audio/release", map[string]any{
 		"job_id": "board-audio", "artist": "Artist", "album": "Album", "title": "Title", "track": 1, "source_name": "song.wav",
 	})
-	if released.Code != http.StatusOK || !strings.Contains(released.Body.String(), `"downloaded":false`) || !strings.Contains(released.Body.String(), `"library_published":true`) || !strings.Contains(released.Body.String(), `"production_verified":false`) {
+	if released.Code != http.StatusOK || !strings.Contains(released.Body.String(), `"downloaded":false`) || !strings.Contains(released.Body.String(), `"library_published":true`) || !strings.Contains(released.Body.String(), `"production_verified":false`) || !strings.Contains(released.Body.String(), `"publish_task_id":"stage:board-audio:publishing"`) {
 		t.Fatal(released.Code, released.Body.String())
+	}
+	var receipt struct {
+		Stage string `json:"stage"`
+	}
+	if err := json.Unmarshal(released.Body.Bytes(), &receipt); err != nil || (receipt.Stage != "publishing" && receipt.Stage != "completed") {
+		t.Fatal(receipt, err, released.Body.String())
 	}
 	source, err := os.ReadFile(filepath.Join(incoming, "song.wav"))
 	published, readErr := os.ReadFile(filepath.Join(application.Dir, "library-audio", "Artist", "Album", "01 Title.wav"))
@@ -68,6 +93,10 @@ func TestVerifiedAudioIngestsLocallyAndTorrentDoesNot(t *testing.T) {
 	if still.Stage != "needs_review" {
 		t.Fatal(still.Stage)
 	}
+	// The ingest moves the root to publishing; the publish task verifies the
+	// library record and completes the job. Wait for that cycle instead of
+	// asserting on a single racy read.
+	waitJob(t, application, "board-audio", "completed")
 	detail := getAuth(t, application, "/v1/jobs/board-audio")
 	if !strings.Contains(detail.Body.String(), `"progress":"已入库"`) || !strings.Contains(detail.Body.String(), "本地导入") || strings.Contains(detail.Body.String(), `"downloaded":true`) || strings.Contains(detail.Body.String(), `"production_verified":true`) {
 		t.Fatal(detail.Body.String())
@@ -77,10 +106,23 @@ func TestVerifiedAudioIngestsLocallyAndTorrentDoesNot(t *testing.T) {
 			Job struct {
 				Stage string `json:"stage"`
 			} `json:"job"`
+			Evidence []struct {
+				Kind   string `json:"kind"`
+				Source string `json:"source"`
+			} `json:"evidence"`
 		} `json:"inspection"`
 	}
 	if err = json.Unmarshal(detail.Body.Bytes(), &shown); err != nil || shown.Inspection.Job.Stage != "completed" {
 		t.Fatal(shown, err, detail.Body.String())
+	}
+	found := false
+	for _, item := range shown.Inspection.Evidence {
+		if item.Kind == "catalog" && item.Source == "local-library" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("release evidence missing", detail.Body.String())
 	}
 }
 

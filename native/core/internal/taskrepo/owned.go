@@ -82,6 +82,36 @@ func (r *Repository) CreateOwned(requestID string, spec Spec, payload []byte, wo
 	}, domain)
 }
 
+// CreateFollowup queues a task owned by an existing workflow job. Unlike
+// CreateOwned, the task id need not equal the job id: a followup carries the
+// stage in its id (stage:<job>:<stage>) while the job keeps its own task.
+// When the followup already exists it is kept and the domain callback still
+// runs, so a repeated call records new evidence instead of dropping queued work.
+func (r *Repository) CreateFollowup(requestID string, spec Spec, payload []byte, workflowJobID string, extra []byte, domain Domain) (Result, error) {
+	if !validSpec(spec) || spec.ParentID != "" || !validID(workflowJobID) || domain == nil {
+		return Result{}, dataengine.ErrInvalidRequest
+	}
+	hash, compressed, err := pack(payload)
+	if err != nil {
+		return Result{}, err
+	}
+	intent := struct {
+		Operation, Workflow, Hash string
+		Spec                      Spec
+		Extra                     []byte
+	}{"workflow_followup", workflowJobID, hash, spec, extra}
+	return r.apply(requestID, spec.ID, intent, func(v *dataengine.View, old *Task) (*Task, []dataengine.Mutation, error) {
+		if old != nil {
+			return old, nil, nil
+		}
+		writes, err := blobWrites(v, hash, compressed)
+		if err != nil {
+			return nil, nil, err
+		}
+		return &Task{Spec: spec, State: "queued", UpdatedNS: spec.CreatedNS, PayloadHash: hash, WorkflowJobID: workflowJobID}, writes, nil
+	}, domain)
+}
+
 // FinishOwned commits task completion together with workflow-owned mutations.
 func (r *Repository) FinishOwned(requestID string, token Token, end Completion, followups []NewTask, owners map[string]string, pauseSuccessors bool, extra []byte, domain Domain) (Result, error) {
 	if domain == nil {

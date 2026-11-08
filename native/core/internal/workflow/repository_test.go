@@ -419,3 +419,131 @@ func TestCommandsStayUnregisteredNames(t *testing.T) {
 		}
 	}
 }
+
+func recordRelease(t *testing.T, repo *Repository, jobID, requestID string, now int64) Result {
+	t.Helper()
+	receipt := []byte(`{"schema":1,"root_id":"` + jobID + `"}`)
+	result, err := repo.RecordRelease(RecordReleaseInput{
+		JobID: jobID, RequestID: requestID,
+		Evidence: EvidenceInput{ID: "rel-" + requestID, Kind: "catalog", Source: "local-library", SubjectID: jobID, TracklistVerified: true, Payload: receipt},
+		Payload: receipt, NowNS: now,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return result
+}
+
+func completedAlbum(t *testing.T) (*Repository, *taskrepo.Repository) {
+	t.Helper()
+	repo, tasks := fixture(t)
+	startPlaylist(t, repo)
+	token := begin(t, tasks, "album1", "identify")
+	if _, err := repo.Complete("handoff", token, handoff(3000)); err != nil {
+		t.Fatal(err)
+	}
+	job, err := repo.Job("album1")
+	if err != nil || job == nil || job.Stage != "completed" {
+		t.Fatalf("%+v %v", job, err)
+	}
+	return repo, tasks
+}
+
+func catalogEvidence(t *testing.T, repo *Repository, jobID string) []Evidence {
+	t.Helper()
+	inspection, err := repo.Inspect(jobID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out []Evidence
+	for _, item := range inspection.Evidence {
+		if item.Kind == "catalog" && item.Source == "local-library" {
+			out = append(out, item)
+		}
+	}
+	return out
+}
+
+func TestRecordReleasePublishesAndQueuesPublishTask(t *testing.T) {
+	repo, tasks := completedAlbum(t)
+	result := recordRelease(t, repo, "album1", "record-1", 4000)
+	if result.Job == nil || result.Job.Stage != "publishing" {
+		t.Fatalf("%+v", result.Job)
+	}
+	if result.Task == nil || result.Task.ID != "stage:album1:publishing" {
+		t.Fatalf("%+v", result.Task)
+	}
+	task, err := tasks.Get("stage:album1:publishing")
+	if err != nil || task == nil || task.State != "queued" || task.Command != cmdPublish || task.Lane != "publish" || task.WorkflowJobID != "album1" {
+		t.Fatalf("%+v %v", task, err)
+	}
+	if got := catalogEvidence(t, repo, "album1"); len(got) != 1 {
+		t.Fatal(got)
+	}
+}
+
+func TestRecordReleaseSecondTrackAppendsEvidenceOnly(t *testing.T) {
+	repo, tasks := completedAlbum(t)
+	recordRelease(t, repo, "album1", "record-1", 4000)
+	recordRelease(t, repo, "album1", "record-2", 4100)
+	job, err := repo.Job("album1")
+	if err != nil || job == nil || job.Stage != "publishing" {
+		t.Fatalf("%+v %v", job, err)
+	}
+	task, err := tasks.Get("stage:album1:publishing")
+	if err != nil || task == nil || task.State != "queued" {
+		t.Fatalf("%+v %v", task, err)
+	}
+	if got := catalogEvidence(t, repo, "album1"); len(got) != 2 {
+		t.Fatal(got)
+	}
+}
+
+func TestRecordReleaseAfterPublishStaysCompleted(t *testing.T) {
+	repo, tasks := completedAlbum(t)
+	recordRelease(t, repo, "album1", "record-1", 4000)
+	token := begin(t, tasks, "stage:album1:publishing", "publish")
+	if _, err := repo.Complete("publish-1", token, Complete{
+		Edge: edgeTerminal, NextStage: "completed", TaskState: "completed", Message: "verified",
+		Evidence: []EvidenceInput{{ID: "publish-ev", Kind: "catalog", Source: "local-library", SubjectID: "album1", TracklistVerified: true, Payload: []byte("receipt")}},
+		NowNS: 5000,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	job, err := repo.Job("album1")
+	if err != nil || job == nil || job.Stage != "completed" {
+		t.Fatalf("%+v %v", job, err)
+	}
+	// A late ingest is recorded as evidence; the finished stage is left
+	// alone instead of reopening publishing with no task to complete it.
+	recordRelease(t, repo, "album1", "record-3", 6000)
+	job, err = repo.Job("album1")
+	if err != nil || job == nil || job.Stage != "completed" {
+		t.Fatalf("late ingest reopened publishing: %+v %v", job, err)
+	}
+	if got := catalogEvidence(t, repo, "album1"); len(got) != 3 {
+		t.Fatal(got)
+	}
+}
+
+func TestRecordReleaseRejectsFailedJob(t *testing.T) {
+	repo, tasks := fixture(t)
+	startPlaylist(t, repo)
+	token := begin(t, tasks, "album1", "identify")
+	if _, err := repo.Complete("fail-1", token, Complete{
+		Edge: edgeTerminal, NextStage: "failed", TaskState: "failed", Message: "identify failed", NowNS: 3000,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := repo.RecordRelease(RecordReleaseInput{
+		JobID: "album1", RequestID: "record-1",
+		Evidence: EvidenceInput{ID: "rel-record-1", Kind: "catalog", Source: "local-library", SubjectID: "album1", TracklistVerified: true, Payload: []byte("receipt")},
+		Payload: []byte("receipt"), NowNS: 4000,
+	}); err == nil {
+		t.Fatal("failed job accepted a release")
+	}
+	task, err := tasks.Get("stage:album1:publishing")
+	if err != nil || task != nil {
+		t.Fatal("rejected release left a publish task", task, err)
+	}
+}

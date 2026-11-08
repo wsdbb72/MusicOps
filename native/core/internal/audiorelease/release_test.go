@@ -101,7 +101,7 @@ func TestMissingFileAndEscapingPath(t *testing.T) {
 	}
 }
 
-func TestFLACRequiresADecoder(t *testing.T) {
+func TestFLACWithoutDecoderUsesStructuralCheck(t *testing.T) {
 	engine, incoming, library := openRelease(t)
 	body := []byte("fLaC")
 	body = append(body, 0x80, 0, 0, 34)
@@ -111,14 +111,65 @@ func TestFLACRequiresADecoder(t *testing.T) {
 	body = append(body, 0xFF, 0xF8, 0x00)
 	writeSource(t, incoming, "song.flac", body)
 	input := sample(incoming, library, "song.flac")
+	// No decoder on the host: the structural check alone accepts the file,
+	// and the receipt says so instead of claiming a full decode. This is the
+	// same rule WAV already had; FLAC no longer fails with tool_missing.
 	got, err := Release(context.Background(), engine, input)
-	if !errors.Is(err, ErrTool) || got.Downloaded || got.Class != "tool_missing" {
+	if err != nil || got.Downloaded || !got.LibraryPublished || got.DecodeState != "structural" || got.Format != "flac" {
 		t.Fatal(got, err)
 	}
-	input.Decoder = func(context.Context, string) error { return errors.New("not a flac frame") }
-	got, err = Release(context.Background(), engine, input)
+	// A decoder that rejects the file still rejects it: structural acceptance
+	// is not a free pass for a bad decode.
+	writeSource(t, incoming, "other.flac", body)
+	reject := sample(incoming, library, "other.flac")
+	reject.RequestID = "rel-2"
+	reject.Track = 2
+	reject.Decoder = func(context.Context, string) error { return errors.New("not a flac frame") }
+	got, err = Release(context.Background(), engine, reject)
 	if !errors.Is(err, ErrRejected) || got.Downloaded || got.Class != "decode_failed" {
 		t.Fatal(got, err)
+	}
+}
+
+func TestSourceRemovedAfterPublishReturnsReceipt(t *testing.T) {
+	engine, incoming, library := openRelease(t)
+	writeSource(t, incoming, "song.wav", wav(16))
+	req := sample(incoming, library, "song.wav")
+	got, err := Release(context.Background(), engine, req)
+	if err != nil || !got.SourcePreserved {
+		t.Fatal(got, err)
+	}
+	if err := os.Remove(filepath.Join(incoming, "song.wav")); err != nil {
+		t.Fatal(err)
+	}
+	// The file and the record are committed. A retry after the source was
+	// moved returns the receipt with SourcePreserved false, never an error.
+	again, err := Release(context.Background(), engine, req)
+	if err != nil || !again.Replayed || again.SourcePreserved || again.SHA256 != got.SHA256 {
+		t.Fatal(again, err)
+	}
+}
+
+func TestVerifyChecksLibraryFile(t *testing.T) {
+	engine, incoming, library := openRelease(t)
+	writeSource(t, incoming, "song.wav", wav(16))
+	got, err := Release(context.Background(), engine, sample(incoming, library, "song.wav"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	verified, err := Verify(engine, "rel-1")
+	if err != nil || verified.SHA256 != got.SHA256 || verified.Format != "wav" {
+		t.Fatal(verified, err)
+	}
+	if _, err := Verify(engine, "rel-missing"); !errors.Is(err, ErrMissing) {
+		t.Fatal("missing record verified", err)
+	}
+	// A library file that no longer hashes to the stored digest fails.
+	if err := os.Remove(filepath.Join(library, "Artist", "Album", "01 Title.wav")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Verify(engine, "rel-1"); err == nil {
+		t.Fatal("corrupt library verified")
 	}
 }
 

@@ -341,6 +341,21 @@ func (a *App) releaseAudio(w http.ResponseWriter, r *http.Request) {
 	if root == "" {
 		root = job.ID
 	}
+	// The stage gate runs on the root job: the release advances the album,
+	// not the child that happened to be named. RecordRelease re-checks the
+	// same rules atomically, so a concurrent cancel still cannot slip in.
+	rootJob := job
+	if root != job.ID {
+		rootJob, err = a.flows.Job(root)
+		if err != nil || rootJob == nil {
+			writeJSON(w, http.StatusNotFound, map[string]any{"ok": false, "code": "NOT_FOUND", "downloaded": false, "library_published": false, "production_verified": false})
+			return
+		}
+	}
+	if err := releaseAllowed(rootJob); err != nil {
+		writeJSON(w, http.StatusConflict, map[string]any{"ok": false, "code": "WORKFLOW_REJECTED", "error": err.Error(), "stage": rootJob.Stage, "downloaded": false, "library_published": false, "production_verified": false})
+		return
+	}
 	incoming, library := filepath.Join(a.Dir, "incoming"), filepath.Join(a.Dir, "library-audio")
 	if err = os.MkdirAll(incoming, 0o700); err != nil || os.MkdirAll(library, 0o700) != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "code": "LIBRARY_UNAVAILABLE", "downloaded": false, "library_published": false, "production_verified": false})
@@ -370,11 +385,70 @@ func (a *App) releaseAudio(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
+	// The ingest is committed; now record it on the workflow and move the job
+	// to publishing. The request id is deterministic per (root, track), so a
+	// retried call replays the release and replays this record instead of
+	// queuing a second publish task.
+	receipt, err := json.Marshal(publishPayload{
+		RootID: root, TrackID: strconv.Itoa(body.Track), RequestID: result.RequestID,
+		SHA256: result.SHA256, Format: result.Format, Origin: result.Origin,
+		SourceName: result.SourceName, DecodeState: result.DecodeState,
+	})
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "code": "LIBRARY_UNAVAILABLE", "downloaded": false, "library_published": false, "production_verified": false})
+		return
+	}
+	recorded, err := a.flows.RecordRelease(workflow.RecordReleaseInput{
+		JobID: root, RequestID: "record-" + result.RequestID,
+		Evidence: workflow.EvidenceInput{ID: "rel-" + result.RequestID, Kind: "catalog", Source: "local-library", SubjectID: root, TracklistVerified: true, Payload: receipt},
+		Payload: receipt, NowNS: time.Now().UnixNano(),
+	})
+	if err != nil {
+		// The file and the library record are already committed; only the
+		// workflow step failed. Report it honestly with the receipt so the
+		// caller can retry: a retry replays the release and records it.
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{
+			"ok": false, "code": "WORKFLOW_UNAVAILABLE", "error": "library ingest committed but the workflow record failed: " + err.Error(),
+			"sha256": result.SHA256, "format": result.Format, "origin": result.Origin,
+			"downloaded": false, "library_published": true, "production_verified": false,
+		})
+		return
+	}
+	stage := "publishing"
+	if recorded.Job != nil {
+		stage = recorded.Job.Stage
+	}
+	publishTask := ""
+	if recorded.Task != nil {
+		publishTask = recorded.Task.ID
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"ok": true, "format": result.Format, "decode_state": result.DecodeState, "sha256": result.SHA256,
-		"origin": result.Origin, "source_name": result.SourceName,
+		"origin": result.Origin, "source_name": result.SourceName, "stage": stage, "publish_task_id": publishTask,
 		"downloaded": result.Downloaded, "library_published": result.LibraryPublished, "production_verified": false,
 	})
+}
+
+// releaseAllowed rejects jobs whose stage cannot receive audio. A paused job
+// or a job with a cancel requested never accepts audio. Terminal stages
+// (failed, cancelled, skipped) and stages before identity is confirmed
+// (preparing, identifying, snapshotting, metadata, searching) reject as
+// well. needs_review is allowed: the review concerns the acquisition path,
+// not the audio that was just verified, and the established release state is
+// a completed root with a needs_review search child.
+func releaseAllowed(job *workflow.Job) error {
+	if job == nil {
+		return errors.New("job not found")
+	}
+	if job.Paused || job.CancelRequested {
+		return errors.New("job is paused or cancel requested")
+	}
+	switch job.Stage {
+	case "needs_review", "completed", "requesting", "downloading", "validating", "publishing", "fallback", "notifying":
+		return nil
+	default:
+		return errors.New("job stage " + job.Stage + " cannot receive audio")
+	}
 }
 
 func (a *App) allowSource(path string) error {

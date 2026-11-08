@@ -36,8 +36,8 @@ type App struct {
 	secrets     map[string]string
 }
 
-// Open creates the native store and starts the scheduler. Library publication
-// stays unregistered. Torrent bytes are not treated as an imported album.
+// Open creates the native store and starts the scheduler. Torrent bytes are
+// not treated as an imported album.
 func Open(dir, backup, password string) (*App, error) {
 	if len(password) < 16 || dir == "" || backup == "" {
 		return nil, errors.New("state directory, backup directory and a password of at least 16 characters are required")
@@ -84,6 +84,7 @@ func (a *App) handlers() map[string]scheduler.Handler {
 		workflow.CommandSnapshot: a.identify,
 		workflow.CommandSearch:   a.search,
 		workflow.CommandProcess:  a.acquire,
+		workflow.CommandPublish:  a.publish,
 	}
 }
 

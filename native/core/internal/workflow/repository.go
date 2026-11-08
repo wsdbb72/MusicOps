@@ -126,6 +126,96 @@ func (r *Repository) Start(requestID string, in Start) (Result, error) {
 	return decode(result, err)
 }
 
+// RecordReleaseInput carries one verified library ingest for a job. RequestID
+// must be deterministic per release (for example "record-" plus the release
+// request id) so a retried call replays instead of queuing a second publish task.
+type RecordReleaseInput struct {
+	JobID     string
+	RequestID string
+	Evidence  EvidenceInput
+	Payload   []byte
+	NowNS     int64
+}
+
+// RecordRelease writes the library evidence for one verified ingest and moves
+// the job to publishing, queuing one publish_album task per job. The task,
+// the evidence and the stage change commit together, so a job can never show
+// "publishing" with no task behind it. A second ingest for the same job
+// appends evidence only: the queued task already covers the album, and a
+// second completion of an already completed job would be rejected by the
+// terminal rule. When a publish cycle already finished, a late ingest is
+// recorded as evidence and the job stays completed: the track itself was
+// verified at ingest, so the album is published.
+//
+// Jobs that never confirmed an identity (preparing, identifying, snapshotting,
+// metadata, searching) and jobs in a terminal stage (failed, cancelled,
+// skipped) reject the release. needs_review is allowed: the review concerns
+// the acquisition path, not the audio that was just verified, and the
+// established release state is a completed root with a needs_review search
+// child. A paused job or a job with a cancel requested rejects as well.
+func (r *Repository) RecordRelease(in RecordReleaseInput) (Result, error) {
+	if !validID(in.JobID) || in.RequestID == "" || len(in.RequestID) > 128 || in.NowNS <= 0 {
+		return Result{}, dataengine.ErrInvalidRequest
+	}
+	evidence, payloads, _, err := prepareEvidence(in.JobID, []EvidenceInput{in.Evidence})
+	if err != nil {
+		return Result{}, err
+	}
+	payload := in.Payload
+	if payload == nil {
+		payload = []byte(`{"schema":1}`)
+	}
+	spec := taskrepo.Spec{ID: stageTaskID(in.JobID, "publishing"), Command: cmdPublish, Lane: "publish", Priority: 1, CreatedNS: in.NowNS}
+	result, err := r.tasks.CreateFollowup(in.RequestID, spec, payload, in.JobID, nil, func(v *dataengine.View, _, after *taskrepo.Task, _ []taskrepo.Task) ([]dataengine.Condition, []dataengine.Mutation, json.RawMessage, error) {
+		live, raw, err := readJob(v, in.JobID)
+		if err != nil || live == nil {
+			if err != nil {
+				return nil, nil, nil, err
+			}
+			return nil, nil, nil, ErrNotFound
+		}
+		if live.Paused || live.CancelRequested {
+			return nil, nil, nil, taskrepo.ErrWorkflowOwned
+		}
+		switch live.Stage {
+		case "needs_review", "completed", "requesting", "downloading", "validating", "publishing", "fallback", "notifying":
+		default:
+			return nil, nil, nil, ErrStale
+		}
+		next := *live
+		// A finished publish task means the cycle already ran: record the
+		// late ingest as evidence and leave the finished stage alone instead
+		// of reopening publishing with no task to complete it.
+		if after == nil || !terminalTaskState(after.State) {
+			next.Stage = "publishing"
+		}
+		updated, err := bump(next, in.NowNS, next.Stage != live.Stage)
+		if err != nil {
+			return nil, nil, nil, err
+		}
+		condition, writes, err := putJob(raw, updated)
+		if err != nil {
+			return nil, nil, nil, err
+		}
+		eConditions, eWrites, err := writeEvidence(v, evidence, payloads)
+		if err != nil {
+			return nil, nil, nil, err
+		}
+		attached, err := json.Marshal(Result{Job: &updated})
+		return append([]dataengine.Condition{condition}, eConditions...), append(writes, eWrites...), attached, err
+	})
+	return decode(result, err)
+}
+
+func terminalTaskState(state string) bool {
+	switch state {
+	case "completed", "failed", "cancelled", "blocked", "recovery_required":
+		return true
+	default:
+		return false
+	}
+}
+
 func planStart(in Start) (taskrepo.Spec, Job, error) {
 	if !validID(in.JobID) || !validID(in.BatchID) || !scenes[in.Scene] || in.NowNS <= 0 || len(in.Label) > 500 {
 		return taskrepo.Spec{}, Job{}, dataengine.ErrInvalidRequest

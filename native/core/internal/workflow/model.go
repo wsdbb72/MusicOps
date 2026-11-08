@@ -46,10 +46,15 @@ const (
 	CommandSnapshot = cmdSnapshot
 	CommandSearch   = cmdSearch
 	CommandProcess  = cmdProcess
+	// CommandPublish is the only command whose effect exists outside the
+	// search/acquire chain: the publish_album executor verifies a library
+	// record before completing the job.
+	CommandPublish = cmdPublish
 )
 
-// Commands are durable queue names. The Go application registers identify and
-// search. Download, repair and publish stay unregistered until those effects exist.
+// Commands are durable queue names. The Go application registers identify,
+// search and publish. Download and repair stay unregistered until those
+// effects exist.
 var Commands = []string{cmdPrepare, cmdIdentify, cmdSnapshot, cmdSearch, cmdRepair, cmdProcess, cmdPublish}
 
 var (

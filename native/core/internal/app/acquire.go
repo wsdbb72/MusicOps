@@ -36,8 +36,11 @@ func (a *App) acquire(ctx context.Context, execution *scheduler.Execution, paylo
 		return scheduler.Outcome{}, err
 	}
 	defer a.forget(plan.RootJobID)
-	if job.Stage == "fallback" || job.Stage == "downloading" {
-		return a.finishAcquire(held, *job, "candidate", "流媒体或音频获取尚未接入；种子保存不等于已下载、尚未入库", "", nil)
+	if job.Stage == "fallback" {
+		return a.acquireFallback(ctx, execution, held, *job, plan)
+	}
+	if job.Stage == "downloading" {
+		return a.finishAcquire(held, *job, "candidate", "下载尚未接入；种子保存不等于已下载、尚未入库", "", nil)
 	}
 	if job.Stage != "requesting" {
 		return a.finishAcquire(held, *job, "candidate", "当前阶段不能获取；尚未下载、尚未入库", "", nil)

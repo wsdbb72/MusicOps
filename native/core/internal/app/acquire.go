@@ -142,6 +142,31 @@ func (a *App) acquireWithToken(ctx context.Context, execution *scheduler.Executi
 	if fetchErr != nil {
 		note = "获取未完成，需要核对是否已消耗"
 	}
+	// A registered spend source can settle the reservation right here instead
+	// of leaving it REQUEST_UNKNOWN: the proof must match the reservation's
+	// account, resource and request, or Reconcile leaves it uncertain and
+	// the flow below keeps the old behaviour. A source error is also not a
+	// proof, so it falls through the same way.
+	var receiptPtr *torrentfetch.Receipt
+	if fetchErr == nil {
+		receiptPtr = &receipt
+	}
+	if proof, found := a.confirmSpend(ctx, site, job.ID); found {
+		if reconciled, err := a.ledger.Reconcile(a.now(), site, proof); err == nil && reconciled.Class != tokenledger.ClassUncertain {
+			switch proof.State {
+			case "CONSUMED":
+				if fetchErr != nil {
+					return a.finishAcquire(held, job, "token", "令牌已确认消耗，但获取未完成；尚未下载、尚未入库", "SPEND_CONFIRMED", nil)
+				}
+				return a.finishAcquire(held, job, "token", "令牌已确认消耗，种子已保存；尚未下载、尚未入库", "SPEND_CONFIRMED", receiptPtr)
+			case "NOT_CONSUMED":
+				if fetchErr != nil {
+					return a.finishAcquire(held, job, "token", "令牌未消耗，但获取未完成；尚未下载、尚未入库", "SPEND_NOT_CONSUMED", nil)
+				}
+				return a.finishAcquire(held, job, "token", "令牌未消耗，种子已保存；尚未下载、尚未入库", "SPEND_NOT_CONSUMED", receiptPtr)
+			}
+		}
+	}
 	if _, err = a.ledger.Advance(a.now(), site, job.ID, tokenledger.StateRequestUnknown, note); err != nil {
 		return scheduler.Outcome{}, err
 	}
@@ -149,6 +174,21 @@ func (a *App) acquireWithToken(ctx context.Context, execution *scheduler.Executi
 		return a.finishAcquire(held, job, "token", "获取未完成，令牌状态待对账；尚未下载、尚未入库", "REQUEST_UNKNOWN", nil)
 	}
 	return a.finishAcquire(held, job, "token", "种子字节已保存，免费是否生效尚未对账；尚未下载、尚未入库", "REQUEST_UNKNOWN", &receipt)
+}
+
+// confirmSpend asks the registered spend source for a correlated charge
+// record for this request. It returns false when there is no source, no
+// record, or the source failed: none of those is a proof, and the caller
+// keeps the reservation REQUEST_UNKNOWN.
+func (a *App) confirmSpend(ctx context.Context, site, requestID string) (tokenledger.SpendProof, bool) {
+	if a.spendSource == nil {
+		return tokenledger.SpendProof{}, false
+	}
+	proof, found, err := a.spendSource.Spend(ctx, site, requestID)
+	if err != nil || !found {
+		return tokenledger.SpendProof{}, false
+	}
+	return proof, true
 }
 
 func (a *App) observeBalance(ctx context.Context, site, cookie string, synthetic bool, base string) (tokenledger.Observation, bool, error) {

@@ -5,6 +5,7 @@ package app
 import (
 	"context"
 	"errors"
+	"path/filepath"
 	"sync"
 	"time"
 
@@ -28,6 +29,7 @@ type App struct {
 	runner      *scheduler.Coordinator
 	searcher    *trackersearch.Client
 	ledger      *tokenledger.Ledger
+	spendSource tokenledger.SpendSource
 	reviews     *reviewai.Cache
 	reviewModel reviewai.Completer
 	now         func() time.Time
@@ -48,6 +50,11 @@ func Open(dir, backup, password string) (*App, error) {
 	}
 	app := &App{Dir: dir, Backup: backup, password: password, engine: engine, tasks: taskrepo.New(engine), searcher: &trackersearch.Client{}, now: time.Now, secrets: map[string]string{}}
 	app.ledger = tokenledger.New(engine)
+	// The spend source is a file the operator writes (spend-proofs.jsonl
+	// under the state directory). No file means no proofs and no behaviour
+	// change; a real online ledger would replace this field with a source
+	// that reads its own format.
+	app.spendSource = tokenledger.NewFileSpendSource(filepath.Join(dir, "spend-proofs.jsonl"))
 	app.reviews = reviewai.NewCache(2)
 	app.flows = workflow.New(engine, app.tasks)
 	runner, err := scheduler.New(app.tasks, app.handlers(), scheduler.DefaultConfig())

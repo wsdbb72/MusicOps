@@ -76,8 +76,9 @@ func Open(dir, backup, password string) (*App, error) {
 	return app, nil
 }
 
-// handlers are the executors this process runs. publish_album stays absent:
-// saving a torrent or a fixture must not be registered as an audio download.
+// handlers are the executors this process runs. publish_album only
+// verifies an already-imported local library record: saving a torrent or a
+// fixture must not be registered as an audio download.
 func (a *App) handlers() map[string]scheduler.Handler {
 	return map[string]scheduler.Handler{
 		workflow.CommandIdentify: a.identify,

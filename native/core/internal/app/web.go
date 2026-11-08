@@ -32,6 +32,7 @@ const appJS = `(function () {
   var siteRows = [];
   var downloadSettings = null;
   var libraryRows = [];
+  var transcodeRows = [];
   var logRows = [];
   var selectedJobs = {};
   var loading = false;
@@ -332,17 +333,52 @@ const appJS = `(function () {
     }
   }
   function renderLibrary() {
+    var html = '<div class="cards"><article><form id="transcode-form"><h2>转码为 FLAC</h2>' +
+      '<label>源文件（库内 WAV 路径，应用数据目录内）<input type="text" id="transcode-source" required placeholder="如 library-audio/Artist/Album/01 Title.wav"></label>' +
+      '<p><button type="submit" class="primary">开始转码</button></p><p class="meta">只支持 PCM WAV 转 FLAC；转码前后 PCM 内容逐字节比对，源文件不动，输出已存在时拒绝覆盖。</p></form></article>';
+    if (transcodeRows.length) {
+      html += '<article><h2>转码记录</h2>';
+      transcodeRows.forEach(function (receipt) {
+        html += '<p>' + escapeText(receipt.request_id || "") + " · " + escapeText(receipt.format || "") + " · " + escapeText((receipt.sha256 || "").slice(0, 12)) + "<br>" + escapeText(receipt.output || "") + "</p>";
+      });
+      html += "</article>";
+    }
     if (!libraryRows.length) {
-      list.innerHTML = "";
+      list.innerHTML = html + "</div>";
       setStatus("", "库里还没有已入库的音频。");
+      var form = document.getElementById("transcode-form");
+      if (form) form.addEventListener("submit", submitTranscode);
       return;
     }
     setStatus("", "");
-    var html = '<div class="cards">';
     libraryRows.forEach(function (entry) {
       html += '<article><h2>' + escapeText(entry.file || entry.source_name || "未命名") + '</h2><p class="meta"><span class="pill">' + escapeText(entry.format || "") + '</span><span class="pill">' + escapeText(entry.decode_state || "") + '</span><span class="pill">' + escapeText(entry.origin || "") + '</span></p><p>' + (entry.file_present ? "文件在库中" : "文件不在库中") + " · " + escapeText((entry.sha256 || "").slice(0, 12)) + "</p></article>";
     });
     list.innerHTML = html + "</div>";
+    var form = document.getElementById("transcode-form");
+    if (form) form.addEventListener("submit", submitTranscode);
+  }
+  async function submitTranscode(event) {
+    event.preventDefault();
+    if (loading) return;
+    var source = document.getElementById("transcode-source");
+    if (!source || !source.value.trim()) { setStatus("fail", "先填源文件路径。"); return; }
+    setBusy(true);
+    setStatus("info", "正在提交转码");
+    try {
+      var response = await fetch("/v1/library/transcode", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({request_id: "tc-" + Date.now().toString(36), source: source.value.trim(), format: "flac"})});
+      var body = await response.json();
+      if (!response.ok || !body || !body.ok) {
+        setStatus("fail", "转码提交失败。" + (body && body.code ? "（" + body.code + "）" : ""));
+        return;
+      }
+      setStatus("ok", "已提交转码，完成后在转码记录里查看。");
+    } catch (err) {
+      setStatus("fail", "转码提交中断。");
+    } finally {
+      setBusy(false);
+    }
+    load(true);
   }
   function renderLogs() {
     if (!logRows.length) {
@@ -541,6 +577,9 @@ const appJS = `(function () {
         var libraryResponse = await fetch("/v1/library", {headers: {Accept: "application/json"}});
         var libraryBody = await libraryResponse.json();
         libraryRows = libraryBody && Array.isArray(libraryBody.entries) ? libraryBody.entries : [];
+        var transcodeResponse = await fetch("/v1/library/transcode", {headers: {Accept: "application/json"}});
+        var transcodeBody = await transcodeResponse.json();
+        transcodeRows = transcodeBody && Array.isArray(transcodeBody.receipts) ? transcodeBody.receipts : [];
       } else if (view === "logs") {
         var logResponse = await fetch("/v1/logs", {headers: {Accept: "application/json"}});
         var logBody = await logResponse.json();

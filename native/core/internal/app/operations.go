@@ -202,9 +202,9 @@ func (a *App) saveDownloadSettings(in downloadSettings) (downloadSettings, error
 }
 
 // downloadSettingsView returns the saved streaming default plus the canonical
-// streaming fallback order. The order comes from downloadpolicy; no streaming
-// executor is wired yet, so the order is information about the intended
-// fallback, not a promise that fallback will run.
+// streaming fallback order and each source's wiring state. The order comes
+// from downloadpolicy; the fallback walk is wired (see acquireFallback), and
+// the status list says honestly which sources have an engine behind them.
 func (a *App) downloadSettings(w http.ResponseWriter, r *http.Request) {
 	settings, err := a.loadDownloadSettings()
 	if err != nil {
@@ -216,7 +216,7 @@ func (a *App) downloadSettings(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "code": "SETTINGS_UNAVAILABLE"})
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "streaming_enabled": settings.StreamingEnabled, "streaming_sources": steps, "streaming_fallback_wired": false})
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "streaming_enabled": settings.StreamingEnabled, "streaming_sources": steps, "streaming_source_status": streamingSourceStatus(), "streaming_fallback_wired": true})
 }
 
 // saveDownload replaces the saved streaming default.

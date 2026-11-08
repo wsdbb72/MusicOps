@@ -9,6 +9,7 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -71,6 +72,7 @@ func (a *App) Handler() http.Handler {
 	mux.HandleFunc("GET /v1/archive/record", a.archiveRecord)
 	mux.HandleFunc("POST /v1/search", a.startSearch)
 	mux.HandleFunc("POST /v1/audio/release", a.releaseAudio)
+	mux.HandleFunc("POST /v1/audio/publish", a.publishAudio)
 	mux.HandleFunc("POST /v1/audio/incoming", a.uploadIncoming)
 	mux.HandleFunc("POST /v1/library/transcode", a.transcodeEnqueue)
 	mux.HandleFunc("GET /v1/library/transcode", a.transcodeList)
@@ -514,6 +516,150 @@ func (a *App) releaseAudio(w http.ResponseWriter, r *http.Request) {
 		"origin": result.Origin, "source_name": result.SourceName, "stage": stage, "publish_task_id": publishTask,
 		"downloaded": result.Downloaded, "library_published": result.LibraryPublished, "production_verified": false,
 	})
+}
+
+// publishAudio queues a publish task for a root job. Two shapes are
+// accepted, never both: a controlled-audio source (a loopback URL plus album
+// names, organised into the library by audiopublish) or a list of already
+// verified ingest receipts (the multi-track download path). The publish task
+// re-verifies everything before the job completes; this endpoint only records
+// the request, so library_published stays false for the controlled path
+// until the task runs.
+func (a *App) publishAudio(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		JobID     string           `json:"job_id"`
+		RequestID string           `json:"request_id"`
+		SourceURL string           `json:"source_url"`
+		Artist    string           `json:"artist"`
+		Album     string           `json:"album"`
+		Title     string           `json:"title"`
+		Track     int              `json:"track"`
+		Receipts  []publishReceipt `json:"receipts"`
+	}
+	if err := decode(r, &body); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "code": "INVALID_REQUEST", "downloaded": false, "library_published": false, "production_verified": false})
+		return
+	}
+	job, err := a.flows.Job(body.JobID)
+	if err != nil || job == nil {
+		writeJSON(w, http.StatusNotFound, map[string]any{"ok": false, "code": "NOT_FOUND", "downloaded": false, "library_published": false, "production_verified": false})
+		return
+	}
+	root := job.RootID
+	if root == "" {
+		root = job.ID
+	}
+	rootJob := job
+	if root != job.ID {
+		rootJob, err = a.flows.Job(root)
+		if err != nil || rootJob == nil {
+			writeJSON(w, http.StatusNotFound, map[string]any{"ok": false, "code": "NOT_FOUND", "downloaded": false, "library_published": false, "production_verified": false})
+			return
+		}
+	}
+	if err := releaseAllowed(rootJob); err != nil {
+		writeJSON(w, http.StatusConflict, map[string]any{"ok": false, "code": "WORKFLOW_REJECTED", "error": err.Error(), "stage": rootJob.Stage, "downloaded": false, "library_published": false, "production_verified": false})
+		return
+	}
+	controlled := body.SourceURL != ""
+	multi := len(body.Receipts) > 0
+	if controlled == multi {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "code": "INVALID_REQUEST", "downloaded": false, "library_published": false, "production_verified": false})
+		return
+	}
+	var payload publishPayload
+	payload.RootID = root
+	source := "controlled-audio"
+	if controlled {
+		if body.Artist == "" || body.Album == "" || body.Title == "" || body.Track < 1 || body.Track > 999 || !validLoopbackURL(body.SourceURL) {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "code": "INVALID_REQUEST", "downloaded": false, "library_published": false, "production_verified": false})
+			return
+		}
+		requestID := body.RequestID
+		if requestID == "" {
+			requestID = publishRequestID(root, "track", strconv.Itoa(body.Track))
+		}
+		if !validPublishID(requestID) {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "code": "INVALID_REQUEST", "downloaded": false, "library_published": false, "production_verified": false})
+			return
+		}
+		payload.RequestID = requestID
+		payload.SourceURL = body.SourceURL
+		payload.Artist = body.Artist
+		payload.Album = body.Album
+		payload.Title = body.Title
+		payload.Track = body.Track
+	} else {
+		for _, item := range body.Receipts {
+			if item.RequestID == "" || item.SHA256 == "" {
+				writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "code": "INVALID_REQUEST", "downloaded": false, "library_published": false, "production_verified": false})
+				return
+			}
+		}
+		encoded, err := json.Marshal(body.Receipts)
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "code": "LIBRARY_UNAVAILABLE", "downloaded": false, "library_published": false, "production_verified": false})
+			return
+		}
+		payload.RequestID = publishRequestID(root, "receipts", hex.EncodeToString(encoded)[:16])
+		payload.Receipts = body.Receipts
+		source = "local-library"
+	}
+	receipt, err := json.Marshal(payload)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "code": "LIBRARY_UNAVAILABLE", "downloaded": false, "library_published": false, "production_verified": false})
+		return
+	}
+	recorded, err := a.flows.RecordRelease(workflow.RecordReleaseInput{
+		JobID: root, RequestID: "record-" + payload.RequestID,
+		Evidence: workflow.EvidenceInput{ID: "pub-" + payload.RequestID, Kind: "catalog", Source: source, SubjectID: root, TracklistVerified: true, Payload: receipt},
+		Payload:  receipt, NowNS: time.Now().UnixNano(),
+	})
+	if err != nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{
+			"ok": false, "code": "WORKFLOW_UNAVAILABLE", "error": "publish record failed: " + err.Error(),
+			"downloaded": false, "library_published": multi, "production_verified": false,
+		})
+		return
+	}
+	stage := "publishing"
+	if recorded.Job != nil {
+		stage = recorded.Job.Stage
+	}
+	publishTask := ""
+	if recorded.Task != nil {
+		publishTask = recorded.Task.ID
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"ok": true, "stage": stage, "publish_task_id": publishTask, "request_id": payload.RequestID,
+		"downloaded": false, "library_published": multi, "production_verified": false,
+	})
+}
+
+// validLoopbackURL accepts only http://127.0.0.1:<port>/... URLs: the
+// controlled-audio source must be a service on this machine, never a remote
+// host. audiopublish re-checks the same rule before fetching.
+func validLoopbackURL(raw string) bool {
+	parsed, err := url.Parse(raw)
+	if err != nil || parsed.Scheme != "http" || parsed.Hostname() != "127.0.0.1" || parsed.Port() == "" {
+		return false
+	}
+	return true
+}
+
+// validPublishID is the audiopublish request-id rule: 1-80 chars of letters,
+// digits, hyphen and underscore.
+func validPublishID(id string) bool {
+	if len(id) < 1 || len(id) > 80 {
+		return false
+	}
+	for _, r := range id {
+		if r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || r == '-' || r == '_' {
+			continue
+		}
+		return false
+	}
+	return true
 }
 
 // releaseAllowed rejects jobs whose stage cannot receive audio. A paused job

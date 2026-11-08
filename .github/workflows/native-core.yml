@@ -1,0 +1,67 @@
+name: Native core development checks
+on:
+  push:
+    branches: ['refactor/go-core']
+    paths: ['native/**', 'src/musicops/state/native_client.py', 'tests/test_native_data_transport.py', '.github/workflows/native-core.yml']
+  pull_request:
+    branches: ['refactor/go-core']
+    paths: ['native/**', 'src/musicops/state/native_client.py', 'tests/test_native_data_transport.py', '.github/workflows/native-core.yml']
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: native-core-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  native:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-latest, macos-15]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    env:
+      CGO_ENABLED: '0'
+      GOMAXPROCS: '4'
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v6
+        with:
+          go-version: '1.26.3'
+          cache-dependency-path: native/core/go.sum
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+      - name: Test and vet the Go core
+        working-directory: native/core
+        run: |
+          go test ./... -count=1 -timeout=120s
+          go vet ./...
+      - name: Build the actual private data service
+        shell: python
+        run: |
+          import os,pathlib,subprocess
+          output=pathlib.Path('work/native/musicops-data'+('.exe' if os.name=='nt' else '')).resolve()
+          output.parent.mkdir(parents=True,exist_ok=True)
+          subprocess.run(['go','build','-trimpath','-o',str(output),'./cmd/musicops-data'],cwd='native/core',check=True)
+          with open(os.environ['GITHUB_ENV'],'a',encoding='utf-8') as stream:
+              stream.write('MUSICOPS_TEST_DATA_BINARY='+str(output)+'\n')
+      - name: Exercise the real executable and owning Python transport
+        run: |
+          python -m pip install pytest
+          python -m pytest tests/test_native_data_transport.py -q
+  race:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v6
+        with:
+          go-version: '1.26.3'
+          cache-dependency-path: native/core/go.sum
+      - name: Detect data races in persistence and scheduling
+        working-directory: native/core
+        env:
+          CGO_ENABLED: '1'
+          GOMAXPROCS: '4'
+        run: go test -race ./... -count=1 -timeout=180s

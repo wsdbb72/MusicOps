@@ -173,7 +173,7 @@ func (a *App) observe(ctx context.Context, execution *scheduler.Execution, job w
 		var seeded *identityPick
 		for _, candidate := range observation.Candidates {
 			hit := releaseHit(candidate)
-			pool = append(pool, reviewai.Candidate{ID: hit.ID, Title: hit.Title, Artists: hit.Artists, Aliases: hit.Aliases, Edition: hit.Edition})
+			pool = append(pool, reviewai.Candidate{ID: hit.ID, Title: hit.Title, Artists: hit.Artists, Aliases: hit.Aliases, Edition: hit.Edition, GroupID: hit.GroupID, Format: hit.Format, Year: hit.Year})
 			if !reviewmatch.Compare(plan.ExpectedTitle, plan.ExpectedArtist, hit).Pass {
 				continue
 			}
@@ -248,7 +248,37 @@ func releaseHit(candidate trackersearch.Candidate) reviewmatch.Hit {
 			edition = value
 		}
 	}
-	return reviewmatch.Hit{ID: candidate.CandidateID, Title: candidate.Title, Artists: candidate.Artists, Aliases: candidate.Aliases, Edition: edition}
+	format := ""
+	if candidate.Media != nil {
+		if value, ok := candidate.Media["format"].(string); ok {
+			format = value
+		}
+	}
+	return reviewmatch.Hit{ID: candidate.CandidateID, Title: candidate.Title, Artists: candidate.Artists, Aliases: candidate.Aliases, Edition: edition, GroupID: candidate.GroupID, Format: format, Year: releaseYear(candidate.Release)}
+}
+
+// releaseYear reads the release year the tracker record carries, or 0 when the
+// record carries none. Values arrive as JSON numbers or strings.
+func releaseYear(release map[string]any) int {
+	if release == nil {
+		return 0
+	}
+	switch value := release["year"].(type) {
+	case int:
+		return value
+	case int64:
+		return int(value)
+	case float64:
+		return int(value)
+	case string:
+		year, err := strconv.Atoi(strings.TrimSpace(value))
+		if err != nil || year < 0 {
+			return 0
+		}
+		return year
+	default:
+		return 0
+	}
 }
 
 func (a *App) cancelled(ctx context.Context, execution *scheduler.Execution) error {

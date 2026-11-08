@@ -1,6 +1,8 @@
 // Package audiorelease copies one verified audio file into this process's library.
 // A torrent payload, a fixture marker, or a failed check never becomes a download.
 // Production verification stays false: this is file acceptance, not a live-site receipt.
+// A local file that was never fetched from a tracker or streaming service is not
+// a download either: Downloaded stays false for every local import.
 package audiorelease
 
 import (
@@ -15,6 +17,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -37,6 +40,8 @@ type Decoder func(context.Context, string) error
 
 // Request names one file already stored under Incoming. Library is this process's
 // own library directory, never an arbitrary user music root.
+// Origin says how the file reached Incoming: "manual" when a person placed it by
+// hand, "local_import" otherwise. An empty Origin means "local_import".
 type Request struct {
 	RequestID  string
 	RootID     string
@@ -45,18 +50,24 @@ type Request struct {
 	Title      string
 	Track      int
 	SourceName string
+	Origin     string
 	Incoming   string
 	Library    string
 	Decoder    Decoder
 }
 
-// Result is the file outcome. Downloaded is true only after the library bytes match.
+// Result is the file outcome. Downloaded stays false: the bytes were verified
+// from a local file, never fetched from a tracker or streaming service.
+// Origin and SourceName record how the file reached Incoming, so a library file
+// can be traced back to its source.
 type Result struct {
 	RequestID          string `json:"request_id"`
 	RootID             string `json:"root_id"`
 	Format             string `json:"format,omitempty"`
 	DecodeState        string `json:"decode_state,omitempty"`
 	SHA256             string `json:"sha256,omitempty"`
+	Origin             string `json:"origin,omitempty"`
+	SourceName         string `json:"source_name,omitempty"`
 	Verified           bool   `json:"verified"`
 	LibraryPublished   bool   `json:"library_published"`
 	Downloaded         bool   `json:"downloaded"`
@@ -73,16 +84,31 @@ type record struct {
 	SHA256           string `json:"sha256"`
 	Format           string `json:"format"`
 	DecodeState      string `json:"decode_state"`
+	Origin           string `json:"origin,omitempty"`
+	SourceName       string `json:"source_name,omitempty"`
 	State            string `json:"state"`
 	Verified         bool   `json:"verified"`
 	LibraryPublished bool   `json:"library_published"`
-	Downloaded       bool   `json:"downloaded"`
+	// Downloaded is retained only so records written before the local-import
+	// correction still decode. New records always leave it false: a verified
+	// local import is not a download.
+	Downloaded bool `json:"downloaded"`
 }
 
 // Release verifies the incoming file and publishes a copy. The source stays in place.
+// The album is keyed by (RootID, Track): one album root holds one record per track,
+// so a second track for the same root publishes as its own file instead of replaying
+// the first track's receipt.
 func Release(ctx context.Context, engine *dataengine.Engine, input Request) (Result, error) {
 	empty := Result{RequestID: input.RequestID, RootID: input.RootID}
 	if engine == nil || ctx == nil || !validID(input.RequestID) || !validID(input.RootID) || input.Track < 1 || input.Track > 999 {
+		return empty, dataengine.ErrInvalidRequest
+	}
+	origin := input.Origin
+	if origin == "" {
+		origin = "local_import"
+	}
+	if origin != "manual" && origin != "local_import" {
 		return empty, dataengine.ErrInvalidRequest
 	}
 	artist, album, title, err := cleanNames(input.Artist, input.Album, input.Title)
@@ -163,7 +189,9 @@ func Release(ctx context.Context, engine *dataengine.Engine, input Request) (Res
 	}
 	rec := record{
 		RequestID: input.RequestID, RootID: input.RootID, Path: dest, SHA256: digest, Format: format,
-		DecodeState: decodeState, State: "published", Verified: true, LibraryPublished: true, Downloaded: true,
+		DecodeState: decodeState, Origin: origin, SourceName: input.SourceName,
+		State: "published", Verified: true, LibraryPublished: true,
+		// Downloaded stays false: a verified local import is not a download.
 	}
 	encoded, err := json.Marshal(rec)
 	if err != nil {
@@ -173,11 +201,11 @@ func Release(ctx context.Context, engine *dataengine.Engine, input Request) (Res
 	ok, err := engine.CompareAndSwap(
 		[]dataengine.Condition{
 			{Key: releaseKey(input.RequestID), Absent: true},
-			{Key: albumKey(input.RootID), Absent: true},
+			{Key: albumKey(input.RootID, input.Track), Absent: true},
 		},
 		[]dataengine.Mutation{
 			{Key: releaseKey(input.RequestID), Value: encoded},
-			{Key: albumKey(input.RootID), Value: encoded},
+			{Key: albumKey(input.RootID, input.Track), Value: encoded},
 		},
 	)
 	if err != nil {
@@ -190,6 +218,15 @@ func Release(ctx context.Context, engine *dataengine.Engine, input Request) (Res
 		}
 		if found && current.SHA256 == digest && current.RootID == input.RootID {
 			return replay(current, source)
+		}
+		// Our bytes are already in the library but no record claims them.
+		// Remove our file when it still holds our bytes, so a lost CAS race
+		// cannot leave an orphaned library file behind. A destination whose
+		// bytes differ from our digest belongs to another publish and is left alone.
+		if data, err := os.ReadFile(dest); err == nil {
+			if sum := sha256.Sum256(data); hex.EncodeToString(sum[:]) == digest {
+				os.Remove(dest)
+			}
 		}
 		return empty, ErrConflict
 	}
@@ -219,10 +256,14 @@ func Albums(engine *dataengine.Engine) (map[string]bool, error) {
 		}
 		for _, item := range page.Items {
 			var rec record
-			if json.Unmarshal(item.Value, &rec) != nil || rec.State != "published" || !rec.Verified || !rec.Downloaded || !rec.LibraryPublished {
+			if json.Unmarshal(item.Value, &rec) != nil || rec.State != "published" || !rec.Verified || !rec.LibraryPublished {
 				continue
 			}
 			id := strings.TrimPrefix(string(item.Key), "library/album-audio/")
+			// Per-track keys are "<root>/<track>"; legacy keys are just "<root>".
+			if i := strings.Index(id, "/"); i >= 0 {
+				id = id[:i]
+			}
 			if id == rec.RootID {
 				out[id] = true
 			}
@@ -265,7 +306,7 @@ func SystemDecoder() Decoder {
 }
 
 func replay(rec record, source string) (Result, error) {
-	if rec.State != "published" || !rec.Verified || !rec.Downloaded || !rec.LibraryPublished {
+	if rec.State != "published" || !rec.Verified || !rec.LibraryPublished {
 		return Result{}, ErrConflict
 	}
 	if err := sameFile(rec.Path, rec.SHA256); err != nil {
@@ -278,7 +319,9 @@ func replay(rec record, source string) (Result, error) {
 func resultFrom(rec record, preserved, replayed bool) Result {
 	return Result{
 		RequestID: rec.RequestID, RootID: rec.RootID, Format: rec.Format, DecodeState: rec.DecodeState,
-		SHA256: rec.SHA256, Verified: true, LibraryPublished: true, Downloaded: true,
+		SHA256: rec.SHA256, Origin: rec.Origin, SourceName: rec.SourceName,
+		Verified: true, LibraryPublished: true,
+		// Downloaded stays false: a verified local import is not a download.
 		SourcePreserved: preserved, Replayed: replayed,
 	}
 }
@@ -490,7 +533,11 @@ func validID(id string) bool {
 }
 
 func releaseKey(id string) []byte { return []byte("library/audio/" + id) }
-func albumKey(id string) []byte   { return []byte("library/album-audio/" + id) }
+
+// albumKey is per (root, track): one album root holds one record per track.
+func albumKey(id string, track int) []byte {
+	return []byte("library/album-audio/" + id + "/" + strconv.Itoa(track))
+}
 
 func readRelease(engine *dataengine.Engine, id string) (record, bool, error) {
 	var rec record

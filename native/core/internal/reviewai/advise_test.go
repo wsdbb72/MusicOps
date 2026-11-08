@@ -32,6 +32,33 @@ func TestAdviceAcceptsOnlyCitedEvidenceAndCachesIt(t *testing.T) {
 	}
 }
 
+func TestAdviceCacheKeyCoversReleaseEvidence(t *testing.T) {
+	cache := NewCache(2)
+	model := &script{reply: func(int) ([]byte, error) {
+		return []byte(`{"decision":"pass","candidate_id":"dic:1","reason":"alias on the record"}`), nil
+	}}
+	one := Request{ExpectedTitle: "Blue", ExpectedArtist: "Artist", Candidates: []Candidate{{
+		ID: "dic:1", Title: "蓝", Artists: []string{"Artist"}, Aliases: []string{"Blue"}, GroupID: "g1", Format: "FLAC", Year: 2020,
+	}}}
+	other := Request{ExpectedTitle: "Blue", ExpectedArtist: "Artist", Candidates: []Candidate{{
+		ID: "dic:1", Title: "蓝", Artists: []string{"Artist"}, Aliases: []string{"Blue"}, GroupID: "g1", Format: "FLAC", Year: 2021,
+	}}}
+	first := cache.Advise(context.Background(), model, one)
+	if !first.Pass || first.Calls != 1 {
+		t.Fatal(first)
+	}
+	// Only the release year differs: the cache must not serve the first verdict.
+	second := cache.Advise(context.Background(), model, other)
+	if second.CacheHit || second.Calls != 1 || model.calls.Load() != 2 {
+		t.Fatal(second, model.calls.Load())
+	}
+	// The identical request is still a cache hit.
+	third := cache.Advise(context.Background(), model, one)
+	if !third.CacheHit || third.Calls != 0 || model.calls.Load() != 2 {
+		t.Fatal(third, model.calls.Load())
+	}
+}
+
 func TestAdviceRejectsHallucinationConflictAndTimeout(t *testing.T) {
 	cache := NewCache(2)
 	unknown := cache.Advise(context.Background(), &script{reply: func(int) ([]byte, error) {

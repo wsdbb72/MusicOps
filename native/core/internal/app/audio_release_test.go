@@ -25,7 +25,7 @@ func TestPublishExecutorStaysUnregistered(t *testing.T) {
 	}
 }
 
-func TestVerifiedAudioCompletesAndTorrentDoesNot(t *testing.T) {
+func TestVerifiedAudioIngestsLocallyAndTorrentDoesNot(t *testing.T) {
 	application := newApp(t)
 	post(t, application, "/v1/search", searchBody("board-audio", "http://127.0.0.1:9", []string{}, false))
 	search := waitJob(t, application, "search:board-audio", "needs_review")
@@ -56,7 +56,7 @@ func TestVerifiedAudioCompletesAndTorrentDoesNot(t *testing.T) {
 	released := postCode(t, application, "/v1/audio/release", map[string]any{
 		"job_id": "board-audio", "artist": "Artist", "album": "Album", "title": "Title", "track": 1, "source_name": "song.wav",
 	})
-	if released.Code != http.StatusOK || !strings.Contains(released.Body.String(), `"downloaded":true`) || !strings.Contains(released.Body.String(), `"library_published":true`) || !strings.Contains(released.Body.String(), `"production_verified":false`) {
+	if released.Code != http.StatusOK || !strings.Contains(released.Body.String(), `"downloaded":false`) || !strings.Contains(released.Body.String(), `"library_published":true`) || !strings.Contains(released.Body.String(), `"production_verified":false`) {
 		t.Fatal(released.Code, released.Body.String())
 	}
 	source, err := os.ReadFile(filepath.Join(incoming, "song.wav"))
@@ -69,7 +69,7 @@ func TestVerifiedAudioCompletesAndTorrentDoesNot(t *testing.T) {
 		t.Fatal(still.Stage)
 	}
 	detail := getAuth(t, application, "/v1/jobs/board-audio")
-	if !strings.Contains(detail.Body.String(), `"progress":"已完成"`) || !strings.Contains(detail.Body.String(), "放入库") || !strings.Contains(detail.Body.String(), `"downloaded":true`) || strings.Contains(detail.Body.String(), `"production_verified":true`) {
+	if !strings.Contains(detail.Body.String(), `"progress":"已入库"`) || !strings.Contains(detail.Body.String(), "本地导入") || strings.Contains(detail.Body.String(), `"downloaded":true`) || strings.Contains(detail.Body.String(), `"production_verified":true`) {
 		t.Fatal(detail.Body.String())
 	}
 	var shown struct {
@@ -97,7 +97,7 @@ func TestHandoffStaysUnfinishedUntilAudioIsReleased(t *testing.T) {
 	}
 	done := markReleased(presentJobs(jobs), map[string]bool{"board-1": true})
 	for _, item := range done {
-		if item.Progress != "已完成" || item.Headline != "音乐已校验并放入库中。" || !item.Downloaded || !item.LibraryPublished {
+		if item.Progress != "已入库" || item.Headline != "音乐已校验并放入库中（本地导入，未经站点下载）。" || item.Downloaded || !item.LibraryPublished {
 			t.Fatal(item)
 		}
 	}
@@ -131,4 +131,64 @@ func pcmWAV(frames int) []byte {
 	_ = binary.Write(&buf, binary.LittleEndian, uint32(len(data)))
 	buf.Write(data)
 	return buf.Bytes()
+}
+
+func TestSecondTrackAndOriginThroughHTTP(t *testing.T) {
+	application := newApp(t)
+	post(t, application, "/v1/search", searchBody("board-audio", "http://127.0.0.1:9", []string{}, false))
+	search := waitJob(t, application, "search:board-audio", "needs_review")
+	if search.Stage != "needs_review" {
+		t.Fatal(search.Stage)
+	}
+	incoming := filepath.Join(application.Dir, "incoming")
+	if err := os.MkdirAll(incoming, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(incoming, "one.wav"), pcmWAV(24), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(incoming, "two.wav"), pcmWAV(48), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var receipt struct {
+		OK         bool   `json:"ok"`
+		SHA256     string `json:"sha256"`
+		Origin     string `json:"origin"`
+		SourceName string `json:"source_name"`
+		Downloaded bool   `json:"downloaded"`
+	}
+	first := postCode(t, application, "/v1/audio/release", map[string]any{
+		"job_id": "board-audio", "artist": "Artist", "album": "Album", "title": "One", "track": 1, "source_name": "one.wav", "origin": "manual",
+	})
+	if first.Code != http.StatusOK {
+		t.Fatal(first.Code, first.Body.String())
+	}
+	if err := json.Unmarshal(first.Body.Bytes(), &receipt); err != nil || !receipt.OK || receipt.Origin != "manual" || receipt.SourceName != "one.wav" || receipt.Downloaded || receipt.SHA256 == "" {
+		t.Fatal(receipt, err, first.Body.String())
+	}
+	second := postCode(t, application, "/v1/audio/release", map[string]any{
+		"job_id": "board-audio", "artist": "Artist", "album": "Album", "title": "Two", "track": 2, "source_name": "two.wav",
+	})
+	if second.Code != http.StatusOK {
+		t.Fatal(second.Code, second.Body.String())
+	}
+	var secondReceipt struct {
+		SHA256 string `json:"sha256"`
+		Origin string `json:"origin"`
+	}
+	if err := json.Unmarshal(second.Body.Bytes(), &secondReceipt); err != nil || secondReceipt.SHA256 == "" || secondReceipt.SHA256 == receipt.SHA256 || secondReceipt.Origin != "local_import" {
+		t.Fatal(secondReceipt, err, second.Body.String())
+	}
+	if _, err := os.Stat(filepath.Join(application.Dir, "library-audio", "Artist", "Album", "01 One.wav")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(application.Dir, "library-audio", "Artist", "Album", "02 Two.wav")); err != nil {
+		t.Fatal(err)
+	}
+	bad := postCode(t, application, "/v1/audio/release", map[string]any{
+		"job_id": "board-audio", "artist": "Artist", "album": "Album", "title": "Three", "track": 3, "source_name": "two.wav", "origin": "torrent",
+	})
+	if bad.Code != http.StatusBadRequest || !strings.Contains(bad.Body.String(), "INVALID_REQUEST") {
+		t.Fatal(bad.Code, bad.Body.String())
+	}
 }

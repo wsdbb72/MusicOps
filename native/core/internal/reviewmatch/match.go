@@ -11,12 +11,22 @@ import (
 )
 
 // Hit is evidence already present on a candidate. Aliases must come from that record.
+// GroupID, Format and Year are the release-identity evidence the record carries:
+// the tracker group, the media format (for example FLAC), and the release year.
+// A zero value means the record carries no such evidence. GroupID is site-local
+// (the same album has different groups on different trackers) and Format is a
+// per-torrent property, so neither is compared across sites; they are carried so
+// the model cache key and later checks cover them. Year is a property of the
+// release itself, so conflicting years veto a merge.
 type Hit struct {
 	ID      string
 	Title   string
 	Artists []string
 	Aliases []string
 	Edition string
+	GroupID string
+	Format  string
+	Year    int
 }
 
 // Result is one comparison. Pass is false whenever the evidence is short or conflicting.
@@ -74,8 +84,15 @@ func Compare(expectedTitle, expectedArtist string, hit Hit) Result {
 }
 
 // Same reports whether two hits that already matched the expectation are one release.
+// Title, edition and artist must agree, and release-year evidence must not
+// conflict: different release years veto the merge. GroupID is site-local and
+// Format is a per-torrent property, so neither vetoes a cross-site merge; they
+// are carried on the hit so the model cache key covers them.
 func Same(left, right Hit) bool {
 	if fold(left.Title) != fold(right.Title) || editionKey(left.Title, left.Edition) != editionKey(right.Title, right.Edition) {
+		return false
+	}
+	if left.Year != 0 && right.Year != 0 && left.Year != right.Year {
 		return false
 	}
 	return artistKey(left.Artists) == artistKey(right.Artists)

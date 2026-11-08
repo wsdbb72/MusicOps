@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -323,6 +324,9 @@ func (a *App) releaseAudio(w http.ResponseWriter, r *http.Request) {
 		Title      string `json:"title"`
 		Track      int    `json:"track"`
 		SourceName string `json:"source_name"`
+		// Origin is optional: "manual" when a person placed the file by hand,
+		// "local_import" otherwise (the default). Anything else is rejected.
+		Origin string `json:"origin"`
 	}
 	if err := decode(r, &body); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "code": "INVALID_REQUEST", "downloaded": false, "library_published": false, "production_verified": false})
@@ -342,10 +346,12 @@ func (a *App) releaseAudio(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "code": "LIBRARY_UNAVAILABLE", "downloaded": false, "library_published": false, "production_verified": false})
 		return
 	}
-	sum := sha256.Sum256([]byte("album-audio/" + root))
+	// One request id per (root, track): a second track for the same root is a
+	// separate publish, not a replay of the first track's receipt.
+	sum := sha256.Sum256([]byte("album-audio/" + root + "/track/" + strconv.Itoa(body.Track)))
 	result, err := audiorelease.Release(r.Context(), a.engine, audiorelease.Request{
 		RequestID: "audio-" + hex.EncodeToString(sum[:16]), RootID: root, Artist: body.Artist, Album: body.Album, Title: body.Title,
-		Track: body.Track, SourceName: body.SourceName, Incoming: incoming, Library: library, Decoder: audiorelease.SystemDecoder(),
+		Track: body.Track, SourceName: body.SourceName, Origin: body.Origin, Incoming: incoming, Library: library, Decoder: audiorelease.SystemDecoder(),
 	})
 	if err != nil {
 		status, code := http.StatusBadRequest, "INVALID_REQUEST"
@@ -366,6 +372,7 @@ func (a *App) releaseAudio(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"ok": true, "format": result.Format, "decode_state": result.DecodeState, "sha256": result.SHA256,
+		"origin": result.Origin, "source_name": result.SourceName,
 		"downloaded": result.Downloaded, "library_published": result.LibraryPublished, "production_verified": false,
 	})
 }

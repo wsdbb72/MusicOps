@@ -22,12 +22,17 @@ type Completer interface {
 }
 
 // Candidate is one search hit sent to the model and checked locally afterwards.
+// GroupID, Format and Year carry the release-identity evidence with the candidate
+// so the model cache key and the local checks cover them.
 type Candidate struct {
 	ID      string   `json:"id"`
 	Title   string   `json:"title"`
 	Artists []string `json:"artists,omitempty"`
 	Aliases []string `json:"aliases,omitempty"`
 	Edition string   `json:"edition,omitempty"`
+	GroupID string   `json:"group_id,omitempty"`
+	Format  string   `json:"format,omitempty"`
+	Year    int      `json:"year,omitempty"`
 }
 
 // Request is the grounded input. The model does not receive permission to invent a release.
@@ -136,7 +141,7 @@ func decide(request Request, parsed verdict) Result {
 	var cited *Candidate
 	var passing []reviewmatch.Hit
 	for _, candidate := range request.Candidates {
-		hit := reviewmatch.Hit{ID: candidate.ID, Title: candidate.Title, Artists: candidate.Artists, Aliases: candidate.Aliases, Edition: candidate.Edition}
+		hit := reviewmatch.Hit{ID: candidate.ID, Title: candidate.Title, Artists: candidate.Artists, Aliases: candidate.Aliases, Edition: candidate.Edition, GroupID: candidate.GroupID, Format: candidate.Format, Year: candidate.Year}
 		if reviewmatch.Compare(request.ExpectedTitle, request.ExpectedArtist, hit).Pass {
 			passing = append(passing, hit)
 		}
@@ -148,7 +153,7 @@ func decide(request Request, parsed verdict) Result {
 	if cited == nil {
 		return Result{Reason: "unknown_candidate", Class: "identity"}
 	}
-	citedHit := reviewmatch.Hit{ID: cited.ID, Title: cited.Title, Artists: cited.Artists, Aliases: cited.Aliases, Edition: cited.Edition}
+	citedHit := reviewmatch.Hit{ID: cited.ID, Title: cited.Title, Artists: cited.Artists, Aliases: cited.Aliases, Edition: cited.Edition, GroupID: cited.GroupID, Format: cited.Format, Year: cited.Year}
 	if !reviewmatch.Compare(request.ExpectedTitle, request.ExpectedArtist, citedHit).Pass {
 		return Result{Reason: "evidence_rejected", Class: "identity"}
 	}

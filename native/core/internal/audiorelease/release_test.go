@@ -18,7 +18,7 @@ func TestWAVPublishesOnceAndKeepsTheSource(t *testing.T) {
 	body := wav(16)
 	writeSource(t, incoming, "song.wav", body)
 	got, err := Release(context.Background(), engine, sample(incoming, library, "song.wav"))
-	if err != nil || !got.Downloaded || !got.LibraryPublished || !got.Verified || !got.SourcePreserved || got.ProductionVerified || got.Replayed || got.Format != "wav" {
+	if err != nil || got.Downloaded || !got.LibraryPublished || !got.Verified || !got.SourcePreserved || got.ProductionVerified || got.Replayed || got.Format != "wav" {
 		t.Fatal(got, err)
 	}
 	source, err := os.ReadFile(filepath.Join(incoming, "song.wav"))
@@ -31,7 +31,7 @@ func TestWAVPublishesOnceAndKeepsTheSource(t *testing.T) {
 		t.Fatal(err, len(file))
 	}
 	again, err := Release(context.Background(), engine, sample(incoming, library, "song.wav"))
-	if err != nil || !again.Replayed || !again.Downloaded || again.SHA256 != got.SHA256 {
+	if err != nil || !again.Replayed || again.Downloaded || again.SHA256 != got.SHA256 {
 		t.Fatal(again, err)
 	}
 	albums, err := Albums(engine)
@@ -135,7 +135,7 @@ func TestSystemDecoderAcceptsWAVWhenPresent(t *testing.T) {
 	input := sample(incoming, library, "song.wav")
 	input.Decoder = decoder
 	got, err := Release(context.Background(), engine, input)
-	if err != nil || got.DecodeState != "decoded" || !got.Downloaded || got.ProductionVerified {
+	if err != nil || got.DecodeState != "decoded" || got.Downloaded || got.ProductionVerified {
 		t.Fatal(got, err)
 	}
 }
@@ -190,4 +190,74 @@ func wav(frames int) []byte {
 	_ = binary.Write(&buf, binary.LittleEndian, uint32(len(data)))
 	buf.Write(data)
 	return buf.Bytes()
+}
+
+func TestSecondTrackPublishesSeparately(t *testing.T) {
+	engine, incoming, library := openRelease(t)
+	writeSource(t, incoming, "one.wav", wav(16))
+	writeSource(t, incoming, "two.wav", wav(24))
+	first, err := Release(context.Background(), engine, Request{
+		RequestID: "rel-t1", RootID: "root-1", Artist: "Artist", Album: "Album", Title: "One", Track: 1,
+		SourceName: "one.wav", Incoming: incoming, Library: library,
+	})
+	if err != nil || first.Replayed || first.Downloaded || first.Origin != "local_import" {
+		t.Fatal(first, err)
+	}
+	second, err := Release(context.Background(), engine, Request{
+		RequestID: "rel-t2", RootID: "root-1", Artist: "Artist", Album: "Album", Title: "Two", Track: 2,
+		SourceName: "two.wav", Incoming: incoming, Library: library,
+	})
+	if err != nil || second.Replayed || second.Downloaded || second.SHA256 == first.SHA256 {
+		t.Fatal(second, err)
+	}
+	for _, name := range []string{"01 One.wav", "02 Two.wav"} {
+		if _, err := os.Stat(filepath.Join(library, "Artist", "Album", name)); err != nil {
+			t.Fatal(name, err)
+		}
+	}
+	albums, err := Albums(engine)
+	if err != nil || !albums["root-1"] {
+		t.Fatal(albums, err)
+	}
+}
+
+func TestOriginManualRecordedAndInvalidRejected(t *testing.T) {
+	engine, incoming, library := openRelease(t)
+	writeSource(t, incoming, "song.wav", wav(16))
+	req := sample(incoming, library, "song.wav")
+	req.Origin = "manual"
+	got, err := Release(context.Background(), engine, req)
+	if err != nil || got.Origin != "manual" || got.SourceName != "song.wav" {
+		t.Fatal(got, err)
+	}
+	again, err := Release(context.Background(), engine, req)
+	if err != nil || !again.Replayed || again.Origin != "manual" {
+		t.Fatal(again, err)
+	}
+	bad := sample(incoming, library, "song.wav")
+	bad.RequestID = "rel-bad"
+	bad.Origin = "torrent"
+	if _, err := Release(context.Background(), engine, bad); !errors.Is(err, dataengine.ErrInvalidRequest) {
+		t.Fatal("invalid origin was accepted", err)
+	}
+}
+
+func TestCASFailureRemovesOrphanFile(t *testing.T) {
+	engine, incoming, library := openRelease(t)
+	writeSource(t, incoming, "song.wav", wav(16))
+	ok, err := engine.CompareAndSwap(
+		[]dataengine.Condition{{Key: albumKey("root-1", 1), Absent: true}},
+		[]dataengine.Mutation{{Key: albumKey("root-1", 1), Value: []byte("seed")}},
+	)
+	if err != nil || !ok {
+		t.Fatal(ok, err)
+	}
+	_, err = Release(context.Background(), engine, sample(incoming, library, "song.wav"))
+	if !errors.Is(err, ErrConflict) {
+		t.Fatal("expected conflict", err)
+	}
+	dest := filepath.Join(library, "Artist", "Album", "01 Title.wav")
+	if _, err := os.Lstat(dest); err == nil {
+		t.Fatal("orphaned library file left behind", dest)
+	}
 }

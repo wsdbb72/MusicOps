@@ -62,8 +62,9 @@ func presentJobs(jobs []jobView) []jobView {
 	return out
 }
 
-// markReleased shows business completion only after a verified audio file is in the library.
-// An internal handoff stage stays untouched when that record is absent.
+// markReleased shows library ingest only after a verified audio file is in the library.
+// A local import is not a download: progress says ingested, not finished downloading,
+// and Downloaded stays false. An internal handoff stage stays untouched when that record is absent.
 func markReleased(jobs []jobView, albums map[string]bool) []jobView {
 	if len(albums) == 0 {
 		return jobs
@@ -75,9 +76,8 @@ func markReleased(jobs []jobView, albums map[string]bool) []jobView {
 			root = job.ID
 		}
 		if albums[root] {
-			job.Progress = "已完成"
-			job.Headline = "音乐已校验并放入库中。"
-			job.Downloaded = true
+			job.Progress = "已入库"
+			job.Headline = "音乐已校验并放入库中（本地导入，未经站点下载）。"
 			job.LibraryPublished = true
 		}
 		out[i] = job

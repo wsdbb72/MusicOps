@@ -17,6 +17,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -25,7 +26,9 @@ import (
 	"github.com/wsdbb72/MusicOps/native/core/internal/dataengine"
 )
 
-const maxAudioBytes = 32 << 20
+// MaxAudioBytes is the largest single audio file the release path accepts.
+// The incoming upload endpoint enforces the same limit.
+const MaxAudioBytes = 32 << 20
 
 var (
 	ErrRejected = errors.New("audio rejected")
@@ -302,6 +305,88 @@ func Albums(engine *dataengine.Engine) (map[string]bool, error) {
 	return out, nil
 }
 
+// Entry is one verified library record, as the operations library view shows it.
+type Entry struct {
+	RequestID   string `json:"request_id"`
+	RootID      string `json:"root_id"`
+	Track       int    `json:"track"`
+	File        string `json:"file"`
+	Format      string `json:"format"`
+	DecodeState string `json:"decode_state"`
+	SHA256      string `json:"sha256"`
+	Origin      string `json:"origin"`
+	SourceName  string `json:"source_name"`
+	FilePresent bool   `json:"file_present"`
+}
+
+// List returns every verified library record, ordered by album root and track
+// number. FilePresent only reports whether the stored file still exists: the
+// list view must not hash every file on each load, and a missing file stays
+// listed so the gap is visible instead of hidden. Verify is the per-record
+// check that re-hashes the file.
+func List(engine *dataengine.Engine) ([]Entry, error) {
+	if engine == nil {
+		return nil, dataengine.ErrInvalidRequest
+	}
+	prefix := []byte("library/album-audio/")
+	entries := []Entry{}
+	var after []byte
+	for {
+		var page dataengine.Page
+		err := engine.View(func(v *dataengine.View) error {
+			var scanErr error
+			page, scanErr = v.Scan(prefix, after, 200)
+			return scanErr
+		})
+		if err != nil {
+			return nil, err
+		}
+		for _, item := range page.Items {
+			var rec record
+			if json.Unmarshal(item.Value, &rec) != nil || rec.State != "published" || !rec.Verified || !rec.LibraryPublished {
+				continue
+			}
+			id := strings.TrimPrefix(string(item.Key), "library/album-audio/")
+			root, track := id, 0
+			if i := strings.LastIndex(id, "/"); i >= 0 {
+				root = id[:i]
+				track, _ = strconv.Atoi(id[i+1:])
+			}
+			if root != rec.RootID {
+				continue
+			}
+			_, statErr := os.Stat(rec.Path)
+			entries = append(entries, Entry{
+				RequestID: rec.RequestID, RootID: rec.RootID, Track: track,
+				File: libraryFile(rec.Path), Format: rec.Format, DecodeState: rec.DecodeState,
+				SHA256: rec.SHA256, Origin: rec.Origin, SourceName: rec.SourceName,
+				FilePresent: statErr == nil,
+			})
+		}
+		if len(page.Next) == 0 {
+			break
+		}
+		after = page.Next
+	}
+	sort.Slice(entries, func(i, j int) bool {
+		if entries[i].RootID != entries[j].RootID {
+			return entries[i].RootID < entries[j].RootID
+		}
+		return entries[i].Track < entries[j].Track
+	})
+	return entries, nil
+}
+
+// libraryFile returns the artist/album/file tail of a library path. Names are
+// validated on ingest, so the path always ends with those three segments.
+func libraryFile(path string) string {
+	parts := strings.Split(path, string(filepath.Separator))
+	if len(parts) < 3 {
+		return filepath.Base(path)
+	}
+	return strings.Join(parts[len(parts)-3:], "/")
+}
+
 // SystemDecoder returns a ffmpeg/ffprobe check when both tools are on PATH.
 func SystemDecoder() Decoder {
 	ffmpeg, err := exec.LookPath("ffmpeg")
@@ -372,7 +457,7 @@ func resultFrom(rec record, preserved, replayed bool) Result {
 }
 
 func classify(name string, body []byte) (string, string) {
-	if len(body) == 0 || len(body) > maxAudioBytes {
+	if len(body) == 0 || len(body) > MaxAudioBytes {
 		return "", "audio_rejected"
 	}
 	if torrent(name, body) {

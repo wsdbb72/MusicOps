@@ -21,10 +21,13 @@ dl{display:grid;grid-template-columns:7rem 1fr;gap:.35rem .75rem;margin:1rem 0}d
 `
 
 const appJS = `(function () {
-  var titles = {tasks: "任务", queue: "队列", review: "核对"};
+  var titles = {tasks: "任务", queue: "队列", review: "核对", sites: "站点", library: "库", logs: "日志"};
   var active = {identifying: true, searching: true, requesting: true, downloading: true, fallback: true, validating: true, publishing: true};
   var view = "tasks";
   var jobs = [];
+  var siteRows = [];
+  var libraryRows = [];
+  var logRows = [];
   var loading = false;
   var status = document.getElementById("status");
   var list = document.getElementById("list");
@@ -61,6 +64,9 @@ const appJS = `(function () {
     note.hidden = true;
     detail.hidden = true;
     list.hidden = false;
+    if (view === "sites") { renderSites(); return; }
+    if (view === "library") { renderLibrary(); return; }
+    if (view === "logs") { renderLogs(); return; }
     var rows = visible();
     if (!rows.length) {
       list.innerHTML = "";
@@ -71,6 +77,70 @@ const appJS = `(function () {
     var html = '<div class="cards">';
     rows.forEach(function (job) {
       html += '<article><button type="button" data-job="' + escapeText(job.job_id) + '"><h2>' + escapeText(job.label || "未命名") + '</h2><p class="meta">' + pill(job) + '</p><p>' + escapeText(job.headline || "") + "</p></button></article>";
+    });
+    list.innerHTML = html + "</div>";
+  }
+  function renderSites() {
+    if (!siteRows.length) {
+      list.innerHTML = "";
+      status.textContent = "还没有站点设置。";
+      return;
+    }
+    status.textContent = "";
+    var html = '<div class="cards"><article><h2>默认站点</h2><p class="meta">检索请求里没有指定站点时，用这里的选择；每次检索也可以自己指定。</p>';
+    siteRows.forEach(function (site) {
+      html += '<label><input type="checkbox" data-site="' + escapeText(site.name) + '"' + (site.enabled ? " checked" : "") + "> " + escapeText(site.name) + "（" + escapeText(site.host || "") + "）</label><br>";
+    });
+    html += '<p><button type="button" id="save-sites" class="primary">保存</button></p></article></div>';
+    list.innerHTML = html;
+    var save = document.getElementById("save-sites");
+    if (save) save.addEventListener("click", saveSites);
+  }
+  async function saveSites() {
+    if (loading) return;
+    var enabled = [];
+    document.querySelectorAll("input[data-site]:checked").forEach(function (box) { enabled.push(box.getAttribute("data-site")); });
+    setBusy(true);
+    status.textContent = "正在保存";
+    try {
+      var response = await fetch("/v1/sites", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({enabled_sites: enabled})});
+      var body = await response.json();
+      if (!response.ok || !body || !body.ok) {
+        status.textContent = "保存失败。";
+        return;
+      }
+      siteRows = Array.isArray(body.sites) ? body.sites : [];
+      status.textContent = "已保存。";
+      render();
+    } catch (err) {
+      status.textContent = "保存失败。";
+    } finally {
+      setBusy(false);
+    }
+  }
+  function renderLibrary() {
+    if (!libraryRows.length) {
+      list.innerHTML = "";
+      status.textContent = "库里还没有已入库的音频。";
+      return;
+    }
+    status.textContent = "";
+    var html = '<div class="cards">';
+    libraryRows.forEach(function (entry) {
+      html += '<article><h2>' + escapeText(entry.file || entry.source_name || "未命名") + '</h2><p class="meta"><span class="pill">' + escapeText(entry.format || "") + '</span><span class="pill">' + escapeText(entry.decode_state || "") + '</span><span class="pill">' + escapeText(entry.origin || "") + '</span></p><p>' + (entry.file_present ? "文件在库中" : "文件不在库中") + " · " + escapeText((entry.sha256 || "").slice(0, 12)) + "</p></article>";
+    });
+    list.innerHTML = html + "</div>";
+  }
+  function renderLogs() {
+    if (!logRows.length) {
+      list.innerHTML = "";
+      status.textContent = "还没有运行记录。";
+      return;
+    }
+    status.textContent = "";
+    var html = '<div class="cards">';
+    logRows.forEach(function (task) {
+      html += '<article><h2>' + escapeText(task.task_id || "") + '</h2><p class="meta"><span class="pill">' + escapeText(task.state || "") + '</span><span class="pill">' + escapeText(task.command || "") + "</span></p><p>" + escapeText(task.message || "") + "</p></article>";
     });
     list.innerHTML = html + "</div>";
   }
@@ -119,9 +189,23 @@ const appJS = `(function () {
       status.textContent = "正在读取";
     }
     try {
-      var response = await fetch("/v1/jobs", {headers: {Accept: "application/json"}});
-      var body = await response.json();
-      jobs = body && Array.isArray(body.jobs) ? body.jobs : [];
+      if (view === "sites") {
+        var siteResponse = await fetch("/v1/sites", {headers: {Accept: "application/json"}});
+        var siteBody = await siteResponse.json();
+        siteRows = siteBody && Array.isArray(siteBody.sites) ? siteBody.sites : [];
+      } else if (view === "library") {
+        var libraryResponse = await fetch("/v1/library", {headers: {Accept: "application/json"}});
+        var libraryBody = await libraryResponse.json();
+        libraryRows = libraryBody && Array.isArray(libraryBody.entries) ? libraryBody.entries : [];
+      } else if (view === "logs") {
+        var logResponse = await fetch("/v1/logs", {headers: {Accept: "application/json"}});
+        var logBody = await logResponse.json();
+        logRows = logBody && Array.isArray(logBody.tasks) ? logBody.tasks : [];
+      } else {
+        var response = await fetch("/v1/jobs", {headers: {Accept: "application/json"}});
+        var body = await response.json();
+        jobs = body && Array.isArray(body.jobs) ? body.jobs : [];
+      }
       if (detail.hidden) render();
       arm();
     } catch (err) {
@@ -133,6 +217,7 @@ const appJS = `(function () {
   var timer = 0;
   function arm() {
     clearTimeout(timer);
+    if (view !== "tasks" && view !== "queue" && view !== "review") return;
     if (!jobs.some(function (job) { return active[job.stage]; })) return;
     timer = setTimeout(function () { load(true); }, 2000);
   }
@@ -141,7 +226,7 @@ const appJS = `(function () {
     if (!button || !button.getAttribute("data-view") || loading) return;
     view = button.getAttribute("data-view");
     detail.hidden = true;
-    render();
+    load();
   });
   list.addEventListener("click", function (event) {
     var button = event.target.closest("button[data-job]");

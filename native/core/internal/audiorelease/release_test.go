@@ -243,6 +243,43 @@ func wav(frames int) []byte {
 	return buf.Bytes()
 }
 
+func TestListReturnsEntriesSorted(t *testing.T) {
+	engine, incoming, library := openRelease(t)
+	writeSource(t, incoming, "one.wav", wav(16))
+	writeSource(t, incoming, "two.wav", wav(24))
+	if _, err := Release(context.Background(), engine, Request{
+		RequestID: "rel-t1", RootID: "root-1", Artist: "Artist", Album: "Album", Title: "One", Track: 1,
+		SourceName: "one.wav", Incoming: incoming, Library: library,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Release(context.Background(), engine, Request{
+		RequestID: "rel-t2", RootID: "root-1", Artist: "Artist", Album: "Album", Title: "Two", Track: 2,
+		SourceName: "two.wav", Incoming: incoming, Library: library,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	entries, err := List(engine)
+	if err != nil || len(entries) != 2 {
+		t.Fatal(entries, err)
+	}
+	if entries[0].Track != 1 || entries[0].File != "Artist/Album/01 One.wav" || !entries[0].FilePresent {
+		t.Fatal(entries[0])
+	}
+	if entries[1].Track != 2 || entries[1].File != "Artist/Album/02 Two.wav" || entries[1].Format != "wav" {
+		t.Fatal(entries[1])
+	}
+	// A missing file stays listed with FilePresent false: the gap is shown,
+	// not hidden.
+	if err := os.Remove(filepath.Join(library, "Artist", "Album", "02 Two.wav")); err != nil {
+		t.Fatal(err)
+	}
+	entries, err = List(engine)
+	if err != nil || len(entries) != 2 || entries[1].FilePresent {
+		t.Fatal(entries, err)
+	}
+}
+
 func TestSecondTrackPublishesSeparately(t *testing.T) {
 	engine, incoming, library := openRelease(t)
 	writeSource(t, incoming, "one.wav", wav(16))

@@ -29,7 +29,7 @@ func TestOperationsBoardReadsStoredJobsAndHidesSecrets(t *testing.T) {
 			t.Fatal(leaked)
 		}
 	}
-	if !strings.Contains(home.Body.String(), "还不能修改连接") || !strings.Contains(home.Body.String(), "还不能查看或整理") || !strings.Contains(home.Body.String(), "还没有单独的运行记录") || !strings.Contains(home.Body.String(), "disabled") || !strings.Contains(script.Body.String(), "job.headline") || !strings.Contains(script.Body.String(), "job.progress") || !strings.Contains(script.Body.String(), "body.downloaded") || !strings.Contains(script.Body.String(), "body.library_published") || !strings.Contains(style.Body.String(), "max-width:720px") {
+	if strings.Contains(home.Body.String(), "还不能修改连接") || strings.Contains(home.Body.String(), "还不能查看或整理") || strings.Contains(home.Body.String(), "还没有单独的运行记录") || !strings.Contains(home.Body.String(), `data-view="sites"`) || !strings.Contains(home.Body.String(), `data-view="library"`) || !strings.Contains(home.Body.String(), `data-view="logs"`) || !strings.Contains(script.Body.String(), "job.headline") || !strings.Contains(script.Body.String(), "job.progress") || !strings.Contains(script.Body.String(), "body.downloaded") || !strings.Contains(script.Body.String(), "body.library_published") || !strings.Contains(script.Body.String(), "/v1/sites") || !strings.Contains(script.Body.String(), "/v1/library") || !strings.Contains(script.Body.String(), "/v1/logs") || !strings.Contains(style.Body.String(), "max-width:720px") {
 		t.Fatal("page controls")
 	}
 	if got := scrub("authkey=sentinel-dic-auth&torrent_pass=sentinel-orpheus-pass"); strings.Contains(got, "sentinel") || !strings.Contains(got, "authkey=redacted") {

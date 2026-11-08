@@ -30,9 +30,9 @@ const page = `<!doctype html>
 <button type="button" data-view="tasks" aria-current="page">任务</button>
 <button type="button" data-view="queue">队列</button>
 <button type="button" data-view="review">核对</button>
-<span class="unavailable"><button type="button" disabled>站点</button><span>还不能修改连接</span></span>
-<span class="unavailable"><button type="button" disabled>库</button><span>还不能查看或整理</span></span>
-<span class="unavailable"><button type="button" disabled>日志</button><span>还没有单独的运行记录</span></span>
+<button type="button" data-view="sites">站点</button>
+<button type="button" data-view="library">库</button>
+<button type="button" data-view="logs">日志</button>
 </nav>
 <main>
 <p id="status" role="status">正在读取</p>
@@ -62,6 +62,11 @@ func (a *App) Handler() http.Handler {
 	mux.HandleFunc("GET /v1/archive/record", a.archiveRecord)
 	mux.HandleFunc("POST /v1/search", a.startSearch)
 	mux.HandleFunc("POST /v1/audio/release", a.releaseAudio)
+	mux.HandleFunc("POST /v1/audio/incoming", a.uploadIncoming)
+	mux.HandleFunc("GET /v1/library", a.library)
+	mux.HandleFunc("GET /v1/logs", a.logs)
+	mux.HandleFunc("GET /v1/sites", a.sites)
+	mux.HandleFunc("POST /v1/sites", a.saveSites)
 	mux.HandleFunc("POST /v1/tokens/recheck", a.recheckToken)
 	mux.HandleFunc("GET /v1/jobs/{id}", a.job)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -246,6 +251,15 @@ func (a *App) startSearch(w http.ResponseWriter, r *http.Request) {
 	body.BalanceKnown = false
 	body.FreeConfirmed = false
 	body.TokenCost = 0
+	// When the request names no sites at all, fall back to the saved site
+	// defaults. An explicit empty list still means "no sites". A settings
+	// read failure keeps the old behaviour instead of blocking the search;
+	// the failure surfaces on GET /v1/sites.
+	if body.EnabledSites == nil {
+		if settings, err := a.loadSiteSettings(); err == nil {
+			body.EnabledSites = settings.EnabledSites
+		}
+	}
 	plan := SearchPlan{
 		RootJobID: body.JobID, Query: body.Query, ExpectedTitle: body.ExpectedTitle, ExpectedArtist: body.ExpectedArtist, EnabledSites: body.EnabledSites,
 		StreamingEnabled: body.StreamingEnabled, Synthetic: body.Synthetic, BaseURL: body.BaseURL, Identity: body.Identity,

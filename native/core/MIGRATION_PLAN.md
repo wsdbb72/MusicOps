@@ -46,7 +46,7 @@
 - 目标：三路盘点 + 新分支 `refactor/go-desktop`（本地工作区已干净同步到 `453804ed`）。
 - 验收：本计划文档在分支内；分支已推远程。
 
-### 阶段 1 — 地基（进行中）
+### 阶段 1 — 地基（已完成，2026-11-09，远程 HEAD `1f0aecc`，Native core 全绿）
 
 - 1.1 本计划文档进分支。
 - 1.2 `native-core.yml` 增加 `refactor/go-desktop` 触发分支，让 Go CI 在本分支上跑起来。
@@ -55,12 +55,29 @@
 - 验收标准：`go vet ./...` 过；`go test ./... -count=1` 22 个包全过；相关包 `-race` 过；`pytest tests/test_native_data_transport.py` 8 passed；新分支上有对应提交；CI 在新分支上跑起来。
 - **阶段结束时安装包里还剩的 Python：全部**（PySide6 GUI + worker + PyInstaller + Inno/macOS/Docker 均未动）。
 
-### 阶段 2 — 完整操作界面（契约硬门槛）
+### 阶段 2 — 完整操作界面（已完成，2026-11-09）
 
-- 搜索提交表单（现在只有 API，没有页面入口）；核对确认（需先设计确认/驳回语义：确认候选、接受元数据修正、还是跳过——仓储层目前没有 review-decide 函数，不能凭空编一个）；凭据与下载配置页（Vault 引用、站点账号、qBittorrent、流媒体开关）；批量操作（批量暂停/重试/取消）；确认对话框与一致的成功/失败/待核对反馈；任务重试语义（workflow 层目前只有 pause/resume/cancel，retry 只在 taskrepo 层）。
-- 用已有领域测试向量验证端到端行为；验收要在浏览器里走通全部操作；未接入能力标明未接入，不虚构数据。
-- 验收标准：契约 `ARCHITECTURE.md:68` 的页面覆盖（任务、队列、核对、站点与下载配置、音乐库、日志）全部真实可用；`go test` + 浏览器走查通过。
+- 搜索提交表单：WebUI 新增搜索视图（查询/期望标题/艺人必填、5 个合法场景、每站可选站点、流媒体默认/显式选择、身份证据字段、每站 Cookie 永不保存）+ `POST /v1/search`（`StreamingEnabled` 改为 `*bool`，省略时取已存下载默认；`dicmusic_authkey`/`orpheus_torrent_pass` 仅本次使用）。
+- 核对确认：`GET/POST /v1/jobs/{id}/review`（任务、核对种类、期望标题/艺人、每站 Exact 行、候选列表上限 100、允许动作与拒绝理由）+ `workflow.Repository.Review`（见下方设计）。
+- 凭据与下载配置页：设置视图（下载默认保存到 Pebble `app/settings/download`、流媒体顺序只读展示、`streaming_fallback_wired: false` 如实标注未接线）+ `POST /v1/sites/preflight`（只读登录检查，Cookie 仅本次调用、不保存）。
+- 批量操作：`POST /v1/jobs/batch`（pause/resume/cancel/retry，1–50 个任务、去重、逐任务结果与 code、整批 200）。
+- 确认对话框与一致反馈：WebUI `setStatus(kind, text)` 单一反馈通道（ok/fail/review/info + 服务端 code）；取消用 `window.confirm`；待核对任务隐藏 pause/resume/cancel（必 409）；失败任务显示重试按钮。
+- 任务重试语义：`taskrepo.ControlOwned` 接受 `retry`；`workflow.Repository.Review` 的 retry（见下方设计）。重试同时补上了阶段 1 的遗留缺口：发布校验永久失败的任务现在可通过 failed 任务重试出 publishing 阶段。
+- 验收：`go vet ./...` 过；`go test ./... -count=1` 全过；app/workflow/taskrepo `-race` 过；pytest 传输 8 passed；真服务 HTTP 端到端走通（搜索→待核对→accept→获取子任务存种子→needs_review/candidate；401 搜索→retry 重检索→skip；配置保存；批量逐任务结果；预检已认证且 Cookie 未落盘；control 对已完成任务 409）。
 - **阶段结束时安装包里还剩的 Python：全部**（界面逻辑已 Go 化，但桌面壳/打包仍 Python）。
+
+#### 阶段 2 review-decide 设计（已定，2026-11-09，从真实代码出发）
+
+**现状（以代码为准）：** `needs_review` 只由四处产生——检索执行器按 `searchdecision` 分类得到 `review_search`/`review_candidate`（`execute.go` 的 `completion`）；获取执行器在不能获取时（`acquire.go` 的 `finishAcquire`，ReviewKind 为 `candidate` 或 `token`）；执行器被确认停止后的 `Interrupt`（ReviewKind `interrupted`，任务进 `recovery_required`）；无执行器时的 `BlockUnregistered`（ReviewKind `error`）。`taskrepo` 的 `finishDecision` 只允许 running/paused 的任务完成，所以已 `blocked` 的任务**走不了** `workflow.Complete`——核对决议必须是一条新的原子转移，而不是复用执行器完成路径；`Control` 的 pause/resume/cancel 对 `blocked` 任务一律 409（`terminal()` 把 `blocked` 算终态），所以待核对任务目前除入库外没有任何出路。
+
+**决议动作（`workflow.Repository.Review`，一次原子提交内完成任务转移 + 任务转移）：**
+- `accept`（仅 ReviewKind `candidate` 的**检索任务**）：应用层从已存证据（每站检索观察）与已存检索计划重建 `searchdecision.Report`，代入用户选定的站点/候选，用同一 `searchdecision.Decide` 分类，必须得到 `queue_request` 才放行；放行后搜索任务进 `completed`，新建获取子任务（payload 为补上选定站点/候选的检索计划），搜索任务进 `completed`，SearchAction 记 `queue_request`。用户是新的决策输入，分类器仍是同一台。**获取任务不能 accept**：它的候选在入队时已选定，accept 会在它下面再挂一个获取子任务；出路只有 retry 或 skip。核对页上获取任务无候选可列（其证据只有种子收据），只给 retry/skip，这是如实行为。
+- 两站返回同一发行时不进核对：`selectIdentity` 会把一致的候选折成一个直接排队；只有候选身份不一致（例如发行年份不同且均非零，`reviewmatch.Same` 否决合并）时分类器才出 `selection_required`。测试里用不同 `groupYear` 构造这一情形。
+- `retry`（ReviewKind `search`/`candidate`/`token` 的待核对任务，或 `failed` 任务）：复用 `taskrepo` 已有的 retry 语义（任务回 `queued`、清空属主与进度），同时把任务阶段还原为执行器重跑时应处的阶段——检索任务回 `searching`；`stage:` 任务取其后缀阶段；`process:` 子任务按父检索任务的 SearchAction 还原为 `requesting`/`fallback`；检索重试计入 `SearchRetryCount`（上限 3 次，与分类器的可重试上限一致）并清掉重试等待。`error`（无执行器，重试必定再次卡住）、`interrupted`（任务在 `recovery_required`，`taskrepo` 的 retry 明确拒绝，需先做外部影响核对——暂未接入）与 `fallback` 阶段的获取任务（重跑必定再次因“流媒体未接入”卡住）不提供重试；已取消的任务不重试（取消是终态）。
+- `skip`（ReviewKind `search`/`candidate`/`token`/`error`）：任务进 `completed`，任务进 `skipped`，SearchAction 记 `skip`；这是用户的明确放弃，不是分类器的输出，代码里注明。
+- 决议只接受 `needs_review`（accept/skip）与 `failed`（仅 retry）的任务；已暂停的任务重试时视为同时恢复（重试即明确要求重新执行，job 的 Paused 标志与 task 的 PauseRequested 一并清除），其余动作拒绝已暂停任务。
+
+**实现中发现并修掉的重试 bug（2026-11-09，测试先暴露、根因已确认）：** 重试后的检索重跑会在 `Complete` 时报 `ErrStale`、被协调器中断进 `interrupted`/`recovery_required`，导致后续 skip 也 409。根因是证据 ID 只由（任务 ID，站点）决定：重试在同一任务上重跑，观测内容一变就与已存证据字节冲突（证据库对同 ID 不同字节拒绝写入）。修复：证据 ID 改为（任务 ID，fence，站点），每次尝试独立；执行器在观测缺时间戳时补 `ObservedAt`（`a.now()`），核对页按 `ObservedAt` 取每站最新一次观测（证据列表是摘要序、不是时间序）；重试保留搜索 Cookie（重跑要用同一 Cookie 再检索），skip 才删全部 secret。**accept 不删 Cookie**：获取子任务仍需会话 Cookie 读种子详情页并下载种子，删了它子任务会以“没有可用的登录状态”卡住；未被核对的 secret 只留内存、随进程重启消失，永不落盘。
 
 ### 阶段 3 — 执行器（从“检索到已入库”之间的全部执行侧链路）
 

@@ -7,6 +7,7 @@ import (
 
 	"github.com/wsdbb72/MusicOps/native/core/internal/audiorelease"
 	"github.com/wsdbb72/MusicOps/native/core/internal/dataengine"
+	"github.com/wsdbb72/MusicOps/native/core/internal/downloadpolicy"
 	"github.com/wsdbb72/MusicOps/native/core/internal/taskrepo"
 	"github.com/wsdbb72/MusicOps/native/core/internal/trackersearch"
 )
@@ -141,6 +142,98 @@ func (a *App) saveSites(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "sites": siteViews(saved), "count": len(saved.EnabledSites)})
+}
+
+// downloadSettingsKey is the persisted download default. A search that does
+// not say whether streaming is on uses this; an explicit value always wins.
+var downloadSettingsKey = []byte("app/settings/download")
+
+// downloadSettings is the persisted download default: whether a search falls
+// back to streaming when the trackers have no exact match.
+type downloadSettings struct {
+	StreamingEnabled bool  `json:"streaming_enabled"`
+	UpdatedNS        int64 `json:"updated_ns"`
+}
+
+func (a *App) loadDownloadSettings() (downloadSettings, error) {
+	var out downloadSettings
+	err := a.engine.View(func(v *dataengine.View) error {
+		raw, ok, err := v.Get(downloadSettingsKey)
+		if err != nil || !ok {
+			return err
+		}
+		return json.Unmarshal(raw, &out)
+	})
+	if err != nil {
+		return downloadSettings{}, err
+	}
+	return out, nil
+}
+
+func (a *App) saveDownloadSettings(in downloadSettings) (downloadSettings, error) {
+	in.UpdatedNS = a.now().UnixNano()
+	encoded, err := json.Marshal(in)
+	if err != nil {
+		return downloadSettings{}, err
+	}
+	for attempt := 0; attempt < 8; attempt++ {
+		var current []byte
+		var present bool
+		if err := a.engine.View(func(v *dataengine.View) error {
+			var err error
+			current, present, err = v.Get(downloadSettingsKey)
+			return err
+		}); err != nil {
+			return downloadSettings{}, err
+		}
+		conditions := []dataengine.Condition{{Key: downloadSettingsKey, Absent: true}}
+		if present {
+			conditions = []dataengine.Condition{{Key: downloadSettingsKey, Value: current}}
+		}
+		ok, err := a.engine.CompareAndSwap(conditions, []dataengine.Mutation{{Key: downloadSettingsKey, Value: encoded}})
+		if err != nil {
+			return downloadSettings{}, err
+		}
+		if ok {
+			return in, nil
+		}
+	}
+	return downloadSettings{}, errors.New("download settings changed under the write")
+}
+
+// downloadSettingsView returns the saved streaming default plus the canonical
+// streaming fallback order. The order comes from downloadpolicy; no streaming
+// executor is wired yet, so the order is information about the intended
+// fallback, not a promise that fallback will run.
+func (a *App) downloadSettings(w http.ResponseWriter, r *http.Request) {
+	settings, err := a.loadDownloadSettings()
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "code": "SETTINGS_UNAVAILABLE"})
+		return
+	}
+	steps, err := downloadpolicy.Plan(downloadpolicy.DefaultSources(), downloadpolicy.Track{})
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "code": "SETTINGS_UNAVAILABLE"})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "streaming_enabled": settings.StreamingEnabled, "streaming_sources": steps, "streaming_fallback_wired": false})
+}
+
+// saveDownload replaces the saved streaming default.
+func (a *App) saveDownload(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		StreamingEnabled *bool `json:"streaming_enabled"`
+	}
+	if err := decode(r, &body); err != nil || body.StreamingEnabled == nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "code": "INVALID_REQUEST"})
+		return
+	}
+	saved, err := a.saveDownloadSettings(downloadSettings{StreamingEnabled: *body.StreamingEnabled})
+	if err != nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"ok": false, "code": "SETTINGS_UNAVAILABLE"})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "streaming_enabled": saved.StreamingEnabled})
 }
 
 // library lists every verified library record. A record whose file is gone

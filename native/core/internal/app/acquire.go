@@ -275,7 +275,7 @@ func (a *App) finishAcquire(held taskrepo.Token, job workflow.Job, review, messa
 			return scheduler.Outcome{}, err
 		}
 		complete.Evidence = []workflow.EvidenceInput{{
-			ID: evidenceID(held.ID, receipt.Site), Kind: "api", Source: receipt.Site, Payload: body,
+			ID: evidenceID(held.ID, held.Fence, receipt.Site), Kind: "api", Source: receipt.Site, Payload: body,
 		}}
 	}
 	if _, err := a.flows.Complete(intentID("acquire", held.ID, held.Fence), held, complete); err != nil {

@@ -14,6 +14,7 @@ import (
 	"github.com/wsdbb72/MusicOps/native/core/internal/reviewmatch"
 	"github.com/wsdbb72/MusicOps/native/core/internal/scheduler"
 	"github.com/wsdbb72/MusicOps/native/core/internal/searchdecision"
+	"github.com/wsdbb72/MusicOps/native/core/internal/taskrepo"
 	"github.com/wsdbb72/MusicOps/native/core/internal/trackersearch"
 	"github.com/wsdbb72/MusicOps/native/core/internal/workflow"
 )
@@ -91,7 +92,7 @@ func (a *App) search(ctx context.Context, execution *scheduler.Execution, payloa
 			return scheduler.Outcome{}, err
 		}
 	}
-	report, evidence, adviseClass, err := a.observe(ctx, execution, *job, plan, token.ID)
+	report, evidence, adviseClass, err := a.observe(ctx, execution, *job, plan, token)
 	if errors.Is(err, scheduler.ErrCancelled) {
 		return scheduler.Outcome{}, a.stop(execution)
 	}
@@ -124,12 +125,20 @@ func (a *App) search(ctx context.Context, execution *scheduler.Execution, payloa
 		return scheduler.Outcome{}, err
 	}
 	if complete.Edge != workflow.EdgeDefer && complete.Edge != workflow.EdgeQueueProcess {
-		a.forget(plan.RootJobID)
+		// The search secret stays while the job tree can still use it: a job
+		// in needs_review or failed can be retried, and the retry re-runs the
+		// search with the same cookie. It is forgotten only when the search
+		// is over for good. A skip also forgets it in the review handler; an
+		// accept keeps it, because the process child still needs the session
+		// cookie to read the torrent detail and fetch the torrent.
+		if complete.NextStage == "skipped" || complete.NextStage == "cancelled" {
+			a.forget(plan.RootJobID)
+		}
 	}
 	return scheduler.Outcome{State: complete.TaskState, Message: complete.Message}, nil
 }
 
-func (a *App) observe(ctx context.Context, execution *scheduler.Execution, job workflow.Job, plan SearchPlan, taskID string) (searchdecision.Report, []workflow.EvidenceInput, string, error) {
+func (a *App) observe(ctx context.Context, execution *scheduler.Execution, job workflow.Job, plan SearchPlan, token taskrepo.Token) (searchdecision.Report, []workflow.EvidenceInput, string, error) {
 	enabled := map[string]bool{}
 	for _, site := range plan.EnabledSites {
 		enabled[site] = true
@@ -166,31 +175,18 @@ func (a *App) observe(ctx context.Context, execution *scheduler.Execution, job w
 				observation.Candidates = append(observation.Candidates, next.Candidates...)
 			}
 		}
-		row.Status = observation.Status
-		row.Attempted = true
-		row.CandidateCount = len(observation.Candidates)
-		row.Limited = observation.Status == "OK" && !observation.SearchComplete
-		var seeded *identityPick
-		for _, candidate := range observation.Candidates {
-			hit := releaseHit(candidate)
-			pool = append(pool, reviewai.Candidate{ID: hit.ID, Title: hit.Title, Artists: hit.Artists, Aliases: hit.Aliases, Edition: hit.Edition, GroupID: hit.GroupID, Format: hit.Format, Year: hit.Year})
-			if !reviewmatch.Compare(plan.ExpectedTitle, plan.ExpectedArtist, hit).Pass {
-				continue
-			}
-			row.Exact = true
-			row.ObservedTitle = candidate.Title
-			if candidate.Seeders != nil {
-				row.Seeders = *candidate.Seeders
-				row.SeedersKnown = true
-			}
-			if seeded == nil && (site == "open.cd" || row.SeedersKnown && row.Seeders > 0) {
-				seeded = &identityPick{site: site, id: candidate.CandidateID, hit: hit}
-			}
-		}
+		row, seeded, sitePool := summarizeSite(plan, site, observation)
+		pool = append(pool, sitePool...)
 		if seeded != nil {
 			picks = append(picks, *seeded)
 		}
 		report.Sites = append(report.Sites, row)
+		// Stamp the observation time when the site did not supply one, so a
+		// later attempt's observation can be told apart from this one. The
+		// review page reads the latest observation per site by this time.
+		if observation.ObservedAt == "" {
+			observation.ObservedAt = a.now().UTC().Format(time.RFC3339Nano)
+		}
 		body, err := json.Marshal(observation)
 		if err != nil {
 			return report, nil, "", err
@@ -199,7 +195,7 @@ func (a *App) observe(ctx context.Context, execution *scheduler.Execution, job w
 		if site == "open.cd" {
 			kind = "website"
 		}
-		evidence = append(evidence, workflow.EvidenceInput{ID: evidenceID(taskID, site), Kind: kind, Source: site, Payload: body})
+		evidence = append(evidence, workflow.EvidenceInput{ID: evidenceID(token.ID, token.Fence, site), Kind: kind, Source: site, Payload: body})
 	}
 	chosen, chosenID := selectIdentity(picks)
 	adviseClass := ""
@@ -221,6 +217,37 @@ func (a *App) observe(ctx context.Context, execution *scheduler.Execution, job w
 		report.SelectedCandidateID = chosenID
 	}
 	return report, evidence, adviseClass, nil
+}
+
+// summarizeSite classifies one stored or live observation exactly the way
+// the search executor does. The review path reuses it so a report rebuilt
+// from stored observations classifies the same as the report the executor
+// built from the same observations.
+func summarizeSite(plan SearchPlan, site string, observation trackersearch.Observation) (searchdecision.SiteReport, *identityPick, []reviewai.Candidate) {
+	row := searchdecision.SiteReport{Site: site, ExpectedTitle: plan.ExpectedTitle}
+	row.Status = observation.Status
+	row.Attempted = true
+	row.CandidateCount = len(observation.Candidates)
+	row.Limited = observation.Status == "OK" && !observation.SearchComplete
+	var seeded *identityPick
+	var pool []reviewai.Candidate
+	for _, candidate := range observation.Candidates {
+		hit := releaseHit(candidate)
+		pool = append(pool, reviewai.Candidate{ID: hit.ID, Title: hit.Title, Artists: hit.Artists, Aliases: hit.Aliases, Edition: hit.Edition, GroupID: hit.GroupID, Format: hit.Format, Year: hit.Year})
+		if !reviewmatch.Compare(plan.ExpectedTitle, plan.ExpectedArtist, hit).Pass {
+			continue
+		}
+		row.Exact = true
+		row.ObservedTitle = candidate.Title
+		if candidate.Seeders != nil {
+			row.Seeders = *candidate.Seeders
+			row.SeedersKnown = true
+		}
+		if seeded == nil && (site == "open.cd" || row.SeedersKnown && row.Seeders > 0) {
+			seeded = &identityPick{site: site, id: candidate.CandidateID, hit: hit}
+		}
+	}
+	return row, seeded, pool
 }
 
 type identityPick struct {
@@ -359,8 +386,12 @@ func (plan SearchPlan) evidence() workflow.EvidenceInput {
 	}
 }
 
-func evidenceID(taskID, site string) string {
-	sum := sha256.Sum256([]byte(taskID + "/" + site))
+// evidenceID names one attempt's evidence for one site. The fence is part of
+// the name: a retried task runs again, and the evidence store rejects the
+// same id with different bytes, so each attempt gets its own ids and the
+// earlier evidence stays as history.
+func evidenceID(taskID string, fence uint64, site string) string {
+	sum := sha256.Sum256([]byte(taskID + "/" + strconv.FormatUint(fence, 10) + "/" + site))
 	return "obs" + hex.EncodeToString(sum[:8])
 }
 

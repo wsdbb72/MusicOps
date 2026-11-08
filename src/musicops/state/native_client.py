@@ -1,7 +1,8 @@
-"""Private transport to the bundled engine; no SQL translation or fallback.
+"""Legacy transport used by the Python 0.4.31 data client.
 
-Not wired into production until repository migration is verified. A lost write
-response is ambiguous: retain its request ID and query/replay that same intent.
+The standalone application is `native/core/cmd/musicops`. It does not import
+this module and it does not start a Python runtime. A lost write response is
+ambiguous: retain its request ID and query or replay that same intent.
 """
 from __future__ import annotations
 
@@ -160,6 +161,58 @@ class NativeDataClient:
 
     def request_status(self, request_id):
         return self._rpc("task_request", request_id)
+
+    @staticmethod
+    def _bytes(value):
+        if isinstance(value, (bytes, bytearray)):
+            return base64.b64encode(value).decode("ascii")
+        return value
+
+    def _evidence(self, items):
+        encoded = []
+        for item in items or ():
+            copied = dict(item)
+            copied["payload"] = self._bytes(copied.get("payload", b""))
+            encoded.append(copied)
+        return encoded
+
+    def workflow_start(self, request_id, **job):
+        payload = dict(job)
+        payload["payload"] = self._bytes(payload.get("payload", b""))
+        payload["evidence"] = self._evidence(payload.get("evidence"))
+        return self._rpc("workflow_start", request_id, **payload)
+
+    def workflow_complete(self, request_id, token, **job):
+        body = dict(job)
+        body["result"] = self._bytes(body.get("result", b""))
+        body["evidence"] = self._evidence(body.get("evidence"))
+        return self._rpc("workflow_complete", request_id, token=token, input=body)
+
+    def workflow_control(self, request_id, job_id, action, now_ns):
+        return self._rpc("workflow_control", request_id, job_id=job_id, action=action, now_ns=now_ns)
+
+    def workflow_job(self, job_id):
+        result = self._rpc("workflow_get", job_id=job_id)
+        return result["job"] if result["found"] else None
+
+    def workflow_inspect(self, job_id):
+        return self._rpc("workflow_inspect", job_id=job_id)
+
+    def workflow_evidence(self, evidence_id):
+        result = self._rpc("workflow_evidence_data", evidence_id=evidence_id)
+        return base64.b64decode(result["data"], validate=True) if result["found"] else None
+
+    def media_stage(self, request_id, name, content, *, replace=False):
+        return self._rpc("media_stage", request_id, name=name, content=self._bytes(content), replace=replace, synthetic=True)
+
+    def media_publish(self, request_id):
+        return self._rpc("media_publish", request_id)
+
+    def media_rollback(self, request_id):
+        return self._rpc("media_rollback", request_id)
+
+    def media_get(self, request_id):
+        return self._rpc("media_get", request_id)
 
     def checkpoint(self, checkpoint_id):
         return self._rpc("checkpoint", checkpoint_id=checkpoint_id, timeout=120)

@@ -112,6 +112,28 @@ func TestRPCDurableWriteReplayAndStatus(t *testing.T) {
 	}
 }
 
+func TestWorkflowRPCReplayAndOwnedTaskGuard(t *testing.T) {
+	h := fixture(t)
+	start := map[string]any{"job_id": "album1", "batch_id": "batch1", "scene": "playlist", "stage": "identifying", "source_track_ids": []string{"track-1"}, "library_file_count": 3, "payload": []byte("tracks"), "now_ns": 1000}
+	code, result := call(t, h, Request{Operation: "workflow_start", RequestID: "start", Params: params(start)})
+	if code != 200 || result["result"].(map[string]any)["job"].(map[string]any)["stage"] != "identifying" {
+		t.Fatal(code, result)
+	}
+	_, result = call(t, h, Request{Operation: "workflow_start", RequestID: "start", Params: params(start)})
+	if result["result"].(map[string]any)["replayed"] != true {
+		t.Fatal(result)
+	}
+	start["payload"] = []byte("changed")
+	code, _ = call(t, h, Request{Operation: "workflow_start", RequestID: "start", Params: params(start)})
+	if code != 409 {
+		t.Fatal(code)
+	}
+	code, _ = call(t, h, Request{Operation: "task_finish", RequestID: "bare", Params: params(map[string]any{"token": map[string]any{"task_id": "album1", "owner": "nobody", "fence": 1}, "completion": map[string]any{"state": "completed", "now_ns": 2000}})})
+	if code != 409 {
+		t.Fatal("workflow task accepted a bare finish", code)
+	}
+}
+
 func TestRejectMalformedUnknownOversizedAndEscapingRequests(t *testing.T) {
 	h := fixture(t)
 	for _, body := range []string{`{"operation":"get","unknown":"x"}`, `{"operation":"get"} {"operation":"apply"}`} {

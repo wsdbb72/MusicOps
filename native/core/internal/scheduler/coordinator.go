@@ -43,10 +43,19 @@ type Health struct {
 	Active   map[string]string `json:"active"`
 	Errors   map[string]string `json:"errors"`
 }
+
+// WorkflowHooks let a missing executor record that fact on the workflow job.
+// Without them, a workflow-owned task is left running instead of reported complete.
+type WorkflowHooks struct {
+	Block     func(requestID string, token taskrepo.Token, nowNS int64) error
+	Interrupt func(requestID string, token taskrepo.Token, nowNS int64, reason string) error
+}
+
 type Coordinator struct {
 	repo     *taskrepo.Repository
 	config   Config
 	handlers map[string]Handler
+	hooks    WorkflowHooks
 	owner    string
 	mu       sync.Mutex
 	cancel   context.CancelFunc
@@ -86,6 +95,16 @@ func New(repo *taskrepo.Repository, handlers map[string]Handler, config Config) 
 	config.Limits = limits
 	return &Coordinator{repo: repo, handlers: copied, config: config, owner: nonce(), done: make(chan struct{}), active: map[string]string{}, failures: map[string]string{}}, nil
 }
+func (c *Coordinator) SetWorkflowHooks(hooks WorkflowHooks) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.cancel != nil {
+		return errors.New("workflow hooks must be installed before the scheduler starts")
+	}
+	c.hooks = hooks
+	return nil
+}
+
 func (c *Coordinator) Start(parent context.Context) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -186,6 +205,7 @@ func (c *Coordinator) worker(ctx context.Context, lane string) {
 func (c *Coordinator) execute(ctx context.Context, claimed taskrepo.Task) {
 	token := taskrepo.Token{ID: claimed.ID, Owner: claimed.Owner, Fence: claimed.Fence}
 	c.mu.Lock()
+	hooks := c.hooks
 	c.active[claimed.ID] = claimed.Lane
 	c.mu.Unlock()
 	defer func() { c.mu.Lock(); delete(c.active, claimed.ID); c.mu.Unlock() }()
@@ -197,7 +217,7 @@ func (c *Coordinator) execute(ctx context.Context, claimed taskrepo.Task) {
 				if current.Execution == "claimed" {
 					_, err = c.repo.ReleaseClaim("release-"+nonce(), token, time.Now().UnixNano())
 				} else if current.Execution == "started" {
-					_, err = c.repo.Interrupt("interrupted-"+nonce(), token, time.Now().UnixNano(), "启动交接期间退出，等待核对执行记录")
+					err = c.interrupt(hooks, token, "启动交接期间退出，等待核对执行记录")
 				}
 			}
 			if err != nil && !errors.Is(err, taskrepo.ErrStale) {
@@ -255,8 +275,7 @@ func (c *Coordinator) execute(ctx context.Context, claimed taskrepo.Task) {
 	execution := &Execution{repo: c.repo, token: token, interval: c.config.ProgressInterval}
 	outcome, err := c.invoke(ctx, execution, claimed)
 	if ctx.Err() != nil || (err != nil && !errors.Is(err, ErrCancelled)) {
-		_, persist := c.repo.Interrupt("interrupted-"+nonce(), token, time.Now().UnixNano(), "执行已退出，等待自动核对外部操作记录")
-		if persist != nil {
+		if persist := c.interrupt(hooks, token, "执行已退出，等待自动核对外部操作记录"); persist != nil {
 			c.failure(claimed.Lane, persist)
 		}
 		return
@@ -271,8 +290,13 @@ func (c *Coordinator) execute(ctx context.Context, claimed taskrepo.Task) {
 	switch outcome.State {
 	case "completed", "failed", "cancelled", "blocked", "recovery_required":
 	default:
-		_, persist := c.repo.Interrupt("invalid-outcome-"+nonce(), token, time.Now().UnixNano(), "执行器返回无效状态，等待核对执行记录")
-		if persist != nil {
+		if persist := c.interrupt(hooks, token, "执行器返回无效状态，等待核对执行记录"); persist != nil {
+			c.failure(claimed.Lane, persist)
+		}
+		return
+	}
+	if claimed.WorkflowJobID != "" && outcome.State == "blocked" && outcome.ErrorClass == "UNSUPPORTED_COMMAND" && hooks.Block != nil {
+		if persist := hooks.Block("workflow-unregistered-"+nonce(), token, time.Now().UnixNano()); persist != nil && !errors.Is(persist, taskrepo.ErrStale) {
 			c.failure(claimed.Lane, persist)
 		}
 		return
@@ -281,7 +305,7 @@ func (c *Coordinator) execute(ctx context.Context, claimed taskrepo.Task) {
 	requestID := "finish-" + nonce()
 	for {
 		_, persist := c.repo.Finish(requestID, token, completion, outcome.Followups)
-		if persist == nil || errors.Is(persist, taskrepo.ErrStale) {
+		if persist == nil || errors.Is(persist, taskrepo.ErrStale) || errors.Is(persist, taskrepo.ErrWorkflowOwned) {
 			return
 		}
 		c.failure(claimed.Lane, persist)
@@ -290,6 +314,15 @@ func (c *Coordinator) execute(ctx context.Context, claimed taskrepo.Task) {
 		}
 	}
 }
+func (c *Coordinator) interrupt(hooks WorkflowHooks, token taskrepo.Token, reason string) error {
+	now := time.Now().UnixNano()
+	_, err := c.repo.Interrupt("interrupted-"+nonce(), token, now, reason)
+	if errors.Is(err, taskrepo.ErrWorkflowOwned) && hooks.Interrupt != nil {
+		return hooks.Interrupt("workflow-interrupt-"+nonce(), token, now, reason)
+	}
+	return err
+}
+
 func (c *Coordinator) invoke(ctx context.Context, e *Execution, task taskrepo.Task) (out Outcome, err error) {
 	defer func() {
 		if recover() != nil {

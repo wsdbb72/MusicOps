@@ -43,7 +43,7 @@ func readTask(v *dataengine.View, id string) (*Task, []byte, error) {
 		return nil, raw, err
 	}
 	var task Task
-	if json.Unmarshal(raw, &task) != nil || task.ID != id || !validSpec(task.Spec) || !validState(task.State) || task.Revision == 0 || task.UpdatedNS < task.CreatedNS || len(task.PayloadHash) != 64 {
+	if json.Unmarshal(raw, &task) != nil || task.ID != id || !validSpec(task.Spec) || !validState(task.State) || task.Revision == 0 || task.UpdatedNS < task.CreatedNS || len(task.PayloadHash) != 64 || task.WorkflowJobID != "" && !validID(task.WorkflowJobID) {
 		return nil, nil, ErrIntegrity
 	}
 	return &task, raw, nil
@@ -168,9 +168,14 @@ func stateBatch(v *dataengine.View, transitions []taskChange) ([]dataengine.Cond
 
 type change func(*dataengine.View, *Task) (*Task, []dataengine.Mutation, error)
 
+// Domain adds one aggregate's mutations to the task commit. It runs inside the
+// snapshot and must only read the supplied task values. A business rejection
+// drops every mutation from this attempt, including successor tasks.
+type Domain func(v *dataengine.View, before, after *Task, children []Task) (conditions []dataengine.Condition, mutations []dataengine.Mutation, attached json.RawMessage, err error)
+
 // apply persists the business response together with its effects. Replaying a
 // command returns that original response even after progress/control changes.
-func (r *Repository) apply(requestID, id string, intent any, decide change, followers ...preparedTask) (Result, error) {
+func (r *Repository) apply(requestID, id string, intent any, decide change, domain Domain, followers ...preparedTask) (Result, error) {
 	if requestID == "" || len(requestID) > 128 || !validID(id) {
 		return Result{}, dataengine.ErrInvalidRequest
 	}
@@ -227,6 +232,22 @@ func (r *Repository) apply(requestID, id string, intent any, decide change, foll
 			if next != nil && len(followers) > 0 {
 				next.FollowupCount = len(children)
 			}
+			var attached json.RawMessage
+			var domainConditions []dataengine.Condition
+			var domainWrites []dataengine.Mutation
+			if rejected == nil && domain != nil {
+				before, after := cloneTask(old), cloneTask(next)
+				observed := append([]Task(nil), children...)
+				var derr error
+				domainConditions, domainWrites, attached, derr = domain(v, before, after, observed)
+				if derr != nil {
+					rejected = derr
+					children = nil
+					extra = nil
+					childConditions = nil
+					domainConditions, domainWrites, attached = nil, nil, nil
+				}
+			}
 			receipt = Receipt{Intent: signature}
 			conditions = []dataengine.Condition{{Key: operationKey(requestID), Absent: true}, condition(taskKey(id), raw)}
 			if rejected != nil {
@@ -240,32 +261,41 @@ func (r *Repository) apply(requestID, id string, intent any, decide change, foll
 					return ErrIntegrity
 				}
 				changed := old == nil || *next != *old
-				if changed {
-					if old == nil {
-						next.Revision = 1
-					} else {
-						if old.Revision == math.MaxUint64 {
+				if changed || len(domainWrites) > 0 || len(children) > 0 {
+					if changed {
+						if old == nil {
+							next.Revision = 1
+						} else {
+							if old.Revision == math.MaxUint64 {
+								return ErrIntegrity
+							}
+							next.Revision = old.Revision + 1
+						}
+						if !validSpec(next.Spec) || !validState(next.State) || next.UpdatedNS < next.CreatedNS || len(next.PayloadHash) != 64 || next.WorkflowJobID != "" && !validID(next.WorkflowJobID) {
 							return ErrIntegrity
 						}
-						next.Revision = old.Revision + 1
 					}
-					if !validSpec(next.Spec) || !validState(next.State) || next.UpdatedNS < next.CreatedNS || len(next.PayloadHash) != 64 {
-						return ErrIntegrity
+					if changed || len(children) > 0 {
+						transitions := []taskChange{}
+						if changed {
+							transitions = append(transitions, taskChange{Old: old, Next: next})
+						}
+						for i := range children {
+							transitions = append(transitions, taskChange{Next: &children[i]})
+						}
+						counters, writes, err := stateBatch(v, transitions)
+						if err != nil {
+							return err
+						}
+						conditions = append(conditions, counters...)
+						conditions = append(conditions, childConditions...)
+						mutations = append(mutations, writes...)
+						mutations = append(mutations, extra...)
 					}
-					transitions := []taskChange{{Old: old, Next: next}}
-					for i := range children {
-						transitions = append(transitions, taskChange{Next: &children[i]})
-					}
-					counters, writes, err := stateBatch(v, transitions)
-					if err != nil {
-						return err
-					}
-					conditions = append(conditions, counters...)
-					conditions = append(conditions, childConditions...)
-					mutations = append(mutations, writes...)
-					mutations = append(mutations, extra...)
+					conditions = append(conditions, domainConditions...)
+					mutations = append(mutations, domainWrites...)
 				}
-				receipt.Result = Result{Task: next, Changed: changed, Followups: children}
+				receipt.Result = Result{Task: next, Changed: changed || len(domainWrites) > 0, Followups: children, Domain: attached}
 			}
 			value, err := json.Marshal(receipt)
 			if err != nil {
@@ -400,19 +430,51 @@ func (r *Repository) Children(parent string, after []byte, limit int) (Page, err
 	return r.page([]byte("task-child/"+digest([]byte(parent))+"/"), after, limit)
 }
 
+type zlibPacker struct {
+	buf *bytes.Buffer
+	w   *zlib.Writer
+}
+
+// Reuse the compressor. A new BestSpeed writer allocates about a megabyte,
+// which dominated enqueue cost for small task payloads.
+var zlibPackers sync.Pool
+
+func borrowPacker() (*zlibPacker, error) {
+	if item := zlibPackers.Get(); item != nil {
+		return item.(*zlibPacker), nil
+	}
+	buf := new(bytes.Buffer)
+	writer, err := zlib.NewWriterLevel(buf, zlib.BestSpeed)
+	if err != nil {
+		return nil, err
+	}
+	return &zlibPacker{buf: buf, w: writer}, nil
+}
+
 func pack(payload []byte) (string, []byte, error) {
 	if len(payload) > maxPayload {
 		return "", nil, dataengine.ErrInvalidRequest
 	}
-	var output bytes.Buffer
-	writer, _ := zlib.NewWriterLevel(&output, zlib.BestSpeed)
-	if _, err := writer.Write(payload); err != nil {
+	packer, err := borrowPacker()
+	if err != nil {
 		return "", nil, err
 	}
-	if err := writer.Close(); err != nil {
+	packer.buf.Reset()
+	packer.w.Reset(packer.buf)
+	_, err = packer.w.Write(payload)
+	if err == nil {
+		err = packer.w.Close()
+	}
+	var compressed []byte
+	if err == nil {
+		compressed = bytes.Clone(packer.buf.Bytes())
+	}
+	packer.buf.Reset()
+	zlibPackers.Put(packer)
+	if err != nil {
 		return "", nil, err
 	}
-	return digest(payload), output.Bytes(), nil
+	return digest(payload), compressed, nil
 }
 func blobWrites(v *dataengine.View, hash string, compressed []byte) ([]dataengine.Mutation, error) {
 	marker := []byte("task-blob-info/" + hash)

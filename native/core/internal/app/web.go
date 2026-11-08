@@ -25,6 +25,7 @@ const appJS = `(function () {
   var active = {identifying: true, searching: true, requesting: true, downloading: true, fallback: true, validating: true, publishing: true};
   var view = "tasks";
   var jobs = [];
+  var currentJob = null;
   var siteRows = [];
   var libraryRows = [];
   var logRows = [];
@@ -175,12 +176,40 @@ const appJS = `(function () {
       field("说明", body.headline);
       field("下载", body.downloaded ? "已下载" : "未下载");
       field("入库", body.library_published ? "已入库" : "未入库");
+      currentJob = job;
+      showActions(job);
       status.textContent = "";
     } catch (err) {
       status.textContent = "读取中断。";
     } finally {
       setBusy(false);
     }
+  }
+  function showActions(job) {
+    var terminal = job.stage === "completed" || job.stage === "failed" || job.stage === "cancelled" || job.stage === "skipped";
+    document.getElementById("pause-job").hidden = terminal || !!job.paused;
+    document.getElementById("resume-job").hidden = terminal || !job.paused;
+    document.getElementById("cancel-job").hidden = terminal || !!job.cancel_requested;
+  }
+  async function controlJob(action, message) {
+    if (!currentJob || loading) return;
+    if (message && !window.confirm(message)) return;
+    setBusy(true);
+    status.textContent = "正在处理";
+    try {
+      var response = await fetch("/v1/jobs/" + encodeURIComponent(currentJob.job_id) + "/control", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({action: action})});
+      var body = await response.json();
+      if (!response.ok || !body || !body.ok) {
+        status.textContent = "操作失败。";
+        return;
+      }
+      status.textContent = action === "pause" ? "已暂停。" : (action === "resume" ? "已继续。" : "已取消。");
+    } catch (err) {
+      status.textContent = "操作失败。";
+    } finally {
+      setBusy(false);
+    }
+    openJob(currentJob.job_id);
   }
   async function load(quiet) {
     if (loading) return;
@@ -238,6 +267,9 @@ const appJS = `(function () {
     detail.hidden = true;
     render();
   });
+  document.getElementById("pause-job").addEventListener("click", function () { controlJob("pause", ""); });
+  document.getElementById("resume-job").addEventListener("click", function () { controlJob("resume", ""); });
+  document.getElementById("cancel-job").addEventListener("click", function () { controlJob("cancel", "取消后未开始的阶段不会继续，确定取消吗？"); });
   load();
 })();
 `

@@ -78,6 +78,33 @@ func waitTranscodeReceipt(t *testing.T, application *App, id string) transcodeRe
 				return receipt
 			}
 		}
+		// A failed or cancelled task will never produce a receipt; fail
+		// fast with the task state instead of burning the whole deadline.
+		// (A completed task always has its receipt already, because the
+		// handler records it before returning the completed outcome.)
+		request := httptest.NewRequest(http.MethodGet, "/v1/logs", nil)
+		request.SetBasicAuth("musicops", "test-password-16b")
+		recorder := httptest.NewRecorder()
+		application.Handler().ServeHTTP(recorder, request)
+		if recorder.Code != http.StatusOK {
+			t.Fatal(recorder.Code, recorder.Body.String())
+		}
+		var decoded struct {
+			Tasks []taskrepo.Task `json:"tasks"`
+		}
+		if err := json.Unmarshal(recorder.Body.Bytes(), &decoded); err != nil {
+			t.Fatal(err)
+		}
+		for _, task := range decoded.Tasks {
+			if task.ID == "transcode:"+id {
+				switch task.State {
+				case "failed", "cancelled":
+					t.Fatalf("transcode task %s ended as %s (%s), no receipt will appear", task.ID, task.State, task.Message)
+				case "completed":
+					t.Fatalf("transcode task %s completed without a receipt", task.ID)
+				}
+			}
+		}
 		time.Sleep(100 * time.Millisecond)
 	}
 	t.Fatal("transcode receipt never appeared for", id)
@@ -129,11 +156,21 @@ func TestTranscodeWAVToFLAC(t *testing.T) {
 		t.Fatal(created)
 	}
 	receipt := waitTranscodeReceipt(t, application, "tc-1")
-	if receipt.Format != "flac" || receipt.Source != source {
+	// The receipt records the canonical (symlink-resolved) paths, so the
+	// expectations must be resolved the same way.
+	wantSource, err := filepath.EvalSymlinks(source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	incoming, err := filepath.EvalSymlinks(filepath.Join(application.Dir, "incoming"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantOutput := filepath.Join(incoming, "tone.flac")
+	if receipt.Format != "flac" || receipt.Source != wantSource {
 		t.Fatal(receipt)
 	}
-	output := filepath.Join(application.Dir, "incoming", "tone.flac")
-	if receipt.Output != output {
+	if receipt.Output != wantOutput {
 		t.Fatal(receipt)
 	}
 	// The source is untouched and the output fully decodes to identical PCM.
@@ -144,14 +181,14 @@ func TestTranscodeWAVToFLAC(t *testing.T) {
 	if decoder == nil {
 		t.Fatal("system decoder unavailable")
 	}
-	if err := decoder(context.Background(), output); err != nil {
+	if err := decoder(context.Background(), wantOutput); err != nil {
 		t.Fatal("transcoded output did not fully decode", err)
 	}
 	sourcePCM, err := pcmHash(context.Background(), source)
 	if err != nil {
 		t.Fatal(err)
 	}
-	outputPCM, err := pcmHash(context.Background(), output)
+	outputPCM, err := pcmHash(context.Background(), wantOutput)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -200,5 +237,60 @@ func TestTranscodeRejectsBadRequests(t *testing.T) {
 		if recorder.Code != http.StatusBadRequest {
 			t.Fatal(body, recorder.Code, recorder.Body.String())
 		}
+	}
+}
+
+// TestResolveInDirSymlinkedParent guards the macOS case where the state
+// directory sits under a symlinked parent (for example /var, which points
+// at /private/var): paths inside the directory must still resolve, while
+// escapes are still rejected.
+func TestResolveInDirSymlinkedParent(t *testing.T) {
+	base := t.TempDir()
+	real := filepath.Join(base, "real")
+	if err := os.MkdirAll(filepath.Join(real, "incoming"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(base, "link")
+	if err := os.Symlink(real, link); err != nil {
+		t.Skip("symlinks unavailable: " + err.Error())
+	}
+	source := filepath.Join(real, "incoming", "tone.wav")
+	writeTestWAV(t, source)
+	// resolveInDir returns the fully resolved path.
+	want, err := filepath.EvalSymlinks(source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A relative path through the symlinked parent must resolve.
+	got, err := resolveInDir(link, filepath.Join("incoming", "tone.wav"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != want {
+		t.Fatal(got, want)
+	}
+	// An absolute path through the symlinked parent must resolve the same way.
+	got, err = resolveInDir(link, source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != want {
+		t.Fatal(got, want)
+	}
+	// An already-resolved absolute path must resolve the same way too:
+	// the handler re-resolves the source the enqueue step stored.
+	got, err = resolveInDir(link, want)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != want {
+		t.Fatal(got, want)
+	}
+	// Escapes are still rejected.
+	if _, err := resolveInDir(link, "../outside.wav"); err == nil {
+		t.Fatal("escape accepted")
+	}
+	if _, err := resolveInDir(link, "/etc/passwd"); err == nil {
+		t.Fatal("absolute escape accepted")
 	}
 }

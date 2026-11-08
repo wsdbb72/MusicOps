@@ -42,6 +42,11 @@ const page = `<!doctype html>
 <button type="button" id="back">返回列表</button>
 <h2 id="detail-title"></h2>
 <dl id="detail-fields"></dl>
+<p id="detail-actions">
+<button type="button" id="pause-job">暂停</button>
+<button type="button" id="resume-job">继续</button>
+<button type="button" id="cancel-job">取消</button>
+</p>
 </section>
 </main>
 <script src="/app.js"></script>
@@ -69,6 +74,7 @@ func (a *App) Handler() http.Handler {
 	mux.HandleFunc("POST /v1/sites", a.saveSites)
 	mux.HandleFunc("POST /v1/tokens/recheck", a.recheckToken)
 	mux.HandleFunc("GET /v1/jobs/{id}", a.job)
+	mux.HandleFunc("POST /v1/jobs/{id}/control", a.controlJob)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Cache-Control", "no-store")
 		w.Header().Set("X-Content-Type-Options", "nosniff")
@@ -330,6 +336,52 @@ func (a *App) job(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// controlJob pauses, resumes or cancels one workflow job. It only exposes
+// actions the workflow repository already supports; retry has no workflow
+// meaning yet (taskrepo retry applies to single tasks, not jobs), so it is
+// rejected rather than invented.
+func (a *App) controlJob(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Action string `json:"action"`
+	}
+	if err := decode(r, &body); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "code": "INVALID_REQUEST"})
+		return
+	}
+	switch body.Action {
+	case "pause", "resume", "cancel":
+	default:
+		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "code": "INVALID_REQUEST"})
+		return
+	}
+	id := r.PathValue("id")
+	requestID := "control-" + id + "-" + body.Action + "-" + strconv.FormatInt(time.Now().UnixNano(), 10)
+	result, err := a.flows.Control(requestID, id, body.Action, time.Now().UnixNano())
+	if err != nil {
+		status, code := http.StatusInternalServerError, "JOBS_UNAVAILABLE"
+		switch {
+		case errors.Is(err, workflow.ErrNotFound):
+			status, code = http.StatusNotFound, "NOT_FOUND"
+		case errors.Is(err, dataengine.ErrInvalidRequest):
+			status, code = http.StatusBadRequest, "INVALID_REQUEST"
+		case errors.Is(err, workflow.ErrStale):
+			status, code = http.StatusConflict, "WORKFLOW_REJECTED"
+		}
+		writeJSON(w, status, map[string]any{"ok": false, "code": code, "error": err.Error()})
+		return
+	}
+	job := result.Job
+	if job == nil {
+		fresh, readErr := a.flows.Job(id)
+		if readErr != nil || fresh == nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "code": "JOBS_UNAVAILABLE"})
+			return
+		}
+		job = fresh
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "job": publicJob(*job)})
+}
+
 func (a *App) releaseAudio(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		JobID      string `json:"job_id"`
@@ -415,7 +467,7 @@ func (a *App) releaseAudio(w http.ResponseWriter, r *http.Request) {
 	recorded, err := a.flows.RecordRelease(workflow.RecordReleaseInput{
 		JobID: root, RequestID: "record-" + result.RequestID,
 		Evidence: workflow.EvidenceInput{ID: "rel-" + result.RequestID, Kind: "catalog", Source: "local-library", SubjectID: root, TracklistVerified: true, Payload: receipt},
-		Payload: receipt, NowNS: time.Now().UnixNano(),
+		Payload:  receipt, NowNS: time.Now().UnixNano(),
 	})
 	if err != nil {
 		// The file and the library record are already committed; only the

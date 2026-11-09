@@ -57,6 +57,7 @@ Wails v2.17.1 桌面壳（窗口反向代理同一 WebUI）、Go 监管、Vault 
 1. `docker-smoke` 的 `healthzOK` 用普通 `bool` 解析 `python` 字段，缺失字段时读作 `false` 而误接受非 Go-core 的 healthz 响应。改为 `*bool`，要求字段存在且为 false；`cmd/musicops` 的 `healthcheck` 用 `map[string]any` 比较，缺失字段为 `nil`，本来就是正确的。
 2. `smoke.Run` 没有 `.app` 布局映射：`build_macos_go.sh` 第 6 步按任务规定的调法（`BUNDLE=<app>`）会在 `core_present_and_executable` 等 9 项上失败（macOS 子代理探针 B1 实测证实）。已在 `smoke.go` 增加映射（`defaults` + `binRel`，`runLive` 的启动路径一并修正），单元测试 `TestAppLayoutMapping` + 假 `.app` 端到端（20 项通过）覆盖；macOS 安装器测试的显式相对路径写法不受影响。
 3. Windows 构建脚本调 `collect_licenses.py`（Python 依赖许可证收集器）会把 PySide6 等许可证写进 Go 包。改为 `packaging/collect_go_licenses.py`（Go 模块许可证）；macOS 脚本同样接入。
+4. releasegate 测试在 Windows 上硬编码 `Layout: "linux"`，夹具却是 `.exe` 文件名：`TestGatePassesGoodBundle` 在 `core_present_and_go_built` 上失败，篡改/删除步骤触及 manifest 未覆盖的 Linux 文件名。CI 运行 42579135564 的 Windows 任务显示 success、日志里 3 个 FAIL（pwsh 假绿再次证实）——由 `gh run view --log` 逐行核查发现。修复：测试按平台选布局（`testLayout()`）并用 `exeSuffix()` 操作真实夹具文件名；gate 本身未动（生产上 Windows 只用 windows 布局）。修复提交 `0e30643`，本地 Linux 9 项全过、`GOOS=windows go vet` 通过，待 CI 重跑验证。
 
 ## 真实剩余缺口（评审时必须看到，不要当作已完成）
 

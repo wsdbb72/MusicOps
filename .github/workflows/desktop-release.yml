@@ -84,10 +84,16 @@ jobs:
           New-Item -ItemType Directory -Force -Path dist/windows/reports | Out-Null
           python -m pytest tests/test_windows_installer.py -q --junitxml=dist/windows/reports/native-installer-tests.xml
           if ($LASTEXITCODE -ne 0) { throw 'Native installer regression tests failed' }
+      - name: Require all six native installer scenarios to execute
+              shell: python
+                      run: |
+                                import pathlib, xml.etree.ElementTree as ET
           required = {
               'test_real_fresh_install_then_detected_update_preserves_data_and_location',
               'test_registered_update_refuses_second_directory',
               'test_downgrade_is_refused_before_replacing_files',
+
+              
               'test_running_worker_blocks_update_without_terminating_it',
               'test_portable_directory_is_detected_as_update',
               'test_stale_install_registration_does_not_prevent_fresh_install',

@@ -118,13 +118,16 @@ func TestEnsureCoreStartsAndAttaches(t *testing.T) {
 	}
 	coreHealth(t, handle)
 
-	// Rendezvous files are on disk, 0600.
+	// Rendezvous files are on disk, 0600. Windows has no Unix
+	// permission bits (Go reports 0666 for every file there), so the
+	// mode assertion is Unix-only; the secret-bearing file is
+	// vault-encrypted anyway (DPAPI on Windows).
 	for _, path := range []string{coreJSONPath(profile), corePasswordPath(profile)} {
 		info, err := os.Stat(path)
 		if err != nil {
 			t.Fatalf("%s: %v", path, err)
 		}
-		if info.Mode().Perm() != 0600 {
+		if runtime.GOOS != "windows" && info.Mode().Perm() != 0600 {
 			t.Fatalf("%s mode = %o, want 0600", path, info.Mode().Perm())
 		}
 	}
@@ -203,7 +206,9 @@ func TestEnsureCoreDetached(t *testing.T) {
 	if !strings.Contains(string(raw), `"ready":true`) || !strings.Contains(string(raw), handle.URL) {
 		t.Fatalf("core.log does not contain the ready line for %s:\n%s", handle.URL, raw)
 	}
-	if info, err := os.Stat(coreLogPath(profile)); err != nil || info.Mode().Perm() != 0600 {
+	// Windows has no Unix permission bits (Go reports 0666 for every
+	// file there), so the 0600 assertion is Unix-only.
+	if info, err := os.Stat(coreLogPath(profile)); err != nil || (runtime.GOOS != "windows" && info.Mode().Perm() != 0600) {
 		t.Fatalf("core.log stat = %v, mode = %v, want 0600", err, info.Mode().Perm())
 	}
 

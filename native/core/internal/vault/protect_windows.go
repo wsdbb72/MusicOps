@@ -3,6 +3,7 @@
 package vault
 
 import (
+	"bytes"
 	"errors"
 	"os"
 	"time"
@@ -27,7 +28,18 @@ type dataBlob struct {
 // platformProtect is the DPAPI whole-blob protection, matching Python
 // clients.vault.protect on Windows: CryptProtectData with description
 // "MusicOps" and CRYPTPROTECT_UI_FORBIDDEN (0x1), no entropy.
+//
+// DPAPI rejects an empty input buffer, so an empty plaintext is
+// protected as emptySentinel and mapped back on decrypt. No real
+// credential value equals the sentinel, and Python never produces an
+// empty blob either (its DPAPI call fails the same way), so the
+// mapping cannot collide with a Python-written value.
+var emptySentinel = []byte("MusicOpsEmptyValue\x00")
+
 func platformProtect(data []byte, decrypt bool) ([]byte, error) {
+	if !decrypt && len(data) == 0 {
+		data = emptySentinel
+	}
 	var in dataBlob
 	if len(data) > 0 {
 		in.cbData = uint32(len(data))
@@ -59,6 +71,9 @@ func platformProtect(data []byte, decrypt bool) ([]byte, error) {
 	defer procLocalFree.Call(uintptr(unsafe.Pointer(out.pbData)))
 	buf := make([]byte, out.cbData)
 	copy(buf, unsafe.Slice(out.pbData, out.cbData))
+	if decrypt && bytes.Equal(buf, emptySentinel) {
+		return []byte{}, nil
+	}
 	return buf, nil
 }
 

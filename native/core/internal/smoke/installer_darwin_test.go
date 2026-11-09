@@ -68,8 +68,17 @@ func runSudo(t *testing.T, args ...string) (string, error) {
 
 // digestTree returns sha256 hex digests of every non-directory entry
 // under root, keyed by slash-separated path relative to root. Symlinks
-// are hashed by the content they point to (read through the link);
-// the build script's audit already rejects links escaping the bundle.
+// to files are hashed by the content they point to (read through the
+// link). A symlink to a directory — the standard macOS framework
+// layout, e.g. Python.framework/Resources ->
+// Versions/Current/Resources inside the bundled FlareSolverr — is
+// recorded by its link target instead: WalkDir reports such an entry
+// as a non-directory (DirEntry.IsDir follows the link itself, not its
+// target), so reading it as a file fails with "is a directory". The
+// content is already covered through the canonical path
+// (Versions/3.12/...), and recording the target still catches a
+// retargeted link. The build script's audit already rejects links
+// escaping the bundle, and a dangling link fails loudly here.
 func digestTree(root string) (map[string]string, error) {
 	out := map[string]string{}
 	err := filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
@@ -79,16 +88,38 @@ func digestTree(root string) (map[string]string, error) {
 		if d.IsDir() {
 			return nil
 		}
-		data, err := os.ReadFile(path)
-		if err != nil {
-			return err
-		}
 		rel, err := filepath.Rel(root, path)
 		if err != nil {
 			return err
 		}
+		rel = filepath.ToSlash(rel)
+		if info, err := d.Info(); err != nil {
+			return err
+		} else if info.Mode()&os.ModeSymlink != 0 {
+			target, err := os.Readlink(path)
+			if err != nil {
+				return err
+			}
+			st, err := os.Stat(path)
+			if err != nil {
+				return err
+			}
+			if st.IsDir() {
+				// Symlink to a directory: record the target, do not
+				// descend. WalkDir never follows a symlinked dir, and
+				// the content is covered via the canonical path.
+				out[rel] = "symlink:" + target
+				return nil
+			}
+			// Symlink to a file: fall through and hash the content
+			// through the link, as before.
+		}
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
 		sum := sha256.Sum256(data)
-		out[filepath.ToSlash(rel)] = hex.EncodeToString(sum[:])
+		out[rel] = hex.EncodeToString(sum[:])
 		return nil
 	})
 	return out, err

@@ -44,6 +44,7 @@ jobs:
             choco install ffmpeg -y
           fi
       - name: Test and vet the Go core
+        shell: bash
         working-directory: native/core
         run: |
           go test ./... -count=1 -timeout=120s

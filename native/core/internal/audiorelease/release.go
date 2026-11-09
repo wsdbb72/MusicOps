@@ -244,6 +244,215 @@ func Release(ctx context.Context, engine *dataengine.Engine, input Request) (Res
 	return resultFrom(rec, sameFile(source, digest) == nil, false), nil
 }
 
+// PublishedInput names one file already inside the library directory.
+// It is the controlled-publish counterpart of Request: the file was
+// fetched and placed by audiopublish, so there is no incoming source to
+// copy from — only the record is written.
+type PublishedInput struct {
+	RequestID string
+	RootID    string
+	Artist    string
+	Album     string
+	Title     string
+	Track     int
+	Path      string // absolute path of the placed file, inside Library
+	Library   string
+	Decoder   Decoder
+}
+
+// RecordPublished records a file that is already inside the library
+// directory as a verified library entry, so the library view, dedup scan
+// and artist-folder planning see the same file the publish executor just
+// placed. The file is never moved or copied; only the record is written.
+// A second call with the same request ID replays the stored receipt, and
+// a different request for the same (root, track) slot is a conflict.
+func RecordPublished(ctx context.Context, engine *dataengine.Engine, input PublishedInput) (Result, error) {
+	empty := Result{RequestID: input.RequestID, RootID: input.RootID}
+	if engine == nil || ctx == nil || !validID(input.RequestID) || !validID(input.RootID) || input.Track < 1 || input.Track > 999 {
+		return empty, dataengine.ErrInvalidRequest
+	}
+	artist, album, title, err := cleanNames(input.Artist, input.Album, input.Title)
+	if err != nil {
+		return empty, err
+	}
+	library, err := filepath.Abs(input.Library)
+	if err != nil {
+		return empty, dataengine.ErrInvalidRequest
+	}
+	path, err := filepath.Abs(input.Path)
+	if err != nil || !inside(library, path) {
+		return empty, dataengine.ErrInvalidRequest
+	}
+	if existing, found, err := readRelease(engine, input.RequestID); err != nil {
+		return empty, err
+	} else if found {
+		return replay(existing, path)
+	}
+	body, err := os.ReadFile(path)
+	if err != nil {
+		empty.Class = "audio_missing"
+		return empty, ErrMissing
+	}
+	format, reason := classify(filepath.Base(path), body)
+	if reason != "" {
+		empty.Class = reason
+		return empty, ErrRejected
+	}
+	// The record must name the organised library file for this track:
+	// anything else would let a caller claim an unrelated file.
+	if path != filepath.Join(library, artist, album, trackName(input.Track, title, format)) {
+		return empty, dataengine.ErrInvalidRequest
+	}
+	decodeState := "structural"
+	if input.Decoder != nil {
+		if err = input.Decoder(ctx, path); err != nil {
+			empty.Class = "decode_failed"
+			empty.Format = format
+			return empty, ErrRejected
+		}
+		decodeState = "decoded"
+	}
+	before := sha256.Sum256(body)
+	digest := hex.EncodeToString(before[:])
+	rec := record{
+		RequestID: input.RequestID, RootID: input.RootID, Path: path, SHA256: digest, Format: format,
+		DecodeState: decodeState, Origin: "controlled_audio", SourceName: filepath.Base(path),
+		State: "published", Verified: true, LibraryPublished: true,
+	}
+	encoded, err := json.Marshal(rec)
+	if err != nil {
+		return empty, err
+	}
+	ok, err := engine.CompareAndSwap(
+		[]dataengine.Condition{
+			{Key: releaseKey(input.RequestID), Absent: true},
+			{Key: albumKey(input.RootID, input.Track), Absent: true},
+		},
+		[]dataengine.Mutation{
+			{Key: releaseKey(input.RequestID), Value: encoded},
+			{Key: albumKey(input.RootID, input.Track), Value: encoded},
+		},
+	)
+	if err != nil {
+		return empty, err
+	}
+	if !ok {
+		current, found, readErr := readRelease(engine, input.RequestID)
+		if readErr != nil {
+			return empty, readErr
+		}
+		if found && current.SHA256 == digest && current.RootID == input.RootID {
+			return replay(current, path)
+		}
+		return empty, ErrConflict
+	}
+	return resultFrom(rec, true, false), nil
+}
+
+// Relocate updates the stored path of a published library record after
+// the file itself was moved (for example by the artist-folder整理 step).
+// The file at newPath must exist and still hash to the stored digest, so a
+// move that lost or replaced the audio cannot silently rewrite the record.
+// Both keys that hold the record (per-request and per-album) are updated in
+// one CompareAndSwap against the exact bytes read, so a concurrent change
+// fails instead of overwriting. Containment of newPath inside the library
+// directory is the caller's job: it knows the library root and resolves
+// the path before calling.
+func Relocate(engine *dataengine.Engine, requestID, newPath string) error {
+	if engine == nil || !validID(requestID) || newPath == "" {
+		return dataengine.ErrInvalidRequest
+	}
+	raw, found, err := readRaw(engine, releaseKey(requestID))
+	if err != nil {
+		return err
+	}
+	if !found {
+		return ErrMissing
+	}
+	var rec record
+	if json.Unmarshal(raw, &rec) != nil {
+		return ErrConflict
+	}
+	if rec.State != "published" || !rec.Verified || !rec.LibraryPublished {
+		return ErrConflict
+	}
+	if err := sameFile(newPath, rec.SHA256); err != nil {
+		return err
+	}
+	updated := rec
+	updated.Path = newPath
+	encoded, err := json.Marshal(updated)
+	if err != nil {
+		return err
+	}
+	conditions := []dataengine.Condition{{Key: releaseKey(requestID), Value: raw}}
+	mutations := []dataengine.Mutation{{Key: releaseKey(requestID), Value: encoded}}
+	// The album key is per (root, track); find the album key(s) holding
+	// this request and update them in the same atomic swap.
+	albumKeys, err := albumKeysFor(engine, rec.RootID)
+	if err != nil {
+		return err
+	}
+	for _, key := range albumKeys {
+		keyRaw, ok, err := readRaw(engine, key)
+		if err != nil || !ok {
+			continue
+		}
+		var keyed record
+		if json.Unmarshal(keyRaw, &keyed) != nil || keyed.RequestID != requestID {
+			continue
+		}
+		conditions = append(conditions, dataengine.Condition{Key: key, Value: keyRaw})
+		mutations = append(mutations, dataengine.Mutation{Key: key, Value: encoded})
+	}
+	ok, err := engine.CompareAndSwap(conditions, mutations)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return ErrConflict
+	}
+	return nil
+}
+
+// albumKeysFor returns the album keys (library/album-audio/<root>/<track>)
+// that exist for one album root.
+func albumKeysFor(engine *dataengine.Engine, rootID string) ([][]byte, error) {
+	var keys [][]byte
+	prefix := []byte("library/album-audio/" + rootID + "/")
+	var after []byte
+	for {
+		var page dataengine.Page
+		err := engine.View(func(v *dataengine.View) error {
+			var scanErr error
+			page, scanErr = v.Scan(prefix, after, 200)
+			return scanErr
+		})
+		if err != nil {
+			return nil, err
+		}
+		for _, item := range page.Items {
+			keys = append(keys, append([]byte(nil), item.Key...))
+		}
+		if len(page.Next) == 0 {
+			break
+		}
+		after = page.Next
+	}
+	return keys, nil
+}
+
+func readRaw(engine *dataengine.Engine, key []byte) ([]byte, bool, error) {
+	var raw []byte
+	var found bool
+	err := engine.View(func(v *dataengine.View) error {
+		var err error
+		raw, found, err = v.Get(key)
+		return err
+	})
+	return raw, found, err
+}
+
 // Verify re-checks a published library record: the stored file must still
 // hash to the stored digest. It copies nothing and does not look at the
 // original source file again, so SourcePreserved is left false: Verify
@@ -377,10 +586,19 @@ func List(engine *dataengine.Engine) ([]Entry, error) {
 	return entries, nil
 }
 
-// libraryFile returns the artist/album/file tail of a library path. Names are
-// validated on ingest, so the path always ends with those three segments.
+// libraryFile returns the library-relative path of a stored file: the
+// part after the "library-audio" directory. Names are validated on
+// ingest, so an organized file always ends with Artist/Album/file, but
+// a file relocated to a loose folder or the library root has fewer
+// segments, and taking a fixed last-three tail would then invent a
+// "library-audio" prefix that is not a real path.
 func libraryFile(path string) string {
 	parts := strings.Split(path, string(filepath.Separator))
+	for i := len(parts) - 1; i >= 0; i-- {
+		if parts[i] == "library-audio" {
+			return strings.Join(parts[i+1:], "/")
+		}
+	}
 	if len(parts) < 3 {
 		return filepath.Base(path)
 	}
@@ -561,7 +779,30 @@ func verifyFLAC(body []byte) error {
 	if rate == 0 || rate > 384000 {
 		return ErrRejected
 	}
-	frame := 8 + size
+	// Walk the metadata block chain to the first audio frame. The old
+	// check looked for the frame sync immediately after STREAMINFO, but
+	// a real FLAC carries further metadata blocks first (VORBIS_COMMENT
+	// and others), so every multi-block FLAC was rejected. The chain
+	// walk is bounded: a truncated or unterminated chain is rejected.
+	offset := 8 + size
+	if body[4]&0x80 == 0 {
+		for {
+			if offset+4 > len(body) {
+				return ErrRejected
+			}
+			last := body[offset]&0x80 != 0
+			blockSize := int(body[offset+1])<<16 | int(body[offset+2])<<8 | int(body[offset+3])
+			offset += 4
+			if blockSize < 0 || offset+blockSize > len(body) {
+				return ErrRejected
+			}
+			offset += blockSize
+			if last {
+				break
+			}
+		}
+	}
+	frame := offset
 	if frame+1 >= len(body) || body[frame] != 0xFF || body[frame+1]&0xFE != 0xF8 {
 		return ErrRejected
 	}

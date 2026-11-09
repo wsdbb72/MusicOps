@@ -546,6 +546,65 @@ func TestResolveTargetInDirRejectsSymlinkEscape(t *testing.T) {
 	}
 }
 
+// TestArtistFolderPlanUnderSymlinkedParent is the regression test for
+// the macOS artist-folder failures: the state directory sits under a
+// symlinked parent (/var points at /private/var), so the plan must
+// still find a loose album (state "intent", from/to spelled through
+// the state directory) instead of reporting it already organized
+// (state "none", empty "to").
+func TestArtistFolderPlanUnderSymlinkedParent(t *testing.T) {
+	base := t.TempDir()
+	real := filepath.Join(base, "real")
+	if err := os.MkdirAll(real, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(base, "link")
+	if err := os.Symlink(real, link); err != nil {
+		t.Skip("symlinks unavailable: " + err.Error())
+	}
+	// t.TempDir follows GOTMPDIR first, then TMPDIR: point both at the
+	// symlinked parent so the app below really lives under it.
+	t.Setenv("GOTMPDIR", link)
+	t.Setenv("TMPDIR", link)
+	application := newApp(t)
+	library := filepath.Join(application.Dir, "library-audio")
+	entry := releaseTaggedFLAC(t, application, "af-sym", "Solo Artist", "My Album", "Track One", 1)
+	organized := filepath.Join(library, "Solo Artist", "My Album")
+	loose := filepath.Join(library, "My Album")
+	if err := os.Rename(organized, loose); err != nil {
+		t.Fatal(err)
+	}
+	if err := audiorelease.Relocate(application.engine, entry.RequestID, filepath.Join(loose, filepath.Base(entry.File))); err != nil {
+		t.Fatal(err)
+	}
+	plans, err := application.planArtistFolders()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(plans) != 1 || plans[0].State != "intent" {
+		t.Fatal(plans)
+	}
+	if plans[0].From != loose || !strings.HasSuffix(plans[0].To, filepath.Join("Solo Artist", "My Album")) {
+		t.Fatal(plans)
+	}
+	// Execute: the folder moves back and the record follows it.
+	code, decoded := mediaPost(t, application, "/v1/library/artist-folders", map[string]any{})
+	if code != http.StatusOK {
+		t.Fatal(code, decoded)
+	}
+	results, ok := decoded["results"].([]any)
+	if !ok || len(results) != 1 || results[0].(map[string]any)["state"] != "done" {
+		t.Fatal(decoded)
+	}
+	entries, err := audiorelease.List(application.engine)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 || entries[0].File != filepath.Join("Solo Artist", "My Album", filepath.Base(entry.File)) {
+		t.Fatal(entries)
+	}
+}
+
 // ---------------------------------------------------------------------------
 // End-to-end acceptance: a real HTTP server over the new endpoints.
 

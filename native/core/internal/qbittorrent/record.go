@@ -3,6 +3,7 @@ package qbittorrent
 import (
 	"context"
 	"errors"
+	"os"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -139,6 +140,32 @@ func resolvePath(path string) string {
 	}
 	abs = filepath.Clean(abs)
 	if resolved, err := filepath.EvalSymlinks(abs); err == nil {
+		return resolved
+	}
+	// The path itself may not exist yet (a download path the client has
+	// not created, for example): resolve the nearest existing ancestor
+	// and append the remainder lexically, so a symlinked parent is
+	// spelled the same way on both sides of the comparison. Returning
+	// the unresolved spelling here used to fail ownership on macOS,
+	// where the state directory sits under /var (a symlink to
+	// /private/var) and the resolved base never matched it.
+	ancestor := abs
+	var suffix []string
+	for {
+		if _, err := os.Lstat(ancestor); err == nil {
+			break
+		}
+		parent := filepath.Dir(ancestor)
+		if parent == ancestor {
+			return abs
+		}
+		suffix = append([]string{filepath.Base(ancestor)}, suffix...)
+		ancestor = parent
+	}
+	if resolved, err := filepath.EvalSymlinks(ancestor); err == nil {
+		for _, part := range suffix {
+			resolved = filepath.Join(resolved, part)
+		}
 		return resolved
 	}
 	return abs

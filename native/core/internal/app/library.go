@@ -657,8 +657,29 @@ func (a *App) planArtistFolder(entry audiorelease.Entry, library string) artistF
 		plan.Reason = "文件路径不在库内或含链接"
 		return plan
 	}
+	// full is resolved, so the library must be resolved the same way
+	// before the lexical Rel below: on macOS the state directory can
+	// sit under a symlinked parent (/var points at /private/var) and
+	// the unresolved library spelling shares no lexical prefix with
+	// the resolved file path, which used to make every loose album
+	// look already organized (state "none", empty "to").
+	resolvedLibrary := library
+	if r, err := filepath.EvalSymlinks(library); err == nil {
+		resolvedLibrary = r
+	}
 	dir := filepath.Dir(full)
-	rel, err := filepath.Rel(library, dir)
+	rel, err := filepath.Rel(resolvedLibrary, dir)
+	if err != nil {
+		plan.State = "skipped"
+		plan.Reason = "文件路径不在库内"
+		return plan
+	}
+	// relFile is the file's path inside the library, for building
+	// from/to in the caller's spelling: plans are compared against
+	// paths built from application.Dir, which may itself be spelled
+	// through a symlinked parent, so the resolved spelling must not
+	// leak into from/to.
+	relFile, err := filepath.Rel(resolvedLibrary, full)
 	if err != nil {
 		plan.State = "skipped"
 		plan.Reason = "文件路径不在库内"
@@ -694,10 +715,10 @@ func (a *App) planArtistFolder(entry audiorelease.Entry, library string) artistF
 	targetDir := filepath.Join(library, cleanFolderComponent(artist), cleanFolderComponent(album))
 	var from, to string
 	if plan.LooseFile {
-		from = full
-		to = filepath.Join(targetDir, filepath.Base(full))
+		from = filepath.Join(library, relFile)
+		to = filepath.Join(targetDir, filepath.Base(relFile))
 	} else {
-		from = dir
+		from = filepath.Join(library, filepath.Dir(relFile))
 		to = targetDir
 	}
 	resolvedTarget, err := resolveTargetInDir(library, to)
@@ -727,6 +748,10 @@ func (a *App) planArtistFolder(entry audiorelease.Entry, library string) artistF
 // existing ancestors are resolved through symlinks and the remainder is
 // appended lexically, then the result must stay inside root. This is the
 // safe_destination contract for a destination that does not exist yet.
+// The returned path keeps the caller's spelling: the resolved path is
+// only the containment check, and callers compare the result against
+// paths built from the state directory, which on macOS may be spelled
+// through a symlinked parent (/var -> /private/var).
 func resolveTargetInDir(root, target string) (string, error) {
 	absRoot, err := filepath.EvalSymlinks(root)
 	if err != nil {
@@ -760,7 +785,7 @@ func resolveTargetInDir(root, target string) (string, error) {
 	if !insideDir(absRoot, resolved) {
 		return "", errors.New("target escapes the library")
 	}
-	return resolved, nil
+	return abs, nil
 }
 
 func (a *App) artistFolderPlan(w http.ResponseWriter, r *http.Request) {

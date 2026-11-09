@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -553,10 +554,20 @@ func mustMeta(t *testing.T, data []byte) Metainfo {
 	return meta
 }
 
+// testRoot returns an absolute directory for record paths. The fixtures
+// used to hardcode Unix roots ("/data"), which are not absolute on
+// Windows (filepath.IsAbs needs a volume), so every record creation and
+// ownership check failed there. Build all fixture paths from t.TempDir
+// instead, with filepath.Join.
+func testRoot(t *testing.T) string {
+	t.Helper()
+	return t.TempDir()
+}
+
 func addStoppedRecord(t *testing.T, client *Client, torrent []byte) Record {
 	t.Helper()
 	meta := mustMeta(t, torrent)
-	rec, err := NewRecord("task-1", "/data", "")
+	rec, err := NewRecord("task-1", testRoot(t), "")
 	if err != nil {
 		t.Fatalf("NewRecord: %v", err)
 	}
@@ -714,7 +725,8 @@ func TestAddStoppedRequestParameters(t *testing.T) {
 	client := loggedInClient(t, fake)
 	torrent := buildV1Multi()
 	meta := mustMeta(t, torrent)
-	rec, err := NewRecord("task-1", "/data", "")
+	root := testRoot(t)
+	rec, err := NewRecord("task-1", root, "")
 	if err != nil {
 		t.Fatalf("NewRecord: %v", err)
 	}
@@ -734,7 +746,7 @@ func TestAddStoppedRequestParameters(t *testing.T) {
 	}
 	cap := fake.addCaptures[0]
 	wantFields := map[string]string{
-		"savepath":                 "/data/task-1",
+		"savepath":                 filepath.Join(root, "task-1"),
 		"category":                 "musicops",
 		"tags":                     "MusicOps",
 		"autoTMM":                  "false",
@@ -744,7 +756,7 @@ func TestAddStoppedRequestParameters(t *testing.T) {
 		"ratioLimit":               "-1",
 		"seedingTimeLimit":         "-1",
 		"inactiveSeedingTimeLimit": "-1",
-		"downloadPath":             "/data/task-1/.incomplete",
+		"downloadPath":             filepath.Join(root, "task-1", ".incomplete"),
 		"useDownloadPath":          "true",
 	}
 	for k, want := range wantFields {
@@ -787,7 +799,7 @@ func TestAddStoppedRequiresFreeEvidence(t *testing.T) {
 	client := loggedInClient(t, fake)
 	torrent := buildV1Single()
 	meta := mustMeta(t, torrent)
-	rec, _ := NewRecord("task-1", "/data", "")
+	rec, _ := NewRecord("task-1", testRoot(t), "")
 	errCases := []FreeEvidence{
 		{Confirmed: false, InfoHash: meta.InfoHashV1, Free: FreePtr(true)},
 		{Confirmed: true, InfoHash: "deadbeef", Free: FreePtr(true)},
@@ -832,16 +844,18 @@ func TestCheckOwnershipRejections(t *testing.T) {
 	if _, _, err := client.Version(context.Background()); err != nil {
 		t.Fatalf("Version: %v", err)
 	}
+	root := testRoot(t)
+	taskPath := filepath.Join(root, "task-1")
 	baseRow := func() *TorrentRow {
 		return &TorrentRow{
 			Hash: "abc", State: "stoppedDL", Progress: 0, Category: "musicops",
-			Tags: "MusicOps", SavePath: "/data/task-1",
-			ContentPath: "/data/task-1", DownloadPath: "/data/task-1/.incomplete",
+			Tags: "MusicOps", SavePath: taskPath,
+			ContentPath: taskPath, DownloadPath: filepath.Join(taskPath, ".incomplete"),
 			AutoTMM: boolPtr(false),
 		}
 	}
 	baseRec := Record{
-		TaskID: "task-1", ClientID: "abc", SourcePath: "/data/task-1",
+		TaskID: "task-1", ClientID: "abc", SourcePath: taskPath,
 		TaskTag: "MusicOps", Category: "musicops", CreationIntent: true,
 	}
 	if reason := client.CheckOwnership(baseRow(), baseRec, true); reason != "" {
@@ -855,13 +869,13 @@ func TestCheckOwnershipRejections(t *testing.T) {
 	}{
 		{"wrong tag", func(r *TorrentRow) { r.Tags = "other" }, nil, false},
 		{"wrong category", func(r *TorrentRow) { r.Category = "other" }, nil, false},
-		{"save path outside source", func(r *TorrentRow) { r.SavePath = "/data/other" }, nil, false},
-		{"save path sibling prefix", func(r *TorrentRow) { r.SavePath = "/data/task-1-evil" }, nil, false},
+		{"save path outside source", func(r *TorrentRow) { r.SavePath = filepath.Join(root, "other") }, nil, false},
+		{"save path sibling prefix", func(r *TorrentRow) { r.SavePath = filepath.Join(root, "task-1-evil") }, nil, false},
 		{"autoTMM on", func(r *TorrentRow) { r.AutoTMM = boolPtr(true) }, nil, false},
 		{"autoTMM unknown", func(r *TorrentRow) { r.AutoTMM = nil }, nil, false},
 		{"download path missing", func(r *TorrentRow) { r.DownloadPath = "" }, nil, false},
-		{"download path outside", func(r *TorrentRow) { r.DownloadPath = "/tmp/x" }, nil, false},
-		{"content path outside", func(r *TorrentRow) { r.ContentPath = "/tmp/x" }, nil, false},
+		{"download path outside", func(r *TorrentRow) { r.DownloadPath = filepath.Join(root, "outside") }, nil, false},
+		{"content path outside", func(r *TorrentRow) { r.ContentPath = filepath.Join(root, "outside") }, nil, false},
 		{"no creation intent", nil, func(r *Record) { r.CreationIntent = false }, false},
 		{"not stopped", func(r *TorrentRow) { r.State = "downloading" }, nil, true},
 	}
@@ -968,19 +982,21 @@ func TestNormalizeTags(t *testing.T) {
 	ctx := context.Background()
 	torrent := buildV1Single()
 	meta := mustMeta(t, torrent)
+	root := testRoot(t)
+	taskPath := filepath.Join(root, "task-1")
 	// Seed the torrent directly with the legacy per-task tag: AddStopped
 	// would already normalize tags via ReconcileAdd, so the legacy state
 	// has to be set up without going through an add.
 	fake.seed(&fakeTorrent{
 		hash: meta.InfoHashV1, state: "stoppedDL",
-		savePath: "/data/task-1", downloadPath: "/data/task-1/.incomplete",
-		contentPath: "/data/task-1", category: "musicops",
+		savePath: taskPath, downloadPath: filepath.Join(taskPath, ".incomplete"),
+		contentPath: taskPath, category: "musicops",
 		tags: "musicops-task-1", autoTMM: false,
 		files: []TorrentFile{{Name: "song.flac", Size: 100, Progress: 0, Priority: 1}},
 	})
 	rec := Record{
 		TaskID: "task-1", ClientID: meta.InfoHashV1, InfoHashV1: meta.InfoHashV1,
-		SourcePath: "/data/task-1", TaskTag: "musicops-task-1",
+		SourcePath: taskPath, TaskTag: "musicops-task-1",
 		Category: "musicops", CreationIntent: true, State: StateStopped,
 		Files: meta.Files,
 	}
@@ -1018,25 +1034,28 @@ func TestNormalizeTagsKeepsTagStillInUse(t *testing.T) {
 	ctx := context.Background()
 	torrent := buildV1Single()
 	meta := mustMeta(t, torrent)
+	root := testRoot(t)
+	taskPath := filepath.Join(root, "task-1")
 	// Seed the legacy-tagged torrent directly (see TestNormalizeTags).
 	fake.seed(&fakeTorrent{
 		hash: meta.InfoHashV1, state: "stoppedDL",
-		savePath: "/data/task-1", downloadPath: "/data/task-1/.incomplete",
-		contentPath: "/data/task-1", category: "musicops",
+		savePath: taskPath, downloadPath: filepath.Join(taskPath, ".incomplete"),
+		contentPath: taskPath, category: "musicops",
 		tags: "musicops-task-1", autoTMM: false,
 		files: []TorrentFile{{Name: "song.flac", Size: 100, Progress: 0, Priority: 1}},
 	})
 	rec := Record{
 		TaskID: "task-1", ClientID: meta.InfoHashV1, InfoHashV1: meta.InfoHashV1,
-		SourcePath: "/data/task-1", TaskTag: "musicops-task-1",
+		SourcePath: taskPath, TaskTag: "musicops-task-1",
 		Category: "musicops", CreationIntent: true, State: StateStopped,
 		Files: meta.Files,
 	}
 	// A second torrent still uses the legacy tag.
+	otherPath := filepath.Join(root, "task-2")
 	fake.seed(&fakeTorrent{
 		hash: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", state: "stoppedDL",
-		savePath: "/data/task-2", downloadPath: "/data/task-2/.incomplete",
-		contentPath: "/data/task-2", category: "musicops",
+		savePath: otherPath, downloadPath: filepath.Join(otherPath, ".incomplete"),
+		contentPath: otherPath, category: "musicops",
 		tags: "musicops-task-1", autoTMM: false,
 		files: []TorrentFile{{Name: "other.flac", Size: 10, Progress: 0, Priority: 1}},
 	})
@@ -1062,17 +1081,19 @@ func TestSetLocationAndDownloadPath(t *testing.T) {
 	client := loggedInClient(t, fake)
 	ctx := context.Background()
 	rec := addStoppedRecord(t, client, buildV1Single())
-	if err := client.SetLocation(ctx, rec.ClientID, "/data/task-1-new"); err != nil {
+	newPath := rec.SourcePath + "-new"
+	newDownloadPath := filepath.Join(newPath, ".incomplete")
+	if err := client.SetLocation(ctx, rec.ClientID, newPath); err != nil {
 		t.Fatalf("SetLocation: %v", err)
 	}
-	if err := client.SetDownloadPath(ctx, rec.ClientID, "/data/task-1-new/.incomplete"); err != nil {
+	if err := client.SetDownloadPath(ctx, rec.ClientID, newDownloadPath); err != nil {
 		t.Fatalf("SetDownloadPath: %v", err)
 	}
 	rows, err := client.Info(ctx, rec.ClientID)
 	if err != nil {
 		t.Fatalf("Info: %v", err)
 	}
-	if len(rows) != 1 || rows[0].SavePath != "/data/task-1-new" || rows[0].DownloadPath != "/data/task-1-new/.incomplete" {
+	if len(rows) != 1 || rows[0].SavePath != newPath || rows[0].DownloadPath != newDownloadPath {
 		t.Fatalf("rows after move = %+v", rows)
 	}
 }

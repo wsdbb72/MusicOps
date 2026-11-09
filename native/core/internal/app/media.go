@@ -25,7 +25,6 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
-	"syscall"
 	"unicode/utf8"
 
 	"github.com/wsdbb72/MusicOps/native/core/internal/audiorelease"
@@ -417,20 +416,6 @@ func writeTagError(w http.ResponseWriter, err error) {
 		return
 	}
 	writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "code": "TAG_UNAVAILABLE"})
-}
-
-// checkNotHardlinked refuses files with more than one hard link, as
-// Python apply_tag_changes does: editing one name would silently change
-// another.
-func checkNotHardlinked(path string) error {
-	info, err := os.Stat(path)
-	if err != nil {
-		return err
-	}
-	if stat, ok := info.Sys().(*syscall.Stat_t); ok && stat.Nlink != 1 {
-		return errors.New("file has more than one hard link")
-	}
-	return nil
 }
 
 // backupFile copies path to a temp file in the same directory and returns

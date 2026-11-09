@@ -293,7 +293,16 @@ fi
 /usr/bin/hdiutil detach "$MOUNT" || die "could not detach DMG mount $MOUNT"
 [ "$DMG_OK" = 1 ] || die "DMG acceptance failed (signature, Applications link, version or architecture)"
 
-INSTALLER="$("$ROOT/packaging/macos_pkg_go.sh" --app "$APP" --output "$OUTPUT" --version "$VERSION")"
+# Do NOT capture this script's stdout: pkgbuild/productbuild print
+# progress to stdout, so $(...) would swallow their chatter plus the
+# echoed path into one multi-line string and [ -s ] would never match
+# (release run 42613771085 died here with "PKG build produced no
+# installer" even though the PKG was built). The PKG path is
+# deterministic - macos_pkg_go.sh computes the same
+# "$OUTPUT/${STEM}.pkg" - so build it here and let the inner script's
+# stdout stay in the log.
+"$ROOT/packaging/macos_pkg_go.sh" --app "$APP" --output "$OUTPUT" --version "$VERSION"
+INSTALLER="$OUTPUT/${STEM}.pkg"
 [ -s "$INSTALLER" ] || die "PKG build produced no installer"
 
 for algorithm in sha256 sha512; do

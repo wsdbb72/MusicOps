@@ -103,7 +103,12 @@ CGO_ENABLED=0 go build -trimpath -ldflags "$LDFLAGS" -o "$CORE" ./cmd/musicops
 # without it the binary embeds a stub that fails at launch ("Wails
 # applications will not build without the correct build tags", as shipped
 # broken in 0.4.33 Windows). -tags desktop,production matches `wails build`.
-CGO_ENABLED=1 go build -tags desktop,production -trimpath -ldflags "$LDFLAGS" -o "$DESKTOP" ./cmd/musicops-desktop
+# `wails build` also adds -framework UniformTypeIdentifiers to CGO_LDFLAGS
+# when the macOS SDK is >= 11 (pkg/commands/build/base.go): the real
+# darwin frontend uses UTType, but Wails' own #cgo LDFLAGS only list
+# Foundation/Cocoa/WebKit, so a plain `go build` fails at link time with
+# "Undefined symbols: _OBJC_CLASS_$_UTType". Pass the framework here.
+CGO_ENABLED=1 CGO_LDFLAGS="-framework UniformTypeIdentifiers" go build -tags desktop,production -trimpath -ldflags "$LDFLAGS" -o "$DESKTOP" ./cmd/musicops-desktop
 # Regression guard for the 0.4.33 break: the stub string must not be present.
 if grep -q 'will not build without the correct build tags' "$DESKTOP"; then die "desktop shell was built without the Wails production tag"; fi
 cd "$ROOT"

@@ -9,8 +9,8 @@
 ## 候选提交
 
 - 分支：`refactor/go-desktop`
-- Phase 5 实现提交 SHA：（推送后填入）
-- 档案更新提交 SHA：（如档案本身在实现提交之后另有仅改文档的提交，在此注明；该提交不改代码）
+- Phase 5 实现提交 SHA：`c3bd468cd058aa751620568ceaca623edf9a549e`（“MusicOps full-Go migration Phase 5: packaging and switch-over (release-ready)”）
+- 档案更新提交 SHA：（本行由该提交本身填入——该提交只改本文档，不改代码；评审对象仍为上述实现提交的树）
 - 基线：Phase 4 完成态 `5f0b2fc`（Native core 运行 42572612091 四任务全绿、四份日志逐行零 FAIL）
 
 ## 评审范围：每阶段摘要

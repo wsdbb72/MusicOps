@@ -126,9 +126,30 @@ func passingSmokeReport(t *testing.T, version string) string {
 	return path
 }
 
+// exeSuffix is the platform executable suffix the fixture uses for the
+// core and engine binaries.
+func exeSuffix() string {
+	if runtime.GOOS == "windows" {
+		return ".exe"
+	}
+	return ""
+}
+
+// testLayout is the gate layout the fixture matches: the fixture builds
+// a linux-layout bundle on Unix and a windows-layout bundle on Windows
+// (the gate's windows layout looks for musicops.exe, its linux layout
+// for musicops). A linux layout on Windows would look for a file the
+// fixture never creates.
+func testLayout() string {
+	if runtime.GOOS == "windows" {
+		return "windows"
+	}
+	return "linux"
+}
+
 func TestGatePassesGoodBundle(t *testing.T) {
 	root := goodBundle(t, "9.9.9-gate")
-	gate := Gate{Version: "9.9.9-gate", Layout: "linux", RequireEngines: true, RequireManifest: true, SmokeReportPath: passingSmokeReport(t, "9.9.9-gate")}
+	gate := Gate{Version: "9.9.9-gate", Layout: testLayout(), RequireEngines: true, RequireManifest: true, SmokeReportPath: passingSmokeReport(t, "9.9.9-gate")}
 	result := gate.Check(root)
 	raw, _ := json.MarshalIndent(result, "", "  ")
 	t.Logf("gate result:\n%s", raw)
@@ -139,7 +160,7 @@ func TestGatePassesGoodBundle(t *testing.T) {
 
 func TestGateFailsVersionMismatch(t *testing.T) {
 	root := goodBundle(t, "9.9.9-gate")
-	gate := Gate{Version: "9.9.8-gate", Layout: "linux"}
+	gate := Gate{Version: "9.9.8-gate", Layout: testLayout()}
 	result := gate.Check(root)
 	if result.Passed || result.Checks["core_version"] {
 		t.Fatalf("gate passed with a version mismatch: %+v", result)
@@ -149,7 +170,7 @@ func TestGateFailsVersionMismatch(t *testing.T) {
 func TestGateFailsPythonInBundle(t *testing.T) {
 	root := goodBundle(t, "9.9.9-gate")
 	writeFile(t, filepath.Join(root, "helper.py"), "x=1")
-	gate := Gate{Version: "9.9.9-gate", Layout: "linux"}
+	gate := Gate{Version: "9.9.9-gate", Layout: testLayout()}
 	result := gate.Check(root)
 	if result.Passed || result.Checks["bundle_no_python"] {
 		t.Fatalf("gate passed with Python in the bundle: %+v", result)
@@ -158,8 +179,8 @@ func TestGateFailsPythonInBundle(t *testing.T) {
 
 func TestGateFailsTamperedManifest(t *testing.T) {
 	root := goodBundle(t, "9.9.9-gate")
-	writeFile(t, filepath.Join(root, "musicops"), "tampered")
-	gate := Gate{Version: "9.9.9-gate", Layout: "linux", RequireManifest: true}
+	writeFile(t, filepath.Join(root, "musicops"+exeSuffix()), "tampered")
+	gate := Gate{Version: "9.9.9-gate", Layout: testLayout(), RequireManifest: true}
 	result := gate.Check(root)
 	if result.Passed || result.Checks["manifest_hashes_match"] {
 		t.Fatalf("gate passed with a tampered manifest: %+v", result)
@@ -168,10 +189,10 @@ func TestGateFailsTamperedManifest(t *testing.T) {
 
 func TestGateFailsMissingEngine(t *testing.T) {
 	root := goodBundle(t, "9.9.9-gate")
-	if err := os.Remove(filepath.Join(root, "tools", "services", "go-music-dl", "go-music-dl")); err != nil {
+	if err := os.Remove(filepath.Join(root, "tools", "services", "go-music-dl", "go-music-dl"+exeSuffix())); err != nil {
 		t.Fatal(err)
 	}
-	gate := Gate{Version: "9.9.9-gate", Layout: "linux", RequireEngines: true}
+	gate := Gate{Version: "9.9.9-gate", Layout: testLayout(), RequireEngines: true}
 	result := gate.Check(root)
 	if result.Passed || result.Checks["engines_present"] {
 		t.Fatalf("gate passed with a missing engine: %+v", result)
@@ -186,7 +207,7 @@ func TestGateFailsSmokeReport(t *testing.T) {
 		"checks": map[string]bool{"bundle_no_python": false}, "error": "bundle_no_python: python files in bundle: helper.py",
 	})
 	writeFile(t, path, string(raw))
-	gate := Gate{Version: "9.9.9-gate", Layout: "linux", SmokeReportPath: path}
+	gate := Gate{Version: "9.9.9-gate", Layout: testLayout(), SmokeReportPath: path}
 	result := gate.Check(root)
 	if result.Passed || result.Checks["smoke_evidence_passed"] {
 		t.Fatalf("gate passed with a failing smoke report: %+v", result)
@@ -196,7 +217,7 @@ func TestGateFailsSmokeReport(t *testing.T) {
 func TestGateFailsBuildJSONMismatch(t *testing.T) {
 	root := goodBundle(t, "9.9.9-gate")
 	writeFile(t, filepath.Join(root, "build.json"), `{"version":"9.9.8-gate"}`)
-	gate := Gate{Version: "9.9.9-gate", Layout: "linux"}
+	gate := Gate{Version: "9.9.9-gate", Layout: testLayout()}
 	result := gate.Check(root)
 	if result.Passed || result.Checks["build_json_version"] {
 		t.Fatalf("gate passed with a build.json mismatch: %+v", result)
@@ -205,7 +226,7 @@ func TestGateFailsBuildJSONMismatch(t *testing.T) {
 
 func TestGateFailsMissingInstaller(t *testing.T) {
 	root := goodBundle(t, "9.9.9-gate")
-	gate := Gate{Version: "9.9.9-gate", Layout: "linux", Installers: []string{"MusicOps-9.9.9-gate-Setup.exe"}}
+	gate := Gate{Version: "9.9.9-gate", Layout: testLayout(), Installers: []string{"MusicOps-9.9.9-gate-Setup.exe"}}
 	result := gate.Check(root)
 	if result.Passed {
 		t.Fatalf("gate passed with a missing installer: %+v", result)

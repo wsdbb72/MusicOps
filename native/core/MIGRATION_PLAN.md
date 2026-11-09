@@ -57,7 +57,7 @@
 
 ### 阶段 2 — 完整操作界面（已完成，2026-11-09）
 
-- 搜索提交表单：WebUI 新增搜索视图（查询/期望标题/艺人必填、5 个合法场景、每站可选站点、流媒体默认/显式选择、身份证据字段、每站 Cookie 永不保存）+ `POST /v1/search`（`StreamingEnabled` 改为 `*bool`，省略时取已存下载默认；`dicmusic_authkey`/`orpheus_torrent_pass` 仅本次使用）。
+- 搜索提交表单：WebUI 新增搜索视图（查询/期望标题/艺人必填、5 个合法场景、每站可选站点、流媒体默认/显式选择、身份证据字段、每站 Cookie 永不保存（2026-11-09 已推翻，见 §0.4.34））+ `POST /v1/search`（`StreamingEnabled` 改为 `*bool`，省略时取已存下载默认；`dicmusic_authkey`/`orpheus_torrent_pass` 仅本次使用）。
 - 核对确认：`GET/POST /v1/jobs/{id}/review`（任务、核对种类、期望标题/艺人、每站 Exact 行、候选列表上限 100、允许动作与拒绝理由）+ `workflow.Repository.Review`（见下方设计）。
 - 凭据与下载配置页：设置视图（下载默认保存到 Pebble `app/settings/download`、流媒体顺序只读展示，`streaming_fallback_wired` 在阶段 3 第 4 片翻为 `true`，见阶段 3 流媒体条目）+ `POST /v1/sites/preflight`（只读登录检查，Cookie 仅本次调用、不保存）。
 - 批量操作：`POST /v1/jobs/batch`（pause/resume/cancel/retry，1–50 个任务、去重、逐任务结果与 code、整批 200）。
@@ -133,6 +133,23 @@
 - **本地验证**：`go vet ./...` 过；`go test ./... -count=1` 32 包 ok、4 包无测试文件、零 FAIL；`-race` 9 相关包全过（app/workflow/taskrepo/downloadpolicy/smoke/releasegate/desktop/cmd/musicops/docker-smoke）；pytest 传输 8 passed；`pytest tests/test_release_versions.py tests/test_windows_installer.py` 2 passed、8 skipped（Windows-only）；交叉构建/检查：Windows 核心+壳、darwin 核心、Linux 全量通过；开发包体冒烟 20/20；假 `.app` 冒烟 20 项通过；`collect_go_licenses.py` 89 模块有许可证、97 文件、0 个 `.py`。
 - **未在本地验证（只能由发版工作流验证，如实记录）**：ISCC 编译 + Windows 安装器验收（无 Windows/ISCC）；macOS PKG/DMG/安装器验收与桌面壳 CGO 构建（无 Mac）；Docker 镜像构建与 `docker-smoke` 端到端（无 Docker）；引擎只验存在未验实跑；Vault 无直接往返检查。
 
+## 0.4.34 设置入口补齐（进行中，2026-11-09，用户决定：先补齐再发 0.4.34）
+
+0.4.33 发布后用户指出 Go 设置页只有下载默认与只读登录检查两张卡，缺了 Python 向导的全部入口。本节按 Python 原版（SetupWizard 7 页 + `app/setup.py` + `config/schema.py`，研读规格见 `~/workspace/musicops-python-settings-spec.md`）逐项补齐，WebUI 与 HTTP API 同一套，桌面与 Docker 共用。
+
+- **Cookie 决定反转**：本计划阶段 2 定下“每站 Cookie 永不保存”，0.4.33 证明只靠每次现填不可用（搜索、预检、下载每次都要用户贴 Cookie）。改为按 Python 向导第 2 页保存：四站 Cookie JSON 导入/粘贴，经 `cookies.ParseEditor` 校验后以规范 JSON 存 Vault（`vault://pt/<site>/cookies`，host 绑定该站域名），设置文档只存已保存状态与版本，永不回显内容；留空保留原值；搜索/预检/下载优先用本次填写的 Cookie，已存值只作回退。`internal/cookies`（解析/编组/取请求头子集）+ `internal/app/cookies.go` + `GET/POST /v1/settings/cookies`。
+- **AI 设置**：启用、地址、模型、API Key（Vault `vault://ai/default/key`，host 绑定 AI 地址）、超时/最大输出/温度 + `POST /v1/settings/ai/test`。生产核对模型已接通：`internal/aiclient` 实现 `reviewai.Completer`（Responses 协议，HTTPS 强制、401/403/429/5xx 分类、输出解析与拒绝处理），`App.refreshReviewModel()` 在启动与每次保存后按设置重建模型；AI 设置变更且启用时 `reviewai.Cache.Reset()`（等价于 Python 保存后对全部待核对/失败/跳过任务重登记 AI 核对——Go 里没有排队中的 AI 核对任务，清缓存即全部重核）。`internal/app/ai.go` + `GET/POST /v1/settings/ai`。
+- **qBittorrent 设置**：地址、用户名/密码（Vault JSON，`vault://user/qbt/<sha256(host)[:12]>`）、分类/标签 + 连接测试（登录→版本→能力→偏好→种子列表）。下载时空白字段用已存设置补齐；已存登录只在调用已存地址时用，绝不发给别的地址。`internal/app/qbittorrent_settings.go` + `GET/POST /v1/settings/qbittorrent`、`POST /v1/settings/qbittorrent/test`。
+- **流媒体回退顺序可编辑**：`downloadpolicy.PlanOrdered`/`OrderedSources`/`ValidateOrder`（顺序须恰好是全部 7 个源各一次）；设置页用 ↑/↓ 调整顺序并保存；回退遍历按保存的顺序走。`GET/POST /v1/settings/download` 的 `streaming_order` 字段。
+- **FlareSolverr 设置**：managed/enabled/地址/超时/可执行程序/auto_start + 连接测试（`POST {base}/v1 {"cmd":"sessions.list"}`，要求 `status=="ok"` 且 sessions 为 list），校验按 Python `validate_solver`（本机回环、非 0 端口、超时 10–120 秒）。**未接线**：Go 传输层没有 solver 客户端，启用暂不改变任何请求行为，界面与本节如实说明。
+- **歌词/封面服务设置**：地址（须 HTTPS）、三路径、鉴权头 + 鉴权值（Vault `vault://lyrics/default/authorization`，原始值，不 strip、不补 `Bearer `）+ 连接测试（Python `connection_tests` lyrics 种：`candidates("童年","罗大佑","之乎者也")`，响应须为含 id/title/artist/lyrics 的 JSON 数组，歌词须过 `lrc.Parse` 且身份匹配；无已存鉴权直接报 `NOT_CONFIGURED`，不发请求）。**未接线**：Go 没有歌词拉取客户端（`lrc` 只读写本地 LRC），保存与测试不改变任何拉取行为。
+- **Discogs Token**：Vault `vault://catalog/discogs/token`（host `api.discogs.com`，Token 须 `[A-Za-z0-9_-]{8,256}`）+ 连接测试（`GET /database/search`，`Authorization: Discogs token=<token>`）。**未接线**：目录核对仍只用 MusicBrainz，`catalogSources()` 保持 Discogs `available: false`，直到有真实 Discogs 客户端。
+- **音乐库目录**：`GET/POST /v1/settings/library`，校验按 Python（绝对路径、非磁盘根、无 symlink 链、不与状态/备份目录重叠），保存时创建目录。新发布写到保存的目录；每条记录存入库时根目录（`audiorelease` record `Library` + `Entry.LibraryDir`），去重/合并/隔离/艺人文件夹按记录各自的根解析，老记录不受影响。**无整库迁移**：Python 也没有（只迁进行中下载），改目录只影响新入库。
+- **音乐服务器**：Plex（启用/地址/音乐库 ID/Token，Vault `vault://user/plex/<sha256(host)[:12]>`）+ Navidrome（启用/地址/用户名/密码，Vault `vault://user/navidrome/<sha256(host)[:12]>`）+ 各自的测试接口（Plex 测试列出音乐库供选 `section_id`；Navidrome 测试是 Subsonic 只读 ping，Python 本无 Navidrome 测试命令）。入库完成后 `completePublish` 调 `notifyServers`：先 Navidrome 再 Plex，失败只追加到任务说明，永不阻断入库；Roon 不通知（Python 也不通知，只靠监听目录发现），Go 不加 Roon 客户端。
+- **歌单**：`POST /v1/jobs/{id}/playlist`（上传 .m3u/.m3u8 或粘贴内容，`parseM3U` 校验，存 `incoming/playlist-<jobID>.m3u`，正是回退步读的文件）+ `GET/POST /v1/playlists`（歌单库，`<state>/playlists/<slug>.m3u`）+ `POST /v1/search` 的 `playlist_id` 字段（搜索前把已存歌单拷到任务文件，启动失败时删回）。**未做**：十平台链接解析与各平台歌单授权（无 Go 读取端，存凭据无消费者反更糟）、网易云 `playlist_ids` 配置列表（同理）。
+- **未做（无 Go 消费端，加了就是死开关）**：流媒体服务地址/musicdl/网易云 api_url/import_dir、Roon 设置。
+- **密钥规则**：全部密钥/Cookie/Token 只进 Vault 或只存内存，永不落明文盘、不记日志、不返回前端明文；“已保存”只显示状态与版本。
+
 ## 4. 阻塞项（需要用户或外部输入，勿用模拟假装完成）
 
 1. **桌面壳方案（已决定，2026-11-09，用户拍板）**：Windows 与 macOS 用 Go 原生 GUI；Docker 用与 Go GUI 相同的 WebUI（同一套界面、同一套操作，与 AGENTS.md 要求的 Docker 界面与桌面操作同步一致，不另搞一套库工作流实现）。原先的选项留作记录：
@@ -141,7 +158,7 @@
    - C. Go 原生 GUI 框架（Wails/Fyne/Gio）：单 Go 技术栈；Wails 本质仍是 webview 壳，Fyne/Gio 则要重写一套与 WebUI 平行的原生界面，违反“同一套页面”的既定方向，工作量与分叉风险最大。**已选此项（桌面端），但按用户决定：原生 GUI 与 Docker WebUI 共用同一套界面设计，不做两套分叉实现。**
    - **框架已定（2026-11-09，Phase 4 开始前评估）：Wails v2.17.1（仅用库，`wails.Run`，不用 wails CLI、不用 Node、不用前端构建）。** 桌面窗口通过 `AssetServer.Handler` 反向代理到本机 Go 核心（`http://127.0.0.1:<port>`），注入 Basic 认证，渲染的正是核心自带的同一套 WebUI——界面与 Docker WebUI 同源，同步要求由构造保证，无第二套界面实现。选 Wails 而非 Fyne/Gio：Fyne/Gio 是原生控件，需重写 6 页工作台+向导，与 AGENTS.md“桌面与 Docker 操作同步、不另搞一套库工作流实现”直接冲突；Wails 是真实桌面应用（原生窗口/图标/单实例/自启），不是浏览器标签（选项 A 不满足用户“Go 原生 GUI”的要求）。**更正（2026-11-09，Phase 4 合并时核对模块源码）：Wails v2.17.1 没有安装托盘的公开 API**——`menu.TrayMenu` 只有数据，`pkg/runtime` 无任何 tray 入口，`runtime.Tray.SetIcon` 只存在于 `pkg/buildassets/onhold/tray/README.md`，内部 menumanager 能处理 tray 菜单但无公开调用方；托盘菜单只做到数据构造（见 Phase 4 缺口）。代价如实记录：需 CGO 与平台 webview 运行时（Windows WebView2 随 Win10/11 预装、macOS WKWebView 内置；Linux 桌面不是发布目标，壳代码以 `windows||darwin` build tag 隔离，Linux 构建永不触碰）；Windows CI 需 C 编译器（mingw，待 CI 验证，必要时改工作流——须走浏览器）；本 Linux 开发机无法交叉编译 darwin/windows 的 CGO 壳代码，壳本身以 macos-15/windows-latest CI 为准，其余 Phase 4 代码均为纯 Go、本地全量验证。
    - D. 保留 Qt 壳、只把后端换成 Go：现有工作台/安装器/更新链路可复用；但 Qt 仍需 Python 运行时，与“安装包里不能再依赖 Python 运行时”的硬门槛直接冲突，只能作过渡、不能作终态。
-2. **真实 AI 模型服务**：`reviewai` 需要可用的模型服务/凭证，现在没有；`reviewModel` 恒为 nil。
+2. **真实 AI 模型服务**：`reviewai` 需要可用的模型服务/凭证，现在没有。`reviewModel` 不再恒为 nil：0.4.34 设置入口工作已接通（`app/settings/ai` + Vault key + `aiclient`，见 §0.4.34），但用户尚未填入真实 AI 地址/模型/API Key，AI 核对实际仍不触发。
 3. **线上逐笔扣费格式**：没有经核对的真实格式，`musicops.fixture.v1` 只是测试协议；确认路径已接通（`SpendSource` 接口 + 文件源 + 已有 `POST /v1/tokens/recheck` 的 `proof` 字段），但真实扣费确认仍做不了——只有拿到经核对的线上格式、接一个读它的源，才能结算真实扣费。
 4. **真实四站凭证与 qBittorrent**：真实下载/扣费/流媒体的端到端验证需要真实凭证与可接的 qBittorrent，现在没有；未尝试、未伪造。
 5. **Muse Wonder 终审**：只是文档里的门，无代码、无 CI 步骤；发布前需真实走终审与复审。

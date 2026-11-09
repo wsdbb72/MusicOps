@@ -102,10 +102,17 @@ type streamSourceStatus struct {
 	Reason     string `json:"reason"`
 }
 
-// streamingSourceStatus reports every default source's wiring state.
-func streamingSourceStatus() []streamSourceStatus {
-	out := make([]streamSourceStatus, 0, len(downloadpolicy.DefaultSources()))
-	for _, source := range downloadpolicy.DefaultSources() {
+// streamingSourceStatus reports every default source's wiring state, in
+// the saved fallback order. Configured means an engine for it exists in
+// this core; the four platform sources have none, so they report why
+// instead of pretending to work.
+func (a *App) streamingSourceStatus() []streamSourceStatus {
+	ordered, err := downloadpolicy.OrderedSources(a.streamingOrder())
+	if err != nil {
+		ordered = downloadpolicy.DefaultSources()
+	}
+	out := make([]streamSourceStatus, 0, len(ordered))
+	for _, source := range ordered {
 		status := streamSourceStatus{Name: source.Name, Tier: source.Tier, Quality: source.Quality, Enabled: source.Enabled}
 		switch source.Name {
 		case "playlist":
@@ -144,8 +151,9 @@ func (a *App) playlistFile(rootJobID string) (string, bool) {
 func (a *App) acquireFallback(ctx context.Context, execution *scheduler.Execution, held taskrepo.Token, job workflow.Job, plan SearchPlan) (scheduler.Outcome, error) {
 	// The fallback job carries album-level identity only; it has no
 	// per-track source or identifying information, so the playlist step
-	// stays in the plan.
-	steps, err := downloadpolicy.Plan(downloadpolicy.DefaultSources(), downloadpolicy.Track{})
+	// stays in the plan. The walk follows the saved streaming order
+	// (canonical when nothing was saved).
+	steps, err := downloadpolicy.PlanOrdered(downloadpolicy.DefaultSources(), a.streamingOrder(), downloadpolicy.Track{})
 	if err != nil {
 		return scheduler.Outcome{}, err
 	}

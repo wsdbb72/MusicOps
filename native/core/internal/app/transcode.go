@@ -70,7 +70,7 @@ func (a *App) transcode(ctx context.Context, execution *scheduler.Execution, pay
 	if err := json.Unmarshal(payload, &in); err != nil || !validTranscodeID(in.RequestID) || in.Format != "flac" || strings.TrimSpace(in.Source) == "" {
 		return scheduler.Outcome{State: "failed", ErrorClass: "INVALID_REQUEST", Message: "转码请求无效：只要 PCM WAV 转 FLAC"}, nil
 	}
-	source, err := resolveInDir(a.Dir, in.Source)
+	source, err := a.resolveLibraryPath(in.Source)
 	if err != nil {
 		return scheduler.Outcome{State: "failed", ErrorClass: "INVALID_REQUEST", Message: "转码源文件必须在应用数据目录内"}, nil
 	}
@@ -414,7 +414,7 @@ func (a *App) transcodeEnqueue(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "code": "INVALID_REQUEST"})
 		return
 	}
-	source, err := resolveInDir(a.Dir, body.Source)
+	source, err := a.resolveLibraryPath(body.Source)
 	if err != nil || !fileExists(source) {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "code": "INVALID_REQUEST"})
 		return

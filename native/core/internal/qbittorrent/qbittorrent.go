@@ -539,6 +539,23 @@ func (c *Client) Capabilities(ctx context.Context) (Capabilities, error) {
 	return caps, nil
 }
 
+// Preferences fetches /api/v2/app/preferences and requires a JSON object.
+// It is the read-only half of the Python qbt_preflight: login, version,
+// preferences and the torrent list, all read without changing anything.
+func (c *Client) Preferences(ctx context.Context) (map[string]any, error) {
+	if err := c.requireLogin(); err != nil {
+		return nil, err
+	}
+	status, body, _, err := c.do(ctx, http.MethodGet, "app/preferences", nil, "")
+	if err != nil {
+		return nil, err
+	}
+	if status != http.StatusOK {
+		return nil, &ResponseError{Method: http.MethodGet, Endpoint: "app/preferences", StatusCode: status}
+	}
+	return decodeJSON[map[string]any](body)
+}
+
 // AddRequest is one stopped torrent add.
 type AddRequest struct {
 	// Torrent is the raw .torrent bytes.

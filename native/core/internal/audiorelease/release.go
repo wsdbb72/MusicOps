@@ -95,6 +95,12 @@ type record struct {
 	State            string `json:"state"`
 	Verified         bool   `json:"verified"`
 	LibraryPublished bool   `json:"library_published"`
+	// Library is the absolute library root the file was published under.
+	// Records written before it existed leave it empty, and readers fall
+	// back to the old library-audio derivation. It lets the library
+	// directory move without orphaning old records: every record resolves
+	// against its own root.
+	Library string `json:"library,omitempty"`
 	// Downloaded is retained only so records written before the local-import
 	// correction still decode. New records always leave it false: a verified
 	// local import is not a download.
@@ -199,7 +205,7 @@ func Release(ctx context.Context, engine *dataengine.Engine, input Request) (Res
 	rec := record{
 		RequestID: input.RequestID, RootID: input.RootID, Path: dest, SHA256: digest, Format: format,
 		DecodeState: decodeState, Origin: origin, SourceName: input.SourceName,
-		State: "published", Verified: true, LibraryPublished: true,
+		State: "published", Verified: true, LibraryPublished: true, Library: library,
 		// Downloaded stays false: a verified local import is not a download.
 	}
 	encoded, err := json.Marshal(rec)
@@ -317,7 +323,7 @@ func RecordPublished(ctx context.Context, engine *dataengine.Engine, input Publi
 	rec := record{
 		RequestID: input.RequestID, RootID: input.RootID, Path: path, SHA256: digest, Format: format,
 		DecodeState: decodeState, Origin: "controlled_audio", SourceName: filepath.Base(path),
-		State: "published", Verified: true, LibraryPublished: true,
+		State: "published", Verified: true, LibraryPublished: true, Library: library,
 	}
 	encoded, err := json.Marshal(rec)
 	if err != nil {
@@ -526,6 +532,10 @@ type Entry struct {
 	Origin      string `json:"origin"`
 	SourceName  string `json:"source_name"`
 	FilePresent bool   `json:"file_present"`
+	// LibraryDir is the absolute library root the file was published
+	// under, empty for records written before it was stored. Library
+	// maintenance resolves File against it.
+	LibraryDir string `json:"library_dir,omitempty"`
 }
 
 // List returns every verified library record, ordered by album root and track
@@ -567,9 +577,9 @@ func List(engine *dataengine.Engine) ([]Entry, error) {
 			_, statErr := os.Stat(rec.Path)
 			entries = append(entries, Entry{
 				RequestID: rec.RequestID, RootID: rec.RootID, Track: track,
-				File: libraryFile(rec.Path), Format: rec.Format, DecodeState: rec.DecodeState,
+				File: libraryFileFor(rec.Path, rec.Library), Format: rec.Format, DecodeState: rec.DecodeState,
 				SHA256: rec.SHA256, Origin: rec.Origin, SourceName: rec.SourceName,
-				FilePresent: statErr == nil,
+				FilePresent: statErr == nil, LibraryDir: rec.Library,
 			})
 		}
 		if len(page.Next) == 0 {
@@ -584,6 +594,20 @@ func List(engine *dataengine.Engine) ([]Entry, error) {
 		return entries[i].Track < entries[j].Track
 	})
 	return entries, nil
+}
+
+// libraryFileFor returns the library-relative path of a stored file: the
+// part under the library root the record was published under. When the
+// root is unknown (records written before it was stored) it falls back
+// to libraryFile, which derives the tail from the "library-audio" segment
+// or, failing that, the last three segments.
+func libraryFileFor(path, library string) string {
+	if library != "" {
+		if rel, err := filepath.Rel(library, path); err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) && rel != "." {
+			return filepath.ToSlash(rel)
+		}
+	}
+	return libraryFile(path)
 }
 
 // libraryFile returns the library-relative path of a stored file: the

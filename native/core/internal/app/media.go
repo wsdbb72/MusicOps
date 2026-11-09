@@ -62,7 +62,7 @@ func (a *App) decryptNCM(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "code": "INVALID_REQUEST"})
 		return
 	}
-	source, err := resolveInDir(a.Dir, body.Source)
+	source, err := a.resolveLibraryPath(body.Source)
 	if err != nil || !strings.EqualFold(filepath.Ext(source), ".ncm") {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "code": "INVALID_REQUEST"})
 		return
@@ -211,7 +211,7 @@ var tagFieldWhitelist = map[string]string{
 }
 
 func (a *App) libraryTags(w http.ResponseWriter, r *http.Request) {
-	path, err := resolveInDir(a.Dir, r.URL.Query().Get("path"))
+	path, err := a.resolveLibraryPath(r.URL.Query().Get("path"))
 	if err != nil || !strings.EqualFold(filepath.Ext(path), ".flac") {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "code": "INVALID_REQUEST"})
 		return
@@ -248,7 +248,7 @@ func (a *App) saveLibraryTags(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "code": "INVALID_REQUEST"})
 		return
 	}
-	path, err := resolveInDir(a.Dir, body.Path)
+	path, err := a.resolveLibraryPath(body.Path)
 	if err != nil || !strings.EqualFold(filepath.Ext(path), ".flac") {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "code": "INVALID_REQUEST"})
 		return
@@ -500,7 +500,7 @@ func lyricView(text string) (map[string]any, error) {
 }
 
 func (a *App) libraryLyrics(w http.ResponseWriter, r *http.Request) {
-	path, err := resolveInDir(a.Dir, r.URL.Query().Get("path"))
+	path, err := a.resolveLibraryPath(r.URL.Query().Get("path"))
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "code": "INVALID_REQUEST"})
 		return
@@ -545,7 +545,7 @@ func (a *App) saveLibraryLyrics(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "code": "INVALID_REQUEST"})
 		return
 	}
-	path, err := resolveInDir(a.Dir, body.Path)
+	path, err := a.resolveLibraryPath(body.Path)
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "code": "INVALID_REQUEST"})
 		return

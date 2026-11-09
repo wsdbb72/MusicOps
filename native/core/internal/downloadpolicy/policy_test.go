@@ -149,3 +149,49 @@ func TestTransientStreamingRetriesThenAsksForReview(t *testing.T) {
 		t.Fatal(last, err)
 	}
 }
+
+func TestValidateOrderAndPlanOrdered(t *testing.T) {
+	canonical := CanonicalOrder()
+	if len(canonical) != 7 {
+		t.Fatal(canonical)
+	}
+	if err := ValidateOrder(canonical); err != nil {
+		t.Fatal(err)
+	}
+	reversed := make([]string, len(canonical))
+	for i, name := range canonical {
+		reversed[len(canonical)-1-i] = name
+	}
+	if err := ValidateOrder(reversed); err != nil {
+		t.Fatal(err)
+	}
+	steps, err := PlanOrdered(DefaultSources(), reversed, Track{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Only enabled sources produce steps (qobuz and deezer are off by
+	// default), but the enabled steps follow the given order.
+	if !equal(names(steps), []string{"playlist", "netease", "qqmusic", "applemusic", "tidal"}) {
+		t.Fatal(names(steps), reversed)
+	}
+	// Plan with the canonical order is unchanged from before: only the
+	// enabled sources produce steps, in canonical order.
+	steps, err = Plan(DefaultSources(), Track{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !equal(names(steps), []string{"tidal", "applemusic", "qqmusic", "netease", "playlist"}) {
+		t.Fatal(names(steps), canonical)
+	}
+	for _, bad := range [][]string{
+		{"tidal"},
+		{"tidal", "tidal", "applemusic", "qobuz", "deezer", "qqmusic", "netease"},
+		{"tidal", "applemusic", "qobuz", "deezer", "qqmusic", "netease", "unknown"},
+		{"tidal", "applemusic", "qobuz", "deezer", "qqmusic", "netease", "playlist", "tidal"},
+		nil,
+	} {
+		if err := ValidateOrder(bad); err == nil {
+			t.Fatalf("order %v must be rejected", bad)
+		}
+	}
+}

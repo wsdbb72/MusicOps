@@ -6,7 +6,6 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
-	"path/filepath"
 
 	"github.com/wsdbb72/MusicOps/native/core/internal/audiopublish"
 	"github.com/wsdbb72/MusicOps/native/core/internal/audiorelease"
@@ -86,7 +85,7 @@ func (a *App) publish(ctx context.Context, execution *scheduler.Execution, paylo
 	if err != nil {
 		return scheduler.Outcome{}, err
 	}
-	if err := a.completePublish(execution, receipt, "已入库并校验完成（本地导入，未经站点下载）。", []workflow.EvidenceInput{{ID: "publish-" + receipt.RequestID, Kind: "catalog", Source: "local-library", SubjectID: receipt.RootID, TracklistVerified: true, Payload: evidence}}, evidence); err != nil {
+	if err := a.completePublish(ctx, execution, receipt, "已入库并校验完成（本地导入，未经站点下载）。", []workflow.EvidenceInput{{ID: "publish-" + receipt.RequestID, Kind: "catalog", Source: "local-library", SubjectID: receipt.RootID, TracklistVerified: true, Payload: evidence}}, evidence); err != nil {
 		return scheduler.Outcome{}, err
 	}
 	return scheduler.Outcome{State: "completed", Message: "已入库并校验完成"}, nil
@@ -98,7 +97,7 @@ func (a *App) publish(ctx context.Context, execution *scheduler.Execution, paylo
 func (a *App) publishControlled(ctx context.Context, execution *scheduler.Execution, receipt publishPayload) (scheduler.Outcome, error) {
 	result, err := audiopublish.Publish(ctx, a.engine, audiopublish.Request{
 		RequestID: receipt.RequestID, Artist: receipt.Artist, Album: receipt.Album, Title: receipt.Title,
-		Track: receipt.Track, Library: filepath.Join(a.Dir, "library-audio"), SourceURL: receipt.SourceURL, Now: a.now(),
+		Track: receipt.Track, Library: a.libraryDir(), SourceURL: receipt.SourceURL, Now: a.now(),
 	})
 	if err != nil {
 		if errors.Is(err, audiopublish.ErrConflict) {
@@ -118,7 +117,7 @@ func (a *App) publishControlled(ctx context.Context, execution *scheduler.Execut
 	if _, err := audiorelease.RecordPublished(ctx, a.engine, audiorelease.PublishedInput{
 		RequestID: receipt.RequestID, RootID: receipt.RootID,
 		Artist: receipt.Artist, Album: receipt.Album, Title: receipt.Title, Track: receipt.Track,
-		Path: result.Path, Library: filepath.Join(a.Dir, "library-audio"),
+		Path: result.Path, Library: a.libraryDir(),
 		Decoder: audiorelease.SystemDecoder(),
 	}); err != nil {
 		return a.failPublish(execution, receipt, "LIBRARY_RECORD_FAILED", "已发布文件未能记入库目录: "+err.Error())
@@ -127,7 +126,7 @@ func (a *App) publishControlled(ctx context.Context, execution *scheduler.Execut
 	if err != nil {
 		return scheduler.Outcome{}, err
 	}
-	if err := a.completePublish(execution, receipt, "已发布到库中（受控音频）。", []workflow.EvidenceInput{{ID: "publish-" + receipt.RequestID, Kind: "catalog", Source: "controlled-audio", SubjectID: receipt.RootID, TracklistVerified: true, Payload: evidence}}, evidence); err != nil {
+	if err := a.completePublish(ctx, execution, receipt, "已发布到库中（受控音频）。", []workflow.EvidenceInput{{ID: "publish-" + receipt.RequestID, Kind: "catalog", Source: "controlled-audio", SubjectID: receipt.RootID, TracklistVerified: true, Payload: evidence}}, evidence); err != nil {
 		return scheduler.Outcome{}, err
 	}
 	return scheduler.Outcome{State: "completed", Message: "已发布到库中"}, nil
@@ -160,7 +159,7 @@ func (a *App) publishReceipts(ctx context.Context, execution *scheduler.Executio
 	if err != nil {
 		return scheduler.Outcome{}, err
 	}
-	if err := a.completePublish(execution, receipt, "已入库并校验完成。", evidence, result); err != nil {
+	if err := a.completePublish(ctx, execution, receipt, "已入库并校验完成。", evidence, result); err != nil {
 		return scheduler.Outcome{}, err
 	}
 	return scheduler.Outcome{State: "completed", Message: "已入库并校验完成"}, nil
@@ -183,8 +182,14 @@ func (a *App) failPublish(execution *scheduler.Execution, receipt publishPayload
 // completePublish completes the root job terminally with the given evidence.
 // It is the single place a publish task may complete a job; failures go
 // through failPublish instead, so no path can complete a job it did not verify.
-func (a *App) completePublish(execution *scheduler.Execution, receipt publishPayload, message string, evidence []workflow.EvidenceInput, result []byte) error {
+// After the job completes, the enabled music servers are asked to rescan
+// (notifyServers); a failed scan only appends to the completion message and
+// never fails the publish, the way Python's pipeline._notifying does it.
+func (a *App) completePublish(ctx context.Context, execution *scheduler.Execution, receipt publishPayload, message string, evidence []workflow.EvidenceInput, result []byte) error {
 	token := execution.Token()
+	if note := a.notifyServers(ctx); note != "" {
+		message += note
+	}
 	_, err := a.flows.Complete(intentID("publish", token.ID, token.Fence), token, workflow.Complete{
 		Edge: workflow.EdgeTerminal, NextStage: "completed", TaskState: "completed",
 		Message:  message,

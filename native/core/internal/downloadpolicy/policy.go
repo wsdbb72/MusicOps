@@ -2,9 +2,10 @@
 // orders the offline fallback switches. It does not call a site, spend a token,
 // download audio, or import a library file.
 //
-// The production Python streaming.order still starts with NetEase. The order
-// below is the requested lossless-first policy for this core, and it is not
-// wired to an executor.
+// The production Python streaming.order still starts with NetEase. The
+// order below is the requested lossless-first policy for this core, and
+// the settings page lets the operator reorder it (PlanOrdered); the
+// default is this canonical order.
 package downloadpolicy
 
 import (
@@ -100,10 +101,67 @@ func DefaultSources() []Source {
 
 var canonical = []string{"tidal", "applemusic", "qobuz", "deezer", "qqmusic", "netease", "playlist"}
 
+// CanonicalOrder is the default fallback order: the lossless-first policy
+// for this core. A saved order replaces it; see PlanOrdered.
+func CanonicalOrder() []string {
+	out := make([]string, len(canonical))
+	copy(out, canonical)
+	return out
+}
+
+// ValidateOrder checks a caller-supplied fallback order: it must name each
+// canonical source exactly once. Anything else is a request error, never a
+// silent re-sort — the Python streaming validator is the same shape
+// (non-empty, no duplicates, every item a known source).
+func ValidateOrder(order []string) error {
+	if len(order) != len(canonical) {
+		return dataengine.ErrInvalidRequest
+	}
+	seen := map[string]bool{}
+	for _, name := range order {
+		if !knownSource(name) || seen[name] {
+			return dataengine.ErrInvalidRequest
+		}
+		seen[name] = true
+	}
+	return nil
+}
+
+// OrderedSources returns the default sources in the given order, for
+// displays that follow the saved order. The order must be a permutation
+// of the canonical names.
+func OrderedSources(order []string) ([]Source, error) {
+	if err := ValidateOrder(order); err != nil {
+		return nil, err
+	}
+	defaults := DefaultSources()
+	byName := map[string]Source{}
+	for _, source := range defaults {
+		byName[source.Name] = source
+	}
+	out := make([]Source, 0, len(order))
+	for _, name := range order {
+		out = append(out, byName[name])
+	}
+	return out, nil
+}
+
 // Plan returns enabled steps in canonical order, ignoring the caller's slice
 // order. The playlist downloader is last, and only when both a resolved source
 // and identifying information are absent.
 func Plan(sources []Source, track Track) ([]Step, error) {
+	return PlanOrdered(sources, canonical, track)
+}
+
+// PlanOrdered is Plan with a caller-chosen source order: the saved
+// streaming order from the settings page. The order must be a permutation
+// of the canonical source names; the playlist step keeps its gating (it
+// only runs when no source or identifying information is known), wherever
+// it sits in the order.
+func PlanOrdered(sources []Source, order []string, track Track) ([]Step, error) {
+	if err := ValidateOrder(order); err != nil {
+		return nil, err
+	}
 	if len(sources) != len(canonical) {
 		return nil, dataengine.ErrInvalidRequest
 	}
@@ -115,7 +173,7 @@ func Plan(sources []Source, track Track) ([]Step, error) {
 		byName[source.Name] = source
 	}
 	var steps []Step
-	for _, name := range canonical {
+	for _, name := range order {
 		source, ok := byName[name]
 		if !ok {
 			return nil, dataengine.ErrInvalidRequest

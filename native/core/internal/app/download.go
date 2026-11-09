@@ -308,11 +308,17 @@ func (a *App) downloadJob(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusConflict, map[string]any{"ok": false, "code": "WORKFLOW_REJECTED", "error": "job stage " + job.Stage + " cannot start a download"})
 		return
 	}
-	origin, creds, category, tags, ok := a.validDownloadSettings(body)
+	effective, resolved := a.effectiveDownloadRequest(body)
+	if !resolved {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "code": "INVALID_REQUEST"})
+		return
+	}
+	origin, creds, category, tags, ok := a.validDownloadSettings(effective)
 	if !ok {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "code": "INVALID_REQUEST"})
 		return
 	}
+	body = effective
 	plan, err := a.buildDownloadPlan(*job, body.SavePath, category, tags)
 	if err != nil {
 		writeJSON(w, http.StatusConflict, map[string]any{"ok": false, "code": "WORKFLOW_REJECTED", "error": "no saved torrent receipt for this job"})
@@ -364,7 +370,12 @@ func (a *App) downloadRetry(w http.ResponseWriter, id string, job workflow.Job, 
 		writeJSON(w, http.StatusConflict, map[string]any{"ok": false, "code": "WORKFLOW_REJECTED", "error": "job stage failed cannot start a download"})
 		return
 	}
-	origin, creds, _, _, ok := a.validDownloadSettings(body)
+	effective, resolved := a.effectiveDownloadRequest(body)
+	if !resolved {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "code": "INVALID_REQUEST"})
+		return
+	}
+	origin, creds, _, _, ok := a.validDownloadSettings(effective)
 	if !ok {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "code": "INVALID_REQUEST"})
 		return
@@ -994,7 +1005,7 @@ func samePath(a, b string) bool {
 // (the audio itself is verified either way; the fallback is a library
 // convention, not a confirmed identity claim).
 func (a *App) ingestDownload(plan downloadPlan, meta qbittorrent.Metainfo, seedDir string) ([]publishReceipt, error) {
-	incoming, library := filepath.Join(a.Dir, "incoming"), filepath.Join(a.Dir, "library-audio")
+	incoming, library := filepath.Join(a.Dir, "incoming"), a.libraryDir()
 	if err := os.MkdirAll(incoming, 0o700); err != nil || os.MkdirAll(library, 0o700) != nil {
 		return nil, downloadError("INGEST_FAILED", "入库目录不可用")
 	}

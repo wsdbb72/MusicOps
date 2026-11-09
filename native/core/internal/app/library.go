@@ -67,6 +67,9 @@ type duplicateFile struct {
 	BitsPerSample int    `json:"bits_per_sample"`
 	Lossless      bool   `json:"lossless"`
 	Rank          []int  `json:"rank"`
+	// LibraryDir is the absolute library root the file was published
+	// under, empty for records written before it was stored.
+	LibraryDir string `json:"library_dir,omitempty"`
 }
 
 // duplicateGroup is one (artist, album, slot) set with more than one file.
@@ -153,7 +156,7 @@ func (a *App) fingerprintGroup(ctx context.Context, rows []audiorelease.Entry, d
 	files := make([]duplicateFile, 0, len(rows))
 	byIdentity := map[string][]int{}
 	for _, entry := range rows {
-		full := filepath.Join(a.Dir, "library-audio", entry.File)
+		full := a.entryFilePath(entry)
 		rate, channels, bits, streamErr := streamInfoFor(full, entry.Format)
 		pcm := ""
 		identity := ""
@@ -178,7 +181,7 @@ func (a *App) fingerprintGroup(ctx context.Context, rows []audiorelease.Entry, d
 		file := duplicateFile{
 			RequestID: entry.RequestID, File: entry.File, Format: entry.Format, SHA256: entry.SHA256,
 			PCMSHA256: pcm, SampleRate: rate, Channels: channels, BitsPerSample: bits,
-			Lossless: entry.Format == "flac" || entry.Format == "wav",
+			Lossless: entry.Format == "flac" || entry.Format == "wav", LibraryDir: entry.LibraryDir,
 		}
 		file.Rank = duplicateRank(file)
 		byIdentity[identity] = append(byIdentity[identity], len(files))
@@ -365,7 +368,7 @@ func (a *App) duplicateMerge(w http.ResponseWriter, r *http.Request) {
 	}
 	// Verify every file is unchanged since the scan before moving any.
 	for _, file := range group.Files {
-		full := filepath.Join(a.Dir, "library-audio", file.File)
+		full := a.libraryFilePath(file.LibraryDir, file.File)
 		digest, err := hashFile(full)
 		if err != nil || digest != file.SHA256 {
 			writeJSON(w, http.StatusConflict, map[string]any{"ok": false, "code": "SCAN_STALE", "error": "保留或重复文件发生变化，请重新扫描"})
@@ -423,7 +426,7 @@ func (a *App) duplicateMerge(w http.ResponseWriter, r *http.Request) {
 // quarantineFile moves one library file (and its .lrc sidecar when
 // present) into the merge quarantine directory, recording each move.
 func (a *App) quarantineFile(receipt *mergeReceipt, file duplicateFile, quarantineRoot string) error {
-	from := filepath.Join(a.Dir, "library-audio", file.File)
+	from := a.libraryFilePath(file.LibraryDir, file.File)
 	dest := filepath.Join(quarantineRoot, file.File)
 	if err := os.MkdirAll(filepath.Dir(dest), 0o700); err != nil {
 		return err
@@ -638,20 +641,19 @@ func (a *App) planArtistFolders() ([]artistFolderPlan, error) {
 	if err != nil {
 		return nil, err
 	}
-	library := filepath.Join(a.Dir, "library-audio")
 	plans := []artistFolderPlan{}
 	for _, entry := range entries {
 		if !entry.FilePresent {
 			continue
 		}
-		plans = append(plans, a.planArtistFolder(entry, library))
+		plans = append(plans, a.planArtistFolder(entry, a.entryLibraryDir(entry)))
 	}
 	return plans, nil
 }
 
 func (a *App) planArtistFolder(entry audiorelease.Entry, library string) artistFolderPlan {
 	plan := artistFolderPlan{RequestID: entry.RequestID, File: entry.File, State: "none"}
-	full, err := resolveInDir(a.Dir, filepath.Join("library-audio", entry.File))
+	full, err := resolveInDir(library, entry.File)
 	if err != nil {
 		plan.State = "skipped"
 		plan.Reason = "文件路径不在库内或含链接"
@@ -842,7 +844,6 @@ func (a *App) artistFolderRelocate(w http.ResponseWriter, r *http.Request) {
 // relocateOne moves one planned item and updates its library record.
 // It returns the new file path, or "" with a reason when it stays put.
 func (a *App) relocateOne(plan artistFolderPlan) (string, string) {
-	library := filepath.Join(a.Dir, "library-audio")
 	if plan.LooseFile {
 		// Move one loose file (plus its sidecar) into Artist/Album/.
 		if err := os.MkdirAll(filepath.Dir(plan.To), 0o700); err != nil {
@@ -885,7 +886,7 @@ func (a *App) relocateOne(plan artistFolderPlan) (string, string) {
 	}
 	moved := []audiorelease.Entry{}
 	for _, entry := range entries {
-		full := filepath.Join(library, entry.File)
+		full := a.entryFilePath(entry)
 		rel, err := filepath.Rel(plan.From, full)
 		if err != nil || strings.HasPrefix(rel, "..") {
 			continue
@@ -893,7 +894,7 @@ func (a *App) relocateOne(plan artistFolderPlan) (string, string) {
 		newPath := filepath.Join(plan.To, rel)
 		if err := audiorelease.Relocate(a.engine, entry.RequestID, newPath); err != nil {
 			for _, done := range moved {
-				_ = audiorelease.Relocate(a.engine, done.RequestID, filepath.Join(library, done.File))
+				_ = audiorelease.Relocate(a.engine, done.RequestID, a.entryFilePath(done))
 			}
 			_ = os.Rename(plan.To, plan.From)
 			return "", "库记录更新失败，已移回原位置"

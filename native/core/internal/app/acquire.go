@@ -58,7 +58,7 @@ func (a *App) acquire(ctx context.Context, execution *scheduler.Execution, paylo
 	if !ok || site == "" || site != plan.SelectedSite || resource == "" {
 		return a.finishAcquire(held, *job, "candidate", "没有唯一候选，不能获取；尚未下载、尚未入库", "", nil)
 	}
-	if a.secret(plan.RootJobID) == "" {
+	if a.cookieFor(plan.RootJobID, site) == "" {
 		return a.finishAcquire(held, *job, "candidate", "没有可用的登录状态，不能获取；尚未下载、尚未入库", "", nil)
 	}
 	decision, err := a.readEvidence(ctx, plan, site, resource)
@@ -79,7 +79,7 @@ func (a *App) acquire(ctx context.Context, execution *scheduler.Execution, paylo
 }
 
 func (a *App) readEvidence(ctx context.Context, plan SearchPlan, site, resource string) (sitefree.Decision, error) {
-	query := trackersearch.Query{Site: site, Cookie: a.secret(plan.RootJobID), Synthetic: plan.Synthetic, BaseURL: plan.BaseURL}
+	query := trackersearch.Query{Site: site, Cookie: a.cookieFor(plan.RootJobID, site), Synthetic: plan.Synthetic, BaseURL: plan.BaseURL}
 	var bodies [][]byte
 	if site == "open.cd" {
 		body, err := a.searcher.ReadDetail(ctx, query, "/details.php", url.Values{"id": {resource}})
@@ -108,7 +108,7 @@ func (a *App) acquireWithToken(ctx context.Context, execution *scheduler.Executi
 	if site != "dicmusic" && site != "orpheus" {
 		return a.finishAcquire(held, job, "token", "该站不使用这条令牌账本；尚未下载、尚未入库", "", nil)
 	}
-	observation, _, err := a.observeBalance(ctx, site, a.secret(plan.RootJobID), plan.Synthetic, plan.BaseURL)
+	observation, _, err := a.observeBalance(ctx, site, a.cookieFor(plan.RootJobID, site), plan.Synthetic, plan.BaseURL)
 	if err != nil {
 		return a.finishAcquire(held, job, "token", "余额读取失败，未发令牌请求；尚未下载、尚未入库", observation.ErrorClass, nil)
 	}
@@ -128,7 +128,7 @@ func (a *App) acquireWithToken(ctx context.Context, execution *scheduler.Executi
 		return a.finishAcquire(held, job, "token", "页面令牌数与账号余额不一致，未发令牌请求；尚未下载、尚未入库", "balance_conflict", nil)
 	}
 	quote := tokenledger.Quote{
-		Site: site, AccountID: observation.AccountID, CookieID: tokenledger.Fingerprint(a.secret(plan.RootJobID)),
+		Site: site, AccountID: observation.AccountID, CookieID: tokenledger.Fingerprint(a.cookieFor(plan.RootJobID, site)),
 		ResourceID: resource, RequestID: job.ID, Cost: decision.TokenCost,
 		SafetyMargin: plan.SafetyMargin, BudgetRef: job.BatchID, Scene: job.Scene,
 		IdentityConfirmed: plan.Identity.IdentityConfirmed, StreamingEnabled: plan.StreamingEnabled,
@@ -304,7 +304,7 @@ func (a *App) fetchTorrent(ctx context.Context, execution *scheduler.Execution, 
 		return torrentfetch.Receipt{}, err
 	}
 	request := torrentfetch.Request{
-		Site: site, Resource: resource, Cookie: a.secret(plan.RootJobID), Synthetic: plan.Synthetic, BaseURL: plan.BaseURL,
+		Site: site, Resource: resource, Cookie: a.cookieFor(plan.RootJobID, site), Synthetic: plan.Synthetic, BaseURL: plan.BaseURL,
 		UseToken: useToken, Directory: filepath.Join(a.Dir, "torrents"),
 	}
 	switch site {

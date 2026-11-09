@@ -354,9 +354,10 @@ func (a *App) batchJobs(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "action": body.Action, "results": results, "succeeded": succeeded, "failed": len(results) - succeeded})
 }
 
-// preflightSite checks one site's login with a caller-supplied cookie. The
-// check is read-only: it never requests a download, spends a token or writes
-// anything. The cookie is used for this one call only and is never stored.
+// preflightSite checks one site's login. The check is read-only: it never
+// requests a download, spends a token or writes anything. A cookie supplied
+// in the call is used for this one call only and is never stored; when the
+// call supplies none, the saved cookie for the site is used instead.
 func (a *App) preflightSite(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		Site      string `json:"site"`
@@ -364,7 +365,7 @@ func (a *App) preflightSite(w http.ResponseWriter, r *http.Request) {
 		Synthetic bool   `json:"synthetic"`
 		BaseURL   string `json:"base_url"`
 	}
-	if err := decode(r, &body); err != nil || body.Cookie == "" || strings.ContainsAny(body.Cookie, "\r\n") {
+	if err := decode(r, &body); err != nil || strings.ContainsAny(body.Cookie, "\r\n") {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "code": "INVALID_REQUEST"})
 		return
 	}
@@ -372,11 +373,16 @@ func (a *App) preflightSite(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "code": "INVALID_REQUEST", "error": "unknown site: " + body.Site})
 		return
 	}
+	cookie, err := a.resolvePreflightCookie(body.Site, body.Cookie)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "code": "INVALID_REQUEST", "error": "no saved cookie for this site; paste a cookie or save one first"})
+		return
+	}
 	if body.BaseURL != "" && !body.Synthetic {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "code": "LIVE_SITE_NOT_CALLED"})
 		return
 	}
-	observation, err := a.searcher.Preflight(r.Context(), trackersearch.Query{Site: body.Site, Cookie: body.Cookie, Synthetic: body.Synthetic, BaseURL: body.BaseURL})
+	observation, err := a.searcher.Preflight(r.Context(), trackersearch.Query{Site: body.Site, Cookie: cookie, Synthetic: body.Synthetic, BaseURL: body.BaseURL})
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "code": "INVALID_REQUEST", "error": err.Error()})
 		return

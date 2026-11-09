@@ -143,6 +143,8 @@ func (f *fakeQBT) serve(w http.ResponseWriter, r *http.Request) {
 		io.WriteString(w, "5.0.0")
 	case r.URL.Path == "/api/v2/app/webapiVersion":
 		io.WriteString(w, "2.11.0")
+	case r.URL.Path == "/api/v2/app/preferences":
+		io.WriteString(w, `{"save_path":"/downloads"}`)
 	case r.URL.Path == "/api/v2/torrents/add":
 		f.addTorrent(w, r)
 	case r.URL.Path == "/api/v2/torrents/info":

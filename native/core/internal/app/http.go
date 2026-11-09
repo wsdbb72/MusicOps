@@ -101,6 +101,34 @@ func (a *App) Handler() http.Handler {
 	mux.HandleFunc("POST /v1/sites/preflight", a.preflightSite)
 	mux.HandleFunc("GET /v1/settings/download", a.downloadSettings)
 	mux.HandleFunc("POST /v1/settings/download", a.saveDownload)
+	mux.HandleFunc("GET /v1/settings/cookies", a.cookieSettingsHandler)
+	mux.HandleFunc("POST /v1/settings/cookies", a.saveCookie)
+	mux.HandleFunc("GET /v1/settings/ai", a.aiSettingsHandler)
+	mux.HandleFunc("POST /v1/settings/ai", a.saveAI)
+	mux.HandleFunc("POST /v1/settings/ai/test", a.testAI)
+	mux.HandleFunc("GET /v1/settings/qbittorrent", a.qbtSettingsHandler)
+	mux.HandleFunc("POST /v1/settings/qbittorrent", a.saveQBittorrent)
+	mux.HandleFunc("POST /v1/settings/qbittorrent/test", a.testQBittorrent)
+	mux.HandleFunc("GET /v1/settings/solver", a.solverSettingsHandler)
+	mux.HandleFunc("POST /v1/settings/solver", a.saveSolver)
+	mux.HandleFunc("POST /v1/settings/solver/test", a.testSolver)
+	mux.HandleFunc("GET /v1/settings/lyrics", a.lyricsSettingsHandler)
+	mux.HandleFunc("POST /v1/settings/lyrics", a.saveLyrics)
+	mux.HandleFunc("POST /v1/settings/lyrics/test", a.testLyrics)
+	mux.HandleFunc("GET /v1/settings/discogs", a.discogsSettingsHandler)
+	mux.HandleFunc("POST /v1/settings/discogs", a.saveDiscogs)
+	mux.HandleFunc("POST /v1/settings/discogs/test", a.testDiscogs)
+	mux.HandleFunc("GET /v1/settings/library", a.librarySettingsHandler)
+	mux.HandleFunc("POST /v1/settings/library", a.saveLibrary)
+	mux.HandleFunc("GET /v1/settings/servers", a.serverSettingsHandler)
+	mux.HandleFunc("POST /v1/settings/servers/plex", a.savePlex)
+	mux.HandleFunc("POST /v1/settings/servers/plex/test", a.testPlex)
+	mux.HandleFunc("POST /v1/settings/servers/navidrome", a.saveNavidrome)
+	mux.HandleFunc("POST /v1/settings/servers/navidrome/test", a.testNavidrome)
+	mux.HandleFunc("GET /v1/playlists", a.listPlaylists)
+	mux.HandleFunc("POST /v1/playlists", a.savePlaylist)
+	mux.HandleFunc("GET /v1/jobs/{id}/playlist", a.jobPlaylistHandler)
+	mux.HandleFunc("POST /v1/jobs/{id}/playlist", a.saveJobPlaylist)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Cache-Control", "no-store")
 		w.Header().Set("X-Content-Type-Options", "nosniff")
@@ -267,6 +295,7 @@ func (a *App) startSearch(w http.ResponseWriter, r *http.Request) {
 		SafetyMargin       int      `json:"safety_margin"`
 		DicmusicAuthKey    string   `json:"dicmusic_authkey"`
 		OrpheusTorrentPass string   `json:"orpheus_torrent_pass"`
+		PlaylistID         string   `json:"playlist_id"`
 		Identity           Identity `json:"identity"`
 	}
 	if err := decode(r, &body); err != nil || strings.ContainsAny(body.Cookie+body.DicmusicAuthKey+body.OrpheusTorrentPass, "\r\n") {
@@ -318,6 +347,13 @@ func (a *App) startSearch(w http.ResponseWriter, r *http.Request) {
 	a.remember(body.JobID, body.Cookie)
 	a.rememberDownload(body.JobID, "dicmusic", body.DicmusicAuthKey)
 	a.rememberDownload(body.JobID, "orpheus", body.OrpheusTorrentPass)
+	if body.PlaylistID != "" {
+		if err := a.attachPlaylistForSearch(body.JobID, body.PlaylistID); err != nil {
+			a.forget(body.JobID)
+			writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "code": "INVALID_REQUEST", "error": err.Error()})
+			return
+		}
+	}
 	_, err = a.flows.Start("start-"+body.JobID, workflow.Start{
 		JobID: body.JobID, BatchID: body.BatchID, Scene: body.Scene, Stage: "identifying", Label: body.ExpectedTitle,
 		SourceTrackIDs: body.SourceTrackIDs, MatchedCount: matched, Payload: raw, Evidence: []workflow.EvidenceInput{plan.evidence()},
@@ -325,6 +361,9 @@ func (a *App) startSearch(w http.ResponseWriter, r *http.Request) {
 	})
 	if err != nil {
 		a.forget(body.JobID)
+		if body.PlaylistID != "" {
+			_ = os.Remove(filepath.Join(a.Dir, "incoming", playlistFileName(body.JobID)))
+		}
 		writeJSON(w, http.StatusConflict, map[string]any{"ok": false, "code": "WORKFLOW_REJECTED"})
 		return
 	}
@@ -457,7 +496,7 @@ func (a *App) releaseAudio(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusConflict, map[string]any{"ok": false, "code": "WORKFLOW_REJECTED", "error": err.Error(), "stage": rootJob.Stage, "downloaded": false, "library_published": false, "production_verified": false})
 		return
 	}
-	incoming, library := filepath.Join(a.Dir, "incoming"), filepath.Join(a.Dir, "library-audio")
+	incoming, library := filepath.Join(a.Dir, "incoming"), a.libraryDir()
 	if err = os.MkdirAll(incoming, 0o700); err != nil || os.MkdirAll(library, 0o700) != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "code": "LIBRARY_UNAVAILABLE", "downloaded": false, "library_published": false, "production_verified": false})
 		return

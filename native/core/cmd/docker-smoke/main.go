@@ -381,10 +381,24 @@ func (r *runner) runContainerChecks() {
 		return
 	}
 	r.record("restart_healthy", true)
+	// The stop/start cycle kills every TCP connection the first boot
+	// pooled in r.client, and docker-proxy can still be re-establishing
+	// the backend when the first post-restart request lands (release
+	// run 42609935556: Docker HEALTHCHECK passed and the core logged
+	// ready, yet the single-shot healthz/auth GETs through the stale
+	// client both failed). Re-resolve the mapped port, drop the pooled
+	// connections with a fresh client, and poll instead of one shot.
+	if info, err := r.inspect(); err == nil && info.HostPort != "" {
+		r.baseURL = "http://127.0.0.1:" + info.HostPort
+	}
+	r.client = &http.Client{Timeout: 15 * time.Second}
 	pw2, err := r.docker("exec", r.name, "cat", "/config/web-password")
 	r.record("web_password_preserved", err == nil && r.password != "" && strings.TrimSpace(pw2) == r.password)
-	status, _, healthBody, err = r.get("/healthz", false)
-	r.record("restart_healthz", err == nil && status == http.StatusOK && healthzOK(healthBody))
+	if err := r.pollHealthz(60 * time.Second); err != nil {
+		r.recordErr("restart_healthz", err)
+		return
+	}
+	r.record("restart_healthz", true)
 	status, _, _, err = r.get("/", true)
 	r.record("restart_auth_works", err == nil && status == http.StatusOK)
 }
@@ -413,6 +427,30 @@ func (r *runner) waitHealthy(timeout time.Duration) error {
 		}
 		if time.Now().After(deadline) {
 			return fmt.Errorf("container did not become healthy within %s", timeout)
+		}
+		time.Sleep(2 * time.Second)
+	}
+}
+
+// pollHealthz GETs /healthz until it answers 200 with a Go-core body,
+// or until timeout. A single shot is not enough right after a restart:
+// the mapped-port path can still be settling even after Docker reports
+// the container healthy.
+func (r *runner) pollHealthz(timeout time.Duration) error {
+	deadline := time.Now().Add(timeout)
+	var lastErr error
+	for {
+		status, _, body, err := r.get("/healthz", false)
+		if err == nil && status == http.StatusOK && healthzOK(body) {
+			return nil
+		}
+		if err != nil {
+			lastErr = err
+		} else {
+			lastErr = fmt.Errorf("healthz status %d", status)
+		}
+		if time.Now().After(deadline) {
+			return lastErr
 		}
 		time.Sleep(2 * time.Second)
 	}

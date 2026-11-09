@@ -11,9 +11,9 @@
 # generated here from the repository LICENSE at build time.
 #
 # Steps: stage payload -> pkgbuild component package -> verify the
-# component package is readable with `installer -showChoicesXML`
+# component package is readable with `pkgutil --payload-files`
 # (before productbuild) -> productbuild the distribution package ->
-# verify the finished PKG the same way.
+# verify the finished PKG with `installer -showChoicesXML`.
 set -euo pipefail
 
 IDENTIFIER='com.wsdbb72.MusicOps.pkg'
@@ -93,18 +93,16 @@ COMPONENT="$BUILD_DIR/MusicOps-component.pkg"
 # Verify the component package is readable before productbuild wraps it:
 # a broken component (bad scripts, bad Distribution reference) must fail
 # here, not after the distribution package is produced.
-CHOICES="$(/usr/sbin/installer -showChoicesXML -pkg "$COMPONENT" -target /)"
-# A component package has no Distribution.xml, so its choice id is
-# whatever installer derives from the package itself (not the
-# lowercase "musicops" choice id the distribution defines below, and
-# evidently not the package identifier either: release run 42606673759
-# matched neither). What matters here is that installer can read the
-# package and it yields a choice at all; the exact choice id is
-# asserted on the finished distribution package below.
-case "$CHOICES" in
-  *"<choice"*) ;;
-  *) die "installer -showChoicesXML cannot read the component package (no choice in output: ${CHOICES:0:200})" ;;
-esac
+# A pkgbuild component package has no choices at all: installer
+# -showChoicesXML on it outputs only the XML declaration (release run
+# 42609935556), so asserting a <choice> there can never pass. What proves
+# the component is readable is pkgutil opening it and listing its
+# payload; the exact 'musicops' choice id is asserted on the finished
+# distribution package below, where Distribution.xml defines it.
+/usr/sbin/pkgutil --payload-files "$COMPONENT" > "$BUILD_DIR/component-payload.txt" \
+  || die "pkgutil cannot read the component package $COMPONENT"
+grep -q 'MusicOps.app' "$BUILD_DIR/component-payload.txt" \
+  || die "component package payload does not contain MusicOps.app"
 
 rm -f "$PKG"
 /usr/bin/productbuild --distribution "$BUILD_DIR/Distribution.xml" \

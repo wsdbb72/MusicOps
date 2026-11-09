@@ -1,7 +1,9 @@
 ; MusicOps Go installer (Inno Setup 6.5+).
 ; Build with: ISCC /DAppVersion=<version> /DBundleDir=<audited Go bundle folder> /O<output folder> MusicOps-go.iss
 ; The bundle is the Go bundle produced by packaging/build_windows_go.ps1:
-; MusicOps.exe (Wails desktop shell) + musicops.exe (Go core) + tools/ + docs.
+; MusicOps.exe (Wails desktop shell) + musicops-core.exe (Go core) + tools/ + docs.
+; The core is musicops-core, not musicops: Windows and macOS filesystems
+; are case-insensitive, so musicops.exe would be the same file as MusicOps.exe.
 ; There is no Python runtime in this bundle: no _internal, no MusicOps-worker.exe.
 ; AppVersion is passed on the command line by the release workflow; the
 ; default below is only a dev fallback and must never ship a release.
@@ -78,7 +80,7 @@ Name: "{app}\profile"; Flags: uninsneveruninstall
 
 [Files]
 Source: "{#BundleDir}\MusicOps.exe"; DestDir: "{app}"; Flags: ignoreversion
-Source: "{#BundleDir}\musicops.exe"; DestDir: "{app}"; Flags: ignoreversion
+Source: "{#BundleDir}\musicops-core.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#BundleDir}\licenses\*"; DestDir: "{app}\licenses"; Flags: ignoreversion recursesubdirs createallsubdirs
 Source: "{#BundleDir}\LICENSE"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#BundleDir}\THIRD-PARTY-NOTICES.md"; DestDir: "{app}"; Flags: ignoreversion
@@ -139,7 +141,7 @@ end;
 function IsExistingMusicOps(const Directory: String): Boolean;
 begin
   Result := (Directory <> '') and FileExists(AddBackslash(Directory) + 'MusicOps.exe') and
-    (FileExists(AddBackslash(Directory) + 'musicops.exe') or
+    (FileExists(AddBackslash(Directory) + 'musicops-core.exe') or
      (FileExists(AddBackslash(Directory) + 'MusicOps-worker.exe') and
       DirExists(AddBackslash(Directory) + '_internal')));
 end;
@@ -297,7 +299,7 @@ begin
   { The legacy worker exe is checked too: an upgrade from a Python install
     must not replace it while it is running. }
   if not ExecutableAvailableForUpdate(ExpandConstant('{app}\MusicOps.exe')) or
-    not ExecutableAvailableForUpdate(ExpandConstant('{app}\musicops.exe')) or
+    not ExecutableAvailableForUpdate(ExpandConstant('{app}\musicops-core.exe')) or
     not ExecutableAvailableForUpdate(ExpandConstant('{app}\MusicOps-worker.exe')) then begin
     Log('MusicOps: update blocked by busy or inaccessible executable; no process terminated.');
     Result := CustomMessage('BusyApplication');

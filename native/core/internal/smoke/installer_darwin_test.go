@@ -383,7 +383,7 @@ func TestInstallerDarwin(t *testing.T) {
 
 	// A running core must block replacement, and the running core must
 	// not be terminated by the refused install.
-	corePath := filepath.Join(installed, "Contents", "MacOS", "musicops")
+	corePath := filepath.Join(installed, "Contents", "MacOS", "musicops-core")
 	core, stopCore := startInstalledCore(t, corePath, work)
 	_, err = runSudo(t, "/usr/sbin/installer", "-pkg", pkgPath, "-target", "/")
 	stillRunning := core.ProcessState == nil
@@ -421,7 +421,7 @@ func TestInstallerDarwin(t *testing.T) {
 	// cover the whole bundle.
 	smokeReport := Run(context.Background(), Config{
 		BundleDir:       installed,
-		CoreName:        filepath.Join("Contents", "MacOS", "musicops"),
+		CoreName:        filepath.Join("Contents", "MacOS", "musicops-core"),
 		DesktopName:     filepath.Join("Contents", "MacOS", "MusicOps"),
 		ToolsDir:        filepath.Join(installed, "Contents", "Resources", "tools"),
 		ServicesDir:     filepath.Join(installed, "Contents", "Resources", "tools", "services"),

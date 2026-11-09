@@ -28,10 +28,7 @@ func TestMain(m *testing.M) {
 		os.Exit(1)
 	}
 	defer os.RemoveAll(dir)
-	testCoreBinary = filepath.Join(dir, "musicops")
-	if runtime.GOOS == "windows" {
-		testCoreBinary += ".exe"
-	}
+	testCoreBinary = filepath.Join(dir, testCoreName())
 	cmd := exec.Command(goBin, "build", "-trimpath",
 		"-ldflags", "-X github.com/wsdbb72/MusicOps/native/core/internal/version.Version=9.9.9-gate",
 		"-o", testCoreBinary, "./cmd/musicops")
@@ -107,7 +104,7 @@ func goodBundle(t *testing.T, version string) string {
 	}
 	sum := sha256.Sum256(data)
 	entries := []map[string]any{{
-		"path": filepath.ToSlash("musicops" + exe), "size": len(data),
+		"path": filepath.ToSlash(testCoreName()), "size": len(data),
 		"sha256": hex.EncodeToString(sum[:]),
 	}}
 	raw, _ := json.Marshal(entries)
@@ -127,7 +124,7 @@ func passingSmokeReport(t *testing.T, version string) string {
 }
 
 // exeSuffix is the platform executable suffix the fixture uses for the
-// core and engine binaries.
+// engine binaries.
 func exeSuffix() string {
 	if runtime.GOOS == "windows" {
 		return ".exe"
@@ -135,9 +132,19 @@ func exeSuffix() string {
 	return ""
 }
 
+// testCoreName is the core binary name the fixture builds, matching the
+// gate default for the fixture's layout: the windows layout looks for
+// musicops-core.exe, the linux layout for musicops.
+func testCoreName() string {
+	if runtime.GOOS == "windows" {
+		return "musicops-core.exe"
+	}
+	return "musicops"
+}
+
 // testLayout is the gate layout the fixture matches: the fixture builds
 // a linux-layout bundle on Unix and a windows-layout bundle on Windows
-// (the gate's windows layout looks for musicops.exe, its linux layout
+// (the gate's windows layout looks for musicops-core.exe, its linux layout
 // for musicops). A linux layout on Windows would look for a file the
 // fixture never creates.
 func testLayout() string {
@@ -179,7 +186,7 @@ func TestGateFailsPythonInBundle(t *testing.T) {
 
 func TestGateFailsTamperedManifest(t *testing.T) {
 	root := goodBundle(t, "9.9.9-gate")
-	writeFile(t, filepath.Join(root, "musicops"+exeSuffix()), "tampered")
+	writeFile(t, filepath.Join(root, testCoreName()), "tampered")
 	gate := Gate{Version: "9.9.9-gate", Layout: testLayout(), RequireManifest: true}
 	result := gate.Check(root)
 	if result.Passed || result.Checks["manifest_hashes_match"] {

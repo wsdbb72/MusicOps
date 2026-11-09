@@ -52,7 +52,7 @@ def test_go_installer_takes_version_from_command_line():
     files = installer.split('[Files]', 1)[1].split('[Icons]', 1)[0]
     assert 'MusicOps-worker.exe' not in files
     assert '_internal' not in files
-    assert 'musicops.exe' in files
+    assert 'musicops-core.exe' in files
 
 
 @pytest.mark.skipif(os.name != 'nt', reason='Windows PE resource encoding')
@@ -60,7 +60,7 @@ def test_go_installer_takes_version_from_command_line():
 # (packaging/build_windows_go.ps1); the release workflow verifies the real
 # binaries' FileVersion after ISCC. This test keeps the resource content
 # (company, description, version strings, filename) from drifting.
-@pytest.mark.parametrize('filename', ['MusicOps.exe', 'musicops.exe'])
+@pytest.mark.parametrize('filename', ['MusicOps.exe', 'musicops-core.exe'])
 def test_windows_pe_resource_uses_project_version_and_correct_filename(filename):
     root = Path(__file__).resolve().parents[1]
     build = runpy.run_path(str(root / 'packaging/windows_version.py'))['windows_version']

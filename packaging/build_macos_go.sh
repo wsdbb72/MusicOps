@@ -82,7 +82,7 @@ APP="$DIST/MusicOps.app"
 REPORTS="$OUTPUT/reports"
 mkdir -p "$REPORTS"
 STAGE="$OUTPUT/package/$STEM"
-CORE="$APP/Contents/MacOS/musicops"
+CORE="$APP/Contents/MacOS/musicops-core"
 DESKTOP="$APP/Contents/MacOS/MusicOps"
 
 GO_VERSION="$(go version | awk '{print $3}')"

@@ -64,7 +64,9 @@ type Config struct {
 	// Version is the expected version; "" accepts whatever the core
 	// binary reports.
 	Version string
-	// CoreName is the core binary name; "" defaults to musicops[.exe].
+	// CoreName is the core binary name; "" defaults to musicops-core[.exe]
+	// on Windows/macOS (the shell is MusicOps[.exe] and those filesystems
+	// are case-insensitive) and musicops elsewhere.
 	CoreName string
 	// DesktopName is the desktop shell binary name; "" means the bundle
 	// has no desktop shell (Docker).
@@ -89,9 +91,13 @@ type Config struct {
 
 func (c *Config) defaults() {
 	if c.CoreName == "" {
-		c.CoreName = "musicops"
-		if runtime.GOOS == "windows" {
-			c.CoreName += ".exe"
+		switch runtime.GOOS {
+		case "windows":
+			c.CoreName = "musicops-core.exe"
+		case "darwin":
+			c.CoreName = "musicops-core"
+		default:
+			c.CoreName = "musicops"
 		}
 	}
 	// A macOS .app keeps its binaries under Contents/MacOS, its tools

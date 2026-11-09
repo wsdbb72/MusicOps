@@ -17,7 +17,7 @@
 // vacuously (engines/manifest skipped) does not satisfy a gate that
 // requires them, because the gate checks them itself.
 //
-// Layouts: "windows" (bundle root holds MusicOps.exe + musicops.exe),
+// Layouts: "windows" (bundle root holds MusicOps.exe + musicops-core.exe),
 // "macos" (a .app: binaries in Contents/MacOS, tools in
 // Contents/Resources/tools, manifest in Contents/Resources), "linux"
 // and "docker" (bundle root holds musicops, no desktop shell).
@@ -80,10 +80,17 @@ func (g Gate) coreName() string {
 	if g.CoreName != "" {
 		return g.CoreName
 	}
-	if g.layout() == "windows" {
-		return "musicops.exe"
+	// Windows and macOS use musicops-core[.exe]: the desktop shell is
+	// MusicOps[.exe] and those filesystems are case-insensitive, so a
+	// core named musicops would be the same file as the shell.
+	switch g.layout() {
+	case "windows":
+		return "musicops-core.exe"
+	case "macos":
+		return "musicops-core"
+	default:
+		return "musicops"
 	}
-	return "musicops"
 }
 
 // manifestRel is the manifest path relative to the bundle root.

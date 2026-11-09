@@ -159,7 +159,7 @@ func TestWindowsInstaller(t *testing.T) {
 		t.Fatalf("fresh install exited %d", code)
 	}
 	checks["fresh_install"] = true
-	for _, name := range []string{"MusicOps.exe", "musicops.exe", "用户操作说明.md", "运维与恢复说明.md", "manifest.json"} {
+	for _, name := range []string{"MusicOps.exe", "musicops-core.exe", "用户操作说明.md", "运维与恢复说明.md", "manifest.json"} {
 		if sha(filepath.Join(target, name)) != sha(filepath.Join(bundle, name)) {
 			t.Fatalf("installed %s does not match the bundle", name)
 		}

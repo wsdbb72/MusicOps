@@ -76,7 +76,8 @@ func attachCore(profile, coreBinaryFlag string) (*coreClient, error) {
 }
 
 // resolveCoreBinary finds the core executable: the --core-binary flag,
-// then MUSICOPS_CORE_BINARY, then musicops on PATH.
+// then MUSICOPS_CORE_BINARY, then the installed core binary on PATH
+// (musicops-core[.exe] on Windows/macOS, musicops elsewhere).
 func resolveCoreBinary(flag string) (string, error) {
 	if flag != "" {
 		return flag, nil
@@ -84,10 +85,11 @@ func resolveCoreBinary(flag string) (string, error) {
 	if env := strings.TrimSpace(os.Getenv("MUSICOPS_CORE_BINARY")); env != "" {
 		return env, nil
 	}
-	if path, err := exec.LookPath("musicops"); err == nil {
+	name := desktop.CoreBinaryName()
+	if path, err := exec.LookPath(name); err == nil {
 		return path, nil
 	}
-	return "", errors.New("找不到核心程序：请用 --core-binary 指定或把 musicops 加入 PATH")
+	return "", errors.New("找不到核心程序：请用 --core-binary 指定或把 " + name + " 加入 PATH")
 }
 
 // stopCore stops the core for a profile.

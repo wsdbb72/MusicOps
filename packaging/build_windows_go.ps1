@@ -88,13 +88,13 @@ function New-VersionResource([string]$Out, [string]$FileName, [string]$Icon) {
     if ($LASTEXITCODE -ne 0) { throw "goversioninfo failed for $FileName" }
 }
 try {
-    New-VersionResource $coreSyso 'musicops.exe' ''
+    New-VersionResource $coreSyso 'musicops-core.exe' ''
     New-VersionResource $shellSyso 'MusicOps.exe' (Join-Path $projectRoot 'src/musicops/assets/musicops.ico')
 
     # 3. Go binaries.
     $ldflags="-s -w -X github.com/wsdbb72/MusicOps/native/core/internal/version.Version=$Version"
     $env:GOOS='windows'; $env:GOARCH='amd64'; $env:CGO_ENABLED='0'
-    & $Go build -trimpath -ldflags $ldflags -o (Join-Path $bundleRoot 'musicops.exe') ./cmd/musicops
+    & $Go build -trimpath -ldflags $ldflags -o (Join-Path $bundleRoot 'musicops-core.exe') ./cmd/musicops
     if ($LASTEXITCODE -ne 0) { throw 'Go core build failed' }
     & $Go build -trimpath -ldflags $ldflags -o (Join-Path $bundleRoot 'MusicOps.exe') ./cmd/musicops-desktop
     if ($LASTEXITCODE -ne 0) { throw 'Go desktop shell build failed' }

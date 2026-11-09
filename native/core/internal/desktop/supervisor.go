@@ -124,9 +124,25 @@ func ensureCoreDirs(profile string) error {
 	return privateDirectory(backupDir(profile))
 }
 
+// CoreBinaryName returns the installed core executable name for this
+// platform. Windows and macOS use musicops-core[.exe] because the desktop
+// shell is MusicOps[.exe] and those filesystems are case-insensitive:
+// musicops and MusicOps would be the same file, so a bundle holding both
+// can only ever contain one of them. Linux keeps musicops.
+func CoreBinaryName() string {
+	switch runtime.GOOS {
+	case "windows":
+		return "musicops-core.exe"
+	case "darwin":
+		return "musicops-core"
+	default:
+		return "musicops"
+	}
+}
+
 // ResolveCoreBinary resolves the core executable, in order: an explicit
-// --core-binary value, $MUSICOPS_CORE_BINARY, musicops[.exe] next to the
-// desktop executable, and musicops on PATH.
+// --core-binary value, $MUSICOPS_CORE_BINARY, the core binary next to the
+// desktop executable, and the core binary on PATH.
 func ResolveCoreBinary(explicit string) (string, error) {
 	candidates := []string{}
 	if explicit != "" {
@@ -136,18 +152,14 @@ func ResolveCoreBinary(explicit string) (string, error) {
 		candidates = append(candidates, env)
 	}
 	if exe, err := os.Executable(); err == nil {
-		name := "musicops"
-		if runtime.GOOS == "windows" {
-			name = "musicops.exe"
-		}
-		candidates = append(candidates, filepath.Join(filepath.Dir(exe), name))
+		candidates = append(candidates, filepath.Join(filepath.Dir(exe), CoreBinaryName()))
 	}
 	for _, c := range candidates {
 		if resolved, err := exec.LookPath(c); err == nil {
 			return resolved, nil
 		}
 	}
-	if resolved, err := exec.LookPath("musicops"); err == nil {
+	if resolved, err := exec.LookPath(CoreBinaryName()); err == nil {
 		return resolved, nil
 	}
 	return "", errors.New("cannot locate the musicops core binary: pass --core-binary or set MUSICOPS_CORE_BINARY")

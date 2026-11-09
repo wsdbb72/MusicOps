@@ -1,7 +1,7 @@
 """Exercise real Inno installation/upgrade behavior using an isolated test AppId.
 
 The tiny payload is a synthetic .NET executable, never a user's MusicOps process.
-The bundle is the Go layout (MusicOps.exe shell + musicops.exe core, no
+The bundle is the Go layout (MusicOps.exe shell + musicops-core.exe core, no
 Python _internal, no MusicOps-worker.exe) and the installer is
 packaging/MusicOps-go.iss, compiled with /DAppVersion=<test version>.
 Set INNO_ISCC to an Inno Setup 6.5+ compiler to run these Windows-only checks.
@@ -44,7 +44,10 @@ def tiny_bundle(tmp_path_factory):
     assert result.returncode == 0, result.stdout+result.stderr
     # Go layout: the shell and the core are two distinct executables; the
     # installer must never ship the legacy Python worker or _internal.
-    shutil.copyfile(bundle/'MusicOps.exe', bundle/'musicops.exe')
+    # The core is musicops-core.exe, not musicops.exe: Windows is
+    # case-insensitive, so musicops.exe would be the same file as
+    # MusicOps.exe and shutil.copyfile would raise SameFileError.
+    shutil.copyfile(bundle/'MusicOps.exe', bundle/'musicops-core.exe')
     for name in ('LICENSE', 'THIRD-PARTY-NOTICES.md', '启动说明.txt', 'licenses/fixture.txt', 'tools/ffmpeg.exe'):
         (bundle/name).write_text('new synthetic payload', 'utf-8')
     return Path(compiler), bundle
@@ -163,7 +166,7 @@ def test_running_worker_blocks_update_without_terminating_it(installation):
     assert app.run(directory=app.target)[0] == 0
     saved = preserve_user_data(app.target)
     # The Go core is the long-running process the installer must not kill.
-    exe = app.target/'musicops.exe'
+    exe = app.target/'musicops-core.exe'
     before = hashlib.sha256(exe.read_bytes()).digest()
     worker = subprocess.Popen([str(exe)], creationflags=subprocess.CREATE_NO_WINDOW)
     try:

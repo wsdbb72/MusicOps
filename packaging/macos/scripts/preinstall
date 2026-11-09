@@ -15,11 +15,12 @@ if [ "$physical_arm" != "1" ]; then
   echo "MusicOps: this package requires an Apple Silicon Mac." >&2
   exit 1
 fi
-# Go desktop shell (MusicOps) and Go core (musicops). The old Python
+# Go desktop shell (MusicOps) and Go core (musicops-core). The old Python
 # worker (MusicOps-worker) no longer exists and is deliberately not
 # checked: a stale name here would never match and would hide a real
-# running core.
-for task_name in MusicOps musicops; do
+# running core. The pre-0.4.33 core name (musicops) stays listed so an
+# upgrade from an install that still runs it is also refused.
+for task_name in MusicOps musicops musicops-core; do
   if /usr/bin/pgrep -x "$task_name" >/dev/null; then
     echo "MusicOps: quit the app and its background core before installing. No process was terminated." >&2
     exit 1

@@ -42,6 +42,14 @@ func TestPublishControlledAudio(t *testing.T) {
 	if err != nil || !bytes.Equal(wav, published) {
 		t.Fatal(err)
 	}
+	// The placed file must also be visible in the library catalogue: a
+	// controlled publish that only lands on disk is invisible to the
+	// library view, dedup scan and artist-folder planning.
+	library := getAuth(t, application, "/v1/library")
+	if !strings.Contains(library.Body.String(), `"file":"Artist/Album/01 Title.wav"`) ||
+		!strings.Contains(library.Body.String(), `"origin":"controlled_audio"`) {
+		t.Fatal(library.Body.String())
+	}
 	detail := getAuth(t, application, "/v1/jobs/pub-ctl")
 	if !strings.Contains(detail.Body.String(), "controlled-audio") {
 		t.Fatal(detail.Body.String())

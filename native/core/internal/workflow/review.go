@@ -413,6 +413,14 @@ func (r *Repository) retryStage(job Job, task *taskrepo.Task) (string, error) {
 	switch task.Command {
 	case cmdSearch:
 		return "searching", nil
+	case cmdDownload:
+		// A failed download task re-runs in "downloading": the torrent
+		// stays in qBittorrent, so the executor resumes it through Query
+		// instead of adding it again. The credentials were cleared when
+		// the attempt failed, so a retry needs them re-supplied through
+		// POST /v1/jobs/{id}/download; a bare review retry fails honestly
+		// with MISSING_CREDENTIALS instead of silently reusing a secret.
+		return "downloading", nil
 	case cmdIdentify:
 		return "identifying", nil
 	case cmdSnapshot:

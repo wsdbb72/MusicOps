@@ -128,6 +128,11 @@ if ($Ffmpeg) {
 }
 & $Python (Join-Path $PSScriptRoot 'collect_go_licenses.py') $bundleRoot
 if ($LASTEXITCODE -ne 0) { throw 'Go license collection failed' }
+# The .iss installs LICENSE from the bundle root (no skipifsourcedoesntexist),
+# as the old Python freeze step did; without this ISCC fails with
+# 'Source file ...\dist\MusicOps-Windows\LICENSE does not exist'
+# (release run 42596352926).
+Copy-Item -LiteralPath (Join-Path $projectRoot 'LICENSE') -Destination $bundleRoot
 Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'THIRD-PARTY-NOTICES.md') -Destination $bundleRoot
 Copy-Item -LiteralPath (Join-Path $PSScriptRoot '启动说明.txt') -Destination $bundleRoot
 Copy-Item -LiteralPath (Join-Path $projectRoot 'docs/用户操作说明.md') -Destination $bundleRoot

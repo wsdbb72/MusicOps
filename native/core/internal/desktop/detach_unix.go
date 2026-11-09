@@ -10,3 +10,8 @@ import "syscall"
 func detachProcAttr() *syscall.SysProcAttr {
 	return &syscall.SysProcAttr{Setsid: true}
 }
+
+// hideConsoleAttr is a no-op on Unix: there is no console window to hide.
+func hideConsoleAttr() *syscall.SysProcAttr {
+	return nil
+}

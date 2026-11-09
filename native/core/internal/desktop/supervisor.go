@@ -379,6 +379,9 @@ func startCore(profile, coreBinary string, detached bool) (*runningCore, error) 
 		cmd.Stdout = logFile
 		cmd.Stderr = logFile
 	} else {
+		if attr := hideConsoleAttr(); attr != nil {
+			cmd.SysProcAttr = attr
+		}
 		cmd.Stdin = stdinR
 		stdoutR, err = cmd.StdoutPipe()
 		if err != nil {

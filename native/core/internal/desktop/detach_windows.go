@@ -15,3 +15,13 @@ func detachProcAttr() *syscall.SysProcAttr {
 		CreationFlags: windows.DETACHED_PROCESS | windows.CREATE_NEW_PROCESS_GROUP,
 	}
 }
+
+// hideConsoleAttr hides the console window of a core started by the desktop
+// shell. The shell itself is a GUI-subsystem binary with no console to
+// inherit, so without this flag Windows would create a new console window
+// for the console-subsystem core every time the app opens.
+func hideConsoleAttr() *syscall.SysProcAttr {
+	return &syscall.SysProcAttr{
+		CreationFlags: windows.CREATE_NO_WINDOW,
+	}
+}

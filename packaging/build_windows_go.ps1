@@ -107,9 +107,19 @@ try {
     # without it the binary embeds a stub that shows "Wails applications will
     # not build without the correct build tags" at launch (0.4.33 shipped
     # broken this way). -tags desktop,production matches `wails build`.
-    & $Go build -tags desktop,production -trimpath -ldflags $ldflags -o (Join-Path $bundleRoot 'MusicOps.exe') ./cmd/musicops-desktop
+    # The shell must also be a GUI-subsystem binary (-H=windowsgui),
+    # otherwise Windows opens a console window next to the app (0.4.33
+    # showed a cmd window on launch).
+    $shellLdflags="$ldflags -H=windowsgui"
+    & $Go build -tags desktop,production -trimpath -ldflags $shellLdflags -o (Join-Path $bundleRoot 'MusicOps.exe') ./cmd/musicops-desktop
     if ($LASTEXITCODE -ne 0) { throw 'Go desktop shell build failed' }
     if (Select-String -LiteralPath (Join-Path $bundleRoot 'MusicOps.exe') -Pattern 'will not build without the correct build tags' -SimpleMatch -Quiet) { throw 'Desktop shell was built without the Wails production tag' }
+    # Regression guard for the 0.4.33 console window: the shell's PE
+    # subsystem must be 2 (Windows GUI), not 3 (console).
+    $shellBytes = [System.IO.File]::ReadAllBytes((Join-Path $bundleRoot 'MusicOps.exe'))
+    $peOffset = [BitConverter]::ToInt32($shellBytes, 0x3C)
+    $shellSubsystem = [BitConverter]::ToUInt16($shellBytes, $peOffset + 24 + 68)
+    if ($shellSubsystem -ne 2) { throw "Desktop shell PE subsystem is $shellSubsystem, want 2 (Windows GUI); a console window would appear" }
 } finally {
     Remove-Item -LiteralPath $coreSyso,$shellSyso -Force -ErrorAction SilentlyContinue
     Pop-Location

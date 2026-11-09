@@ -63,7 +63,6 @@ func TestStartupReopenAndConcurrentConditionalWrites(t *testing.T) {
 		t.Fatal(err)
 	}
 	reopen := time.Since(reopenStarted)
-	defer engine.Close()
 	err = engine.View(func(v *View) error {
 		value, found, err := v.Get([]byte("profile/3/7"))
 		if err != nil || !found || string(value) != "synthetic" {
@@ -72,6 +71,15 @@ func TestStartupReopenAndConcurrentConditionalWrites(t *testing.T) {
 		return nil
 	})
 	if err != nil {
+		t.Fatal(err)
+	}
+	// Close before walking the directory: Pebble manages its files
+	// (including deleting obsolete OPTIONS files) while the engine is
+	// open, so a walk of the live directory can race a deletion and
+	// fail (OPTIONS-000003 vanished between readdir and stat on the
+	// Windows CI runner in run 42580776325). After Close, background
+	// file management has stopped and the directory is stable.
+	if err := engine.Close(); err != nil {
 		t.Fatal(err)
 	}
 	disk, err := dirBytes(dir)

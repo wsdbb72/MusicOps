@@ -410,7 +410,7 @@ func TestSearchHandoffCreatesProcessTaskWithoutRunningIt(t *testing.T) {
 }
 
 func TestCommandsStayUnregisteredNames(t *testing.T) {
-	if len(Commands) != 7 {
+	if len(Commands) != 8 {
 		t.Fatal(Commands)
 	}
 	for _, command := range Commands {
@@ -426,7 +426,7 @@ func recordRelease(t *testing.T, repo *Repository, jobID, requestID string, now 
 	result, err := repo.RecordRelease(RecordReleaseInput{
 		JobID: jobID, RequestID: requestID,
 		Evidence: EvidenceInput{ID: "rel-" + requestID, Kind: "catalog", Source: "local-library", SubjectID: jobID, TracklistVerified: true, Payload: receipt},
-		Payload: receipt, NowNS: now,
+		Payload:  receipt, NowNS: now,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -506,7 +506,7 @@ func TestRecordReleaseAfterPublishStaysCompleted(t *testing.T) {
 	if _, err := repo.Complete("publish-1", token, Complete{
 		Edge: edgeTerminal, NextStage: "completed", TaskState: "completed", Message: "verified",
 		Evidence: []EvidenceInput{{ID: "publish-ev", Kind: "catalog", Source: "local-library", SubjectID: "album1", TracklistVerified: true, Payload: []byte("receipt")}},
-		NowNS: 5000,
+		NowNS:    5000,
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -538,7 +538,7 @@ func TestRecordReleaseRejectsFailedJob(t *testing.T) {
 	if _, err := repo.RecordRelease(RecordReleaseInput{
 		JobID: "album1", RequestID: "record-1",
 		Evidence: EvidenceInput{ID: "rel-record-1", Kind: "catalog", Source: "local-library", SubjectID: "album1", TracklistVerified: true, Payload: []byte("receipt")},
-		Payload: []byte("receipt"), NowNS: 4000,
+		Payload:  []byte("receipt"), NowNS: 4000,
 	}); err == nil {
 		t.Fatal("failed job accepted a release")
 	}

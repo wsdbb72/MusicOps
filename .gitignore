@@ -16,6 +16,9 @@ outputs/
 profile/
 profiles/
 vault/
+# ...but not the Go vault package itself (source code, not credentials):
+# the bare `vault/` rule above also matches native/core/internal/vault/.
+!native/core/internal/vault/
 *.dpapi
 *.sqlite
 *.sqlite3

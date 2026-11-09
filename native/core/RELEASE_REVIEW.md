@@ -10,9 +10,10 @@
 
 - 分支：`refactor/go-desktop`
 - Phase 5 实现提交 SHA：`c3bd468cd058aa751620568ceaca623edf9a549e`（“MusicOps full-Go migration Phase 5: packaging and switch-over (release-ready)”）
-- Windows gate 修复提交 SHA：`0e30643016cd2190cea87f0e7592d4af1483bbbb`（最后一次代码改动；其后的提交仅改文档）
-- **候选代码提交（供评审）：`0e30643` 的树**。档案更新提交（本文档的最后一次修改）只改本文档，不改代码；评审对象为该提交的树，即 `0e30643` 的代码 + 最新档案。
-- CI 验证：Native core 运行 **42580116895**（HEAD `09af4fb`，含上述全部提交）：completed success，四任务全绿（macos-15、windows-latest、race、ubuntu-latest），四份任务日志逐行核查零 FAIL（Windows 日志正向确认 `ok internal/releasegate 17.880s`）。注意：前一轮运行 42579135564 曾出现 Windows 任务 success 但日志 3 个 FAIL（pwsh 假绿），已由 `0e30643` 修复，见“本次发现并修复的问题”第 4 项。
+- Windows gate 修复提交 SHA：`0e30643016cd2190cea87f0e7592d4af1483bbbb`
+- dataengine 测试竞态修复提交 SHA：`5f819b9dde58ddbdf921d51db3fa518595e27294`（最后一次代码改动；其后的提交仅改文档）
+- **候选代码提交（供评审）：`5f819b9` 的树**。档案更新提交（本文档的最后一次修改）只改本文档，不改代码；评审对象为该提交的树，即 `5f819b9` 的代码 + 最新档案。
+- CI 验证：Native core 运行 **42581790198**（HEAD `5f819b9`，含上述全部提交）：completed success，四任务全绿（macos-15、windows-latest、race、ubuntu-latest），四份任务日志逐行核查零 FAIL（Windows 日志正向确认 `ok internal/dataengine 7.324s` 与 `ok internal/releasegate 6.818s`）。注意：前两轮运行曾各藏一个 Windows 失败（42579135564 的 releasegate 3 项、42580776325 的 dataengine 1 项），任务结论均为 success——pwsh 假绿再次证实，均已由 `0e30643`、`5f819b9` 修复，见“本次发现并修复的问题”第 4、5 项。
 - 基线：Phase 4 完成态 `5f0b2fc`（Native core 运行 42572612091 四任务全绿、四份日志逐行零 FAIL）
 
 ## 评审范围：每阶段摘要
@@ -59,7 +60,8 @@ Wails v2.17.1 桌面壳（窗口反向代理同一 WebUI）、Go 监管、Vault 
 1. `docker-smoke` 的 `healthzOK` 用普通 `bool` 解析 `python` 字段，缺失字段时读作 `false` 而误接受非 Go-core 的 healthz 响应。改为 `*bool`，要求字段存在且为 false；`cmd/musicops` 的 `healthcheck` 用 `map[string]any` 比较，缺失字段为 `nil`，本来就是正确的。
 2. `smoke.Run` 没有 `.app` 布局映射：`build_macos_go.sh` 第 6 步按任务规定的调法（`BUNDLE=<app>`）会在 `core_present_and_executable` 等 9 项上失败（macOS 子代理探针 B1 实测证实）。已在 `smoke.go` 增加映射（`defaults` + `binRel`，`runLive` 的启动路径一并修正），单元测试 `TestAppLayoutMapping` + 假 `.app` 端到端（20 项通过）覆盖；macOS 安装器测试的显式相对路径写法不受影响。
 3. Windows 构建脚本调 `collect_licenses.py`（Python 依赖许可证收集器）会把 PySide6 等许可证写进 Go 包。改为 `packaging/collect_go_licenses.py`（Go 模块许可证）；macOS 脚本同样接入。
-4. releasegate 测试在 Windows 上硬编码 `Layout: "linux"`，夹具却是 `.exe` 文件名：`TestGatePassesGoodBundle` 在 `core_present_and_go_built` 上失败，篡改/删除步骤触及 manifest 未覆盖的 Linux 文件名。CI 运行 42579135564 的 Windows 任务显示 success、日志里 3 个 FAIL（pwsh 假绿再次证实）——由 `gh run view --log` 逐行核查发现。修复：测试按平台选布局（`testLayout()`）并用 `exeSuffix()` 操作真实夹具文件名；gate 本身未动（生产上 Windows 只用 windows 布局）。修复提交 `0e30643`，本地 Linux 9 项全过、`GOOS=windows go vet` 通过，待 CI 重跑验证。
+4. releasegate 测试在 Windows 上硬编码 `Layout: "linux"`，夹具却是 `.exe` 文件名：`TestGatePassesGoodBundle` 在 `core_present_and_go_built` 上失败，篡改/删除步骤触及 manifest 未覆盖的 Linux 文件名。CI 运行 42579135564 的 Windows 任务显示 success、日志里 3 个 FAIL（pwsh 假绿再次证实）——由 `gh run view --log` 逐行核查发现。修复：测试按平台选布局（`testLayout()`）并用 `exeSuffix()` 操作真实夹具文件名；gate 本身未动（生产上 Windows 只用 windows 布局）。修复提交 `0e30643`，本地 Linux 9 项全过、`GOOS=windows go vet` 通过，CI 运行 42580116895 验证通过。
+5. dataengine 重开测试 `TestStartupReopenAndConcurrentConditionalWrites` 在 Windows CI 运行 42580776325 上失败：`dirBytes` 在引擎仍打开时 walk 数据目录，Pebble 后台清理旧 OPTIONS 文件与 walk 的 stat 撞车（`OPTIONS-000003` 在 readdir 与 stat 之间消失，`profile_test.go:79`）。数据本身无损（重开读回 `profile/3/7`，201 键回放成功），且前一轮同代码通过（文档提交差量），属平台敏感竞态而非 Phase 5 回归。修复：读验证通过后先 `Close()` 再 walk（Close 后 Pebble 后台文件管理停止，目录稳定）。修复提交 `5f819b9`，本地该测试 10 次重复 + 整包全过，CI 运行 42581790198 验证通过（Windows 日志 `ok internal/dataengine 7.324s`）。
 
 ## 真实剩余缺口（评审时必须看到，不要当作已完成）
 

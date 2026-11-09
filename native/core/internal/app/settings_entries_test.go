@@ -419,9 +419,20 @@ func TestLibraryDirCustomPublish(t *testing.T) {
 		t.Fatal(err)
 	}
 	entries := getAuth(t, application, "/v1/library")
-	body := entries.Body.String()
-	if !strings.Contains(body, `"file":"Artist/Album/01 Title.wav"`) || !strings.Contains(body, `"library_dir":"`+library+`"`) {
-		t.Fatal(body)
+	var listed struct {
+		Entries []struct {
+			File       string `json:"file"`
+			LibraryDir string `json:"library_dir"`
+		} `json:"entries"`
+	}
+	// Decode the JSON instead of substring-matching the raw body: on
+	// Windows the path contains backslashes, which JSON escapes, so a
+	// raw-string comparison can never match there.
+	if err := json.NewDecoder(entries.Body).Decode(&listed); err != nil {
+		t.Fatal(err)
+	}
+	if len(listed.Entries) != 1 || listed.Entries[0].File != "Artist/Album/01 Title.wav" || listed.Entries[0].LibraryDir != library {
+		t.Fatalf("%+v", listed)
 	}
 }
 

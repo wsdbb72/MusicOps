@@ -21,13 +21,17 @@ FROM golang:1.26.3-bookworm AS build
 ARG VERSION
 ENV DEBIAN_FRONTEND=noninteractive
 # git clones the pinned engine sources; python3-venv builds the
-# FlareSolverr freeze; chromium/chromedriver are what prepare_engines.py
-# links into the Linux engine output (a symlink to /usr/bin/chromium and
-# a copy of /usr/bin/chromedriver). No gcc: every Go build below sets
+# FlareSolverr freeze; libpython3.11 is the Python shared library
+# PyInstaller needs to freeze it (bookworm's python3 package does not
+# ship it; without it the build fails with "Python shared library
+# ('libpython3.11.so.1.0') was not found", release run 42599831641);
+# chromium/chromedriver are what prepare_engines.py links into the
+# Linux engine output (a symlink to /usr/bin/chromium and a copy of
+# /usr/bin/chromedriver). No gcc: every Go build below sets
 # CGO_ENABLED=0, including the go-music-dl build inside
 # prepare_engines.py.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    ca-certificates chromium chromium-driver git python3 python3-venv \
+    ca-certificates chromium chromium-driver git libpython3.11 python3 python3-venv \
     && rm -rf /var/lib/apt/lists/*
 WORKDIR /build
 # Go module cache first, so dependency downloads are cached across

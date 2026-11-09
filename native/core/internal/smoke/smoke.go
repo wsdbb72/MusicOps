@@ -386,6 +386,20 @@ func CheckManifest(bundleDir, manifestRel string, required bool) error {
 		if err != nil {
 			return fmt.Errorf("manifest entry %s unreadable: %w", e.Path, err)
 		}
+		if isMachO(data) {
+			// Mach-O binaries change when the bundle is ad-hoc
+			// codesigned: macOS signs after the manifest is written,
+			// and the embedded signature grows the file, so a
+			// pre-signing size/hash can never match (release run
+			// 42599831641: Contents/MacOS/MusicOps grew by 18158
+			// bytes under signing). Their integrity is covered by
+			// codesign --verify instead (the macOS build verifies
+			// the sealed bundle before and after packaging) plus
+			// the version-execution checks; the manifest still
+			// proves they exist. On Windows/Linux there are no
+			// Mach-O files, so this changes nothing there.
+			continue
+		}
 		if int64(len(data)) != e.Size {
 			return fmt.Errorf("manifest entry %s size %d, want %d", e.Path, len(data), e.Size)
 		}
@@ -395,6 +409,23 @@ func CheckManifest(bundleDir, manifestRel string, required bool) error {
 		}
 	}
 	return nil
+}
+
+// isMachO reports whether data starts with a Mach-O magic: thin
+// 32/64-bit (FEEDFACE/FEEDFACF), fat (CAFEBABE/CAFEBABF), either byte
+// order.
+func isMachO(data []byte) bool {
+	if len(data) < 4 {
+		return false
+	}
+	switch string(data[:4]) {
+	case "\xFE\xED\xFA\xCE", "\xFE\xED\xFA\xCF",
+		"\xCE\xFA\xED\xFE", "\xCF\xFA\xED\xFE",
+		"\xCA\xFE\xBA\xBE", "\xCA\xFE\xBA\xBF",
+		"\xBE\xBA\xFE\xCA", "\xBF\xBA\xFE\xCA":
+		return true
+	}
+	return false
 }
 
 // CheckEngines verifies the managed engines layout produced by

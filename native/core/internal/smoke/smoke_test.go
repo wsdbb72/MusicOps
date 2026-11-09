@@ -85,6 +85,45 @@ func TestCheckManifest(t *testing.T) {
 	}
 }
 
+func TestCheckManifestSkipsSignedMachO(t *testing.T) {
+	root := t.TempDir()
+	// A 64-bit Mach-O binary whose manifest entry records the
+	// pre-signing size/hash, then "grows" under ad-hoc codesigning:
+	// the check must still pass (integrity of signed binaries is
+	// covered by codesign --verify, not the manifest).
+	macho := append([]byte{0xFE, 0xED, 0xFA, 0xCF}, []byte("signed-binary-payload")...)
+	writeFile(t, filepath.Join(root, "MusicOps"), string(macho))
+	fat := append([]byte{0xCA, 0xFE, 0xBA, 0xBE}, []byte("fat-binary")...)
+	writeFile(t, filepath.Join(root, "driver"), string(fat))
+	// A regular file with a deliberately wrong hash must still fail.
+	writeFile(t, filepath.Join(root, "notes.txt"), "plain-text")
+	entries := []map[string]any{
+		{"path": "MusicOps", "size": 1, "sha256": strings.Repeat("0", 64)},
+		{"path": "driver", "size": 1, "sha256": strings.Repeat("0", 64)},
+		{"path": "notes.txt", "size": 10, "sha256": strings.Repeat("0", 64)},
+	}
+	raw, _ := json.Marshal(entries)
+	writeFile(t, filepath.Join(root, "manifest.json"), string(raw))
+	if err := CheckManifest(root, "manifest.json", true); err == nil {
+		t.Fatal("expected a tampered plain file to fail the manifest check")
+	}
+	// Without the tampered plain file, the stale Mach-O entries pass.
+	entries = entries[:2]
+	raw, _ = json.Marshal(entries)
+	writeFile(t, filepath.Join(root, "manifest.json"), string(raw))
+	if err := CheckManifest(root, "manifest.json", true); err != nil {
+		t.Fatalf("stale Mach-O entries must be skipped: %v", err)
+	}
+	// A missing Mach-O file is still an error: the manifest must at
+	// least prove the binary exists.
+	if err := os.Remove(filepath.Join(root, "MusicOps")); err != nil {
+		t.Fatal(err)
+	}
+	if err := CheckManifest(root, "manifest.json", true); err == nil {
+		t.Fatal("expected a missing Mach-O entry to fail the manifest check")
+	}
+}
+
 func TestCheckEngines(t *testing.T) {
 	root := t.TempDir()
 	services := filepath.Join(root, "tools", "services")

@@ -111,6 +111,18 @@ func (a *App) publishControlled(ctx context.Context, execution *scheduler.Execut
 	if digest, err := hashFile(result.Path); err != nil || digest != result.SHA256 {
 		return a.failPublish(execution, receipt, "VERIFY_FAILED", "已发布文件与记录的摘要不一致")
 	}
+	// Record the placed file in the library catalogue, or the library
+	// view, dedup scan and artist-folder planning would never see it even
+	// though the file is on disk. A retry replays both the publish and
+	// this record, so a failure here converges instead of duplicating.
+	if _, err := audiorelease.RecordPublished(ctx, a.engine, audiorelease.PublishedInput{
+		RequestID: receipt.RequestID, RootID: receipt.RootID,
+		Artist: receipt.Artist, Album: receipt.Album, Title: receipt.Title, Track: receipt.Track,
+		Path: result.Path, Library: filepath.Join(a.Dir, "library-audio"),
+		Decoder: audiorelease.SystemDecoder(),
+	}); err != nil {
+		return a.failPublish(execution, receipt, "LIBRARY_RECORD_FAILED", "已发布文件未能记入库目录: "+err.Error())
+	}
 	evidence, err := json.Marshal(result)
 	if err != nil {
 		return scheduler.Outcome{}, err

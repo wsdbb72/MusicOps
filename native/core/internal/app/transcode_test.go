@@ -206,6 +206,43 @@ func TestTranscodeWAVToFLAC(t *testing.T) {
 	}
 }
 
+func TestTranscodeWAVWithExtraChunksToFLAC(t *testing.T) {
+	application := newApp(t)
+	plain := writeTestWAV(t, filepath.Join(application.Dir, "incoming", "plain.wav"))
+	// ffmpeg writes a LIST chunk between fmt and data, pushing the data
+	// chunk past the first 44 bytes. A validator that only scans the
+	// header prefix rejects that file; the chunk walk must accept it.
+	payload := append([]byte("INFO"), make([]byte, 22)...)
+	extra := make([]byte, 0, len(plain)+8+len(payload))
+	extra = append(extra, plain[:36]...)
+	extra = append(extra, []byte("LIST")...)
+	var sizeBuf [4]byte
+	binary.LittleEndian.PutUint32(sizeBuf[:], uint32(len(payload)))
+	extra = append(extra, sizeBuf[:]...)
+	extra = append(extra, payload...)
+	extra = append(extra, plain[36:]...)
+	binary.LittleEndian.PutUint32(extra[4:], uint32(len(extra)-8))
+	source := filepath.Join(application.Dir, "incoming", "extra.wav")
+	if err := os.WriteFile(source, extra, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	created := post(t, application, "/v1/library/transcode", map[string]any{"request_id": "tc-extra", "source": source, "format": "flac"})
+	if created["task_id"] != "transcode:tc-extra" {
+		t.Fatal(created)
+	}
+	receipt := waitTranscodeReceipt(t, application, "tc-extra")
+	if receipt.Format != "flac" {
+		t.Fatal(receipt)
+	}
+	sourcePCM, err := pcmHash(context.Background(), source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if receipt.PCMSHA256 != sourcePCM {
+		t.Fatal("PCM hash mismatch after transcode", receipt)
+	}
+}
+
 func TestTranscodeRejectsNonPCM(t *testing.T) {
 	application := newApp(t)
 	// A text file is not a WAV at all; the task must fail, not produce a receipt.

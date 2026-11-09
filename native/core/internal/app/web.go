@@ -271,7 +271,8 @@ const appJS = `(function () {
       '<label><input type="checkbox" id="download-streaming"' + (downloadSettings.streaming_enabled ? " checked" : "") + '> 流媒体回退（四站无精确匹配时走流媒体）</label>' +
       '<p><button type="button" id="save-download" class="primary">保存</button></p>' +
       '<p class="meta">流媒体回退顺序：' + (downloadSettings.streaming_sources || []).map(function (step) { return escapeText(step.name); }).join(" → ") + '</p>' +
-      '<p class="meta">回退执行已接入：' + (downloadSettings.streaming_source_status || []).map(function (source) { return escapeText(source.name) + (source.configured ? "已接入" : "未接入"); }).join("、") + '。四站无凭证与引擎，歌单文件只导入曲目元数据。</p></article>' +
+      '<p class="meta">回退执行已接入：' + (downloadSettings.streaming_source_status || []).map(function (source) { return escapeText(source.name) + (source.configured ? "已接入" : "未接入"); }).join("、") + '。四站无凭证与引擎，歌单文件只导入曲目元数据。</p>' +
+      '<p class="meta">各功能状态：下载已接入（需 qBittorrent 地址与登录，凭据只存内存）；目录核对已接入 MusicBrainz（Discogs 需用户 Token、网易云未接入）；媒体与库维护已接入（NCM 解密、FLAC 标签、歌词、去重、艺人文件夹；OpenCC 无字典数据，未接入）；转码已接入（需系统 ffmpeg/ffprobe）。</p></article>' +
       '<article><h2>站点登录检查</h2><p class="meta">只读检查：只验证登录与余额，不下载、不花 token。Cookie 只用于这次检查，不保存。</p>' +
       '<label>站点<select id="preflight-site">' + siteRows.map(function (site) { return '<option value="' + escapeText(site.name) + '">' + escapeText(site.name) + "</option>"; }).join("") + '</select></label>' +
       '<label>Cookie<input type="password" id="preflight-cookie" autocomplete="off"></label>' +

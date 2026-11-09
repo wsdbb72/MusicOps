@@ -397,7 +397,10 @@ func TestArtistFolderPlanAndRelocate(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(entries) != 1 || entries[0].File != filepath.Join("Solo Artist", "My Album", filepath.Base(entry.File)) {
+	// Entry.File is slash-separated on every OS (see libraryFile), so
+	// compare in slash form rather than against filepath.Join, which
+	// is backslash-joined on Windows.
+	if len(entries) != 1 || filepath.ToSlash(entries[0].File) != "Solo Artist/My Album/"+filepath.Base(entry.File) {
 		t.Fatal(entries)
 	}
 	if _, err := os.Stat(filepath.Join(library, "Solo Artist", "My Album", filepath.Base(entry.File))); err != nil {
@@ -600,7 +603,10 @@ func TestArtistFolderPlanUnderSymlinkedParent(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(entries) != 1 || entries[0].File != filepath.Join("Solo Artist", "My Album", filepath.Base(entry.File)) {
+	// Entry.File is slash-separated on every OS (see libraryFile), so
+	// compare in slash form rather than against filepath.Join, which
+	// is backslash-joined on Windows.
+	if len(entries) != 1 || filepath.ToSlash(entries[0].File) != "Solo Artist/My Album/"+filepath.Base(entry.File) {
 		t.Fatal(entries)
 	}
 }

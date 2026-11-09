@@ -249,7 +249,9 @@ func TestRememberProfile(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if info.Mode().Perm() != 0700 {
+	// Windows has no Unix permission bits: Go reports 0777 for every
+	// directory there, so the 0700 assertion is Unix-only.
+	if runtime.GOOS != "windows" && info.Mode().Perm() != 0700 {
 		t.Fatalf("MusicOps dir mode = %o, want 0700", info.Mode().Perm())
 	}
 	raw, err := os.ReadFile(filepath.Join(location, "active-profile.json"))

@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -31,6 +32,12 @@ func TestMain(m *testing.M) {
 	}
 	defer os.RemoveAll(dir)
 	testCoreBinary = filepath.Join(dir, "musicops-test")
+	// On Windows `go build -o <name>` writes <name>.exe, so the path
+	// the tests hand to EnsureCore must carry the suffix or the binary
+	// is "not found" even though the build succeeded.
+	if runtime.GOOS == "windows" {
+		testCoreBinary += ".exe"
+	}
 	cmd := exec.Command(goBin, "build", "-o", testCoreBinary, "./cmd/musicops")
 	cmd.Dir = filepath.Join("..", "..") // native/core
 	// GOTMPDIR must exist before the build runs: the dev box keeps it

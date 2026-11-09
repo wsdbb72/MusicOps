@@ -99,6 +99,18 @@ func (a *App) search(ctx context.Context, execution *scheduler.Execution, payloa
 	if err != nil {
 		return scheduler.Outcome{}, err
 	}
+	// A cancel requested while the last site was being read must still
+	// be honoured before the search completes: observe() only
+	// checkpoints before each site, so with a single site a cancel
+	// landing during its HTTP call would otherwise be recorded as
+	// "completed with cancel request" instead of cancelling the job.
+	// A pause requested during the read likewise takes effect here.
+	// cancelled() routes an observed cancel through a.stop(), so the
+	// job lands in needs_review/interrupted (task recovery_required)
+	// — the designed outcome for a search cancelled mid-flight.
+	if err := a.cancelled(ctx, execution); err != nil {
+		return scheduler.Outcome{}, err
+	}
 	decision, err := searchdecision.Decide(report)
 	if err != nil {
 		return scheduler.Outcome{}, err

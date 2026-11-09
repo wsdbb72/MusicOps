@@ -325,10 +325,12 @@ func TestCLISubprocessEndToEnd(t *testing.T) {
 	// The fake tracker answers after 12s (inside the 15s client
 	// timeout), so the search task stays running long enough to pause,
 	// resume and cancel deterministically instead of finishing in
-	// milliseconds. The 8s budget was not enough: CLI subprocess spawns
-	// on a loaded runner are slow enough that the search finished
-	// between resume and cancel on macOS, and the cancel was then
-	// rejected as stale (WORKFLOW_REJECTED).
+	// milliseconds. synthetic must be true: only then does the
+	// searcher use base_url at all — with synthetic false it talks to
+	// the real tracker host, the fake tracker is never hit, and the
+	// search finishes on the network's own schedule (about a second
+	// in this sandbox), which made the pause/cancel below a race the
+	// Windows runner lost.
 	slowTracker := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		time.Sleep(12 * time.Second)
 		w.Header().Set("Content-Type", "application/json")
@@ -339,7 +341,7 @@ func TestCLISubprocessEndToEnd(t *testing.T) {
 	status, body := post("/v1/search", map[string]any{
 		"job_id": jobID, "batch_id": "e2e-batch-1", "scene": "playlist", "query": "test",
 		"expected_title": "Test", "expected_artist": "Artist",
-		"source_track_ids": []string{"t1"}, "synthetic": false,
+		"source_track_ids": []string{"t1"}, "synthetic": true,
 		"enabled_sites": []string{"dicmusic"}, "base_url": slowTracker.URL,
 		"cookie":   "session=cookie-secret-not-stored",
 		"identity": map[string]any{"evidence_id": "ev-catalog", "kind": "catalog", "source": "musicbrainz", "subject_id": "release-1", "tracklist_verified": true, "identity_confirmed": true, "payload": "catalogue-row"},
@@ -374,6 +376,16 @@ func TestCLISubprocessEndToEnd(t *testing.T) {
 	if !searching {
 		t.Fatalf("job %s never reached searching stage", searchJobID)
 	}
+	// Wait until the executor is inside the tracker HTTP call before
+	// pausing: the scheduler claims the task within milliseconds of
+	// creation (via the repo Changes channel), so without this the
+	// pause can land before the executor's first checkpoint and the
+	// cancel is then observed there — which makes the test pass
+	// without ever exercising the post-read cancel checkpoint. The
+	// 12s tracker call gives a wide window: sleeping 2s guarantees
+	// the in-call path on every OS, and the cancel below is observed
+	// at the post-read checkpoint once the call returns.
+	time.Sleep(2 * time.Second)
 	if code, out := runCLIBinary(t, binary, append([]string{"control", searchJobID, "pause"}, baseArgs...)...); code != 0 {
 		t.Fatalf("control pause: code %d out %s", code, out)
 	}
@@ -385,9 +397,11 @@ func TestCLISubprocessEndToEnd(t *testing.T) {
 	if code, out := runCLIBinary(t, binary, append([]string{"job", searchJobID}, baseArgs...)...); code != 0 || !strings.Contains(out, searchJobID) || !strings.Contains(out, `"paused": true`) {
 		t.Fatalf("job(paused): code %d out %s", code, out)
 	}
-	// resume, then pause again before cancelling: the search only runs
-	// while unpaused, so re-pausing freezes it and the cancel below
-	// cannot lose a race with the search finishing.
+	// Resume, then pause again before cancelling: this exercises the
+	// resume path and proves a cancel issued against a paused job is
+	// still honoured (the checkpoint checks CancelRequested before
+	// waiting on the pause). The cancel itself is observed at the
+	// post-read checkpoint once the tracker call returns.
 	if code, out := runCLIBinary(t, binary, append([]string{"control", searchJobID, "resume"}, baseArgs...)...); code != 0 {
 		t.Fatalf("control resume: code %d out %s", code, out)
 	}
@@ -409,6 +423,14 @@ func TestCLISubprocessEndToEnd(t *testing.T) {
 	}
 	if !cancelled {
 		t.Fatalf("job(cancelled) never reached exit 2")
+	}
+	// Exit 2 alone does not prove a cancel: a blocked job exits 2 too.
+	// Assert the task state itself: a search cancelled mid-flight ends
+	// as recovery_required with the job in needs_review/interrupted
+	// ("检索已取消") — cancelled() routes an observed cancel through
+	// a.stop()/Interrupt by design.
+	if code, out := runCLIBinary(t, binary, append([]string{"job", searchJobID}, baseArgs...)...); code != 2 || !strings.Contains(out, `"state": "recovery_required"`) || !strings.Contains(out, "检索已取消") {
+		t.Fatalf("job(cancelled) state: code %d out %s, want recovery_required + 检索已取消", code, out)
 	}
 	// --wait on an already terminal job returns at once with exit 2.
 	if code, _ := runCLIBinary(t, binary, append([]string{"job", searchJobID, "--wait"}, baseArgs...)...); code != 2 {

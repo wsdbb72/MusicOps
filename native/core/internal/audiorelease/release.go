@@ -592,21 +592,23 @@ func List(engine *dataengine.Engine) ([]Entry, error) {
 // a file relocated to a loose folder or the library root has fewer
 // segments, and taking a fixed last-three tail would then invent a
 // "library-audio" prefix that is not a real path.
-//
-// The tail is joined with the OS separator, not "/": on Windows a
-// forward-slash join is not the path the rest of the code (and the
-// tests) compare against.
+// The tail is joined with "/" regardless of the host OS: Entry.File is
+// a portable, slash-separated library-relative path (it is stored in
+// Pebble, returned by the library API and shown in the WebUI), and the
+// release/library tests assert exactly that form. Joining with the OS
+// separator instead broke those tests on Windows, where the stored
+// value became "Artist\Album\01 One.wav".
 func libraryFile(path string) string {
 	parts := strings.Split(path, string(filepath.Separator))
 	for i := len(parts) - 1; i >= 0; i-- {
 		if parts[i] == "library-audio" {
-			return strings.Join(parts[i+1:], string(filepath.Separator))
+			return strings.Join(parts[i+1:], "/")
 		}
 	}
 	if len(parts) < 3 {
 		return filepath.Base(path)
 	}
-	return strings.Join(parts[len(parts)-3:], string(filepath.Separator))
+	return strings.Join(parts[len(parts)-3:], "/")
 }
 
 // SystemDecoder returns a ffmpeg/ffprobe check when both tools are on PATH.

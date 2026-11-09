@@ -22,10 +22,9 @@ func (a *App) acquire(ctx context.Context, execution *scheduler.Execution, paylo
 	if err := a.cancelled(ctx, execution); err != nil {
 		return scheduler.Outcome{}, err
 	}
-	plan, err := decodePlan(payload)
-	if err != nil {
-		return scheduler.Outcome{}, err
-	}
+	// The validating stage task carries a publish payload, not a search
+	// plan, so the task and job are read before the plan is decoded: the
+	// validating branch below never decodes a search plan at all.
 	held := execution.Token()
 	task, err := a.tasks.Get(held.ID)
 	if err != nil || task == nil {
@@ -33,6 +32,16 @@ func (a *App) acquire(ctx context.Context, execution *scheduler.Execution, paylo
 	}
 	job, err := a.flows.Job(task.WorkflowJobID)
 	if err != nil || job == nil {
+		return scheduler.Outcome{}, err
+	}
+	if job.Stage == "validating" {
+		// The download executor advanced the job from downloading to
+		// validating and queued this task with the ingest receipts; see
+		// finishValidating in download.go.
+		return a.finishValidating(execution, held, *job, payload)
+	}
+	plan, err := decodePlan(payload)
+	if err != nil {
 		return scheduler.Outcome{}, err
 	}
 	defer a.forget(plan.RootJobID)

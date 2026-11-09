@@ -425,6 +425,50 @@ func TestLibraryDirCustomPublish(t *testing.T) {
 	}
 }
 
+func TestLibraryDirSymlinkResolves(t *testing.T) {
+	vaultKey(t)
+	application := newApp(t)
+	real := filepath.Join(t.TempDir(), "real")
+	if err := os.MkdirAll(real, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(t.TempDir(), "link")
+	if err := os.Symlink(real, link); err != nil {
+		t.Fatal(err)
+	}
+	// A symlink is followed, not rejected: on macOS even the system
+	// temp dir sits under the /var -> /private/var symlink.
+	post(t, application, "/v1/settings/library", map[string]any{"library_dir": link})
+	got := getAuth(t, application, "/v1/settings/library")
+	if decodeBody(t, got)["library"].(map[string]any)["effective_library_dir"] != link {
+		t.Fatal(got.Body.String())
+	}
+	// A link to the backup directory still resolves to the backup
+	// directory and is refused.
+	recorder := postCode(t, application, "/v1/settings/library", map[string]any{"library_dir": application.Backup})
+	if recorder.Code != http.StatusBadRequest {
+		t.Fatal(recorder.Code, recorder.Body.String())
+	}
+	startSearchJob(t, application, "pub-link")
+	wav := pcmWAV(24)
+	audio := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "audio/wav")
+		_, _ = w.Write(wav)
+	}))
+	defer audio.Close()
+	posted := postCode(t, application, "/v1/audio/publish", map[string]any{
+		"job_id": "pub-link", "source_url": audio.URL, "artist": "Artist", "album": "Album", "title": "Title", "track": 1,
+	})
+	if posted.Code != http.StatusOK {
+		t.Fatal(posted.Code, posted.Body.String())
+	}
+	waitJob(t, application, "pub-link", "completed")
+	published, err := os.ReadFile(filepath.Join(real, "Artist", "Album", "01 Title.wav"))
+	if err != nil || !bytes.Equal(wav, published) {
+		t.Fatal(err)
+	}
+}
+
 func TestMusicServersNotifiedOnPublish(t *testing.T) {
 	var plexSections, plexRefresh, navidromePing, navidromeScan atomic.Int32
 	plex := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

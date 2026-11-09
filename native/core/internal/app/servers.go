@@ -3,12 +3,14 @@
 // Python SetupWizard page 1 sets the library directory and page 7 the
 // music servers (Plex / Navidrome). The Python rules mirrored here:
 //
-//   - Library: an absolute path, never the filesystem root, no
-//     symlink/junction/reparse chain on the path (library/paths.py
-//     reject_reparse_chain), and never overlapping the state or backup
-//     directories (config/schema.py validate_roots). The directory is
-//     created at save time (setup.py library.mkdir). There is no
-//     whole-library migration: Python's storage_migration only moves
+//   - Library: an absolute path, never the filesystem root, and never
+//     overlapping the state or backup directories (config/schema.py
+//     validate_roots). Symlinks are resolved first rather than rejected
+//     the way Python's reject_reparse_chain does: on macOS /var is a
+//     symlink to /private/var, so rejecting any symlink would reject
+//     every path under /var/folders. The resolved target is what the
+//     overlap checks validate. The directory is created at save time
+//     (setup.py library.mkdir). There is no whole-library migration: Python's storage_migration only moves
 //     in-flight downloads, never published audio (see the spec file). Go
 //     does the same — changing the directory only moves where NEW audio
 //     is published; existing records keep their absolute paths and keep
@@ -122,11 +124,38 @@ func (a *App) saveLibrarySettings(in librarySettings) (librarySettings, error) {
 	return in, nil
 }
 
-// validateLibraryDir checks a library directory the Python way: absolute,
-// not the filesystem root, no symlink on the existing chain, and never
-// equal to, containing, or inside the backup directory, and never equal
-// to or containing the state directory. (Being a new subdirectory of the
-// state directory is allowed: the default library lives there.)
+// resolveExisting resolves the longest existing ancestor of path with
+// EvalSymlinks and appends the non-existent remainder lexically.
+// System prefixes are symlinks by design — macOS /var points at
+// /private/var, so every path under the CI temp dir passes through one —
+// and must be resolved, not rejected. This is the same lesson as
+// resolveInDir (Phase 3): a symlinked parent is a spelling, not a scope
+// escape. A user symlink is followed the same way, and the resolved
+// target is what the overlap checks below validate.
+func resolveExisting(path string) string {
+	for current := path; ; current = filepath.Dir(current) {
+		if resolved, err := filepath.EvalSymlinks(current); err == nil {
+			if rel, err := filepath.Rel(current, path); err == nil {
+				return filepath.Join(resolved, rel)
+			}
+			return resolved
+		}
+		parent := filepath.Dir(current)
+		if parent == current {
+			return path
+		}
+	}
+}
+
+// validateLibraryDir checks a library directory: absolute, not the
+// filesystem root, and never equal to, containing, or inside the state
+// or backup directories — all compared on resolved paths. (Being a new
+// subdirectory of the state directory is allowed: the default library
+// lives there.) This deliberately differs from Python's
+// reject_reparse_chain, which rejects any symlink in the chain: on
+// macOS that would reject every path under /var/folders, including the
+// test temp dir. Resolving first keeps the safety property — the real
+// location is what gets validated — without rejecting system prefixes.
 func (a *App) validateLibraryDir(dir string) error {
 	abs, err := filepath.Abs(dir)
 	if err != nil {
@@ -135,20 +164,7 @@ func (a *App) validateLibraryDir(dir string) error {
 	if abs == filepath.Dir(abs) {
 		return errors.New("请选择音乐库子目录，不使用整个磁盘根目录")
 	}
-	for current := abs; ; {
-		info, err := os.Lstat(current)
-		if err == nil && info.Mode()&os.ModeSymlink != 0 {
-			return errors.New("路径含 symlink/junction，须人工确认范围")
-		}
-		if err != nil && !os.IsNotExist(err) {
-			return err
-		}
-		parent := filepath.Dir(current)
-		if parent == current {
-			break
-		}
-		current = parent
-	}
+	resolved := resolveExisting(abs)
 	state, err := filepath.Abs(a.Dir)
 	if err != nil {
 		return err
@@ -157,13 +173,15 @@ func (a *App) validateLibraryDir(dir string) error {
 	if err != nil {
 		return err
 	}
-	if abs == state || abs == backup {
+	resolvedState := resolveExisting(state)
+	resolvedBackup := resolveExisting(backup)
+	if resolved == resolvedState || resolved == resolvedBackup {
 		return errors.New("音乐库目录不能与状态目录或备份目录相同")
 	}
-	if insideDir(abs, state) || insideDir(abs, backup) {
+	if insideDir(resolved, resolvedState) || insideDir(resolved, resolvedBackup) {
 		return errors.New("音乐库目录不能包含状态目录或备份目录")
 	}
-	if insideDir(backup, abs) {
+	if insideDir(resolvedBackup, resolved) {
 		return errors.New("音乐库目录不能位于备份目录内")
 	}
 	return nil

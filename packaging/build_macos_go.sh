@@ -99,7 +99,13 @@ rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cd "$ROOT/native/core"
 CGO_ENABLED=0 go build -trimpath -ldflags "$LDFLAGS" -o "$CORE" ./cmd/musicops
-CGO_ENABLED=1 go build -trimpath -ldflags "$LDFLAGS" -o "$DESKTOP" ./cmd/musicops-desktop
+# Wails v2 only compiles the real desktop shell with the production tag;
+# without it the binary embeds a stub that fails at launch ("Wails
+# applications will not build without the correct build tags", as shipped
+# broken in 0.4.33 Windows). -tags desktop,production matches `wails build`.
+CGO_ENABLED=1 go build -tags desktop,production -trimpath -ldflags "$LDFLAGS" -o "$DESKTOP" ./cmd/musicops-desktop
+# Regression guard for the 0.4.33 break: the stub string must not be present.
+if grep -q 'will not build without the correct build tags' "$DESKTOP"; then die "desktop shell was built without the Wails production tag"; fi
 cd "$ROOT"
 [ -x "$CORE" ] && [ -x "$DESKTOP" ] || die "packaged executables missing or not executable"
 /usr/bin/lipo "$CORE" -verify_arch "$ARCH"

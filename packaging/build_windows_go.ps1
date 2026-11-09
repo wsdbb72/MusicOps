@@ -103,8 +103,13 @@ try {
     $env:GOOS='windows'; $env:GOARCH='amd64'; $env:CGO_ENABLED='0'
     & $Go build -trimpath -ldflags $ldflags -o (Join-Path $bundleRoot 'musicops-core.exe') ./cmd/musicops
     if ($LASTEXITCODE -ne 0) { throw 'Go core build failed' }
-    & $Go build -trimpath -ldflags $ldflags -o (Join-Path $bundleRoot 'MusicOps.exe') ./cmd/musicops-desktop
+    # Wails v2 only compiles the real desktop shell with the production tag;
+    # without it the binary embeds a stub that shows "Wails applications will
+    # not build without the correct build tags" at launch (0.4.33 shipped
+    # broken this way). -tags desktop,production matches `wails build`.
+    & $Go build -tags desktop,production -trimpath -ldflags $ldflags -o (Join-Path $bundleRoot 'MusicOps.exe') ./cmd/musicops-desktop
     if ($LASTEXITCODE -ne 0) { throw 'Go desktop shell build failed' }
+    if (Select-String -LiteralPath (Join-Path $bundleRoot 'MusicOps.exe') -Pattern 'will not build without the correct build tags' -SimpleMatch -Quiet) { throw 'Desktop shell was built without the Wails production tag' }
 } finally {
     Remove-Item -LiteralPath $coreSyso,$shellSyso -Force -ErrorAction SilentlyContinue
     Pop-Location

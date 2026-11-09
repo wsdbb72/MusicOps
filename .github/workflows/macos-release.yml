@@ -9,6 +9,10 @@ on:
         description: 'Exact source commit supplied by the desktop release workflow'
         type: string
         required: true
+      version:
+        description: 'Release version (X.Y.Z) supplied by the desktop release workflow'
+        type: string
+        required: true
   workflow_dispatch:
     inputs:
       ref:
@@ -16,6 +20,11 @@ on:
         type: string
         required: false
         default: main
+      version:
+        description: 'Release version (X.Y.Z); empty reads it from pyproject.toml'
+        type: string
+        required: false
+        default: ''
 
 permissions:
   contents: read
@@ -58,6 +67,10 @@ jobs:
         with:
           go-version: '1.26.3'
           cache: false
+      - name: Install ffmpeg for transcode smoke tests
+        shell: bash
+        run: |
+          brew install ffmpeg
       - name: Install reviewed build dependencies
         shell: bash
         env:
@@ -100,18 +113,58 @@ jobs:
           PY
       - name: Build app, verify ad-hoc signatures, run packaged acceptance and archive
         id: native_build
+        shell: bash
         env:
           BUILD_ARCH: ${{ matrix.arch }}
         run: |
           mkdir -p dist/macos/reports
           set -o pipefail
-          python packaging/build_macos.py --arch "$BUILD_ARCH" --output dist/macos 2>&1 | tee dist/macos/reports/native-build.log
+          VERSION="${{ inputs.version }}"
+          if [ -z "$VERSION" ]; then
+            VERSION="$(python3 -c 'import tomllib; print(tomllib.load(open("pyproject.toml","rb"))["project"]["version"])')"
+          fi
+          ./packaging/build_macos_go.sh --version "$VERSION" --arch "$BUILD_ARCH" --output dist/macos 2>&1 | tee dist/macos/reports/native-build.log
       - name: Save a directly readable native diagnostic check
         if: always()
         env:
           GH_TOKEN: ${{ github.token }}
           BUILD_OUTCOME: ${{ steps.native_build.outcome }}
         run: python packaging/publish_ci_diagnostics.py
+      - name: Run native installer acceptance against the built PKG
+        shell: bash
+        env:
+          BUILD_ARCH: ${{ matrix.arch }}
+        run: |
+          set -euo pipefail
+          VERSION="${{ inputs.version }}"
+          if [ -z "$VERSION" ]; then
+            VERSION="$(python3 -c 'import tomllib; print(tomllib.load(open("pyproject.toml","rb"))["project"]["version"])')"
+          fi
+          cd native/core
+          MUSICOPS_SMOKE_PKG="$GITHUB_WORKSPACE/dist/macos/MusicOps-${VERSION}-macOS-${BUILD_ARCH}.pkg" \
+          MUSICOPS_SMOKE_APP="$GITHUB_WORKSPACE/dist/macos/dist/MusicOps.app" \
+          MUSICOPS_SMOKE_WORK="$RUNNER_TEMP/musicops-installer" \
+          MUSICOPS_SMOKE_INSTALLER_REPORT="$GITHUB_WORKSPACE/dist/macos/reports/installer-smoke.json" \
+          go test ./internal/smoke/ -run 'TestInstallerDarwin' -count=1 -v -timeout 20m
+      - name: Merge installer acceptance into build.json
+        shell: python
+        env:
+          BUILD_ARCH: ${{ matrix.arch }}
+          INPUT_VERSION: ${{ inputs.version }}
+        run: |
+          import json, os, pathlib, tomllib
+          version = os.environ['INPUT_VERSION'] or tomllib.loads(pathlib.Path('pyproject.toml').read_text('utf-8'))['project']['version']
+          arch = os.environ['BUILD_ARCH']
+          build = pathlib.Path(f'dist/macos/MusicOps-{version}-macOS-{arch}-build.json')
+          report = json.loads(pathlib.Path('dist/macos/reports/installer-smoke.json').read_text('utf-8'))
+          if report.get('passed') is not True or len(report.get('checks', {})) != 11 or not all(report['checks'].values()):
+              raise SystemExit('macOS installer acceptance did not pass all 11 checks')
+          data = json.loads(build.read_text('utf-8'))
+          if data.get('version') != version:
+              raise SystemExit('build.json version mismatch')
+          data['installer_smoke_passed'] = True
+          data['installer_smoke_checks'] = report['checks']
+          build.write_text(json.dumps(data, ensure_ascii=False, indent=2) + '\n', 'utf-8')
       - name: Save tested release files
         uses: actions/upload-artifact@v7
         with:
@@ -126,7 +179,7 @@ jobs:
           if-no-files-found: error
           compression-level: 0
           retention-days: 30
-      - name: Save native acceptance report and screenshots
+      - name: Save native acceptance report and diagnostics
         timeout-minutes: 3
         if: always()
         uses: actions/upload-artifact@v7
@@ -136,8 +189,7 @@ jobs:
             dist/macos/reports/*.json
             dist/macos/reports/*.xml
             dist/macos/reports/*.log
-            dist/macos/smoke/*window.png
-            dist/macos/installer-smoke/installed-app/*window.png
+            dist/macos/reports/*.txt
           if-no-files-found: ignore
           retention-days: 14
       - name: Delete only the temporary test keychain

@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -119,13 +120,25 @@ func TestWindowsInstaller(t *testing.T) {
 			t.Fatalf("expected one installer, got %v (%v)", matches, err)
 		}
 		installerExe = matches[0]
-	} else if version == "" {
+	} else {
 		// Prebuilt installer: MusicOps-<version>-Setup.exe.
-		base := filepath.Base(installerExe)
-		version = strings.TrimSuffix(strings.TrimPrefix(base, "MusicOps-"), "-Setup.exe")
-		if version == base {
-			version = "0.0.0-dev"
+		if version == "" {
+			base := filepath.Base(installerExe)
+			version = strings.TrimSuffix(strings.TrimPrefix(base, "MusicOps-"), "-Setup.exe")
+			if version == base {
+				version = "0.0.0-dev"
+			}
 		}
+		// The prebuilt installer is the shipping build, compiled with
+		// the .iss default AppIdentity rather than the QA identity
+		// above, so the uninstall key it creates is
+		// <AppIdentity>_is1. Read the identity from the .iss (resolved
+		// from the bundle path: the bundle is
+		// <repo>/dist/MusicOps-Windows) so the upgrade step below opens
+		// the key the installer actually wrote. On a CI runner there
+		// is no production install to disturb, and the uninstall step
+		// at the end removes the key again.
+		identity = appIdentityFromISS(t, bundle)
 	}
 
 	runInstaller := func(dir string) (int, string) {
@@ -159,7 +172,7 @@ func TestWindowsInstaller(t *testing.T) {
 		t.Fatalf("fresh install exited %d", code)
 	}
 	checks["fresh_install"] = true
-	for _, name := range []string{"MusicOps.exe", "musicops-core.exe", "用户操作说明.md", "运维与恢复说明.md", "manifest.json"} {
+	for _, name := range []string{"MusicOps.exe", "musicops-core.exe", "LICENSE", "用户操作说明.md", "运维与恢复说明.md", "manifest.json"} {
 		if sha(filepath.Join(target, name)) != sha(filepath.Join(bundle, name)) {
 			t.Fatalf("installed %s does not match the bundle", name)
 		}
@@ -301,4 +314,21 @@ func randomBytes(t *testing.T, n int) []byte {
 		t.Fatal(err)
 	}
 	return buf
+}
+
+// appIdentityFromISS reads the default AppIdentity from the release .iss
+// next to the bundle's repo root (the bundle is
+// <repo>/dist/MusicOps-Windows).
+func appIdentityFromISS(t *testing.T, bundle string) string {
+	t.Helper()
+	repoRoot := filepath.Dir(filepath.Dir(bundle))
+	data, err := os.ReadFile(filepath.Join(repoRoot, "packaging", "MusicOps-go.iss"))
+	if err != nil {
+		t.Fatalf("cannot read MusicOps-go.iss: %v", err)
+	}
+	m := regexp.MustCompile(`(?m)^\s*#define\s+AppIdentity\s+"([^"]+)"`).FindSubmatch(data)
+	if m == nil {
+		t.Fatal("MusicOps-go.iss has no #define AppIdentity")
+	}
+	return string(m[1])
 }

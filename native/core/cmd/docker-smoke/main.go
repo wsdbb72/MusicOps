@@ -123,6 +123,23 @@ func (r *runner) run() int {
 			return 1
 		}
 	}
+	// The container runs as uid 1000, not as the host user that owns
+	// these throwaway dirs: a 0700 bind mount is not even traversable
+	// for the container, and the entrypoint's mkdir -p then fails
+	// naming /config itself (release run 42603332223). Make the temp
+	// root traversable and the bind mounts world-writable; the dirs
+	// are deleted after the run, and the generated web password file
+	// itself is still created 0600 by the entrypoint.
+	if err := os.Chmod(tmp, 0o755); err != nil {
+		fmt.Fprintf(os.Stderr, "docker-smoke: cannot chmod %s: %v\n", tmp, err)
+		return 1
+	}
+	for _, dir := range []string{r.configDir, r.mediaDir} {
+		if err := os.Chmod(dir, 0o777); err != nil {
+			fmt.Fprintf(os.Stderr, "docker-smoke: cannot chmod %s: %v\n", dir, err)
+			return 1
+		}
+	}
 	r.name = containerNameFor(os.Getpid())
 	if !r.opts.keep {
 		defer func() {

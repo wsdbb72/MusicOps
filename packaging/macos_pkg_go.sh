@@ -94,9 +94,13 @@ COMPONENT="$BUILD_DIR/MusicOps-component.pkg"
 # a broken component (bad scripts, bad Distribution reference) must fail
 # here, not after the distribution package is produced.
 CHOICES="$(/usr/sbin/installer -showChoicesXML -pkg "$COMPONENT" -target /)"
+# The component package has no Distribution.xml: its choice id is the
+# package identifier (com.wsdbb72.MusicOps.pkg), not the lowercase
+# "musicops" choice id the distribution defines below. Matching
+# "musicops" here can never succeed (release run 42603332223).
 case "$CHOICES" in
-  *musicops*) ;;
-  *) die "installer -showChoicesXML cannot read the component package (no musicops choice)" ;;
+  *"$IDENTIFIER"*) ;;
+  *) die "installer -showChoicesXML cannot read the component package (no $IDENTIFIER choice)" ;;
 esac
 
 rm -f "$PKG"

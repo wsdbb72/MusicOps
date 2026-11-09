@@ -22,10 +22,9 @@ func (a *App) acquire(ctx context.Context, execution *scheduler.Execution, paylo
 	if err := a.cancelled(ctx, execution); err != nil {
 		return scheduler.Outcome{}, err
 	}
-	plan, err := decodePlan(payload)
-	if err != nil {
-		return scheduler.Outcome{}, err
-	}
+	// The validating stage task carries a publish payload, not a search
+	// plan, so the task and job are read before the plan is decoded: the
+	// validating branch below never decodes a search plan at all.
 	held := execution.Token()
 	task, err := a.tasks.Get(held.ID)
 	if err != nil || task == nil {
@@ -35,9 +34,22 @@ func (a *App) acquire(ctx context.Context, execution *scheduler.Execution, paylo
 	if err != nil || job == nil {
 		return scheduler.Outcome{}, err
 	}
+	if job.Stage == "validating" {
+		// The download executor advanced the job from downloading to
+		// validating and queued this task with the ingest receipts; see
+		// finishValidating in download.go.
+		return a.finishValidating(execution, held, *job, payload)
+	}
+	plan, err := decodePlan(payload)
+	if err != nil {
+		return scheduler.Outcome{}, err
+	}
 	defer a.forget(plan.RootJobID)
-	if job.Stage == "fallback" || job.Stage == "downloading" {
-		return a.finishAcquire(held, *job, "candidate", "流媒体或音频获取尚未接入；种子保存不等于已下载、尚未入库", "", nil)
+	if job.Stage == "fallback" {
+		return a.acquireFallback(ctx, execution, held, *job, plan)
+	}
+	if job.Stage == "downloading" {
+		return a.finishAcquire(held, *job, "candidate", "下载尚未接入；种子保存不等于已下载、尚未入库", "", nil)
 	}
 	if job.Stage != "requesting" {
 		return a.finishAcquire(held, *job, "candidate", "当前阶段不能获取；尚未下载、尚未入库", "", nil)
@@ -46,7 +58,7 @@ func (a *App) acquire(ctx context.Context, execution *scheduler.Execution, paylo
 	if !ok || site == "" || site != plan.SelectedSite || resource == "" {
 		return a.finishAcquire(held, *job, "candidate", "没有唯一候选，不能获取；尚未下载、尚未入库", "", nil)
 	}
-	if a.secret(plan.RootJobID) == "" {
+	if a.cookieFor(plan.RootJobID, site) == "" {
 		return a.finishAcquire(held, *job, "candidate", "没有可用的登录状态，不能获取；尚未下载、尚未入库", "", nil)
 	}
 	decision, err := a.readEvidence(ctx, plan, site, resource)
@@ -67,7 +79,7 @@ func (a *App) acquire(ctx context.Context, execution *scheduler.Execution, paylo
 }
 
 func (a *App) readEvidence(ctx context.Context, plan SearchPlan, site, resource string) (sitefree.Decision, error) {
-	query := trackersearch.Query{Site: site, Cookie: a.secret(plan.RootJobID), Synthetic: plan.Synthetic, BaseURL: plan.BaseURL}
+	query := trackersearch.Query{Site: site, Cookie: a.cookieFor(plan.RootJobID, site), Synthetic: plan.Synthetic, BaseURL: plan.BaseURL}
 	var bodies [][]byte
 	if site == "open.cd" {
 		body, err := a.searcher.ReadDetail(ctx, query, "/details.php", url.Values{"id": {resource}})
@@ -96,7 +108,7 @@ func (a *App) acquireWithToken(ctx context.Context, execution *scheduler.Executi
 	if site != "dicmusic" && site != "orpheus" {
 		return a.finishAcquire(held, job, "token", "该站不使用这条令牌账本；尚未下载、尚未入库", "", nil)
 	}
-	observation, _, err := a.observeBalance(ctx, site, a.secret(plan.RootJobID), plan.Synthetic, plan.BaseURL)
+	observation, _, err := a.observeBalance(ctx, site, a.cookieFor(plan.RootJobID, site), plan.Synthetic, plan.BaseURL)
 	if err != nil {
 		return a.finishAcquire(held, job, "token", "余额读取失败，未发令牌请求；尚未下载、尚未入库", observation.ErrorClass, nil)
 	}
@@ -116,7 +128,7 @@ func (a *App) acquireWithToken(ctx context.Context, execution *scheduler.Executi
 		return a.finishAcquire(held, job, "token", "页面令牌数与账号余额不一致，未发令牌请求；尚未下载、尚未入库", "balance_conflict", nil)
 	}
 	quote := tokenledger.Quote{
-		Site: site, AccountID: observation.AccountID, CookieID: tokenledger.Fingerprint(a.secret(plan.RootJobID)),
+		Site: site, AccountID: observation.AccountID, CookieID: tokenledger.Fingerprint(a.cookieFor(plan.RootJobID, site)),
 		ResourceID: resource, RequestID: job.ID, Cost: decision.TokenCost,
 		SafetyMargin: plan.SafetyMargin, BudgetRef: job.BatchID, Scene: job.Scene,
 		IdentityConfirmed: plan.Identity.IdentityConfirmed, StreamingEnabled: plan.StreamingEnabled,
@@ -142,6 +154,31 @@ func (a *App) acquireWithToken(ctx context.Context, execution *scheduler.Executi
 	if fetchErr != nil {
 		note = "获取未完成，需要核对是否已消耗"
 	}
+	// A registered spend source can settle the reservation right here instead
+	// of leaving it REQUEST_UNKNOWN: the proof must match the reservation's
+	// account, resource and request, or Reconcile leaves it uncertain and
+	// the flow below keeps the old behaviour. A source error is also not a
+	// proof, so it falls through the same way.
+	var receiptPtr *torrentfetch.Receipt
+	if fetchErr == nil {
+		receiptPtr = &receipt
+	}
+	if proof, found := a.confirmSpend(ctx, site, job.ID); found {
+		if reconciled, err := a.ledger.Reconcile(a.now(), site, proof); err == nil && reconciled.Class != tokenledger.ClassUncertain {
+			switch proof.State {
+			case "CONSUMED":
+				if fetchErr != nil {
+					return a.finishAcquire(held, job, "token", "令牌已确认消耗，但获取未完成；尚未下载、尚未入库", "SPEND_CONFIRMED", nil)
+				}
+				return a.finishAcquire(held, job, "token", "令牌已确认消耗，种子已保存；尚未下载、尚未入库", "SPEND_CONFIRMED", receiptPtr)
+			case "NOT_CONSUMED":
+				if fetchErr != nil {
+					return a.finishAcquire(held, job, "token", "令牌未消耗，但获取未完成；尚未下载、尚未入库", "SPEND_NOT_CONSUMED", nil)
+				}
+				return a.finishAcquire(held, job, "token", "令牌未消耗，种子已保存；尚未下载、尚未入库", "SPEND_NOT_CONSUMED", receiptPtr)
+			}
+		}
+	}
 	if _, err = a.ledger.Advance(a.now(), site, job.ID, tokenledger.StateRequestUnknown, note); err != nil {
 		return scheduler.Outcome{}, err
 	}
@@ -149,6 +186,21 @@ func (a *App) acquireWithToken(ctx context.Context, execution *scheduler.Executi
 		return a.finishAcquire(held, job, "token", "获取未完成，令牌状态待对账；尚未下载、尚未入库", "REQUEST_UNKNOWN", nil)
 	}
 	return a.finishAcquire(held, job, "token", "种子字节已保存，免费是否生效尚未对账；尚未下载、尚未入库", "REQUEST_UNKNOWN", &receipt)
+}
+
+// confirmSpend asks the registered spend source for a correlated charge
+// record for this request. It returns false when there is no source, no
+// record, or the source failed: none of those is a proof, and the caller
+// keeps the reservation REQUEST_UNKNOWN.
+func (a *App) confirmSpend(ctx context.Context, site, requestID string) (tokenledger.SpendProof, bool) {
+	if a.spendSource == nil {
+		return tokenledger.SpendProof{}, false
+	}
+	proof, found, err := a.spendSource.Spend(ctx, site, requestID)
+	if err != nil || !found {
+		return tokenledger.SpendProof{}, false
+	}
+	return proof, true
 }
 
 func (a *App) observeBalance(ctx context.Context, site, cookie string, synthetic bool, base string) (tokenledger.Observation, bool, error) {
@@ -252,7 +304,7 @@ func (a *App) fetchTorrent(ctx context.Context, execution *scheduler.Execution, 
 		return torrentfetch.Receipt{}, err
 	}
 	request := torrentfetch.Request{
-		Site: site, Resource: resource, Cookie: a.secret(plan.RootJobID), Synthetic: plan.Synthetic, BaseURL: plan.BaseURL,
+		Site: site, Resource: resource, Cookie: a.cookieFor(plan.RootJobID, site), Synthetic: plan.Synthetic, BaseURL: plan.BaseURL,
 		UseToken: useToken, Directory: filepath.Join(a.Dir, "torrents"),
 	}
 	switch site {
@@ -275,7 +327,7 @@ func (a *App) finishAcquire(held taskrepo.Token, job workflow.Job, review, messa
 			return scheduler.Outcome{}, err
 		}
 		complete.Evidence = []workflow.EvidenceInput{{
-			ID: evidenceID(held.ID, receipt.Site), Kind: "api", Source: receipt.Site, Payload: body,
+			ID: evidenceID(held.ID, held.Fence, receipt.Site), Kind: "api", Source: receipt.Site, Payload: body,
 		}}
 	}
 	if _, err := a.flows.Complete(intentID("acquire", held.ID, held.Fence), held, complete); err != nil {

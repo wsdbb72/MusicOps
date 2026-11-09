@@ -349,3 +349,110 @@ func TestCASFailureRemovesOrphanFile(t *testing.T) {
 		t.Fatal("orphaned library file left behind", dest)
 	}
 }
+
+func TestRelocateUpdatesRecordAndRefusesChangedBytes(t *testing.T) {
+	engine, incoming, library := openRelease(t)
+	body := wav(16)
+	writeSource(t, incoming, "song.wav", body)
+	got, err := Release(context.Background(), engine, sample(incoming, library, "song.wav"))
+	if err != nil || !got.LibraryPublished {
+		t.Fatal(got, err)
+	}
+	published := filepath.Join(library, "Artist", "Album", "01 Title.wav")
+	moved := filepath.Join(library, "Artist", "Album", "01 Title (moved).wav")
+	if err := os.Rename(published, moved); err != nil {
+		t.Fatal(err)
+	}
+	if err := Relocate(engine, "rel-1", moved); err != nil {
+		t.Fatal(err)
+	}
+	entries, err := List(engine)
+	if err != nil || len(entries) != 1 || entries[0].File != "Artist/Album/01 Title (moved).wav" {
+		t.Fatal(entries, err)
+	}
+	// Verify still attests the moved file.
+	if _, err := Verify(engine, "rel-1"); err != nil {
+		t.Fatal(err)
+	}
+	// A destination holding different bytes is refused.
+	other := filepath.Join(library, "Artist", "Album", "01 Title (other).wav")
+	if err := os.WriteFile(other, []byte("different bytes"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := Relocate(engine, "rel-1", other); err == nil {
+		t.Fatal("relocate to different bytes accepted")
+	}
+	// A missing record is refused.
+	if err := Relocate(engine, "rel-missing", moved); !errors.Is(err, ErrMissing) {
+		t.Fatal(err)
+	}
+}
+
+func TestRealFLACPublishes(t *testing.T) {
+	if _, err := exec.LookPath("ffmpeg"); err != nil {
+		t.Skip("ffmpeg not available: " + err.Error())
+	}
+	engine, incoming, library := openRelease(t)
+	flac := filepath.Join(incoming, "real.flac")
+	cmd := exec.Command("ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
+		"-f", "lavfi", "-i", "sine=frequency=440:duration=1", "-c:a", "flac", flac)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("ffmpeg generate: %v %s", err, out)
+	}
+	got, err := Release(context.Background(), engine, sample(incoming, library, "real.flac"))
+	if err != nil || !got.LibraryPublished || got.Format != "flac" {
+		t.Fatal(got, err)
+	}
+	// The same file with a rewritten tag block still publishes: the
+	// metadata chain is longer than STREAMINFO alone.
+	if _, err := os.Stat(filepath.Join(library, "Artist", "Album", "01 Title.flac")); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestRecordPublished(t *testing.T) {
+	engine, _, library := openRelease(t)
+	placed := filepath.Join(library, "Artist", "Album", "01 Title.wav")
+	if err := os.MkdirAll(filepath.Dir(placed), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(placed, wav(32), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	input := PublishedInput{
+		RequestID: "pub-1", RootID: "root-1", Artist: "Artist", Album: "Album", Title: "Title", Track: 1,
+		Path: placed, Library: library,
+	}
+	got, err := RecordPublished(context.Background(), engine, input)
+	if err != nil || !got.LibraryPublished || got.Format != "wav" || got.Origin != "controlled_audio" {
+		t.Fatal(got, err)
+	}
+	entries, err := List(engine)
+	if err != nil || len(entries) != 1 || entries[0].RequestID != "pub-1" {
+		t.Fatal(entries, err)
+	}
+	// A second call with the same request ID replays the stored receipt.
+	replayed, err := RecordPublished(context.Background(), engine, input)
+	if err != nil || !replayed.Replayed || replayed.SHA256 != got.SHA256 {
+		t.Fatal(replayed, err)
+	}
+	// A different request for the same (root, track) slot is a conflict,
+	// and a file that is not the organised library file for the track is
+	// refused outright.
+	if _, err := RecordPublished(context.Background(), engine, PublishedInput{
+		RequestID: "pub-2", RootID: "root-1", Artist: "Artist", Album: "Album", Title: "Title", Track: 1,
+		Path: placed, Library: library,
+	}); err == nil {
+		t.Fatal("same slot accepted twice")
+	}
+	other := filepath.Join(library, "Artist", "Album", "99 Other.wav")
+	if err := os.WriteFile(other, wav(32), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := RecordPublished(context.Background(), engine, PublishedInput{
+		RequestID: "pub-3", RootID: "root-1", Artist: "Artist", Album: "Album", Title: "Title", Track: 1,
+		Path: other, Library: library,
+	}); err == nil {
+		t.Fatal("unorganised path accepted")
+	}
+}

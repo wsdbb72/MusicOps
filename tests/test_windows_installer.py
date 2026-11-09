@@ -1,6 +1,9 @@
 """Exercise real Inno installation/upgrade behavior using an isolated test AppId.
 
 The tiny payload is a synthetic .NET executable, never a user's MusicOps process.
+The bundle is the Go layout (MusicOps.exe shell + musicops-core.exe core, no
+Python _internal, no MusicOps-worker.exe) and the installer is
+packaging/MusicOps-go.iss, compiled with /DAppVersion=<test version>.
 Set INNO_ISCC to an Inno Setup 6.5+ compiler to run these Windows-only checks.
 """
 from __future__ import annotations
@@ -35,13 +38,17 @@ def tiny_bundle(tmp_path_factory):
     source = directory/'Synthetic.cs'
     source.write_text('using System.Threading; class Synthetic { static void Main() { Thread.Sleep(60000); } }', 'utf-8')
     bundle = directory/'bundle'
-    (bundle/'_internal/musicops/assets').mkdir(parents=True)
+    (bundle/'tools/services').mkdir(parents=True)
     (bundle/'licenses').mkdir()
     result = run_process([csc, '/nologo', '/target:winexe', '/out:'+str(bundle/'MusicOps.exe'), source])
     assert result.returncode == 0, result.stdout+result.stderr
-    shutil.copyfile(bundle/'MusicOps.exe', bundle/'MusicOps-worker.exe')
-    shutil.copyfile(ROOT/'src/musicops/assets/musicops.ico', bundle/'_internal/musicops/assets/musicops.ico')
-    for name in ('LICENSE', 'THIRD-PARTY-NOTICES.md', '启动说明.txt', 'licenses/fixture.txt', '_internal/payload.txt'):
+    # Go layout: the shell and the core are two distinct executables; the
+    # installer must never ship the legacy Python worker or _internal.
+    # The core is musicops-core.exe, not musicops.exe: Windows is
+    # case-insensitive, so musicops.exe would be the same file as
+    # MusicOps.exe and shutil.copyfile would raise SameFileError.
+    shutil.copyfile(bundle/'MusicOps.exe', bundle/'musicops-core.exe')
+    for name in ('LICENSE', 'THIRD-PARTY-NOTICES.md', '启动说明.txt', 'licenses/fixture.txt', 'tools/ffmpeg.exe'):
         (bundle/name).write_text('new synthetic payload', 'utf-8')
     return Path(compiler), bundle
 
@@ -79,8 +86,10 @@ def installation(tiny_bundle, tmp_path):
     # Inno hashes long application IDs into uninstall-key names. Keep this short
     # so the test exercises the same literal registration scheme as production.
     identity = 'MusicOps.Test.'+uuid.uuid4().hex[:12]
-    result = run_process([compiler, '/Q', '/DAppIdentity='+identity, '/DBundleDir='+str(bundle),
-                          '/O'+str(tmp_path/'installer'), ROOT/'packaging/MusicOps.iss'])
+    # /DAppVersion=9.9.9 is a synthetic test version: above the 0.3.0 the
+    # upgrade test fakes, below the 99.0.0 the downgrade test fakes.
+    result = run_process([compiler, '/Q', '/DAppIdentity='+identity, '/DAppVersion=9.9.9', '/DBundleDir='+str(bundle),
+                          '/O'+str(tmp_path/'installer'), ROOT/'packaging/MusicOps-go.iss'])
     assert result.returncode == 0, result.stdout+result.stderr
     instance = Installation(next((tmp_path/'installer').glob('*-Setup.exe')), tmp_path/'app', identity)
     try:
@@ -120,12 +129,14 @@ def test_real_fresh_install_then_detected_update_preserves_data_and_location(ins
     code, log = app.run(directory=app.target)
     assert code == 0 and 'MusicOps install mode=fresh' in log
     saved = preserve_user_data(app.target)
-    (app.target/'_internal/payload.txt').write_text('obsolete payload', 'utf-8')
+    # tools/ffmpeg.exe is a bundled file the upgrade must replace; the
+    # preserved tools/custom-tool.exe in preserve_user_data must survive.
+    (app.target/'tools/ffmpeg.exe').write_text('obsolete payload', 'utf-8')
     app.registry('DisplayVersion', '0.3.0')
     code, log = app.run()  # No /DIR: detection must find the first install.
     assert code == 0 and 'MusicOps install mode=upgrade; detected version=0.3.0' in log
     assert Path(app.registry('InstallLocation')).resolve() == app.target.resolve()
-    assert (app.target/'_internal/payload.txt').read_text('utf-8') == 'new synthetic payload'
+    assert (app.target/'tools/ffmpeg.exe').read_text('utf-8') == 'new synthetic payload'
     assert_preserved(app.target, saved)
 
 
@@ -143,7 +154,7 @@ def test_downgrade_is_refused_before_replacing_files(installation):
     app = installation
     assert app.run(directory=app.target)[0] == 0
     app.registry('DisplayVersion', '99.0.0')
-    sentinel = app.target/'_internal/payload.txt'
+    sentinel = app.target/'tools/ffmpeg.exe'
     sentinel.write_text('newer application payload', 'utf-8')
     assert app.run()[0] != 0
     assert sentinel.read_text('utf-8') == 'newer application payload'
@@ -154,7 +165,8 @@ def test_running_worker_blocks_update_without_terminating_it(installation):
     app = installation
     assert app.run(directory=app.target)[0] == 0
     saved = preserve_user_data(app.target)
-    exe = app.target/'MusicOps-worker.exe'
+    # The Go core is the long-running process the installer must not kill.
+    exe = app.target/'musicops-core.exe'
     before = hashlib.sha256(exe.read_bytes()).digest()
     worker = subprocess.Popen([str(exe)], creationflags=subprocess.CREATE_NO_WINDOW)
     try:

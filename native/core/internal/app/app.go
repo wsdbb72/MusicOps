@@ -5,6 +5,8 @@ package app
 import (
 	"context"
 	"errors"
+	"net/http"
+	"path/filepath"
 	"sync"
 	"time"
 
@@ -14,6 +16,7 @@ import (
 	"github.com/wsdbb72/MusicOps/native/core/internal/taskrepo"
 	"github.com/wsdbb72/MusicOps/native/core/internal/tokenledger"
 	"github.com/wsdbb72/MusicOps/native/core/internal/trackersearch"
+	"github.com/wsdbb72/MusicOps/native/core/internal/vault"
 	"github.com/wsdbb72/MusicOps/native/core/internal/workflow"
 )
 
@@ -28,12 +31,24 @@ type App struct {
 	runner      *scheduler.Coordinator
 	searcher    *trackersearch.Client
 	ledger      *tokenledger.Ledger
+	spendSource tokenledger.SpendSource
 	reviews     *reviewai.Cache
 	reviewModel reviewai.Completer
-	now         func() time.Time
-	Wait        func(context.Context, time.Duration) error
-	mu          sync.Mutex
-	secrets     map[string]string
+	// vault is the profile credential store. Its base is the profile
+	// directory: the state directory is <profile>/state/native, so the
+	// vault lives two levels up. Keys, cookies and tokens are only ever
+	// read through it, never from the settings documents.
+	vault *vault.Vault
+	now   func() time.Time
+	Wait  func(context.Context, time.Duration) error
+	// aiHTTPClient overrides the HTTP client the review model and the AI
+	// connection test use. It is nil in production (aiclient.New then
+	// uses http.DefaultClient); tests set it to a fake server's client
+	// so a TLS test server is trusted. The same seam pattern as
+	// searcher.Now and Wait above.
+	aiHTTPClient *http.Client
+	mu           sync.Mutex
+	secrets      map[string]string
 }
 
 // Open creates the native store and starts the scheduler. Torrent bytes are
@@ -47,8 +62,31 @@ func Open(dir, backup, password string) (*App, error) {
 		return nil, err
 	}
 	app := &App{Dir: dir, Backup: backup, password: password, engine: engine, tasks: taskrepo.New(engine), searcher: &trackersearch.Client{}, now: time.Now, secrets: map[string]string{}}
+	// The vault base is the profile directory, two levels above the state
+	// directory (<profile>/state/native). Open only computes the store
+	// path; the platform key is only needed when a credential is actually
+	// read or written, so a profile without a key file still opens.
+	absDir, err := filepath.Abs(dir)
+	if err != nil {
+		engine.Close()
+		return nil, err
+	}
+	app.vault, err = vault.Open(filepath.Dir(filepath.Dir(absDir)))
+	if err != nil {
+		engine.Close()
+		return nil, err
+	}
 	app.ledger = tokenledger.New(engine)
+	// The spend source is a file the operator writes (spend-proofs.jsonl
+	// under the state directory). No file means no proofs and no behaviour
+	// change; a real online ledger would replace this field with a source
+	// that reads its own format.
+	app.spendSource = tokenledger.NewFileSpendSource(filepath.Join(dir, "spend-proofs.jsonl"))
 	app.reviews = reviewai.NewCache(2)
+	// Wire the production review model from the saved AI settings, if any.
+	// A missing or disabled configuration leaves reviewModel nil and the
+	// search executor keeps its local-only classification.
+	app.refreshReviewModel()
 	app.flows = workflow.New(engine, app.tasks)
 	runner, err := scheduler.New(app.tasks, app.handlers(), scheduler.DefaultConfig())
 	if err != nil {
@@ -76,15 +114,18 @@ func Open(dir, backup, password string) (*App, error) {
 	return app, nil
 }
 
-// handlers are the executors this process runs. publish_album stays absent:
-// saving a torrent or a fixture must not be registered as an audio download.
+// handlers are the executors this process runs. publish_album only
+// verifies an already-imported local library record: saving a torrent or a
+// fixture must not be registered as an audio download.
 func (a *App) handlers() map[string]scheduler.Handler {
 	return map[string]scheduler.Handler{
 		workflow.CommandIdentify: a.identify,
 		workflow.CommandSnapshot: a.identify,
 		workflow.CommandSearch:   a.search,
 		workflow.CommandProcess:  a.acquire,
+		workflow.CommandDownload: a.download,
 		workflow.CommandPublish:  a.publish,
+		transcodeCommand:         a.transcode,
 	}
 }
 

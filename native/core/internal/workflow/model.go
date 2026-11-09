@@ -35,6 +35,7 @@ const (
 	cmdRepair   = "repair_album"
 	cmdProcess  = "process_release"
 	cmdPublish  = "publish_album"
+	cmdDownload = "download_release"
 
 	EdgeQueueSearch  = edgeQueueSearch
 	EdgeQueueProcess = edgeQueueProcess
@@ -50,12 +51,16 @@ const (
 	// search/acquire chain: the publish_album executor verifies a library
 	// record before completing the job.
 	CommandPublish = cmdPublish
+	// CommandDownload runs the qBittorrent download for a process job whose
+	// torrent receipt is already stored. It is created only by StartDownload,
+	// never by the search/acquire chain.
+	CommandDownload = cmdDownload
 )
 
 // Commands are durable queue names. The Go application registers identify,
-// search and publish. Download and repair stay unregistered until those
-// effects exist.
-var Commands = []string{cmdPrepare, cmdIdentify, cmdSnapshot, cmdSearch, cmdRepair, cmdProcess, cmdPublish}
+// search, publish and download. Repair stays unregistered until that effect
+// exists.
+var Commands = []string{cmdPrepare, cmdIdentify, cmdSnapshot, cmdSearch, cmdRepair, cmdProcess, cmdPublish, cmdDownload}
 
 var (
 	idPattern     = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9:._-]{0,199}$`)

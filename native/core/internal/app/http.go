@@ -9,6 +9,7 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -30,7 +31,9 @@ const page = `<!doctype html>
 <button type="button" data-view="tasks" aria-current="page">任务</button>
 <button type="button" data-view="queue">队列</button>
 <button type="button" data-view="review">核对</button>
+<button type="button" data-view="search">搜索</button>
 <button type="button" data-view="sites">站点</button>
+<button type="button" data-view="settings">设置</button>
 <button type="button" data-view="library">库</button>
 <button type="button" data-view="logs">日志</button>
 </nav>
@@ -42,6 +45,13 @@ const page = `<!doctype html>
 <button type="button" id="back">返回列表</button>
 <h2 id="detail-title"></h2>
 <dl id="detail-fields"></dl>
+<p id="detail-actions">
+<button type="button" id="pause-job">暂停</button>
+<button type="button" id="resume-job">继续</button>
+<button type="button" id="cancel-job">取消</button>
+<button type="button" id="retry-job">重试</button>
+</p>
+<div id="review-box" class="review-box" hidden></div>
 </section>
 </main>
 <script src="/app.js"></script>
@@ -61,14 +71,64 @@ func (a *App) Handler() http.Handler {
 	mux.HandleFunc("POST /v1/archive/rollback", a.rollbackArchive)
 	mux.HandleFunc("GET /v1/archive/record", a.archiveRecord)
 	mux.HandleFunc("POST /v1/search", a.startSearch)
+	mux.HandleFunc("POST /v1/catalog/identify", a.identifyCatalog)
 	mux.HandleFunc("POST /v1/audio/release", a.releaseAudio)
+	mux.HandleFunc("POST /v1/audio/publish", a.publishAudio)
 	mux.HandleFunc("POST /v1/audio/incoming", a.uploadIncoming)
+	mux.HandleFunc("POST /v1/library/transcode", a.transcodeEnqueue)
+	mux.HandleFunc("GET /v1/library/transcode", a.transcodeList)
+	mux.HandleFunc("POST /v1/library/ncm/decrypt", a.decryptNCM)
+	mux.HandleFunc("GET /v1/library/tags", a.libraryTags)
+	mux.HandleFunc("POST /v1/library/tags", a.saveLibraryTags)
+	mux.HandleFunc("GET /v1/library/lyrics", a.libraryLyrics)
+	mux.HandleFunc("POST /v1/library/lyrics", a.saveLibraryLyrics)
+	mux.HandleFunc("GET /v1/library/duplicates", a.duplicateScan)
+	mux.HandleFunc("POST /v1/library/duplicates/merge", a.duplicateMerge)
+	mux.HandleFunc("POST /v1/library/duplicates/restore", a.duplicateRestore)
+	mux.HandleFunc("GET /v1/library/artist-folders", a.artistFolderPlan)
+	mux.HandleFunc("POST /v1/library/artist-folders", a.artistFolderRelocate)
 	mux.HandleFunc("GET /v1/library", a.library)
 	mux.HandleFunc("GET /v1/logs", a.logs)
 	mux.HandleFunc("GET /v1/sites", a.sites)
 	mux.HandleFunc("POST /v1/sites", a.saveSites)
 	mux.HandleFunc("POST /v1/tokens/recheck", a.recheckToken)
 	mux.HandleFunc("GET /v1/jobs/{id}", a.job)
+	mux.HandleFunc("POST /v1/jobs/{id}/control", a.controlJob)
+	mux.HandleFunc("GET /v1/jobs/{id}/review", a.reviewData)
+	mux.HandleFunc("POST /v1/jobs/{id}/review", a.reviewJob)
+	mux.HandleFunc("POST /v1/jobs/{id}/download", a.downloadJob)
+	mux.HandleFunc("POST /v1/jobs/batch", a.batchJobs)
+	mux.HandleFunc("POST /v1/sites/preflight", a.preflightSite)
+	mux.HandleFunc("GET /v1/settings/download", a.downloadSettings)
+	mux.HandleFunc("POST /v1/settings/download", a.saveDownload)
+	mux.HandleFunc("GET /v1/settings/cookies", a.cookieSettingsHandler)
+	mux.HandleFunc("POST /v1/settings/cookies", a.saveCookie)
+	mux.HandleFunc("GET /v1/settings/ai", a.aiSettingsHandler)
+	mux.HandleFunc("POST /v1/settings/ai", a.saveAI)
+	mux.HandleFunc("POST /v1/settings/ai/test", a.testAI)
+	mux.HandleFunc("GET /v1/settings/qbittorrent", a.qbtSettingsHandler)
+	mux.HandleFunc("POST /v1/settings/qbittorrent", a.saveQBittorrent)
+	mux.HandleFunc("POST /v1/settings/qbittorrent/test", a.testQBittorrent)
+	mux.HandleFunc("GET /v1/settings/solver", a.solverSettingsHandler)
+	mux.HandleFunc("POST /v1/settings/solver", a.saveSolver)
+	mux.HandleFunc("POST /v1/settings/solver/test", a.testSolver)
+	mux.HandleFunc("GET /v1/settings/lyrics", a.lyricsSettingsHandler)
+	mux.HandleFunc("POST /v1/settings/lyrics", a.saveLyrics)
+	mux.HandleFunc("POST /v1/settings/lyrics/test", a.testLyrics)
+	mux.HandleFunc("GET /v1/settings/discogs", a.discogsSettingsHandler)
+	mux.HandleFunc("POST /v1/settings/discogs", a.saveDiscogs)
+	mux.HandleFunc("POST /v1/settings/discogs/test", a.testDiscogs)
+	mux.HandleFunc("GET /v1/settings/library", a.librarySettingsHandler)
+	mux.HandleFunc("POST /v1/settings/library", a.saveLibrary)
+	mux.HandleFunc("GET /v1/settings/servers", a.serverSettingsHandler)
+	mux.HandleFunc("POST /v1/settings/servers/plex", a.savePlex)
+	mux.HandleFunc("POST /v1/settings/servers/plex/test", a.testPlex)
+	mux.HandleFunc("POST /v1/settings/servers/navidrome", a.saveNavidrome)
+	mux.HandleFunc("POST /v1/settings/servers/navidrome/test", a.testNavidrome)
+	mux.HandleFunc("GET /v1/playlists", a.listPlaylists)
+	mux.HandleFunc("POST /v1/playlists", a.savePlaylist)
+	mux.HandleFunc("GET /v1/jobs/{id}/playlist", a.jobPlaylistHandler)
+	mux.HandleFunc("POST /v1/jobs/{id}/playlist", a.saveJobPlaylist)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Cache-Control", "no-store")
 		w.Header().Set("X-Content-Type-Options", "nosniff")
@@ -222,7 +282,7 @@ func (a *App) startSearch(w http.ResponseWriter, r *http.Request) {
 		ExpectedArtist     string   `json:"expected_artist"`
 		SourceTrackIDs     []string `json:"source_track_ids"`
 		EnabledSites       []string `json:"enabled_sites"`
-		StreamingEnabled   bool     `json:"streaming_enabled"`
+		StreamingEnabled   *bool    `json:"streaming_enabled"`
 		Synthetic          bool     `json:"synthetic"`
 		BaseURL            string   `json:"base_url"`
 		Cookie             string   `json:"cookie"`
@@ -235,6 +295,7 @@ func (a *App) startSearch(w http.ResponseWriter, r *http.Request) {
 		SafetyMargin       int      `json:"safety_margin"`
 		DicmusicAuthKey    string   `json:"dicmusic_authkey"`
 		OrpheusTorrentPass string   `json:"orpheus_torrent_pass"`
+		PlaylistID         string   `json:"playlist_id"`
 		Identity           Identity `json:"identity"`
 	}
 	if err := decode(r, &body); err != nil || strings.ContainsAny(body.Cookie+body.DicmusicAuthKey+body.OrpheusTorrentPass, "\r\n") {
@@ -260,9 +321,18 @@ func (a *App) startSearch(w http.ResponseWriter, r *http.Request) {
 			body.EnabledSites = settings.EnabledSites
 		}
 	}
+	// Streaming follows the same rule: an explicit value wins, omitting it
+	// falls back to the saved download default, and a settings read failure
+	// keeps streaming off rather than blocking the search.
+	streaming := false
+	if body.StreamingEnabled != nil {
+		streaming = *body.StreamingEnabled
+	} else if settings, err := a.loadDownloadSettings(); err == nil {
+		streaming = settings.StreamingEnabled
+	}
 	plan := SearchPlan{
 		RootJobID: body.JobID, Query: body.Query, ExpectedTitle: body.ExpectedTitle, ExpectedArtist: body.ExpectedArtist, EnabledSites: body.EnabledSites,
-		StreamingEnabled: body.StreamingEnabled, Synthetic: body.Synthetic, BaseURL: body.BaseURL, Identity: body.Identity,
+		StreamingEnabled: streaming, Synthetic: body.Synthetic, BaseURL: body.BaseURL, Identity: body.Identity,
 		Budget: body.Budget, SafetyMargin: body.SafetyMargin,
 	}
 	raw, err := json.Marshal(plan)
@@ -277,6 +347,13 @@ func (a *App) startSearch(w http.ResponseWriter, r *http.Request) {
 	a.remember(body.JobID, body.Cookie)
 	a.rememberDownload(body.JobID, "dicmusic", body.DicmusicAuthKey)
 	a.rememberDownload(body.JobID, "orpheus", body.OrpheusTorrentPass)
+	if body.PlaylistID != "" {
+		if err := a.attachPlaylistForSearch(body.JobID, body.PlaylistID); err != nil {
+			a.forget(body.JobID)
+			writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "code": "INVALID_REQUEST", "error": err.Error()})
+			return
+		}
+	}
 	_, err = a.flows.Start("start-"+body.JobID, workflow.Start{
 		JobID: body.JobID, BatchID: body.BatchID, Scene: body.Scene, Stage: "identifying", Label: body.ExpectedTitle,
 		SourceTrackIDs: body.SourceTrackIDs, MatchedCount: matched, Payload: raw, Evidence: []workflow.EvidenceInput{plan.evidence()},
@@ -284,6 +361,9 @@ func (a *App) startSearch(w http.ResponseWriter, r *http.Request) {
 	})
 	if err != nil {
 		a.forget(body.JobID)
+		if body.PlaylistID != "" {
+			_ = os.Remove(filepath.Join(a.Dir, "incoming", playlistFileName(body.JobID)))
+		}
 		writeJSON(w, http.StatusConflict, map[string]any{"ok": false, "code": "WORKFLOW_REJECTED"})
 		return
 	}
@@ -330,6 +410,52 @@ func (a *App) job(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// controlJob pauses, resumes or cancels one workflow job. It only exposes
+// actions the workflow repository already supports; retry has no workflow
+// meaning yet (taskrepo retry applies to single tasks, not jobs), so it is
+// rejected rather than invented.
+func (a *App) controlJob(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Action string `json:"action"`
+	}
+	if err := decode(r, &body); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "code": "INVALID_REQUEST"})
+		return
+	}
+	switch body.Action {
+	case "pause", "resume", "cancel":
+	default:
+		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "code": "INVALID_REQUEST"})
+		return
+	}
+	id := r.PathValue("id")
+	requestID := "control-" + id + "-" + body.Action + "-" + strconv.FormatInt(time.Now().UnixNano(), 10)
+	result, err := a.flows.Control(requestID, id, body.Action, time.Now().UnixNano())
+	if err != nil {
+		status, code := http.StatusInternalServerError, "JOBS_UNAVAILABLE"
+		switch {
+		case errors.Is(err, workflow.ErrNotFound):
+			status, code = http.StatusNotFound, "NOT_FOUND"
+		case errors.Is(err, dataengine.ErrInvalidRequest):
+			status, code = http.StatusBadRequest, "INVALID_REQUEST"
+		case errors.Is(err, workflow.ErrStale):
+			status, code = http.StatusConflict, "WORKFLOW_REJECTED"
+		}
+		writeJSON(w, status, map[string]any{"ok": false, "code": code, "error": err.Error()})
+		return
+	}
+	job := result.Job
+	if job == nil {
+		fresh, readErr := a.flows.Job(id)
+		if readErr != nil || fresh == nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "code": "JOBS_UNAVAILABLE"})
+			return
+		}
+		job = fresh
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "job": publicJob(*job)})
+}
+
 func (a *App) releaseAudio(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		JobID      string `json:"job_id"`
@@ -370,7 +496,7 @@ func (a *App) releaseAudio(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusConflict, map[string]any{"ok": false, "code": "WORKFLOW_REJECTED", "error": err.Error(), "stage": rootJob.Stage, "downloaded": false, "library_published": false, "production_verified": false})
 		return
 	}
-	incoming, library := filepath.Join(a.Dir, "incoming"), filepath.Join(a.Dir, "library-audio")
+	incoming, library := filepath.Join(a.Dir, "incoming"), a.libraryDir()
 	if err = os.MkdirAll(incoming, 0o700); err != nil || os.MkdirAll(library, 0o700) != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "code": "LIBRARY_UNAVAILABLE", "downloaded": false, "library_published": false, "production_verified": false})
 		return
@@ -415,7 +541,7 @@ func (a *App) releaseAudio(w http.ResponseWriter, r *http.Request) {
 	recorded, err := a.flows.RecordRelease(workflow.RecordReleaseInput{
 		JobID: root, RequestID: "record-" + result.RequestID,
 		Evidence: workflow.EvidenceInput{ID: "rel-" + result.RequestID, Kind: "catalog", Source: "local-library", SubjectID: root, TracklistVerified: true, Payload: receipt},
-		Payload: receipt, NowNS: time.Now().UnixNano(),
+		Payload:  receipt, NowNS: time.Now().UnixNano(),
 	})
 	if err != nil {
 		// The file and the library record are already committed; only the
@@ -441,6 +567,150 @@ func (a *App) releaseAudio(w http.ResponseWriter, r *http.Request) {
 		"origin": result.Origin, "source_name": result.SourceName, "stage": stage, "publish_task_id": publishTask,
 		"downloaded": result.Downloaded, "library_published": result.LibraryPublished, "production_verified": false,
 	})
+}
+
+// publishAudio queues a publish task for a root job. Two shapes are
+// accepted, never both: a controlled-audio source (a loopback URL plus album
+// names, organised into the library by audiopublish) or a list of already
+// verified ingest receipts (the multi-track download path). The publish task
+// re-verifies everything before the job completes; this endpoint only records
+// the request, so library_published stays false for the controlled path
+// until the task runs.
+func (a *App) publishAudio(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		JobID     string           `json:"job_id"`
+		RequestID string           `json:"request_id"`
+		SourceURL string           `json:"source_url"`
+		Artist    string           `json:"artist"`
+		Album     string           `json:"album"`
+		Title     string           `json:"title"`
+		Track     int              `json:"track"`
+		Receipts  []publishReceipt `json:"receipts"`
+	}
+	if err := decode(r, &body); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "code": "INVALID_REQUEST", "downloaded": false, "library_published": false, "production_verified": false})
+		return
+	}
+	job, err := a.flows.Job(body.JobID)
+	if err != nil || job == nil {
+		writeJSON(w, http.StatusNotFound, map[string]any{"ok": false, "code": "NOT_FOUND", "downloaded": false, "library_published": false, "production_verified": false})
+		return
+	}
+	root := job.RootID
+	if root == "" {
+		root = job.ID
+	}
+	rootJob := job
+	if root != job.ID {
+		rootJob, err = a.flows.Job(root)
+		if err != nil || rootJob == nil {
+			writeJSON(w, http.StatusNotFound, map[string]any{"ok": false, "code": "NOT_FOUND", "downloaded": false, "library_published": false, "production_verified": false})
+			return
+		}
+	}
+	if err := releaseAllowed(rootJob); err != nil {
+		writeJSON(w, http.StatusConflict, map[string]any{"ok": false, "code": "WORKFLOW_REJECTED", "error": err.Error(), "stage": rootJob.Stage, "downloaded": false, "library_published": false, "production_verified": false})
+		return
+	}
+	controlled := body.SourceURL != ""
+	multi := len(body.Receipts) > 0
+	if controlled == multi {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "code": "INVALID_REQUEST", "downloaded": false, "library_published": false, "production_verified": false})
+		return
+	}
+	var payload publishPayload
+	payload.RootID = root
+	source := "controlled-audio"
+	if controlled {
+		if body.Artist == "" || body.Album == "" || body.Title == "" || body.Track < 1 || body.Track > 999 || !validLoopbackURL(body.SourceURL) {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "code": "INVALID_REQUEST", "downloaded": false, "library_published": false, "production_verified": false})
+			return
+		}
+		requestID := body.RequestID
+		if requestID == "" {
+			requestID = publishRequestID(root, "track", strconv.Itoa(body.Track))
+		}
+		if !validPublishID(requestID) {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "code": "INVALID_REQUEST", "downloaded": false, "library_published": false, "production_verified": false})
+			return
+		}
+		payload.RequestID = requestID
+		payload.SourceURL = body.SourceURL
+		payload.Artist = body.Artist
+		payload.Album = body.Album
+		payload.Title = body.Title
+		payload.Track = body.Track
+	} else {
+		for _, item := range body.Receipts {
+			if item.RequestID == "" || item.SHA256 == "" {
+				writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "code": "INVALID_REQUEST", "downloaded": false, "library_published": false, "production_verified": false})
+				return
+			}
+		}
+		encoded, err := json.Marshal(body.Receipts)
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "code": "LIBRARY_UNAVAILABLE", "downloaded": false, "library_published": false, "production_verified": false})
+			return
+		}
+		payload.RequestID = publishRequestID(root, "receipts", hex.EncodeToString(encoded)[:16])
+		payload.Receipts = body.Receipts
+		source = "local-library"
+	}
+	receipt, err := json.Marshal(payload)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "code": "LIBRARY_UNAVAILABLE", "downloaded": false, "library_published": false, "production_verified": false})
+		return
+	}
+	recorded, err := a.flows.RecordRelease(workflow.RecordReleaseInput{
+		JobID: root, RequestID: "record-" + payload.RequestID,
+		Evidence: workflow.EvidenceInput{ID: "pub-" + payload.RequestID, Kind: "catalog", Source: source, SubjectID: root, TracklistVerified: true, Payload: receipt},
+		Payload:  receipt, NowNS: time.Now().UnixNano(),
+	})
+	if err != nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{
+			"ok": false, "code": "WORKFLOW_UNAVAILABLE", "error": "publish record failed: " + err.Error(),
+			"downloaded": false, "library_published": multi, "production_verified": false,
+		})
+		return
+	}
+	stage := "publishing"
+	if recorded.Job != nil {
+		stage = recorded.Job.Stage
+	}
+	publishTask := ""
+	if recorded.Task != nil {
+		publishTask = recorded.Task.ID
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"ok": true, "stage": stage, "publish_task_id": publishTask, "request_id": payload.RequestID,
+		"downloaded": false, "library_published": multi, "production_verified": false,
+	})
+}
+
+// validLoopbackURL accepts only http://127.0.0.1:<port>/... URLs: the
+// controlled-audio source must be a service on this machine, never a remote
+// host. audiopublish re-checks the same rule before fetching.
+func validLoopbackURL(raw string) bool {
+	parsed, err := url.Parse(raw)
+	if err != nil || parsed.Scheme != "http" || parsed.Hostname() != "127.0.0.1" || parsed.Port() == "" {
+		return false
+	}
+	return true
+}
+
+// validPublishID is the audiopublish request-id rule: 1-80 chars of letters,
+// digits, hyphen and underscore.
+func validPublishID(id string) bool {
+	if len(id) < 1 || len(id) > 80 {
+		return false
+	}
+	for _, r := range id {
+		if r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || r == '-' || r == '_' {
+			continue
+		}
+		return false
+	}
+	return true
 }
 
 // releaseAllowed rejects jobs whose stage cannot receive audio. A paused job

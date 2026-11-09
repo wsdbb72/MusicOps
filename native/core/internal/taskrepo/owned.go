@@ -148,13 +148,128 @@ func (r *Repository) FinishOwned(requestID string, token Token, end Completion, 
 	}, domain, prepared...)
 }
 
-// ControlOwned records a pause, resume or cancel on a workflow-owned task.
+// ResolveOwned completes a blocked workflow-owned task as a human review
+// decision, together with workflow-owned mutations. Executors finish running
+// tasks through FinishOwned; a blocked task has no running executor left to
+// hold a token, so review is the only path that moves it. The attempt record
+// is left alone: it records that the attempt ended blocked, and the review is
+// a separate, later decision. Followups are only allowed when the task
+// completes, mirroring FinishOwned.
+func (r *Repository) ResolveOwned(requestID, id string, end Completion, followups []NewTask, owners map[string]string, extra []byte, domain Domain) (Result, error) {
+	if domain == nil {
+		return Result{}, dataengine.ErrInvalidRequest
+	}
+	hash, compressed, prepared, intents, err := prepareResolve(id, end, followups)
+	if err != nil {
+		return Result{}, err
+	}
+	if len(owners) != len(prepared) {
+		return Result{}, dataengine.ErrInvalidRequest
+	}
+	for i := range prepared {
+		jobID, ok := owners[prepared[i].Task.ID]
+		if !ok || !validID(jobID) {
+			return Result{}, dataengine.ErrInvalidRequest
+		}
+		prepared[i].Task.WorkflowJobID = jobID
+	}
+	intent := struct {
+		Operation                        string
+		ID                               string
+		State, Hash, ErrorClass, Message string
+		Children                         any
+		Extra                            []byte
+		Owners                           map[string]string
+	}{"workflow_resolve", id, end.State, hash, end.ErrorClass, end.Message, intents, extra, owners}
+	return r.apply(requestID, id, intent, func(v *dataengine.View, current *Task) (*Task, []dataengine.Mutation, error) {
+		return resolveDecision(v, current, end, hash, compressed, true)
+	}, domain, prepared...)
+}
+
+func prepareResolve(id string, end Completion, followups []NewTask) (string, []byte, []preparedTask, []childIntent, error) {
+	if !validID(id) || end.NowNS <= 0 || len(end.Message) > 4000 || len(end.ErrorClass) > 80 {
+		return "", nil, nil, nil, dataengine.ErrInvalidRequest
+	}
+	if end.State != "completed" {
+		return "", nil, nil, nil, dataengine.ErrInvalidRequest
+	}
+	hash := ""
+	var compressed []byte
+	var err error
+	if end.Payload != nil {
+		hash, compressed, err = pack(end.Payload)
+		if err != nil {
+			return "", nil, nil, nil, err
+		}
+	}
+	if len(followups) > 1000 {
+		return "", nil, nil, nil, dataengine.ErrInvalidRequest
+	}
+	total := len(end.Payload)
+	seen := map[string]bool{id: true}
+	prepared := make([]preparedTask, 0, len(followups))
+	for _, child := range followups {
+		if !validSpec(child.Spec) || seen[child.Spec.ID] || (child.Spec.ParentID != "" && child.Spec.ParentID != id) {
+			return "", nil, nil, nil, dataengine.ErrInvalidRequest
+		}
+		total += len(child.Payload)
+		if total > maxPayload {
+			return "", nil, nil, nil, dataengine.ErrInvalidRequest
+		}
+		seen[child.Spec.ID] = true
+		child.Spec.ParentID = id
+		childHash, childBlob, err := pack(child.Payload)
+		if err != nil {
+			return "", nil, nil, nil, err
+		}
+		prepared = append(prepared, preparedTask{Task: Task{Spec: child.Spec, State: "queued", UpdatedNS: child.Spec.CreatedNS, Revision: 1, PayloadHash: childHash}, Compressed: childBlob})
+	}
+	intents := make([]childIntent, 0, len(prepared))
+	for _, child := range prepared {
+		intents = append(intents, childIntent{Spec: child.Task.Spec, Hash: child.Task.PayloadHash})
+	}
+	return hash, compressed, prepared, intents, nil
+}
+
+func resolveDecision(v *dataengine.View, current *Task, end Completion, hash string, compressed []byte, allowOwned bool) (*Task, []dataengine.Mutation, error) {
+	if current != nil && current.WorkflowJobID != "" && !allowOwned {
+		return nil, nil, ErrWorkflowOwned
+	}
+	if current == nil {
+		return nil, nil, ErrNotFound
+	}
+	if current.State != "blocked" || current.CancelRequested {
+		return nil, nil, ErrStale
+	}
+	next := *current
+	next.State = end.State
+	next.Execution = "finished"
+	next.PauseRequested = false
+	next.ResultHash = hash
+	next.ErrorClass = end.ErrorClass
+	next.Message = end.Message
+	next.UpdatedNS = effectiveTime(end.NowNS, current)
+	if end.State == "completed" {
+		next.Progress = 100
+	}
+	var extra []dataengine.Mutation
+	if hash != "" {
+		writes, err := blobWrites(v, hash, compressed)
+		if err != nil {
+			return nil, nil, err
+		}
+		extra = append(extra, writes...)
+	}
+	return &next, extra, nil
+}
+
+// ControlOwned records a pause, resume, cancel or retry on a workflow-owned task.
 func (r *Repository) ControlOwned(requestID, id, action string, nowNS int64, extra []byte, domain Domain) (Result, error) {
 	if !validID(id) || nowNS <= 0 || domain == nil {
 		return Result{}, dataengine.ErrInvalidRequest
 	}
 	switch action {
-	case "pause", "resume", "cancel":
+	case "pause", "resume", "cancel", "retry":
 	default:
 		return Result{}, dataengine.ErrInvalidRequest
 	}

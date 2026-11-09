@@ -1,4 +1,9 @@
 // MusicOps application. This process is the Go runtime: it does not start Python.
+//
+// With no subcommand (or a leading dash, i.e. the serve flags) it runs the
+// core server, exactly as before. With a subcommand as the first argument
+// it behaves as the MusicOps CLI (see cli.go): version, status, jobs, job,
+// control, stop, migrate and healthcheck.
 package main
 
 import (
@@ -12,6 +17,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -19,6 +25,13 @@ import (
 )
 
 func main() {
+	if len(os.Args) > 1 && !strings.HasPrefix(os.Args[1], "-") {
+		os.Exit(runCLI(os.Args[1:]))
+	}
+	serve()
+}
+
+func serve() {
 	dir := flag.String("state-dir", "", "dedicated MusicOps native data directory")
 	backup := flag.String("backup-dir", "", "dedicated backup directory")
 	listen := flag.String("listen", "127.0.0.1:0", "local application listen address")

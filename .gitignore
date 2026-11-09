@@ -11,11 +11,17 @@ dist/
 work/
 reports/
 outputs/
+# Go Windows version-resource objects (generated per release by
+# packaging/build_windows_go.ps1, removed after the build).
+*.syso
 
 # Run profiles, state and protected credentials
 profile/
 profiles/
 vault/
+# ...but not the Go vault package itself (source code, not credentials):
+# the bare `vault/` rule above also matches native/core/internal/vault/.
+!native/core/internal/vault/
 *.dpapi
 *.sqlite
 *.sqlite3

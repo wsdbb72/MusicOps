@@ -1,10 +1,10 @@
 name: Native core development checks
 on:
   push:
-    branches: ['refactor/go-core']
+    branches: ['refactor/go-core', 'refactor/go-desktop']
     paths: ['native/**', 'src/musicops/state/native_client.py', 'tests/test_native_data_transport.py', '.github/workflows/native-core.yml']
   pull_request:
-    branches: ['refactor/go-core']
+    branches: ['refactor/go-core', 'refactor/go-desktop']
     paths: ['native/**', 'src/musicops/state/native_client.py', 'tests/test_native_data_transport.py', '.github/workflows/native-core.yml']
   workflow_dispatch:
 permissions:
@@ -32,7 +32,19 @@ jobs:
       - uses: actions/setup-python@v7
         with:
           python-version: '3.12'
+      - name: Install ffmpeg for transcode tests
+        shell: bash
+        run: |
+          if [[ "$RUNNER_OS" == "Linux" ]]; then
+            sudo apt-get update
+            sudo apt-get install -y ffmpeg
+          elif [[ "$RUNNER_OS" == "macOS" ]]; then
+            brew install ffmpeg
+          else
+            choco install ffmpeg -y
+          fi
       - name: Test and vet the Go core
+        shell: bash
         working-directory: native/core
         run: |
           go test ./... -count=1 -timeout=120s
@@ -59,6 +71,10 @@ jobs:
         with:
           go-version: '1.26.3'
           cache-dependency-path: native/core/go.sum
+      - name: Install ffmpeg for transcode tests
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg
       - name: Detect data races in persistence and scheduling
         working-directory: native/core
         env:

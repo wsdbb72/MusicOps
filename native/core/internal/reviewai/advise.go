@@ -75,6 +75,19 @@ func NewCache(parallel int) *Cache {
 	return &Cache{slots: make(chan struct{}, parallel), saved: map[string]Result{}}
 }
 
+// Reset drops every cached verdict. The Python setup calls for a full
+// re-review when the AI configuration changes; this is the Go equivalent:
+// verdicts advised under the old model or key must not decide a search
+// after the configuration moved.
+func (c *Cache) Reset() {
+	if c == nil {
+		return
+	}
+	c.mu.Lock()
+	c.saved = map[string]Result{}
+	c.mu.Unlock()
+}
+
 // Advise calls the model at most twice. Identity failures are cached. Transport failures are not.
 func (c *Cache) Advise(ctx context.Context, model Completer, request Request) Result {
 	if c == nil || model == nil {

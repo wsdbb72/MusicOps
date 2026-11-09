@@ -7,6 +7,7 @@ import (
 
 	"github.com/wsdbb72/MusicOps/native/core/internal/audiorelease"
 	"github.com/wsdbb72/MusicOps/native/core/internal/dataengine"
+	"github.com/wsdbb72/MusicOps/native/core/internal/downloadpolicy"
 	"github.com/wsdbb72/MusicOps/native/core/internal/taskrepo"
 	"github.com/wsdbb72/MusicOps/native/core/internal/trackersearch"
 )
@@ -141,6 +142,139 @@ func (a *App) saveSites(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "sites": siteViews(saved), "count": len(saved.EnabledSites)})
+}
+
+// downloadSettingsKey is the persisted download default. A search that does
+// not say whether streaming is on uses this; an explicit value always wins.
+var downloadSettingsKey = []byte("app/settings/download")
+
+// downloadSettings is the persisted download default: whether a search falls
+// back to streaming when the trackers have no exact match, and in which
+// order the fallback tries the sources. An empty order means the canonical
+// order; a saved order is a permutation of the canonical source names.
+type downloadSettings struct {
+	StreamingEnabled bool     `json:"streaming_enabled"`
+	StreamingOrder   []string `json:"streaming_order,omitempty"`
+	UpdatedNS        int64    `json:"updated_ns"`
+}
+
+func (a *App) loadDownloadSettings() (downloadSettings, error) {
+	var out downloadSettings
+	err := a.engine.View(func(v *dataengine.View) error {
+		raw, ok, err := v.Get(downloadSettingsKey)
+		if err != nil || !ok {
+			return err
+		}
+		return json.Unmarshal(raw, &out)
+	})
+	if err != nil {
+		return downloadSettings{}, err
+	}
+	if len(out.StreamingOrder) == 0 {
+		out.StreamingOrder = downloadpolicy.CanonicalOrder()
+	}
+	return out, nil
+}
+
+// streamingOrder returns the saved fallback order, or the canonical order
+// when nothing was saved or the saved order is invalid.
+func (a *App) streamingOrder() []string {
+	settings, err := a.loadDownloadSettings()
+	if err != nil || len(settings.StreamingOrder) == 0 {
+		return downloadpolicy.CanonicalOrder()
+	}
+	if err := downloadpolicy.ValidateOrder(settings.StreamingOrder); err != nil {
+		return downloadpolicy.CanonicalOrder()
+	}
+	return settings.StreamingOrder
+}
+
+func (a *App) saveDownloadSettings(in downloadSettings) (downloadSettings, error) {
+	in.UpdatedNS = a.now().UnixNano()
+	encoded, err := json.Marshal(in)
+	if err != nil {
+		return downloadSettings{}, err
+	}
+	for attempt := 0; attempt < 8; attempt++ {
+		var current []byte
+		var present bool
+		if err := a.engine.View(func(v *dataengine.View) error {
+			var err error
+			current, present, err = v.Get(downloadSettingsKey)
+			return err
+		}); err != nil {
+			return downloadSettings{}, err
+		}
+		conditions := []dataengine.Condition{{Key: downloadSettingsKey, Absent: true}}
+		if present {
+			conditions = []dataengine.Condition{{Key: downloadSettingsKey, Value: current}}
+		}
+		ok, err := a.engine.CompareAndSwap(conditions, []dataengine.Mutation{{Key: downloadSettingsKey, Value: encoded}})
+		if err != nil {
+			return downloadSettings{}, err
+		}
+		if ok {
+			return in, nil
+		}
+	}
+	return downloadSettings{}, errors.New("download settings changed under the write")
+}
+
+// downloadSettingsView returns the saved streaming default plus the saved
+// streaming fallback order and each source's wiring state. The order is the
+// operator's saved order (canonical when nothing was saved); the fallback
+// walk follows it (see acquireFallback), and the status list says honestly
+// which sources have an engine behind them.
+func (a *App) downloadSettings(w http.ResponseWriter, r *http.Request) {
+	settings, err := a.loadDownloadSettings()
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "code": "SETTINGS_UNAVAILABLE"})
+		return
+	}
+	steps, err := downloadpolicy.PlanOrdered(downloadpolicy.DefaultSources(), settings.StreamingOrder, downloadpolicy.Track{})
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "code": "SETTINGS_UNAVAILABLE"})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "streaming_enabled": settings.StreamingEnabled, "streaming_order": settings.StreamingOrder, "streaming_sources": steps, "streaming_source_status": a.streamingSourceStatus(), "streaming_fallback_wired": true})
+}
+
+// saveDownload replaces the saved streaming default and/or the saved
+// fallback order. Either field may be omitted; an omitted field keeps its
+// saved value, so saving the checkbox never wipes the order.
+func (a *App) saveDownload(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		StreamingEnabled *bool    `json:"streaming_enabled"`
+		StreamingOrder   []string `json:"streaming_order"`
+	}
+	if err := decode(r, &body); err != nil || (body.StreamingEnabled == nil && body.StreamingOrder == nil) {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "code": "INVALID_REQUEST"})
+		return
+	}
+	if body.StreamingOrder != nil {
+		if err := downloadpolicy.ValidateOrder(body.StreamingOrder); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "code": "INVALID_REQUEST", "error": "streaming order must name each source exactly once"})
+			return
+		}
+	}
+	current, err := a.loadDownloadSettings()
+	if err != nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"ok": false, "code": "SETTINGS_UNAVAILABLE"})
+		return
+	}
+	next := current
+	if body.StreamingEnabled != nil {
+		next.StreamingEnabled = *body.StreamingEnabled
+	}
+	if body.StreamingOrder != nil {
+		next.StreamingOrder = body.StreamingOrder
+	}
+	saved, err := a.saveDownloadSettings(next)
+	if err != nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"ok": false, "code": "SETTINGS_UNAVAILABLE"})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "streaming_enabled": saved.StreamingEnabled, "streaming_order": saved.StreamingOrder})
 }
 
 // library lists every verified library record. A record whose file is gone

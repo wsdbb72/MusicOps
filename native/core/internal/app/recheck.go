@@ -37,12 +37,18 @@ func (a *App) recheckToken(w http.ResponseWriter, r *http.Request) {
 	now := a.now()
 	observation := tokenledger.Observation{Contract: tokenledger.BalanceContract, Site: body.Site}
 	siteRead := false
+	// A saved cookie is the fallback when the call supplies none, the same
+	// rule the search and preflight paths use.
+	cookie := body.Cookie
+	if cookie == "" {
+		cookie, _ = a.savedCookie(body.Site)
+	}
 	allowed, class, until := a.ledger.ReadAllowed(body.Site, now)
 	if !allowed {
 		observation.ErrorClass = class
 		observation.RecheckAtNS = until
-	} else if body.Cookie != "" && body.BaseURL != "" {
-		read, called, err := a.observeBalance(r.Context(), body.Site, body.Cookie, body.Synthetic, body.BaseURL)
+	} else if cookie != "" && body.BaseURL != "" {
+		read, called, err := a.observeBalance(r.Context(), body.Site, cookie, body.Synthetic, body.BaseURL)
 		if err != nil {
 			writeJSON(w, http.StatusConflict, map[string]any{"ok": false, "code": "BALANCE_UNREAD", "downloaded": false, "production_verified": false})
 			return

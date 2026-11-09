@@ -10,7 +10,9 @@
 
 - 分支：`refactor/go-desktop`
 - Phase 5 实现提交 SHA：`c3bd468cd058aa751620568ceaca623edf9a549e`（“MusicOps full-Go migration Phase 5: packaging and switch-over (release-ready)”）
-- 档案更新提交 SHA：（本行由该提交本身填入——该提交只改本文档，不改代码；评审对象仍为上述实现提交的树）
+- Windows gate 修复提交 SHA：`0e30643016cd2190cea87f0e7592d4af1483bbbb`（最后一次代码改动；其后的提交仅改文档）
+- **候选代码提交（供评审）：`0e30643` 的树**。档案更新提交（本文档的最后一次修改）只改本文档，不改代码；评审对象为该提交的树，即 `0e30643` 的代码 + 最新档案。
+- CI 验证：Native core 运行 **42580116895**（HEAD `09af4fb`，含上述全部提交）：completed success，四任务全绿（macos-15、windows-latest、race、ubuntu-latest），四份任务日志逐行核查零 FAIL（Windows 日志正向确认 `ok internal/releasegate 17.880s`）。注意：前一轮运行 42579135564 曾出现 Windows 任务 success 但日志 3 个 FAIL（pwsh 假绿），已由 `0e30643` 修复，见“本次发现并修复的问题”第 4 项。
 - 基线：Phase 4 完成态 `5f0b2fc`（Native core 运行 42572612091 四任务全绿、四份日志逐行零 FAIL）
 
 ## 评审范围：每阶段摘要

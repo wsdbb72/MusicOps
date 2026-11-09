@@ -111,7 +111,7 @@
 - **真实剩余缺口（Phase 4 内）**：(1) 托盘装不上——Wails v2.17.1 无公开 API 安装托盘图标，托盘菜单只做到数据构造；装托盘需另选托盘库或能暴露 tray 的 Wails 版本；`--minimized` 目前只能最小化到任务栏/Dock，无托盘可回。(2) 桌面壳未在 Windows/macOS 真机上跑过：本地只有 vet 与 CGO-off 构建（macOS 的 CGO-off 产物不含 WKWebView 前端），真实链接与运行以 macos-15/windows-latest CI 为准；Windows CI 需 C 编译器（mingw）才能编 CGO 壳——本次 CI 若因此失败，改工作流须走浏览器。(3) 更新全流程未在真机上走完：Check 已对真实 GitHub API 跑通（0.4.32），Stage 的真实安装包下载（macOS 380MB）与 Launch 交接未在真机跑过。(4) `core.log` 无轮换（每次 detached 启动截断重写）；长时故障下的监管退避循环未做 soak 测试。(5) `control <id> retry` 在任务层被核心拒绝（400 INVALID_REQUEST），CLI 如实透传为 exit 7；任务级 retry 生效需核心侧支持。(6) **Windows CI 的 "Test and vet the Go core" 步骤不可信**：pwsh 下步骤结论取最后一条命令（`go vet`）的退出码，`go test` 失败不会使任务失败——本次 Windows 任务显示 success 但日志里有 11 个 FAIL（42568056951）；每次须直接读 Windows 任务日志 grep `FAIL`，不能只看结论。修工作流（如 `shell: bash` + `set -e`）须走浏览器，见 §4 顶部说明。
 - **阶段结束时安装包里还剩的 Python：打包脚本本身（构建时用 Python 编排），安装包内容已无 Python 运行时**（壳、worker、业务全是 Go）。
 
-### 阶段 5 — 打包与切换（已完成，2026-11-09，本地未推送，待 CI 验证）
+### 阶段 5 — 打包与切换（已完成，2026-11-09，远程 HEAD `09af4fb`，Native core 运行 42580116895 四任务全绿、四份日志零 FAIL）
 
 - Go 构建的安装器：Windows Inno（只打 Go 二进制 + 引擎，不含 `_internal`）、macOS PKG/DMG/ZIP（Go `.app`）、Linux Docker 镜像（Go 二进制入口，替换 `docker/entrypoint.py` 的 Python 启动）。
 - `desktop-release.yml` 改走 Go 产物；冒烟测试（引擎/启动/并行/监督/安装器）改跑 Go 包；`releasegate` 从文本测试升级为真实门禁检查。

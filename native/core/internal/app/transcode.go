@@ -292,24 +292,56 @@ func insideDir(root, path string) bool {
 
 // checkWAVPCM rejects anything that is not a PCM WAV: the Python
 // prepare_media_copy contract only implements PCM-to-FLAC, and DSD sources
-// need their own policy.
+// need their own policy. The chunk walk follows the RIFF layout instead of
+// assuming the data chunk sits inside the first 44 bytes: real encoders
+// (ffmpeg included) write LIST/fact chunks before data, and those files
+// are valid PCM WAVs.
 func checkWAVPCM(path string) error {
 	file, err := os.Open(path)
 	if err != nil {
 		return err
 	}
 	defer file.Close()
-	header := make([]byte, 44)
-	if _, err := io.ReadFull(file, header); err != nil {
+	head := make([]byte, 12)
+	if _, err := io.ReadFull(file, head); err != nil {
 		return errors.New("文件太短，不是 WAV")
 	}
-	if string(header[0:4]) != "RIFF" || string(header[8:12]) != "WAVE" {
+	if string(head[0:4]) != "RIFF" || string(head[8:12]) != "WAVE" {
 		return errors.New("不是 WAV 文件")
 	}
-	if binary.LittleEndian.Uint16(header[20:22]) != 1 {
+	// Walk chunks from offset 12. Each chunk is an 8-byte header plus its
+	// payload, padded to an even size. The walk is bounded so a corrupt
+	// chunk size cannot loop forever.
+	var pcm, data bool
+	for offset := int64(12); offset < 1<<20; {
+		var header [8]byte
+		if _, err := file.ReadAt(header[:], offset); err != nil {
+			break
+		}
+		id := string(header[0:4])
+		size := binary.LittleEndian.Uint32(header[4:8])
+		if id == "fmt " {
+			if size < 2 {
+				return errors.New("不是 PCM 编码")
+			}
+			var format [2]byte
+			if _, err := file.ReadAt(format[:], offset+8); err != nil {
+				return errors.New("不是 PCM 编码")
+			}
+			if binary.LittleEndian.Uint16(format[:]) != 1 {
+				return errors.New("不是 PCM 编码")
+			}
+			pcm = true
+		}
+		if id == "data" {
+			data = true
+		}
+		offset += 8 + int64(size) + int64(size&1)
+	}
+	if !pcm {
 		return errors.New("不是 PCM 编码")
 	}
-	if !bytes.Contains(header[12:], []byte("data")) && !bytes.Contains(header, []byte("data")) {
+	if !data {
 		return errors.New("WAV 数据块缺失")
 	}
 	return nil

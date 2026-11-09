@@ -33,7 +33,19 @@ func TestMain(m *testing.M) {
 	testCoreBinary = filepath.Join(dir, "musicops-test")
 	cmd := exec.Command(goBin, "build", "-o", testCoreBinary, "./cmd/musicops")
 	cmd.Dir = filepath.Join("..", "..") // native/core
-	cmd.Env = append(os.Environ(), "GOTMPDIR="+filepath.Join(os.Getenv("HOME"), ".cache", "go-tmp"))
+	// GOTMPDIR must exist before the build runs: the dev box keeps it
+	// at ~/.cache/go-tmp (its /tmp is a 512M tmpfs), but CI runners do
+	// not have that directory, and on Windows HOME is usually unset so
+	// the path would come out relative. Create whatever we point at.
+	goTmpDir := filepath.Join(os.TempDir(), "musicops-go-tmp")
+	if home, err := os.UserHomeDir(); err == nil && home != "" {
+		goTmpDir = filepath.Join(home, ".cache", "go-tmp")
+	}
+	if err := os.MkdirAll(goTmpDir, 0o755); err != nil {
+		fmt.Fprintln(os.Stderr, "cannot create GOTMPDIR:", err)
+		os.Exit(1)
+	}
+	cmd.Env = append(os.Environ(), "GOTMPDIR="+goTmpDir)
 	cmd.Stdout = os.Stderr
 	cmd.Stderr = os.Stderr
 	if err := cmd.Run(); err != nil {

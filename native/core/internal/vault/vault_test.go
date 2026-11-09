@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -27,9 +28,18 @@ func TestProtectRoundTrip(t *testing.T) {
 	if bytes.Equal(blob, plain) {
 		t.Fatal("Protect returned plaintext")
 	}
-	// The Linux envelope is magic || nonce(12) || ciphertext.
-	if !bytes.HasPrefix(blob, linuxMagic) {
-		t.Fatalf("blob lacks the Linux magic, got %q", blob[:16])
+	// The envelope magic is platform-specific: Linux seals with the
+	// Linux magic and macOS with the Keychain magic; Windows DPAPI
+	// returns a raw blob with no envelope magic at all.
+	var wantMagic []byte
+	switch runtime.GOOS {
+	case "linux":
+		wantMagic = linuxMagic
+	case "darwin":
+		wantMagic = macMagic
+	}
+	if wantMagic != nil && !bytes.HasPrefix(blob, wantMagic) {
+		t.Fatalf("blob lacks the %s magic, got %q", runtime.GOOS, blob[:16])
 	}
 	back, err := Unprotect(blob)
 	if err != nil {
@@ -59,6 +69,11 @@ func TestProtectRoundTrip(t *testing.T) {
 }
 
 func TestProtectRequiresKeyFile(t *testing.T) {
+	// Only the Linux AES-GCM path needs a key file; macOS uses the
+	// Keychain and Windows uses DPAPI.
+	if runtime.GOOS != "linux" {
+		t.Skip("only the Linux vault path requires a key file")
+	}
 	t.Setenv("MUSICOPS_VAULT_KEY_FILE", "")
 	if _, err := Protect([]byte("x")); err == nil {
 		t.Fatal("Protect without a key file must fail")
@@ -151,6 +166,13 @@ func TestVaultPythonFixture(t *testing.T) {
 	// Fixture written by the Python vault (clients.vault.Vault) with the
 	// venv interpreter: one ref, vault://pt/dicmusic/cookies, bound to
 	// dicmusic.com. The Go store must read it byte-for-byte.
+	//
+	// The fixture is a Linux AES-GCM vault, and vault protection is
+	// per-platform by design (the Python vault is too: a Linux vault
+	// file cannot be opened on macOS/Windows). Only Linux can read it.
+	if runtime.GOOS != "linux" {
+		t.Skip("the Python fixture is a Linux AES-GCM vault")
+	}
 	keyBytes, err := os.ReadFile("testdata/python-linux-master.key")
 	if err != nil {
 		t.Fatal(err)

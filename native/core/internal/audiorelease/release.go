@@ -592,17 +592,21 @@ func List(engine *dataengine.Engine) ([]Entry, error) {
 // a file relocated to a loose folder or the library root has fewer
 // segments, and taking a fixed last-three tail would then invent a
 // "library-audio" prefix that is not a real path.
+//
+// The tail is joined with the OS separator, not "/": on Windows a
+// forward-slash join is not the path the rest of the code (and the
+// tests) compare against.
 func libraryFile(path string) string {
 	parts := strings.Split(path, string(filepath.Separator))
 	for i := len(parts) - 1; i >= 0; i-- {
 		if parts[i] == "library-audio" {
-			return strings.Join(parts[i+1:], "/")
+			return strings.Join(parts[i+1:], string(filepath.Separator))
 		}
 	}
 	if len(parts) < 3 {
 		return filepath.Base(path)
 	}
-	return strings.Join(parts[len(parts)-3:], "/")
+	return strings.Join(parts[len(parts)-3:], string(filepath.Separator))
 }
 
 // SystemDecoder returns a ffmpeg/ffprobe check when both tools are on PATH.

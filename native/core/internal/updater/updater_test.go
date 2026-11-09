@@ -330,8 +330,9 @@ func TestCheckOnLinuxHasNoPackage(t *testing.T) {
 	sum := sha256.Sum256(asset)
 	digest := "sha256:" + hex.EncodeToString(sum[:])
 	f.asset = asset
-	// No System/Machine override: this Linux box has no auto-update package.
-	u := &Updater{HTTP: f.mappedClient(), Current: "0.4.32"}
+	// Force the Linux view explicitly: Linux has no auto-update
+	// package, whatever OS the test itself runs on.
+	u := &Updater{HTTP: f.mappedClient(), Current: "0.4.32", System: "linux", Machine: "amd64"}
 	f.setRelease(t, testTag, false, false, []map[string]any{assetEntry(testName, testURL, int64(len(asset)), digest)})
 	if _, err := u.Check(context.Background()); err == nil || !strings.Contains(err.Error(), "当前系统没有自动更新安装包") {
 		t.Fatalf("Check on linux = %v, want '当前系统没有自动更新安装包'", err)
@@ -590,7 +591,8 @@ func TestLaunchLinuxRefuses(t *testing.T) {
 	if err := os.WriteFile(staged.Path, asset, 0600); err != nil {
 		t.Fatal(err)
 	}
-	u := &Updater{HTTP: f.mappedClient(), Current: "0.4.32"}
+	// Force the Linux view explicitly (see TestCheckOnLinuxHasNoPackage).
+	u := &Updater{HTTP: f.mappedClient(), Current: "0.4.32", System: "linux", Machine: "amd64"}
 	if err := u.Launch(staged, 0, ""); err == nil || !strings.Contains(err.Error(), "当前系统没有自动更新安装器") {
 		t.Fatalf("Launch on linux = %v, want '当前系统没有自动更新安装器'", err)
 	}

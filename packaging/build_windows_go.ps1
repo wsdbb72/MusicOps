@@ -87,6 +87,13 @@ function New-VersionResource([string]$Out, [string]$FileName, [string]$Icon) {
     & $Go run github.com/josephspurrier/goversioninfo/cmd/goversioninfo @args
     if ($LASTEXITCODE -ne 0) { throw "goversioninfo failed for $FileName" }
 }
+# goversioninfo and the Go builds resolve module packages, so they must
+# run from inside the Go module (native/core). The workflow invokes this
+# script from the repo root, where there is no go.mod: without this,
+# `go run <module package>` fails with "go.mod file not found" (release
+# run 42595317232). All paths used below are absolute, so changing the
+# working directory is safe.
+Push-Location $coreRoot
 try {
     New-VersionResource $coreSyso 'musicops-core.exe' ''
     New-VersionResource $shellSyso 'MusicOps.exe' (Join-Path $projectRoot 'src/musicops/assets/musicops.ico')
@@ -100,6 +107,7 @@ try {
     if ($LASTEXITCODE -ne 0) { throw 'Go desktop shell build failed' }
 } finally {
     Remove-Item -LiteralPath $coreSyso,$shellSyso -Force -ErrorAction SilentlyContinue
+    Pop-Location
 }
 
 # 4. Bundle contents.

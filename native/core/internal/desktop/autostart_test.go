@@ -3,6 +3,7 @@ package desktop
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 )
 
@@ -89,6 +90,9 @@ func TestQuoteExePath(t *testing.T) {
 }
 
 func TestAutostartLinuxEndToEnd(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("Linux XDG autostart")
+	}
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	enabled, err := Enabled()

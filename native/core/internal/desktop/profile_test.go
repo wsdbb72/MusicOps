@@ -49,6 +49,33 @@ func TestLinuxDefaultKeyFile(t *testing.T) {
 	}
 }
 
+// testTempDir returns a temp directory with symlinks resolved.
+// ResolveProfile returns symlink-resolved paths, so expectations built
+// from an unresolved temp dir would mismatch on macOS (where /var is a
+// symlink to /private/var) and on Windows (8.3 short names in %TEMP%).
+func testTempDir(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	if resolved, err := filepath.EvalSymlinks(dir); err == nil {
+		return resolved
+	}
+	return dir
+}
+
+// testHome returns an isolated home directory (symlinks resolved) and
+// points HOME — plus the platform data-root overrides — at it, so
+// UserDataRoot() resolves inside the test temp dir on every OS:
+// LOCALAPPDATA on Windows, XDG_DATA_HOME cleared on Linux so the
+// ~/.local/share branch is used, HOME on macOS.
+func testHome(t *testing.T) string {
+	t.Helper()
+	home := testTempDir(t)
+	t.Setenv("HOME", home)
+	t.Setenv("LOCALAPPDATA", home)
+	t.Setenv("XDG_DATA_HOME", "")
+	return home
+}
+
 // fakeExe returns a path under dir pretending to be the desktop executable.
 func fakeExe(t *testing.T, dir string, rel string) string {
 	t.Helper()
@@ -66,9 +93,8 @@ func TestResolveProfilePortable(t *testing.T) {
 	if runtime.GOOS == "darwin" {
 		t.Skip("portable mode is not used on macOS")
 	}
-	home := t.TempDir()
-	t.Setenv("HOME", home)
-	root := t.TempDir()
+	testHome(t)
+	root := testTempDir(t)
 	exe := fakeExe(t, root, "musicops-desktop")
 	if err := os.MkdirAll(filepath.Join(root, "profile"), 0755); err != nil {
 		t.Fatal(err)
@@ -86,9 +112,8 @@ func TestResolveProfileCheckout(t *testing.T) {
 	if runtime.GOOS == "darwin" {
 		t.Skip("checkout walk is not used on macOS")
 	}
-	home := t.TempDir()
-	t.Setenv("HOME", home)
-	root := t.TempDir()
+	testHome(t)
+	root := testTempDir(t)
 	if err := os.WriteFile(filepath.Join(root, "pyproject.toml"), []byte("[x]"), 0644); err != nil {
 		t.Fatal(err)
 	}
@@ -113,8 +138,7 @@ func TestResolveProfileCheckoutNeedsSQLite(t *testing.T) {
 	if runtime.GOOS == "darwin" {
 		t.Skip("checkout walk is not used on macOS")
 	}
-	home := t.TempDir()
-	t.Setenv("HOME", home)
+	testHome(t)
 	root := t.TempDir()
 	if err := os.WriteFile(filepath.Join(root, "pyproject.toml"), []byte("[x]"), 0644); err != nil {
 		t.Fatal(err)
@@ -128,22 +152,21 @@ func TestResolveProfileCheckoutNeedsSQLite(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got != filepath.Join(home, ".local", "share", "MusicOps", "profile") {
+	if got != filepath.Join(UserDataRoot(), "MusicOps", "profile") {
 		t.Fatalf("got %q (expected the default profile)", got)
 	}
 }
 
 func TestResolveProfileActiveJSON(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("HOME", home)
-	remembered := filepath.Join(t.TempDir(), "myprofile")
+	home := testHome(t)
+	remembered := filepath.Join(home, "myprofile")
 	if err := os.MkdirAll(filepath.Join(remembered, "state"), 0755); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(remembered, "state", "musicops.sqlite"), []byte("sqlite"), 0644); err != nil {
 		t.Fatal(err)
 	}
-	location := filepath.Join(home, ".local", "share", "MusicOps")
+	location := filepath.Join(UserDataRoot(), "MusicOps")
 	if err := os.MkdirAll(location, 0700); err != nil {
 		t.Fatal(err)
 	}
@@ -162,9 +185,8 @@ func TestResolveProfileActiveJSON(t *testing.T) {
 }
 
 func TestResolveProfileActiveJSONOversizedIgnored(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("HOME", home)
-	location := filepath.Join(home, ".local", "share", "MusicOps")
+	testHome(t)
+	location := filepath.Join(UserDataRoot(), "MusicOps")
 	if err := os.MkdirAll(location, 0700); err != nil {
 		t.Fatal(err)
 	}
@@ -177,20 +199,19 @@ func TestResolveProfileActiveJSONOversizedIgnored(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got != filepath.Join(home, ".local", "share", "MusicOps", "profile") {
+	if got != filepath.Join(UserDataRoot(), "MusicOps", "profile") {
 		t.Fatalf("got %q (expected the default profile)", got)
 	}
 }
 
 func TestResolveProfileDefault(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("HOME", home)
+	testHome(t)
 	exe := fakeExe(t, t.TempDir(), "musicops-desktop")
 	got, err := ResolveProfile(exe)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got != filepath.Join(home, ".local", "share", "MusicOps", "profile") {
+	if got != filepath.Join(UserDataRoot(), "MusicOps", "profile") {
 		t.Fatalf("got %q", got)
 	}
 }
@@ -199,9 +220,8 @@ func TestResolveProfileSymlinkRefused(t *testing.T) {
 	if runtime.GOOS == "darwin" {
 		t.Skip("portable mode is not used on macOS")
 	}
-	home := t.TempDir()
-	t.Setenv("HOME", home)
-	root := t.TempDir()
+	testHome(t)
+	root := testTempDir(t)
 	real := filepath.Join(root, "real-profile")
 	if err := os.MkdirAll(real, 0755); err != nil {
 		t.Fatal(err)
@@ -216,16 +236,15 @@ func TestResolveProfileSymlinkRefused(t *testing.T) {
 }
 
 func TestRememberProfile(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("HOME", home)
-	base := filepath.Join(t.TempDir(), "base")
+	home := testHome(t)
+	base := filepath.Join(home, "base")
 	if err := os.MkdirAll(base, 0755); err != nil {
 		t.Fatal(err)
 	}
 	if err := RememberProfile(base); err != nil {
 		t.Fatal(err)
 	}
-	location := filepath.Join(home, ".local", "share", "MusicOps")
+	location := filepath.Join(UserDataRoot(), "MusicOps")
 	info, err := os.Stat(location)
 	if err != nil {
 		t.Fatal(err)

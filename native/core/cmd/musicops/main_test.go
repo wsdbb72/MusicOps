@@ -322,11 +322,15 @@ func TestCLISubprocessEndToEnd(t *testing.T) {
 	}
 
 	// Create a job through the real core API, then drive it via the CLI.
-	// The fake tracker answers after 8s (inside the 15s client timeout),
-	// so the search task stays running long enough to pause, resume and
-	// cancel deterministically instead of finishing in milliseconds.
+	// The fake tracker answers after 12s (inside the 15s client
+	// timeout), so the search task stays running long enough to pause,
+	// resume and cancel deterministically instead of finishing in
+	// milliseconds. The 8s budget was not enough: CLI subprocess spawns
+	// on a loaded runner are slow enough that the search finished
+	// between resume and cancel on macOS, and the cancel was then
+	// rejected as stale (WORKFLOW_REJECTED).
 	slowTracker := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		time.Sleep(8 * time.Second)
+		time.Sleep(12 * time.Second)
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = io.WriteString(w, `{"status":"success","response":{"results":[],"pages":1}}`)
 	}))
@@ -381,9 +385,14 @@ func TestCLISubprocessEndToEnd(t *testing.T) {
 	if code, out := runCLIBinary(t, binary, append([]string{"job", searchJobID}, baseArgs...)...); code != 0 || !strings.Contains(out, searchJobID) || !strings.Contains(out, `"paused": true`) {
 		t.Fatalf("job(paused): code %d out %s", code, out)
 	}
-	// resume, then cancel; the cancelled job exits 2.
+	// resume, then pause again before cancelling: the search only runs
+	// while unpaused, so re-pausing freezes it and the cancel below
+	// cannot lose a race with the search finishing.
 	if code, out := runCLIBinary(t, binary, append([]string{"control", searchJobID, "resume"}, baseArgs...)...); code != 0 {
 		t.Fatalf("control resume: code %d out %s", code, out)
+	}
+	if code, out := runCLIBinary(t, binary, append([]string{"control", searchJobID, "pause"}, baseArgs...)...); code != 0 {
+		t.Fatalf("control pause again: code %d out %s", code, out)
 	}
 	if code, out := runCLIBinary(t, binary, append([]string{"control", searchJobID, "cancel"}, baseArgs...)...); code != 0 && code != 2 {
 		t.Fatalf("control cancel: code %d out %s", code, out)

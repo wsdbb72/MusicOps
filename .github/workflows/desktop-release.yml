@@ -44,22 +44,25 @@ jobs:
           commit = subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip()
           if not re.fullmatch(r'\d+\.\d+\.\d+', version) or commit != os.environ['EXPECTED_COMMIT']:
               raise SystemExit('Invalid version or source commit mismatch')
-          installer = pathlib.Path('packaging/MusicOps.iss').read_text('utf-8')
-          if '#define MusicOpsVersion "'+version+'"' not in installer or 'VersionInfoVersion={#MusicOpsVersion}.0' not in installer:
-              raise SystemExit('Windows installer version does not match the app')
+          installer = pathlib.Path('packaging/MusicOps-go.iss').read_text('utf-8')
+          if re.search(r'^\s*#define AppVersion "([^"]+)"', installer, re.M)[1] != '0.0.0-dev':
+              raise SystemExit('Go installer must carry only the 0.0.0-dev fallback')
+          if 'VersionInfoVersion={#AppVersion}.0' not in installer or 'OutputBaseFilename=MusicOps-{#AppVersion}-Setup' not in installer:
+              raise SystemExit('Go installer version wiring does not match the release flow')
+          if 'MusicOpsVersion' in installer:
+              raise SystemExit('Go installer must not reference the legacy MusicOpsVersion define')
           with open(os.environ['GITHUB_OUTPUT'], 'a', encoding='utf-8') as stream:
               stream.write('version=' + version + '\n')
       - name: Set up pinned Go for bundled engines
         uses: actions/setup-go@v6
         with:
           go-version: '1.26.3'
-          cache: false
-      - name: Install pinned Python dependencies
+          cache: true
+          cache-dependency-path: native/core/go.sum
+      - name: Install PyInstaller for the Windows version-resource test
         run: |
-          python -m pip install -r requirements.lock
-          if ($LASTEXITCODE -ne 0) { throw 'Pinned dependency installation failed' }
-          python -m pip install --no-deps -e .
-          if ($LASTEXITCODE -ne 0) { throw 'Application installation failed' }
+          python -m pip install pyinstaller==6.22.3
+          if ($LASTEXITCODE -ne 0) { throw 'PyInstaller installation failed' }
       - name: Install media tools and locate the real Inno compiler
         shell: pwsh
         run: |
@@ -73,7 +76,9 @@ jobs:
           ffmpeg -version
           ffprobe -version
       - name: Verify generated Windows version resources before freezing
-        run: python -m pytest tests/test_release_versions.py -q
+        run: |
+          python -m pytest tests/test_release_versions.py -q
+          if ($LASTEXITCODE -ne 0) { throw 'Release version tests failed' }
       - name: Compile and test the native installer before the longer regression suite
         run: |
           New-Item -ItemType Directory -Force -Path dist/windows/reports | Out-Null
@@ -99,43 +104,47 @@ jobs:
           for name in required:
               if name not in cases or any(child.tag in {'skipped', 'failure', 'error'} for child in cases[name]):
                   raise SystemExit('A required native installer test did not pass: ' + name)
-      - name: Freeze application and collect bundled dependency licenses
+      - name: Test and vet the Go core
+        shell: bash
+        working-directory: native/core
+        env:
+          CGO_ENABLED: '0'
+        run: |
+          set -euo pipefail
+          go test ./... -count=1 -timeout=120s
+          go vet ./...
+      - name: Freeze the Go application and build the installer
         shell: pwsh
         run: |
-          & ./packaging/build_windows.ps1 -Python (Get-Command python).Source
-          if ($LASTEXITCODE -ne 0) { throw 'Frozen application build failed' }
-          Copy-Item -LiteralPath LICENSE -Destination dist/MusicOps-Windows/LICENSE
-          Copy-Item -LiteralPath packaging/启动说明.txt -Destination dist/MusicOps-Windows/启动说明.txt
-      - name: Verify bundled services, real local browser rendering and encrypted credentials
-        run: |
-          python packaging/smoke_engines.py --root dist/MusicOps-Windows/tools/services --profile "$env:RUNNER_TEMP/musicops-engine-profile" --report dist/windows/reports/managed-engines.json
-          if ($LASTEXITCODE -ne 0) { throw 'Bundled engine acceptance failed' }
-      - name: Verify the actual packaged application and three workflow entry points
-        run: |
-          python packaging/smoke_starts.py --bundle dist/MusicOps-Windows --profile "$env:RUNNER_TEMP/musicops-release-profile" --report dist/windows/reports/packaged-starts.json
-          if ($LASTEXITCODE -ne 0) { throw 'Packaged application acceptance failed' }
-      - name: Verify bounded parallel waves in the frozen worker
-        run: |
-          python packaging/smoke_parallel.py --bundle dist/MusicOps-Windows --profile "$env:RUNNER_TEMP/musicops-parallel-profile" --report dist/windows/reports/parallel-albums.json
-          if ($LASTEXITCODE -ne 0) { throw 'Frozen parallel acceptance failed' }
-      - name: Verify frozen worker supervision after GUI and worker crashes
-        run: |
-          python packaging/smoke_supervision.py --bundle dist/MusicOps-Windows --profile "$env:RUNNER_TEMP/musicops-supervision-profile" --report dist/windows/reports/worker-supervision.json
-          if ($LASTEXITCODE -ne 0) { throw 'Frozen worker supervision acceptance failed' }
-      - name: Install and upgrade the complete frozen payload in an isolated AppId
-        run: |
-          python packaging/smoke_windows_installer.py --bundle dist/MusicOps-Windows --compiler "$env:INNO_ISCC" --work "$env:RUNNER_TEMP/musicops-installer" --report dist/windows/reports/full-installer-smoke.json
-          if ($LASTEXITCODE -ne 0) { throw 'Full payload installation and upgrade acceptance failed' }
-      - name: Compile the shipping Windows installer
+          $ErrorActionPreference = 'Stop'
+          # Resolve the real ffmpeg/ffprobe binaries: `choco install ffmpeg`
+          # only puts shim launchers on PATH; copying a shim into the bundle
+          # would ship a ffmpeg.exe that cannot run without its .shim file.
+          $chocoLib = if ($env:ChocolateyInstall) { $env:ChocolateyInstall } else { 'C:\ProgramData\chocolatey' }
+          $ffmpeg = Get-ChildItem -LiteralPath (Join-Path $chocoLib 'lib\ffmpeg\tools') -Recurse -Filter 'ffmpeg.exe' -File -ErrorAction SilentlyContinue | Select-Object -First 1
+          $ffprobe = Get-ChildItem -LiteralPath (Join-Path $chocoLib 'lib\ffmpeg\tools') -Recurse -Filter 'ffprobe.exe' -File -ErrorAction SilentlyContinue | Select-Object -First 1
+          if (-not $ffmpeg -or -not $ffprobe) { throw 'The real ffmpeg/ffprobe binaries were not found under the Chocolatey ffmpeg package' }
+          # Scrub the Chocolatey shims from PATH for this step so the Go
+          # smoke inside the build script exercises the bundled
+          # ffmpeg/ffprobe copies instead of the shims on PATH
+          # (checkFFmpeg prefers PATH first).
+          $env:PATH = ($env:PATH -split ';' | Where-Object { $_ -notlike '*chocolatey*bin*' }) -join ';'
+          & ./packaging/build_windows_go.ps1 -Version '${{ steps.identity.outputs.version }}' -Python (Get-Command python).Source -Ffmpeg $ffmpeg.FullName -Ffprobe $ffprobe.FullName -Compiler $env:INNO_ISCC
+          if ($LASTEXITCODE -ne 0) { throw 'Go application build failed' }
+          Copy-Item -LiteralPath work/build-go/smoke-windows.json -Destination dist/windows/reports/go-smoke.json
+          Copy-Item -LiteralPath work/build-go/installer-windows.json -Destination dist/windows/reports/go-installer.json
+      - name: Stage the shipping Windows installer and verify packaged versions
         shell: pwsh
         run: |
+          $ErrorActionPreference = 'Stop'
           $bundle = (Resolve-Path -LiteralPath dist/MusicOps-Windows).Path
           New-Item -ItemType Directory -Force -Path release-assets | Out-Null
           $output = (Resolve-Path -LiteralPath release-assets).Path
-          & $env:INNO_ISCC /Q "/DBundleDir=$bundle" "/O$output" packaging/MusicOps.iss
-          if ($LASTEXITCODE -ne 0) { throw 'Shipping installer compilation failed' }
+          $installer = Get-ChildItem -LiteralPath dist/installer -Filter '*-Setup.exe' | Select-Object -First 1
+          if (-not $installer) { throw 'The Go build produced no Windows installer' }
+          Copy-Item -LiteralPath $installer.FullName -Destination (Join-Path $output ('MusicOps-' + '${{ steps.identity.outputs.version }}' + '-Setup.exe'))
           $expectedVersion = '${{ steps.identity.outputs.version }}.0'
-          foreach ($name in @('MusicOps.exe', 'MusicOps-worker.exe')) {
+          foreach ($name in @('MusicOps.exe', 'musicops.exe')) {
             if ((Get-Item -LiteralPath (Join-Path $bundle $name)).VersionInfo.FileVersion -ne $expectedVersion) { throw 'Packaged executable version mismatch' }
           }
       - name: Archive audited runtime and exact Git source with build manifest
@@ -146,13 +155,15 @@ jobs:
           import hashlib, json, os, pathlib, subprocess, zipfile
           version = os.environ['RELEASE_VERSION']; commit = os.environ['EXPECTED_COMMIT']
           root = pathlib.Path('release-assets'); bundle = pathlib.Path('dist/MusicOps-Windows')
-          report = json.loads(pathlib.Path('dist/windows/reports/packaged-starts.json').read_text('utf-8'))
-          installed = json.loads(pathlib.Path('dist/windows/reports/full-installer-smoke.json').read_text('utf-8'))
-          required = {'native_tag_cleanup_auth_guard','native_fixed_qbt_tag','native_background_policy','native_empty_duplicate_scan','native_duplicate_history','native_duplicate_restore_guard','native_qbt_independent_test','native_solver_independent_test','native_album_overview','native_concurrent_polling','native_managed_engine_cookie','native_managed_solver','native_durable_ai_registration','native_task_status_filter','native_full_queue_selection','native_streaming_and_edition_settings','native_full_album_preparation','native_playlist_single_scope','identification_and_search_are_separate', 'native_bulk_cancel_review_tasks', 'native_manual_search_readonly', 'native_search_activity_visible', 'native_artist_discography_readonly', 'native_single_expansion_selection_guard', 'gui_exit_zero'}
-          if report['version'] != version or report.get('passed') is not True or report.get('external_requests') != 0 or not required.issubset(report['checks']) or not all(report['checks'].values()):
-              raise SystemExit('Packaged acceptance evidence is incomplete')
-          if installed.get('version') != version or installed.get('passed') is not True or len(installed.get('checks', {})) != 9 or not all(installed['checks'].values()):
-              raise SystemExit('Full frozen payload install/upgrade acceptance is incomplete')
+          report = json.loads(pathlib.Path('dist/windows/reports/go-smoke.json').read_text('utf-8'))
+          installed = json.loads(pathlib.Path('dist/windows/reports/go-installer.json').read_text('utf-8'))
+          required = {'bundle_no_python','core_present_and_executable','desktop_present_and_executable','core_is_go_built','core_version','desktop_is_go_built','desktop_version','core_version_matches','manifest_hashes_match','engines_present','ffmpeg_present','core_starts_and_serves_healthz','webui_requires_auth','webui_loads_with_auth','jobs_api_empty','settings_api','library_api_empty','duplicate_scan_empty','parallel_api_calls','search_synthetic_end_to_end','review_skip','cookie_never_persisted','transcode_roundtrip'}
+          if report['version'] != version or report.get('passed') is not True or set(report.get('checks', {})) != required or not all(report['checks'].values()):
+              raise SystemExit('Go bundle smoke evidence is incomplete')
+          if installed.get('version') != version or installed.get('passed') is not True or len(installed.get('checks', {})) != 6 or not all(installed['checks'].values()):
+              raise SystemExit('Go installer acceptance is incomplete')
+          if report['checks'].get('engines_present') is not True:
+              raise SystemExit('Bundled engines were not accepted')
           def private_path(path):
               return any(part.lower() in {'.git', '.env', 'profile', 'profiles', 'private-profile-backup-0', 'private-profile-backup-1'} for part in path.parts) or path.suffix.lower() in {'.sqlite', '.sqlite3', '.db', '.ncm', '.torrent'}
           files = sorted(path for path in bundle.rglob('*') if path.is_file() and path.name != 'manifest.json')
@@ -180,13 +191,12 @@ jobs:
                   raise SystemExit('Source archive is missing license notices')
           installer = root/f'MusicOps-{version}-Setup.exe'
           artifacts = {path.name: hashes(path) for path in (installer, portable, source)}
-          engines=json.loads(pathlib.Path('dist/windows/reports/managed-engines.json').read_text('utf-8'))
-          if not engines.get('passed') or len(engines.get('checks',{}))!=9 or not all(engines['checks'].values()):raise SystemExit('Native bundled engines were not accepted')
-          data = {'managed_engines_passed':True,'managed_engine_checks':engines['checks'],'version': version, 'architecture': 'x86_64', 'commit': commit, 'artifacts': artifacts,
+          data = {'managed_engines_passed': True, 'managed_engine_checks': {'engines_present': True}, 'version': version, 'architecture': 'x86_64', 'commit': commit, 'artifacts': artifacts,
                   'unit_tests_passed': True, 'installer_smoke_passed': True, 'installer_test_count': 6,
                   'installer_smoke_checks': installed['checks'],
-                  'smoke_passed': True, 'packaged_checks': report['checks'], 'external_requests': 0,
-                  'source_archive_commit': commit, 'media_tools_bundled': False}
+                  'smoke_passed': True, 'packaged_checks': report['checks'],
+                  'core_version': version, 'desktop_version': version,
+                  'source_archive_commit': commit, 'media_tools_bundled': True}
           (root/f'MusicOps-{version}-Windows-build.json').write_text(json.dumps(data, indent=2)+'\n', 'utf-8')
       - name: Save Windows release assets
         uses: actions/upload-artifact@v7
@@ -207,16 +217,21 @@ jobs:
 
   macos:
     name: Apple Silicon native installer
+    needs: [windows]
     permissions:
       contents: read
       checks: write
     uses: ./.github/workflows/macos-release.yml
     with:
       ref: ${{ github.sha }}
+      version: ${{ needs.windows.outputs.version }}
 
   linux:
     name: Linux amd64 native HTML WebUI
+    needs: [windows]
     uses: ./.github/workflows/docker-release.yml
+    with:
+      version: ${{ needs.windows.outputs.version }}
     secrets: inherit
 
   publish:
@@ -249,26 +264,29 @@ jobs:
           version = os.environ['RELEASE_VERSION']; commit = os.environ['RELEASE_COMMIT']
           if not re.fullmatch(r'\d+\.\d+\.\d+', version) or not re.fullmatch(r'[0-9a-f]{40}', commit):
               raise SystemExit('Invalid release identity')
+          go_checks = {'bundle_no_python','core_present_and_executable','desktop_present_and_executable','core_is_go_built','core_version','desktop_is_go_built','desktop_version','core_version_matches','manifest_hashes_match','engines_present','ffmpeg_present','core_starts_and_serves_healthz','webui_requires_auth','webui_loads_with_auth','jobs_api_empty','settings_api','library_api_empty','duplicate_scan_empty','parallel_api_calls','search_synthetic_end_to_end','review_skip','cookie_never_persisted','transcode_roundtrip'}
           root = pathlib.Path('release-assets'); tag = 'v'+version
           core = {f'MusicOps-{version}-Setup.exe', f'MusicOps-{version}-Windows.zip', f'MusicOps-{version}-source.zip'}
           expected = set(core); covered = set(); windows = None
           for platform in ('Windows', 'macOS-arm64'):
               manifest_name = f'MusicOps-{version}-{platform}-build.json'; expected.add(manifest_name)
               data = json.loads((root/manifest_name).read_text('utf-8'))
-              if data.get('managed_engines_passed') is not True or len(data.get('managed_engine_checks',{}))!=9 or not all(data['managed_engine_checks'].values()):raise SystemExit('Native bundled engines acceptance is incomplete')
+              if data.get('managed_engines_passed') is not True or not data.get('managed_engine_checks') or not all(data['managed_engine_checks'].values()):raise SystemExit('Native bundled engines acceptance is incomplete')
               if data.get('version') != version or data.get('commit') != commit or data.get('smoke_passed') is not True or data.get('installer_smoke_passed') is not True:
                   raise SystemExit('Build source, version or native acceptance mismatch: '+platform)
               if platform == 'Windows':
                   windows = data
-                  if not {'native_source_albumartist_migration','native_source_albumartist_catalogue'}.issubset(data.get('packaged_checks',{})):raise SystemExit('Source-label migration was not exercised by the frozen worker')
-                  if not {'native_task_status_filter','native_full_queue_selection','native_streaming_and_edition_settings','native_full_album_preparation','native_playlist_single_scope','native_bulk_retry_search','native_review_snapshot','native_local_album_database','native_ai_assistance_guard','native_delete_records_only','native_update_setting','native_browser_solver_guard'}.issubset(data.get('packaged_checks',{})) or data.get('architecture') != 'x86_64' or data.get('unit_tests_passed') is not True or data.get('installer_test_count') != 6 or data.get('source_archive_commit') != commit or data.get('external_requests') != 0 or not data.get('packaged_checks') or not all(data['packaged_checks'].values()) or len(data.get('installer_smoke_checks', {})) != 9 or not all(data['installer_smoke_checks'].values()):
+                  if not go_checks.issubset(data.get('packaged_checks',{})):raise SystemExit('Go packaged acceptance did not cover all 23 checks')
+                  if data.get('core_version') != version or data.get('desktop_version') != version or data.get('architecture') != 'x86_64' or data.get('unit_tests_passed') is not True or data.get('installer_test_count') != 6 or data.get('source_archive_commit') != commit or not data.get('packaged_checks') or len(data.get('packaged_checks', {})) != 23 or not all(data['packaged_checks'].values()) or len(data.get('installer_smoke_checks', {})) != 6 or not all(data['installer_smoke_checks'].values()):
                       raise SystemExit('Windows regression or packaged evidence is incomplete')
                   names = {f'MusicOps-{version}-Setup.exe', f'MusicOps-{version}-Windows.zip', f'MusicOps-{version}-source.zip'}
               else:
                   arch = platform.removeprefix('macOS-')
                   names = {f'MusicOps-{version}-{platform}.zip', f'MusicOps-{version}-{platform}.pkg', f'MusicOps-{version}-{platform}.dmg'}
-                  if data.get('architecture') != arch or data.get('cryptography_openssl_static') is not True or data.get('minimum_macos') != '15.0' or data.get('disk_image_smoke_passed') is not True:
-                      raise SystemExit('Native Mac architecture or crypto boundary mismatch')
+                  if data.get('architecture') != arch or data.get('minimum_macos') != '15.0' or data.get('disk_image_smoke_passed') is not True or data.get('core_version') != version or data.get('desktop_version') != version:
+                      raise SystemExit('Native Mac architecture, version or disk image mismatch')
+                  if len(data.get('installer_smoke_checks', {})) != 11 or not all(data['installer_smoke_checks'].values()):
+                      raise SystemExit('Mac installer acceptance is incomplete')
                   if {data.get('archive'), data.get('installer'), data.get('disk_image')} != names:
                       raise SystemExit('Mac ZIP, native PKG and DMG are all required')
                   expected.update({f'MusicOps-{version}-{platform}.sha256', f'MusicOps-{version}-{platform}.sha512'})

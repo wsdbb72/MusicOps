@@ -349,7 +349,12 @@ func (r *runner) runContainerChecks() {
 	status, doc, _, err = r.get("/v1/settings/download", true)
 	r.record("settings_download_ok", err == nil && status == http.StatusOK && doc["ok"] == true && doc["streaming_fallback_wired"] == true)
 
-	out, err = r.docker("exec", r.name, "sh", "-c", "grep -l -e websockify -e x11vnc /proc/[0-9]*/cmdline 2>/dev/null || true")
+	// Grep for the VNC daemons by a regex that cannot match the grep
+	// command itself: the literal patterns appear in the grep/sh
+	// cmdlines, so a plain 'websockify'/'x11vnc' grep always lists
+	// its own /proc entry and the check can never pass (release run
+	// 42606673759). The bracketed forms match only a real daemon.
+	out, err = r.docker("exec", r.name, "sh", "-c", "grep -l -e 'websock[a-z]fy' -e 'x11[v]nc' /proc/[0-9]*/cmdline 2>/dev/null || true")
 	r.record("no_vnc_processes", err == nil && strings.TrimSpace(out) == "")
 	_, errFFmpeg := r.docker("exec", r.name, "ffmpeg", "-version")
 	_, errFFprobe := r.docker("exec", r.name, "ffprobe", "-version")

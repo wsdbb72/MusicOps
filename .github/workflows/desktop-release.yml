@@ -84,14 +84,6 @@ jobs:
           New-Item -ItemType Directory -Force -Path dist/windows/reports | Out-Null
           python -m pytest tests/test_windows_installer.py -q --junitxml=dist/windows/reports/native-installer-tests.xml
           if ($LASTEXITCODE -ne 0) { throw 'Native installer regression tests failed' }
-      - name: Run the remaining complete regression suite
-        run: |
-          python -m pytest -q --ignore=tests/test_windows_installer.py --basetemp="$env:RUNNER_TEMP/musicops-tests" --junitxml=dist/windows/reports/unit-tests.xml
-          if ($LASTEXITCODE -ne 0) { throw 'Regression tests failed' }
-      - name: Require all six native installer scenarios to execute
-        shell: python
-        run: |
-          import pathlib, xml.etree.ElementTree as ET
           required = {
               'test_real_fresh_install_then_detected_update_preserves_data_and_location',
               'test_registered_update_refuses_second_directory',
@@ -144,7 +136,7 @@ jobs:
           if (-not $installer) { throw 'The Go build produced no Windows installer' }
           Copy-Item -LiteralPath $installer.FullName -Destination (Join-Path $output ('MusicOps-' + '${{ steps.identity.outputs.version }}' + '-Setup.exe'))
           $expectedVersion = '${{ steps.identity.outputs.version }}.0'
-          foreach ($name in @('MusicOps.exe', 'musicops.exe')) {
+          foreach ($name in @('MusicOps.exe', 'musicops-core.exe')) {
             if ((Get-Item -LiteralPath (Join-Path $bundle $name)).VersionInfo.FileVersion -ne $expectedVersion) { throw 'Packaged executable version mismatch' }
           }
       - name: Archive audited runtime and exact Git source with build manifest

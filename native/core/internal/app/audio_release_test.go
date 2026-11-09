@@ -17,7 +17,7 @@ import (
 func TestPublishExecutorIsRegistered(t *testing.T) {
 	application := newApp(t)
 	handlers := application.handlers()
-	if len(handlers) != 6 || handlers[workflow.CommandProcess] == nil || handlers[workflow.CommandSearch] == nil || handlers[workflow.CommandPublish] == nil || handlers[transcodeCommand] == nil {
+	if len(handlers) != 7 || handlers[workflow.CommandProcess] == nil || handlers[workflow.CommandSearch] == nil || handlers[workflow.CommandPublish] == nil || handlers[workflow.CommandDownload] == nil || handlers[transcodeCommand] == nil {
 		t.Fatal(len(handlers))
 	}
 }

@@ -1,0 +1,28 @@
+#!/bin/sh
+# MusicOps PKG preinstall: refuse unsafe destinations and a running app.
+# Runs as root during installation; it never terminates any process.
+set -eu
+if [ "${3:-/}" != "/" ]; then
+  echo "MusicOps: please install on the startup volume." >&2
+  exit 1
+fi
+if [ -L /Applications ] || [ -L /Applications/MusicOps.app ]; then
+  echo "MusicOps: refusing a symbolic-link installation destination." >&2
+  exit 1
+fi
+physical_arm=$(/usr/sbin/sysctl -n hw.optional.arm64 2>/dev/null || /bin/echo 0)
+if [ "$physical_arm" != "1" ]; then
+  echo "MusicOps: this package requires an Apple Silicon Mac." >&2
+  exit 1
+fi
+# Go desktop shell (MusicOps) and Go core (musicops). The old Python
+# worker (MusicOps-worker) no longer exists and is deliberately not
+# checked: a stale name here would never match and would hide a real
+# running core.
+for task_name in MusicOps musicops; do
+  if /usr/bin/pgrep -x "$task_name" >/dev/null; then
+    echo "MusicOps: quit the app and its background core before installing. No process was terminated." >&2
+    exit 1
+  fi
+done
+exit 0

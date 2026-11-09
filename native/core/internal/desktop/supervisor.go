@@ -153,6 +153,48 @@ func ResolveCoreBinary(explicit string) (string, error) {
 	return "", errors.New("cannot locate the musicops core binary: pass --core-binary or set MUSICOPS_CORE_BINARY")
 }
 
+// toolsDirFor returns the bundle's tools directory for a core binary path,
+// or "" when the layout has none. Windows/Linux bundles ship
+// <core-dir>/tools; the macOS .app ships the core in Contents/MacOS and
+// the tools in Contents/Resources/tools. The bundled ffmpeg/ffprobe live
+// there, and the core finds them through PATH (exec.LookPath), so the
+// supervisor must put this directory first when it launches the core.
+func toolsDirFor(coreBinary string) string {
+	dir := filepath.Dir(coreBinary)
+	if runtime.GOOS == "darwin" && filepath.Base(dir) == "MacOS" {
+		candidate := filepath.Join(dir, "..", "Resources", "tools")
+		if st, err := os.Stat(candidate); err == nil && st.IsDir() {
+			return candidate
+		}
+		return ""
+	}
+	candidate := filepath.Join(dir, "tools")
+	if st, err := os.Stat(candidate); err == nil && st.IsDir() {
+		return candidate
+	}
+	return ""
+}
+
+// withPathPrefix returns env with dir prepended to PATH (replacing the
+// existing PATH entry when present, appending one when absent). Duplicate
+// PATH keys are left to the OS to resolve, so a plain append is not safe.
+func withPathPrefix(env []string, dir string) []string {
+	out := make([]string, 0, len(env)+1)
+	replaced := false
+	for _, kv := range env {
+		if key, _, ok := strings.Cut(kv, "="); ok && strings.EqualFold(key, "PATH") {
+			out = append(out, "PATH="+dir+string(os.PathListSeparator)+kv[len(key)+1:])
+			replaced = true
+			continue
+		}
+		out = append(out, kv)
+	}
+	if !replaced {
+		out = append(out, "PATH="+dir)
+	}
+	return out
+}
+
 // generatePassword returns n random alphanumeric characters (crypto/rand).
 // The core requires a password of at least 16 characters.
 func generatePassword(n int) (string, error) {
@@ -311,7 +353,15 @@ func startCore(profile, coreBinary string, detached bool) (*runningCore, error) 
 		}
 	}
 	cmd := exec.Command(binary, args...)
-	cmd.Env = append(os.Environ(), "MUSICOPS_APP_PASSWORD="+password)
+	env := append(os.Environ(), "MUSICOPS_APP_PASSWORD="+password)
+	// Bundled ffmpeg/ffprobe (and, later, the managed engines) live in
+	// the bundle's tools directory; the core resolves them via PATH, so
+	// the tools directory goes first. A dev checkout has no tools
+	// directory and the PATH is left alone.
+	if tools := toolsDirFor(binary); tools != "" {
+		env = withPathPrefix(env, tools)
+	}
+	cmd.Env = env
 	if detached {
 		cmd.SysProcAttr = detachProcAttr()
 		cmd.Stdout = logFile

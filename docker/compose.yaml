@@ -12,5 +12,11 @@ services:
       - ${MUSICOPS_MEDIA:-/srv/music-storage}:/media
     shm_size: 1gb
     stop_grace_period: 120s
+    healthcheck:
+      test: ["CMD", "musicops", "healthcheck", "--addr", "127.0.0.1:8080"]
+      interval: 30s
+      timeout: 15s
+      start_period: 600s
+      retries: 3
     environment:
       TZ: ${TZ:-Asia/Shanghai}

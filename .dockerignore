@@ -9,6 +9,14 @@
 !docs/references/**
 !docker/
 !docker/**
+# Go core source and root LICENSE: the Dockerfile builds the Go core
+# from native/core and copies LICENSE into the image. Parent directories
+# must be re-included one level at a time (a file cannot be re-included
+# while its parent directory stays excluded).
+!LICENSE
+!native/
+!native/core/
+!native/core/**
 **/__pycache__
 **/*.pyc
 docker/.env*

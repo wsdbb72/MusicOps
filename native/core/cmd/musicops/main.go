@@ -3,7 +3,7 @@
 // With no subcommand (or a leading dash, i.e. the serve flags) it runs the
 // core server, exactly as before. With a subcommand as the first argument
 // it behaves as the MusicOps CLI (see cli.go): version, status, jobs, job,
-// control, stop and migrate.
+// control, stop, migrate and healthcheck.
 package main
 
 import (

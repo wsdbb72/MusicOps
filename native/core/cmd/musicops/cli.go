@@ -8,8 +8,10 @@ import (
 	"fmt"
 	"io"
 	"math"
+	"net/http"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/wsdbb72/MusicOps/native/core/internal/configmigrate"
 	"github.com/wsdbb72/MusicOps/native/core/internal/version"
@@ -105,13 +107,17 @@ func parseCLIFlags(cmd string, rest []string) (*cliFlags, error) {
 
 // runCLI implements the subcommands. Exit codes follow the Python CLI:
 // 0 normal, 2 for a terminally failed job state, 3 for a --wait timeout,
-// 7 for a CLI-side error.
+// 7 for a CLI-side error. healthcheck is the exception: it reports the
+// core's liveness for Docker HEALTHCHECK, so 0 means healthy and 1 means
+// not healthy (Docker reserves other codes).
 func runCLI(args []string) int {
 	cmd := args[0]
 	switch cmd {
 	case "version":
 		printJSON(map[string]string{"version": version.Version})
 		return 0
+	case "healthcheck":
+		return runHealthcheck(args[1:])
 	case "status", "jobs", "job", "control", "stop", "migrate":
 		// Parsed below.
 	default:
@@ -188,6 +194,49 @@ func runCLI(args []string) int {
 	default:
 		return printError(fmt.Errorf("未知命令: %s", cmd))
 	}
+}
+
+// runHealthcheck probes the core's unauthenticated /healthz endpoint and
+// reports healthy (exit 0) or not (exit 1). It takes no profile: Docker's
+// HEALTHCHECK runs it against the listening address only. Flags: --addr
+// (default 127.0.0.1:8080), --timeout seconds (default 5). A healthy core
+// answers 200 with ok:true, application:musicops and python:false.
+func runHealthcheck(args []string) int {
+	fs := flag.NewFlagSet("healthcheck", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	addr := fs.String("addr", "127.0.0.1:8080", "core listen address")
+	timeout := fs.Float64("timeout", 5, "probe timeout in seconds")
+	if err := fs.Parse(args); err != nil {
+		return printError(err)
+	}
+	if math.IsNaN(*timeout) || math.IsInf(*timeout, 0) || *timeout < 0 {
+		return printError(fmt.Errorf("CLI_INVALID_TIMEOUT"))
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(*timeout*float64(time.Second)))
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://"+*addr+"/healthz", nil)
+	if err != nil {
+		printJSON(map[string]any{"ok": false, "error": err.Error()})
+		return 1
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		printJSON(map[string]any{"ok": false, "error": err.Error()})
+		return 1
+	}
+	defer resp.Body.Close()
+	var body map[string]any
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		printJSON(map[string]any{"ok": false, "status": resp.StatusCode, "error": "invalid health response"})
+		return 1
+	}
+	healthy := resp.StatusCode == http.StatusOK && body["ok"] == true &&
+		body["application"] == "musicops" && body["python"] == false
+	printJSON(map[string]any{"ok": healthy, "status": resp.StatusCode, "body": body})
+	if healthy {
+		return 0
+	}
+	return 1
 }
 
 // runJob fetches one job, optionally waiting for it to settle, then prints

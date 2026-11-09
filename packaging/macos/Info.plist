@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleName</key>
+	<string>MusicOps</string>
+	<key>CFBundleDisplayName</key>
+	<string>MusicOps</string>
+	<key>CFBundleIdentifier</key>
+	<string>com.wsdbb72.MusicOps</string>
+	<key>CFBundleShortVersionString</key>
+	<string>__MUSICOPS_VERSION__</string>
+	<key>CFBundleVersion</key>
+	<string>__MUSICOPS_VERSION__</string>
+	<key>CFBundleExecutable</key>
+	<string>MusicOps</string>
+	<key>CFBundleIconFile</key>
+	<string>MusicOps</string>
+	<key>CFBundlePackageType</key>
+	<string>APPL</string>
+	<key>CFBundleInfoDictionaryVersion</key>
+	<string>6.0</string>
+	<key>LSMinimumSystemVersion</key>
+	<string>15.0</string>
+	<key>LSBackgroundOnly</key>
+	<false/>
+	<key>NSHighResolutionCapable</key>
+	<true/>
+	<key>NSPrincipalClass</key>
+	<string>NSApplication</string>
+	<key>NSAppleScriptEnabled</key>
+	<false/>
+	<key>LSApplicationCategoryType</key>
+	<string>public.app-category.music</string>
+	<key>NSHumanReadableCopyright</key>
+	<string>Copyright © MusicOps contributors. See bundled LICENSE.</string>
+</dict>
+</plist>

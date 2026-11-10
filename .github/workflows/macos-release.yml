@@ -81,6 +81,10 @@ jobs:
           security create-keychain -p "$TASK_KEYCHAIN_PASSWORD" "$MUSICOPS_KEYCHAIN_PATH"
           security set-keychain-settings -lut 21600 "$MUSICOPS_KEYCHAIN_PATH"
           security unlock-keychain -p "$TASK_KEYCHAIN_PASSWORD" "$MUSICOPS_KEYCHAIN_PATH"
+      - name: Run the Go keychain regression on the temporary keychain
+        working-directory: native/core
+        shell: bash
+        run: go test ./internal/vault/ -run TestKeychainDecryptsInAFreshProcess -count=1 -timeout 3m
       - name: Build app, verify ad-hoc signatures, run packaged acceptance and archive
         id: native_build
         shell: bash

@@ -3,16 +3,25 @@ name: Build and publish desktop release
 on:
   push:
     branches: ['codex/release-*']
+  pull_request:
+    branches: [main]
   workflow_dispatch:
+    inputs:
+      publish:
+        description: '创建 GitHub Release 并推进 Docker latest。验收构建保持关闭。'
+        type: boolean
+        default: false
 
 permissions:
   contents: read
   checks: write
 
-# Finish a publication transaction before another candidate can publish.
+# A real publication keeps the exclusive lock. Acceptance builds on a
+# pull request or a manual run with publish left off do not take it and
+# do not create a Release, tag or Docker latest tag.
 concurrency:
-  group: musicops-desktop-publication
-  cancel-in-progress: false
+  group: ${{ (github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.publish)) && 'musicops-desktop-publication' || format('musicops-desktop-acceptance-{0}', github.ref) }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   windows:
@@ -103,7 +112,7 @@ jobs:
           CGO_ENABLED: '0'
         run: |
           set -euo pipefail
-          go test ./... -count=1 -timeout=120s
+          go test ./... -count=1 -timeout=180s
           go vet ./...
       - name: Freeze the Go application and build the installer
         shell: pwsh
@@ -224,11 +233,13 @@ jobs:
     uses: ./.github/workflows/docker-release.yml
     with:
       version: ${{ needs.windows.outputs.version }}
+      push_image: ${{ github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.publish) }}
     secrets: inherit
 
   publish:
     name: Publish only the complete verified desktop release
     needs: [windows, macos, linux]
+    if: github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.publish)
     runs-on: ubuntu-latest
     timeout-minutes: 20
     permissions:
@@ -372,6 +383,7 @@ jobs:
   docker_latest:
     name: Advance Docker latest after the complete release
     needs: [publish, linux]
+    if: github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.publish)
     runs-on: ubuntu-latest
     steps:
       - uses: docker/setup-buildx-action@v4

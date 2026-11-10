@@ -53,7 +53,7 @@ func TestLibraryListsReleasedAudio(t *testing.T) {
 	entry := decoded.Entries[0]
 	// DecodeState depends on the host: "decoded" when ffmpeg/ffprobe are
 	// installed, "structural" otherwise. Both are honest receipts.
-	if entry.File != "Artist/Album/01 Title.wav" || entry.Format != "wav" || (entry.DecodeState != "structural" && entry.DecodeState != "decoded") || entry.Origin != "local_import" || !entry.FilePresent || entry.RootID != "board-lib" {
+	if entry.File != "Artist/Album/01 Title.flac" || entry.Format != "flac" || (entry.DecodeState != "structural" && entry.DecodeState != "decoded") || entry.Origin != "local_import" || !entry.FilePresent || entry.RootID != "board-lib" {
 		t.Fatal(entry)
 	}
 }

@@ -34,6 +34,11 @@ func TestWAVTagsAreReadBeforeAndAfterImport(t *testing.T) {
 	if err := os.WriteFile(withInfo, wavWithINFO(), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	turnedOff := post(t, application, "/v1/settings/wav", map[string]any{"auto_convert_wav": false, "wav_disposal": "keep"})
+	note, _ := turnedOff["note"].(string)
+	if turnedOff["ok"] != true || !strings.Contains(note, "当前已关闭自动转换") {
+		t.Fatal(turnedOff)
+	}
 
 	bareBefore := mustCompare(t, application, "notags.wav")
 	id3Before := mustCompare(t, application, "id3.wav")
@@ -172,6 +177,56 @@ func appendWAVChunk(wav []byte, id string, payload []byte) []byte {
 		wav = append(wav, 0)
 	}
 	return wav
+}
+
+func TestWAVAutoConvertDefaultsOnAndKeepsAnExplicitOff(t *testing.T) {
+	application := newApp(t)
+	shown := getAuth(t, application, "/v1/settings/wav")
+	if shown.Code != http.StatusOK || !strings.Contains(shown.Body.String(), `"auto_convert_wav":true`) || !strings.Contains(shown.Body.String(), `"wav_disposal":"keep"`) || !strings.Contains(shown.Body.String(), "默认开启") || !strings.Contains(shown.Body.String(), "原 WAV 默认保留") || !strings.Contains(shown.Body.String(), "当前已打开自动转换") {
+		t.Fatal(shown.Code, shown.Body.String())
+	}
+	incoming := filepath.Join(application.Dir, "incoming")
+	if err := os.MkdirAll(incoming, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	source := filepath.Join(incoming, "plain.wav")
+	if err := os.WriteFile(source, pcmWAV(16), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	opened := mustCompare(t, application, "plain.wav")
+	if !opened.Converted || opened.After.Format != "flac" {
+		t.Fatalf("default did not convert before identify: %+v", opened)
+	}
+	if _, err := os.Stat(source); err != nil {
+		t.Fatal("default disposal removed the wav", err)
+	}
+	if _, err := os.Stat(filepath.Join(incoming, "plain.flac")); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := application.casSaveJSON(wavSettingsKey(), []byte(`{"wav_disposal":"recycle"}`)); err != nil {
+		t.Fatal(err)
+	}
+	if got := application.loadWAVSettings(); !got.Auto || got.Disposal != "recycle" {
+		t.Fatalf("a document without the switch was not left on: %+v", got)
+	}
+	if err := application.casSaveJSON(wavSettingsKey(), []byte(`{"auto_convert_wav":false,"wav_disposal":"keep"}`)); err != nil {
+		t.Fatal(err)
+	}
+	if got := application.loadWAVSettings(); got.Auto || got.Disposal != "keep" {
+		t.Fatalf("an explicit off was turned back on: %+v", got)
+	}
+	held := filepath.Join(incoming, "held.wav")
+	if err := os.WriteFile(held, pcmWAV(16), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	closed := mustCompare(t, application, "held.wav")
+	if closed.Converted || closed.After.Format != "wav" {
+		t.Fatalf("explicit off still converted: %+v", closed)
+	}
+	if _, err := os.Stat(filepath.Join(incoming, "held.flac")); !os.IsNotExist(err) {
+		t.Fatal("explicit off wrote a flac", err)
+	}
 }
 
 func TestWAVBatchReportsProgressAndDoesNotClaimDownload(t *testing.T) {

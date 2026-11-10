@@ -16,26 +16,42 @@ import (
 	"github.com/wsdbb72/MusicOps/native/core/internal/wavflac"
 )
 
-// WAV conversion settings. Auto is off until the user turns it on, so an
-// upgrade does not move existing files. Disposal defaults to keep.
+// WAV conversion settings. Automatic conversion is on unless a saved
+// document explicitly turns it off. Disposal stays keep unless chosen.
 type wavSettings struct {
 	Auto      bool   `json:"auto_convert_wav"`
 	Disposal  string `json:"wav_disposal"`
 	UpdatedNS int64  `json:"updated_ns"`
 }
 
+func defaultWAVSettings() wavSettings {
+	return wavSettings{Auto: true, Disposal: "keep"}
+}
+
 func wavSettingsKey() []byte { return []byte("app/settings/wav") }
 
 func (a *App) loadWAVSettings() wavSettings {
-	var settings wavSettings
-	found, err := a.loadJSONSetting(wavSettingsKey(), &settings)
-	if err != nil || !found {
-		return wavSettings{Disposal: "keep"}
+	var raw json.RawMessage
+	found, err := a.loadJSONSetting(wavSettingsKey(), &raw)
+	if err != nil || !found || len(raw) == 0 {
+		return defaultWAVSettings()
 	}
-	switch settings.Disposal {
+	var doc struct {
+		Auto      *bool  `json:"auto_convert_wav"`
+		Disposal  string `json:"wav_disposal"`
+		UpdatedNS int64  `json:"updated_ns"`
+	}
+	if json.Unmarshal(raw, &doc) != nil {
+		return defaultWAVSettings()
+	}
+	settings := defaultWAVSettings()
+	settings.UpdatedNS = doc.UpdatedNS
+	if doc.Auto != nil {
+		settings.Auto = *doc.Auto
+	}
+	switch doc.Disposal {
 	case "keep", "recycle", "delete":
-	default:
-		settings.Disposal = "keep"
+		settings.Disposal = doc.Disposal
 	}
 	return settings
 }
@@ -46,7 +62,10 @@ func (a *App) wavSettingsHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *App) saveWAVSettings(w http.ResponseWriter, r *http.Request) {
-	var body wavSettings
+	var body struct {
+		Auto     *bool  `json:"auto_convert_wav"`
+		Disposal string `json:"wav_disposal"`
+	}
 	if err := decode(r, &body); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "code": "INVALID_REQUEST"})
 		return
@@ -57,30 +76,36 @@ func (a *App) saveWAVSettings(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "code": "INVALID_REQUEST", "error": "原 WAV 只能保留、回收或删除"})
 		return
 	}
-	if body.Disposal == "" {
-		body.Disposal = "keep"
+	saved := a.loadWAVSettings()
+	if body.Auto != nil {
+		saved.Auto = *body.Auto
 	}
-	body.UpdatedNS = a.now().UnixNano()
-	encoded, err := json.Marshal(body)
+	if body.Disposal != "" {
+		saved.Disposal = body.Disposal
+	}
+	saved.UpdatedNS = a.now().UnixNano()
+	encoded, err := json.Marshal(saved)
 	if err != nil || a.casSaveJSON(wavSettingsKey(), encoded) != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "code": "SETTINGS_UNAVAILABLE"})
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "wav": body, "note": wavSettingNote(body)})
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "wav": saved, "note": wavSettingNote(saved)})
 }
 
 func wavSettingNote(settings wavSettings) string {
-	note := "关闭时，WAV 保持原样。打开后，下载进入待入库目录或重新索引时，会先把整数 PCM WAV 无损转成 FLAC 并迁移标签，再做识别入库。"
+	note := "默认开启：下载进入待入库或重新索引时，先把整数 PCM WAV 无损转成 FLAC 并迁移标签，再做识别入库。关闭后 WAV 保持原样，识别仍会读取里面的 LIST/INFO 和 ID3。"
 	switch settings.Disposal {
 	case "recycle":
 		note += "原 WAV 移入可恢复的回收目录。"
 	case "delete":
 		note += "校验通过后删除原 WAV。"
 	default:
-		note += "默认保留原 WAV。"
+		note += "原 WAV 默认保留。"
 	}
 	if settings.Auto {
 		note += "当前已打开自动转换。"
+	} else {
+		note += "当前已关闭自动转换。"
 	}
 	return note
 }

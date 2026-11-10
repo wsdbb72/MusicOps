@@ -432,7 +432,7 @@ func TestDownloadExecutorFullChain(t *testing.T) {
 		t.Fatal(done)
 	}
 	waitRootPublished(t, application, job.RootID)
-	library, err := filepath.Glob(filepath.Join(application.Dir, "library-audio", "*", "*", "*.wav"))
+	library, err := filepath.Glob(filepath.Join(application.Dir, "library-audio", "*", "*", "*.flac"))
 	if err != nil || len(library) != 2 {
 		t.Fatal(library, err)
 	}
@@ -728,7 +728,7 @@ func TestDownloadAcceptanceOverHTTP(t *testing.T) {
 	waitStage("process:search:album-accept", "completed")
 	waitStage("album-accept", "publishing", "completed")
 	waitStage("album-accept", "completed")
-	library, err := filepath.Glob(filepath.Join(application.Dir, "library-audio", "*", "*", "*.wav"))
+	library, err := filepath.Glob(filepath.Join(application.Dir, "library-audio", "*", "*", "*.flac"))
 	if err != nil || len(library) != 2 {
 		t.Fatal(library, err)
 	}

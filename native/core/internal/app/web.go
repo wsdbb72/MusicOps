@@ -1070,7 +1070,7 @@ const appJS = `(function () {
       '<label>恢复编号<input type="text" id="restore-merge-id" placeholder="合并后返回的编号"></label><p><button type="button" id="restore-duplicates">恢复这次合并</button></p></article>' +
       '<article><form id="transcode-form"><h2>WAV 无损转 FLAC</h2>' +
       '<p class="meta">整数 PCM（16/24/32 位、多声道、可扩展格式）用纯 Go 转成 FLAC，样本逐个比对并写入 MD5。浮点和压缩 WAV 会拒绝，不会降级。标签从 LIST/INFO、ID3 和 BWF 迁入，封面写入内嵌图片。没有标签时只按文件名和目录补显示名，不把它当成已确认的发行。</p>' +
-      '<label><input type="checkbox" id="wav-auto"> 下载进入待入库或重新索引时，先转成 FLAC 再识别入库</label>' +
+      '<label><input type="checkbox" id="wav-auto" checked> 下载进入待入库或重新索引时，先转成 FLAC 再识别入库（默认开启）</label>' +
       '<label>原 WAV<select id="wav-disposal"><option value="keep">保留原文件</option><option value="recycle">移入可恢复回收目录</option><option value="delete">校验通过后删除</option></select></label>' +
       '<p><button type="button" id="save-wav" class="primary">保存转换设置</button></p><p id="wav-setting-note" class="meta"></p>' +
       '<label>单个 WAV<input type="text" id="transcode-source" placeholder="库内或待入库 .wav"></label>' +

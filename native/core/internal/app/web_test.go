@@ -26,7 +26,7 @@ func TestOperationsBoardReadsStoredJobsAndHidesSecrets(t *testing.T) {
 		t.Fatal(home.Code, script.Code, style.Code)
 	}
 	pageText := home.Body.String() + script.Body.String()
-	for _, leaked := range []string{"Python", "python", "种子字节", "执行器", "此进程", "站点回执", "authkey", "Pebble", "usetoken", "cookie-secret"} {
+	for _, leaked := range []string{"Python", "python", "种子字节", "执行器", "此进程", "站点回执", "authkey", "Pebble", "usetoken", "cookie-secret", "使用测试服务器", "Vault", "AGPL"} {
 		if strings.Contains(pageText, leaked) {
 			t.Fatal(leaked)
 		}

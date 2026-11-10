@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"encoding/json"
+	"net/http"
 	"net/url"
 	"path/filepath"
 	"strconv"
@@ -112,6 +113,11 @@ func (a *App) acquireWithToken(ctx context.Context, execution *scheduler.Executi
 	if err != nil {
 		return a.finishAcquire(held, job, "token", "余额读取失败，未发令牌请求；尚未下载、尚未入库", observation.ErrorClass, nil)
 	}
+	if bound, bindErr := a.bindPageBalance(observation, decision); bindErr != nil {
+		return a.finishAcquire(held, job, "token", "余额读取失败，未发令牌请求；尚未下载、尚未入库", "read_error", nil)
+	} else {
+		observation = bound
+	}
 	if !observation.Known || observation.ErrorClass != "" {
 		message := "站点余额未知或无法绑定账号，未发令牌请求；尚未下载、尚未入库"
 		class := observation.ErrorClass
@@ -140,7 +146,13 @@ func (a *App) acquireWithToken(ctx context.Context, execution *scheduler.Executi
 		// the same quote.
 		return a.finishAcquire(held, job, "token", "令牌预留没有成立，未向站点请求；尚未下载、尚未入库", "ledger_rejected", nil)
 	}
-	if reserved.State != tokenledger.StateReserved {
+	switch reserved.State {
+	case tokenledger.StateRequesting, tokenledger.StateRequestUnknown, tokenledger.StateUnknown:
+		// The token request was already sent or may have been sent. Read the
+		// site again and do not add usetoken a second time.
+		return a.reconcileInFlightToken(ctx, execution, held, job, plan, site, resource)
+	case tokenledger.StateReserved:
+	default:
 		return a.finishAcquire(held, job, "token", "令牌预留没有成立，未向站点请求；尚未下载、尚未入库", reserved.Class, nil)
 	}
 	if allowed, class, _ := a.ledger.ReadAllowed(site, a.now()); !allowed {
@@ -153,19 +165,12 @@ func (a *App) acquireWithToken(ctx context.Context, execution *scheduler.Executi
 		return scheduler.Outcome{}, err
 	}
 	receipt, fetchErr := a.fetchTorrent(ctx, execution, plan, site, resource, true)
-	note := "种子已保存，免费对账未完成"
-	if fetchErr != nil {
-		note = "获取未完成，需要核对是否已消耗"
-	}
-	// A registered spend source can settle the reservation right here instead
-	// of leaving it REQUEST_UNKNOWN: the proof must match the reservation's
-	// account, resource and request, or Reconcile leaves it uncertain and
-	// the flow below keeps the old behaviour. A source error is also not a
-	// proof, so it falls through the same way.
 	var receiptPtr *torrentfetch.Receipt
 	if fetchErr == nil {
 		receiptPtr = &receipt
 	}
+	// A fixture proof is an explicit charge record. It settles the reservation
+	// before the site is read again. Torrent bytes alone are not a proof.
 	if proof, found := a.confirmSpend(ctx, site, job.ID); found {
 		if reconciled, err := a.ledger.Reconcile(a.now(), site, proof); err == nil && reconciled.Class != tokenledger.ClassUncertain {
 			switch proof.State {
@@ -173,7 +178,7 @@ func (a *App) acquireWithToken(ctx context.Context, execution *scheduler.Executi
 				if fetchErr != nil {
 					return a.finishAcquire(held, job, "token", "令牌已确认消耗，但获取未完成；尚未下载、尚未入库", "SPEND_CONFIRMED", nil)
 				}
-				return a.finishAcquire(held, job, "token", "令牌已确认消耗，种子已保存；尚未下载、尚未入库", "SPEND_CONFIRMED", receiptPtr)
+				return a.finishConfirmedToken(held, job, "令牌已确认消耗，种子已保存；尚未下载、尚未入库", "SPEND_CONFIRMED", receiptPtr)
 			case "NOT_CONSUMED":
 				if fetchErr != nil {
 					return a.finishAcquire(held, job, "token", "令牌未消耗，但获取未完成；尚未下载、尚未入库", "SPEND_NOT_CONSUMED", nil)
@@ -182,13 +187,111 @@ func (a *App) acquireWithToken(ctx context.Context, execution *scheduler.Executi
 			}
 		}
 	}
+	if outcome, settled, err := a.confirmTokenFromSite(ctx, execution, held, job, plan, site, resource, receiptPtr); err != nil || settled {
+		return outcome, err
+	}
+	note := "种子已保存，免费对账未完成"
+	if fetchErr != nil {
+		note = "获取未完成，需要核对是否已消耗"
+	}
 	if _, err = a.ledger.Advance(a.now(), site, job.ID, tokenledger.StateRequestUnknown, note); err != nil {
 		return scheduler.Outcome{}, err
 	}
 	if fetchErr != nil {
 		return a.finishAcquire(held, job, "token", "获取未完成，令牌状态待对账；尚未下载、尚未入库", "REQUEST_UNKNOWN", nil)
 	}
-	return a.finishAcquire(held, job, "token", "种子字节已保存，免费是否生效尚未对账；尚未下载、尚未入库", "REQUEST_UNKNOWN", &receipt)
+	return a.finishAcquire(held, job, "token", "种子字节已保存，免费是否生效尚未对账；尚未下载、尚未入库", "REQUEST_UNKNOWN", receiptPtr)
+}
+
+// bindPageBalance uses the unique total printed on the torrent page when the
+// account document has an id but no token field. The number stays bound to
+// that account. A known API balance is never replaced, so a disagreement
+// still blocks the spend.
+func (a *App) bindPageBalance(observation tokenledger.Observation, decision sitefree.Decision) (tokenledger.Observation, error) {
+	if observation.Known || observation.AccountID == "" || observation.ErrorClass != tokenledger.ClassBalanceUnknown || decision.Balance == nil {
+		return observation, nil
+	}
+	observation.ReadBase = observation.Generation
+	observation.ReadBaseSet = true
+	observation.Generation = 0
+	observation.Known = true
+	observation.Balance = *decision.Balance
+	observation.ErrorClass = ""
+	observation.Source = "page"
+	committed, err := a.ledger.CommitObservation(observation)
+	if err != nil {
+		return tokenledger.Observation{}, err
+	}
+	if committed.Known && committed.ErrorClass == "" {
+		_ = a.ledger.ClearReadHold(observation.Site)
+	}
+	return committed, nil
+}
+
+// tokenEffectConfirmed reports the site evidence that a token spend took
+// effect for this user. That is personal freeleech on the API or in this
+// torrent's own row. A global isFreeleech flag, a site-wide 「免费」 label,
+// and the saved torrent bytes do not prove the token was consumed.
+func tokenEffectConfirmed(decision sitefree.Decision) bool {
+	return decision.Personal || decision.RowFree == "personal"
+}
+
+// confirmTokenFromSite re-reads the torrent after the token request. When
+// the site now shows the free label, the reservation is confirmed and the
+// torrent already in hand can be downloaded. A read failure or a page that
+// still is not free leaves the reservation for the caller to mark uncertain.
+// This read never sends usetoken.
+func (a *App) confirmTokenFromSite(ctx context.Context, execution *scheduler.Execution, held taskrepo.Token, job workflow.Job, plan SearchPlan, site, resource string, receipt *torrentfetch.Receipt) (scheduler.Outcome, bool, error) {
+	after, err := a.readEvidence(ctx, plan, site, resource)
+	if err != nil || !tokenEffectConfirmed(after) {
+		return scheduler.Outcome{}, false, nil
+	}
+	if _, err = a.ledger.Advance(a.now(), site, job.ID, tokenledger.StateConfirmed, "site-personal-free"); err != nil {
+		return scheduler.Outcome{}, false, err
+	}
+	if receipt != nil {
+		outcome, err := a.finishConfirmedToken(held, job, "站点已确认免费生效，种子已保存；尚未下载、尚未入库", "", receipt)
+		return outcome, true, err
+	}
+	return a.saveFreeTorrent(ctx, execution, held, job, plan, site, resource)
+}
+
+// reconcileInFlightToken runs when this request is already in flight. It
+// never sends usetoken again. A site free label confirms the reservation
+// and then downloads the torrent without a token; otherwise the request
+// stays uncertain.
+func (a *App) reconcileInFlightToken(ctx context.Context, execution *scheduler.Execution, held taskrepo.Token, job workflow.Job, plan SearchPlan, site, resource string) (scheduler.Outcome, error) {
+	if outcome, settled, err := a.confirmTokenFromSite(ctx, execution, held, job, plan, site, resource, nil); err != nil || settled {
+		return outcome, err
+	}
+	current, found, err := a.ledger.Get(site, job.ID)
+	if err != nil {
+		return scheduler.Outcome{}, err
+	}
+	if found && current.State == tokenledger.StateRequesting {
+		if _, err = a.ledger.Advance(a.now(), site, job.ID, tokenledger.StateRequestUnknown, "对账后仍未确认免费"); err != nil {
+			return scheduler.Outcome{}, err
+		}
+	}
+	return a.finishAcquire(held, job, "token", "令牌请求仍待对账，未再次向站点使用令牌；尚未下载、尚未入库", "REQUEST_UNKNOWN", nil)
+}
+
+// saveFreeTorrent stores the torrent with the ordinary download link after
+// the site has already shown that this user does not need another token.
+func (a *App) saveFreeTorrent(ctx context.Context, execution *scheduler.Execution, held taskrepo.Token, job workflow.Job, plan SearchPlan, site, resource string) (scheduler.Outcome, bool, error) {
+	receipt, err := a.fetchTorrent(ctx, execution, plan, site, resource, false)
+	if err != nil {
+		outcome, finishErr := a.finishAcquire(held, job, "token", "免费已确认，但种子没有保存；未再次使用令牌；尚未下载、尚未入库", "SPEND_CONFIRMED", nil)
+		return outcome, true, finishErr
+	}
+	outcome, finishErr := a.finishConfirmedToken(held, job, "站点已确认免费生效，种子已保存；尚未下载、尚未入库", "", &receipt)
+	return outcome, true, finishErr
+}
+
+// finishConfirmedToken records a settled token spend as a candidate the
+// download lane can start. The album is still not in the library.
+func (a *App) finishConfirmedToken(held taskrepo.Token, job workflow.Job, message, class string, receipt *torrentfetch.Receipt) (scheduler.Outcome, error) {
+	return a.finishAcquire(held, job, "candidate", message, class, receipt)
 }
 
 // confirmSpend asks the registered spend source for a correlated charge
@@ -256,6 +359,35 @@ func (a *App) observeBalance(ctx context.Context, site, cookie string, synthetic
 	}
 	if obs.ErrorClass == "auth" && obs.RecheckAtNS == 0 {
 		obs.RecheckAtNS = now.Add(5 * time.Minute).UnixNano()
+	}
+	// 0.4.31 reads the user profile when the index document has an account
+	// id but no token field. A profile failure leaves the balance unknown
+	// and does not place a site-wide hold: the next attempt can read again,
+	// and no token request has been sent. Auth and rate limits are real
+	// site answers and are kept.
+	if obs.ErrorClass == tokenledger.ClassBalanceUnknown && obs.AccountID != "" && err == nil && status == http.StatusOK {
+		userBody, userStatus, userRetry, userErr := a.searcher.ReadAccount(ctx, query, url.Values{"action": {"user"}, "id": {obs.AccountID}})
+		switch {
+		case userErr != nil || userStatus == 0 || userStatus >= 500:
+		case userStatus == http.StatusUnauthorized || userStatus == http.StatusForbidden:
+			obs.Known = false
+			obs.Balance = 0
+			obs.ErrorClass = "auth"
+			obs.RecheckAtNS = now.Add(5 * time.Minute).UnixNano()
+		case userStatus == http.StatusTooManyRequests:
+			obs.Known = false
+			obs.Balance = 0
+			obs.ErrorClass = "rate_limited"
+			obs.RecheckAtNS = now.Add(recheckDelay(userRetry)).UnixNano()
+		case userStatus == http.StatusOK:
+			parsed := tokenledger.ParseBalance(site, userBody)
+			if parsed.Known && parsed.ErrorClass == "" && (parsed.AccountID == "" || parsed.AccountID == obs.AccountID) {
+				obs.Known = true
+				obs.Balance = parsed.Balance
+				obs.Source = "user." + parsed.Source
+				obs.ErrorClass = ""
+			}
+		}
 	}
 	account := obs.AccountID
 	if account == "" {

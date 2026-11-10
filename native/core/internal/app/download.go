@@ -48,14 +48,11 @@
 //
 // Free evidence: the acquire executor only fetches a torrent without a
 // token after sitefree confirmed it free for this user (personal free, or
-// global free on a non-token site), and a token fetch buys freeleech for
-// that torrent (the Python provider records free=not nonfree for both
-// cases). The receipt's UseToken flag is the durable trace of which branch
-// ran, so the handler transcribes it into the plan as FreeConfirmed with
-// FreeMethod "site-free" or "token". A receipt that cannot be traced to
-// the acquire decision stays unconfirmed and StartDownload refuses it;
-// the executor re-checks the same rule through AddStopped, which refuses
-// unconfirmed free evidence.
+// global free on a non-token site). A token fetch is confirmed only after
+// a correlated spend record or after the site shows that free took effect.
+// UseToken on the receipt is not itself confirmation. The plan's
+// FreeConfirmed bit is set only for those two cases. StartDownload refuses
+// anything else, and the executor re-checks through AddStopped.
 package app
 
 import (
@@ -79,6 +76,7 @@ import (
 	"github.com/wsdbb72/MusicOps/native/core/internal/qbittorrent"
 	"github.com/wsdbb72/MusicOps/native/core/internal/scheduler"
 	"github.com/wsdbb72/MusicOps/native/core/internal/taskrepo"
+	"github.com/wsdbb72/MusicOps/native/core/internal/tokenledger"
 	"github.com/wsdbb72/MusicOps/native/core/internal/torrentfetch"
 	"github.com/wsdbb72/MusicOps/native/core/internal/workflow"
 )
@@ -434,11 +432,10 @@ func (a *App) validDownloadSettings(body downloadRequest) (string, qbittorrentCr
 
 // buildDownloadPlan builds the durable, secret-free download plan for one
 // acquire job from the stored search plan and the stored torrent receipt.
-// The free determination is transcribed from the receipt: the acquire
-// executor only fetches without a token after sitefree confirmed the
-// torrent free for this user, and a token fetch buys freeleech for that
-// torrent, so either branch is confirmed free (see the package comment).
-// A job with no receipt, or a receipt whose bytes are gone, has no plan.
+// A no-token receipt was fetched only after the site showed it was free.
+// A token receipt counts as free only when that request's reservation is
+// confirmed. A job with no receipt, or a receipt whose bytes are gone, has
+// no plan.
 func (a *App) buildDownloadPlan(job workflow.Job, savePath, category, tags string) (downloadPlan, error) {
 	var plan SearchPlan
 	inspection, err := a.flows.Inspect(job.ID)
@@ -462,8 +459,20 @@ func (a *App) buildDownloadPlan(job workflow.Job, savePath, category, tags strin
 		return downloadPlan{}, err
 	}
 	freeMethod := "site-free"
+	freeConfirmed := true
 	if receipt.UseToken {
 		freeMethod = "token"
+		freeConfirmed = false
+		result, found, err := a.ledger.Get(receipt.Site, job.ID)
+		if err != nil {
+			return downloadPlan{}, err
+		}
+		if found && (result.State == tokenledger.StateConfirmed || result.State == tokenledger.StateConsumed) {
+			freeConfirmed = true
+		}
+	}
+	if !freeConfirmed {
+		return downloadPlan{}, errors.New("token spend is not confirmed")
 	}
 	return downloadPlan{
 		RootJobID: job.RootID, JobID: job.ID, Site: receipt.Site, ResourceID: receipt.ResourceID,

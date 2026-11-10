@@ -27,7 +27,12 @@ const (
 	// maxQuoteBudget is the largest batch cap the ledger will store. A site
 	// balance may be higher; callers must cap the batch instead of copying
 	// the whole balance into Budget.
-	maxQuoteBudget       = 100
+	maxQuoteBudget = 100
+	// maxIndexItems bounds the per-site reservation index. Released and
+	// rejected rows are dropped from the index (the request key still
+	// replays them) so a run of local refusals cannot fill it. Confirmed
+	// spends stay, because they are what stops a second charge.
+	maxIndexItems        = 8192
 	ClassBalanceUnknown  = "balance_unknown"
 	ClassBalanceStale    = "balance_stale"
 	ClassPending         = "token_pending"
@@ -153,6 +158,7 @@ func (l *Ledger) Reserve(now time.Time, quote Quote) (Result, error) {
 		if existing, ok, err := l.replay(quote); err != nil || ok {
 			return existing, err
 		}
+		snap.Items = compactIndex(snap.Items)
 		next, item, reject := decide(now, quote, snap)
 		if reject.Class == ClassAlreadyReserved || reject.Class == ClassPending || reject.Class == ClassAccountHold || reject.Class == ClassTokenBudget || reject.Class == ClassBalanceUnknown || reject.Class == ClassBalanceStale || reject.Class == ClassAuthorization || reject.Class == ClassSpent {
 			next = rejection(now, quote, reject.Class)
@@ -166,7 +172,7 @@ func (l *Ledger) Reserve(now time.Time, quote Quote) (Result, error) {
 		}
 		snap.Generation++
 		snap.Items = append(snap.Items, item)
-		if len(snap.Items) > 200 {
+		if len(snap.Items) > maxIndexItems {
 			return Result{}, dataengine.ErrInvalidRequest
 		}
 		encodedIndex, err := json.Marshal(snap)
@@ -480,6 +486,20 @@ func allow(from, to string) bool {
 	default:
 		return false
 	}
+}
+
+// compactIndex drops local refusals. A released or rejected row is still
+// stored under its request key, so the same request replays, but it no
+// longer occupies the index that blocks later spends.
+func compactIndex(items []indexItem) []indexItem {
+	kept := make([]indexItem, 0, len(items))
+	for _, item := range items {
+		if item.State == StateReleased || item.State == StateRejected {
+			continue
+		}
+		kept = append(kept, item)
+	}
+	return kept
 }
 
 func inFlight(state string) bool {

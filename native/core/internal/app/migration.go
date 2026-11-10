@@ -7,7 +7,7 @@ import (
 	"github.com/wsdbb72/MusicOps/native/core/internal/livemigrate"
 )
 
-const migrationNote = "旧版若开启了自动更新，会安装当时的官方发行版。本版启动时把旧音乐库索引、未完成任务和未对账令牌迁入正在使用的数据；音乐文件不移动。迁移失败则启动失败，可以原样重试。回退只撤索引、任务和迁入的令牌记录，不删除音乐文件，也不删除冷归档。本版不会在启动时自动安装更新。"
+const migrationNote = "旧版若开启了自动更新，会安装当时的官方发行版。本版启动时把旧音乐库索引、未完成任务和未对账令牌迁入正在使用的数据；音乐文件不移动。迁移失败则启动失败，可以原样重试。回退只撤索引、任务和迁入的令牌记录，不删除音乐文件，也不删除旧库归档。本版不会在启动时自动安装更新。"
 
 // migrationStatus explains the 0.4.31 upgrade. The cold archive stays even
 // after a live rollback. This process does not auto-install a newer release.

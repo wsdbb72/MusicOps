@@ -68,6 +68,29 @@ func TestTorrentIdentityMustMatch(t *testing.T) {
 	}
 }
 
+func TestPageTokenTotalSumsAndRejectsAPartialNumber(t *testing.T) {
+	summed := `<span>令牌: 0+1</span><a href="torrents.php?action=download&amp;id=3&amp;usetoken=1">FL</a>`
+	decision, err := Read("dicmusic", "3", [][]byte{[]byte(summed)}, time.Unix(10, 0))
+	if err != nil || decision.Balance == nil || *decision.Balance != 1 || decision.TokenCost != 1 {
+		t.Fatal(decision, err)
+	}
+	grouped := `<span>Tokens: 1,000</span><a href="torrents.php?action=download&amp;id=3&amp;usetoken=1">FL</a>`
+	decision, err = Read("orpheus", "3", [][]byte{[]byte(grouped)}, time.Unix(10, 0))
+	if err != nil || decision.Balance == nil || *decision.Balance != 1000 {
+		t.Fatal(decision, err)
+	}
+	split := `<span>令牌: 1</span><span>令牌: 2</span>`
+	decision, err = Read("dicmusic", "3", [][]byte{[]byte(split)}, time.Unix(10, 0))
+	if err != nil || decision.Balance != nil {
+		t.Fatal(decision, err)
+	}
+	fraction := []byte(`{"status":"success","response":{"torrent":{"id":"3"},"personal":{"freeleechTokens":1.5}}}`)
+	decision, err = Read("dicmusic", "3", [][]byte{fraction}, time.Unix(10, 0))
+	if err != nil || decision.Balance != nil {
+		t.Fatal(decision, err)
+	}
+}
+
 func TestCallerClockIsRequired(t *testing.T) {
 	if _, err := Read("open.cd", "11", [][]byte{[]byte(`<tr id="torrent11"><strong class="tl_free">免费</strong></tr>`)}, time.Time{}); err == nil {
 		t.Fatal("missing observation time accepted")

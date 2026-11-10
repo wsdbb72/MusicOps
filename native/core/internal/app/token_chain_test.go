@@ -631,6 +631,198 @@ func TestLiveRecheckIsNotSent(t *testing.T) {
 	}
 }
 
+func TestSummedPageBalanceMatchesTheAccountAndStillSpends(t *testing.T) {
+	var downloads atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		values := r.URL.Query()
+		switch {
+		case values.Get("action") == "torrent":
+			io.WriteString(w, `{"status":"success","response":{"group":{"id":10},"torrent":{"id":"`+values.Get("id")+`","isPersonalFreeleech":false,"isFreeleech":false}}}`)
+		case values.Get("torrentid") != "":
+			io.WriteString(w, `<a href="torrents.php?action=download&amp;id=`+values.Get("torrentid")+`&amp;usetoken=1">FL</a><span>令牌: 0+1</span>`)
+		case values.Get("action") == "index":
+			io.WriteString(w, `{"status":"success","response":{"id":7,"userstats":{"tokens":1}}}`)
+		case values.Get("action") == "download":
+			downloads.Add(1)
+			if values.Get("usetoken") != "1" || values.Get("authkey") == "" {
+				t.Error(r.URL.RawQuery)
+			}
+			io.WriteString(w, sampleTorrent)
+		default:
+			io.WriteString(w, gazelleHit("11"))
+		}
+	}))
+	defer server.Close()
+	application := newApp(t)
+	body := tokenBody("album-sum", server.URL, []string{"dicmusic"})
+	body["dicmusic_authkey"] = "sentinel-dic-auth"
+	post(t, application, "/v1/search", body)
+	job := waitJob(t, application, "process:search:album-sum", "needs_review")
+	if downloads.Load() != 1 || job.ErrorClass != "REQUEST_UNKNOWN" || job.ReviewKind != "token" {
+		t.Fatal(downloads.Load(), job.ErrorClass, job.ReviewKind, job.Message)
+	}
+}
+
+func TestProfileOrPageBalanceIsUsedWhenTheIndexOmitsTokens(t *testing.T) {
+	var downloads atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		values := r.URL.Query()
+		switch {
+		case values.Get("action") == "torrent":
+			io.WriteString(w, `{"status":"success","response":{"group":{"id":10},"torrent":{"id":"`+values.Get("id")+`","isPersonalFreeleech":false}}}`)
+		case values.Get("torrentid") != "":
+			io.WriteString(w, `<a href="torrents.php?action=download&amp;id=`+values.Get("torrentid")+`&amp;usetoken=1">FL</a>`)
+		case values.Get("action") == "index":
+			io.WriteString(w, `{"status":"success","response":{"id":7,"username":"listener"}}`)
+		case values.Get("action") == "user":
+			if values.Get("id") != "7" {
+				t.Error(values.Get("id"))
+			}
+			io.WriteString(w, `{"status":"success","response":{"id":7,"personal":{"freeleechTokens":3}}}`)
+		case values.Get("action") == "download":
+			downloads.Add(1)
+			io.WriteString(w, sampleTorrent)
+		default:
+			io.WriteString(w, gazelleHit("11"))
+		}
+	}))
+	defer server.Close()
+	application := newApp(t)
+	body := tokenBody("album-profile", server.URL, []string{"dicmusic"})
+	body["dicmusic_authkey"] = "sentinel-dic-auth"
+	post(t, application, "/v1/search", body)
+	job := waitJob(t, application, "process:search:album-profile", "needs_review")
+	if downloads.Load() != 1 || job.ErrorClass != "REQUEST_UNKNOWN" {
+		t.Fatal(downloads.Load(), job.ErrorClass, job.Message)
+	}
+}
+
+func TestPageTotalBindsToTheAccountWhenNeitherDocumentHasTokens(t *testing.T) {
+	var downloads atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		values := r.URL.Query()
+		switch {
+		case values.Get("action") == "torrent":
+			io.WriteString(w, `{"status":"success","response":{"group":{"id":10},"torrent":{"id":"`+values.Get("id")+`","isPersonalFreeleech":false}}}`)
+		case values.Get("torrentid") != "":
+			io.WriteString(w, `<a href="torrents.php?action=download&amp;id=`+values.Get("torrentid")+`&amp;usetoken=1">FL</a><span>令牌: 0+1</span>`)
+		case values.Get("action") == "index":
+			io.WriteString(w, `{"status":"success","response":{"id":8,"username":"listener"}}`)
+		case values.Get("action") == "user":
+			io.WriteString(w, `{"status":"success","response":{"id":8,"personal":{}}}`)
+		case values.Get("action") == "download":
+			downloads.Add(1)
+			if values.Get("usetoken") != "1" {
+				t.Error("page balance did not authorize the token request")
+			}
+			io.WriteString(w, sampleTorrent)
+		default:
+			io.WriteString(w, gazelleHit("11"))
+		}
+	}))
+	defer server.Close()
+	application := newApp(t)
+	body := tokenBody("album-page", server.URL, []string{"orpheus"})
+	body["orpheus_torrent_pass"] = "sentinel-orpheus-pass"
+	post(t, application, "/v1/search", body)
+	job := waitJob(t, application, "process:search:album-page", "needs_review")
+	if downloads.Load() != 1 || job.ErrorClass != "REQUEST_UNKNOWN" || strings.Contains(job.Message, "未发令牌请求") {
+		t.Fatal(downloads.Load(), job.ErrorClass, job.Message)
+	}
+}
+
+func TestPersonalFreeAfterTheTokenRequestConfirmsAndReleasesTheAccount(t *testing.T) {
+	var tokenUses atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		values := r.URL.Query()
+		switch {
+		case values.Get("action") == "torrent":
+			personal := values.Get("id") == "11" && tokenUses.Load() > 0
+			flag := "false"
+			if personal {
+				flag = "true"
+			}
+			io.WriteString(w, `{"status":"success","response":{"group":{"id":10},"torrent":{"id":"`+values.Get("id")+`","isPersonalFreeleech":`+flag+`,"isFreeleech":false}}}`)
+		case values.Get("torrentid") != "":
+			io.WriteString(w, `<a href="torrents.php?action=download&amp;id=`+values.Get("torrentid")+`&amp;usetoken=1">FL</a>`)
+		case values.Get("action") == "index":
+			io.WriteString(w, `{"status":"success","response":{"id":7,"userstats":{"tokens":4}}}`)
+		case values.Get("action") == "download":
+			if values.Get("usetoken") == "1" {
+				tokenUses.Add(1)
+			} else {
+				t.Error("confirmation fetched the torrent again with a token")
+			}
+			io.WriteString(w, sampleTorrent)
+		case values.Get("searchstr") == "Album B":
+			io.WriteString(w, gazelleHit("22"))
+		default:
+			io.WriteString(w, gazelleHit("11"))
+		}
+	}))
+	defer server.Close()
+	application := newApp(t)
+	body := tokenBody("album-settled", server.URL, []string{"dicmusic"})
+	body["dicmusic_authkey"] = "sentinel-dic-auth"
+	post(t, application, "/v1/search", body)
+	job := waitJob(t, application, "process:search:album-settled", "needs_review")
+	if tokenUses.Load() != 1 || job.ReviewKind != "candidate" || job.ErrorClass != "" || !strings.Contains(job.Message, "尚未入库") {
+		t.Fatal(tokenUses.Load(), job.ReviewKind, job.ErrorClass, job.Message)
+	}
+	state := postRecheck(t, application, map[string]any{"site": "dicmusic", "request_id": "process:search:album-settled"})
+	if nested(t, state, "reservation")["state"] != "CONFIRMED" || state["downloaded"] != false {
+		t.Fatal(state)
+	}
+	again := tokenBody("album-settled-2", server.URL, []string{"dicmusic"})
+	again["query"] = "Album B"
+	again["dicmusic_authkey"] = "sentinel-dic-auth"
+	post(t, application, "/v1/search", again)
+	second := waitJob(t, application, "process:search:album-settled-2", "needs_review")
+	if tokenUses.Load() != 2 || second.ErrorClass != "REQUEST_UNKNOWN" {
+		t.Fatal(tokenUses.Load(), second.ErrorClass, second.Message)
+	}
+}
+
+func TestTokenHTTPRejectionDoesNotBanTheSiteOrRetry(t *testing.T) {
+	var downloads atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		values := r.URL.Query()
+		switch {
+		case values.Get("action") == "torrent":
+			io.WriteString(w, `{"status":"success","response":{"group":{"id":10},"torrent":{"id":"`+values.Get("id")+`","isPersonalFreeleech":false,"isFreeleech":true}}}`)
+		case values.Get("torrentid") != "":
+			io.WriteString(w, `<a href="torrents.php?action=download&amp;id=`+values.Get("torrentid")+`&amp;usetoken=1">FL</a>`)
+		case values.Get("action") == "index":
+			io.WriteString(w, `{"status":"success","response":{"id":7,"userstats":{"tokens":4}}}`)
+		case values.Get("action") == "download":
+			downloads.Add(1)
+			io.WriteString(w, `<html><body>站点拒绝这次下载</body></html>`)
+		case values.Get("searchstr") == "Album B":
+			io.WriteString(w, gazelleHit("22"))
+		default:
+			io.WriteString(w, gazelleHit("11"))
+		}
+	}))
+	defer server.Close()
+	application := newApp(t)
+	body := tokenBody("album-rejected", server.URL, []string{"dicmusic"})
+	body["dicmusic_authkey"] = "sentinel-dic-auth"
+	post(t, application, "/v1/search", body)
+	job := waitJob(t, application, "process:search:album-rejected", "needs_review")
+	allowed, class, _ := application.ledger.ReadAllowed("dicmusic", time.Now())
+	if downloads.Load() != 1 || job.ErrorClass != "REQUEST_UNKNOWN" || job.ReviewKind != "token" || !allowed || class != "" {
+		t.Fatal(downloads.Load(), job.ErrorClass, job.ReviewKind, allowed, class, job.Message)
+	}
+	again := tokenBody("album-rejected-2", server.URL, []string{"dicmusic"})
+	again["query"] = "Album B"
+	again["dicmusic_authkey"] = "sentinel-dic-auth"
+	post(t, application, "/v1/search", again)
+	second := waitJob(t, application, "process:search:album-rejected-2", "needs_review")
+	if downloads.Load() != 1 || second.ErrorClass != "account_token_hold" || !strings.Contains(second.Message, "未向站点请求") {
+		t.Fatal(downloads.Load(), second.ErrorClass, second.Message)
+	}
+}
+
 func tokenBody(jobID, base string, sites []string) map[string]any {
 	body := searchBody(jobID, base, sites, false)
 	body["identity"] = map[string]any{

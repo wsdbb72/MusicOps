@@ -17,12 +17,10 @@
 // to the executor through that map, never through this payload.
 //
 // FreeConfirmed must be true: a download task only runs on confirmed free
-// evidence. The app derives it from the torrent receipt (see
-// app/download.go): the acquire executor only fetches a torrent without a
-// token after sitefree confirmed it free for this user, and a token fetch
-// buys freeleech for that torrent, so either branch is confirmed free.
-// Anything the handler cannot trace to the acquire decision stays
-// unconfirmed and is refused here, before any task is queued.
+// evidence. The app sets it only after sitefree confirmed a no-token fetch,
+// or after a token reservation was confirmed by a spend record or by the
+// site showing that free took effect. A token request that is still
+// uncertain is refused here, before any task is queued.
 package workflow
 
 import (

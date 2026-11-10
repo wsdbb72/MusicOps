@@ -59,7 +59,7 @@ func TestTokenFetchReconcilesFromProofFile(t *testing.T) {
 	writeSpendProof(t, application, `{"contract":"musicops.fixture.v1","account_id":"7","resource_id":"11","request_id":"process:search:album-proof","state":"CONSUMED"}`)
 	runTokenSpend(t, application, server, "album-proof")
 	job := inspect(t, application, "process:search:album-proof")
-	if job.Job.ReviewKind != "token" || job.Job.ErrorClass != "SPEND_CONFIRMED" || !strings.Contains(job.Job.Message, "已确认消耗") {
+	if job.Job.ReviewKind != "candidate" || job.Job.ErrorClass != "SPEND_CONFIRMED" || !strings.Contains(job.Job.Message, "已确认消耗") {
 		t.Fatal(job.Job)
 	}
 	reservation, found, err := application.ledger.Get("dicmusic", "process:search:album-proof")

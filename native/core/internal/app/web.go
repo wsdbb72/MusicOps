@@ -157,9 +157,8 @@ const appJS = `(function () {
       var failed = [];
       (body.results || []).forEach(function (item) { if (!item.ok) failed.push(item.job_id + "：" + (item.code || "失败")); });
       Object.keys(selectedJobs).forEach(function (id) { selectedJobs[id] = false; });
-      if (failed.length) setStatus("review", "批量完成：成功 " + body.succeeded + " 个，失败 " + body.failed + " 个。" + failed.join("；"));
-      else setStatus("ok", "批量完成：成功 " + body.succeeded + " 个。");
-      load();
+      if (failed.length) await reloadThen("review", "批量完成：成功 " + body.succeeded + " 个，失败 " + body.failed + " 个。" + failed.join("；"));
+      else await reloadThen("ok", "批量完成：成功 " + body.succeeded + " 个。");
     } catch (err) {
       setStatus("fail", "批量操作中断。");
     } finally {
@@ -196,8 +195,8 @@ const appJS = `(function () {
         return;
       }
       siteRows = Array.isArray(body.sites) ? body.sites : [];
-      setStatus("ok", "已保存。");
       render();
+      setStatus("ok", "已保存。");
     } catch (err) {
       setStatus("fail", "保存失败。");
     } finally {
@@ -207,7 +206,7 @@ const appJS = `(function () {
   function renderSearch() {
     setStatus("", "");
     var html = '<div class="cards"><article><form id="search-form"><h2>提交搜索</h2>' +
-      '<p class="meta">四站只读检索；是否下载由核对结果与身份证据决定，这里不直接下载。</p>' +
+      '<p class="meta">只读检索已启用的站点；是否下载由核对结果和身份证据决定，这里不直接下载。</p>' +
       '<label>检索关键词<input type="text" id="search-query" required></label>' +
       '<label>期望标题<input type="text" id="search-title" required></label>' +
       '<label>期望艺人<input type="text" id="search-artist"></label>' +
@@ -224,8 +223,6 @@ const appJS = `(function () {
       '<label><input type="checkbox" id="search-identity-tracklist"> 已核对曲目清单</label>' +
       '<label><input type="checkbox" id="search-identity-confirmed"> 确认这是同一发行（须先核对曲目清单）</label></fieldset>' +
       '<label>本次检索的 Cookie（只用于这次检索，不保存；留空用已保存的 Cookie）<input type="password" id="search-cookie" autocomplete="off"></label>' +
-      '<label><input type="checkbox" id="search-synthetic"> 使用测试服务器（不访问真实站点）</label>' +
-      '<label>测试服务器地址<input type="text" id="search-base-url" placeholder="使用测试服务器时必填"></label>' +
       '<p><button type="submit" class="primary">提交搜索</button></p></form></article></div>';
     list.innerHTML = html;
     var sitesBox = document.getElementById("search-sites");
@@ -248,9 +245,6 @@ const appJS = `(function () {
     var confirmed = document.getElementById("search-identity-confirmed").checked;
     var tracklist = document.getElementById("search-identity-tracklist").checked;
     if (confirmed && !tracklist) { setStatus("fail", "确认身份前须先核对曲目清单。"); return; }
-    var synthetic = document.getElementById("search-synthetic").checked;
-    var baseURL = document.getElementById("search-base-url").value.trim();
-    if (synthetic && !baseURL) { setStatus("fail", "使用测试服务器时需要填写地址。"); return; }
     var tracks = document.getElementById("search-tracks").value.split(",").map(function (v) { return v.trim(); }).filter(function (v) { return v; });
     var scene = document.getElementById("search-scene").value;
     if (scene === "playlist" && !tracks.length) { setStatus("fail", "歌单场景需要至少一个来源曲目 ID。"); return; }
@@ -267,7 +261,7 @@ const appJS = `(function () {
       identity_confirmed: confirmed,
       payload: document.getElementById("search-identity-payload").value.trim()
     };
-    var body = {job_id: jobID, scene: scene, query: query, expected_title: title, expected_artist: document.getElementById("search-artist").value.trim(), source_track_ids: tracks, identity: identity, cookie: document.getElementById("search-cookie").value, synthetic: synthetic, base_url: baseURL};
+    var body = {job_id: jobID, scene: scene, query: query, expected_title: title, expected_artist: document.getElementById("search-artist").value.trim(), source_track_ids: tracks, identity: identity, cookie: document.getElementById("search-cookie").value, synthetic: false};
     var playlistID = document.getElementById("search-playlist").value;
     if (playlistID) body.playlist_id = playlistID;
     if (sites.length) body.enabled_sites = sites;
@@ -281,9 +275,8 @@ const appJS = `(function () {
         setStatus("fail", "提交失败。" + (result && result.code ? "（" + result.code + "）" : ""));
         return;
       }
-      setStatus("ok", "已提交搜索，任务 " + jobID + "。");
       view = "queue";
-      load();
+      await reloadThen("ok", "已提交搜索，任务 " + jobID + "。");
     } catch (err) {
       setStatus("fail", "提交中断。");
     } finally {
@@ -309,17 +302,21 @@ const appJS = `(function () {
   }
   function downloadCard() {
     if (!downloadSettings) return "";
+    var statusByName = {};
+    (downloadSettings.streaming_source_status || []).forEach(function (step) { statusByName[step.name] = step; });
     var orderHtml = streamingOrder.map(function (name, index) {
-      return '<p class="meta">' + escapeText(name) +
+      var step = statusByName[name] || {};
+      var note = step.enabled === false ? "（默认不启用，不会去请求）" : "";
+      return '<p class="meta">' + escapeText(name) + escapeText(note) +
         ' <button type="button" data-order-move="' + index + ':-1">↑</button>' +
         ' <button type="button" data-order-move="' + index + ':1">↓</button></p>';
     }).join("");
     return '<article><h2>下载默认</h2><p class="meta">搜索时不指定流媒体回退，就用这里的选择。</p>' +
-      '<label><input type="checkbox" id="download-streaming"' + (downloadSettings.streaming_enabled ? " checked" : "") + '> 流媒体回退（四站无精确匹配时走流媒体）</label>' +
-      '<label>本机 go-music-dl 地址<input type="text" id="download-engine" value="' + escapeText(downloadSettings.engine_url || "") + '" placeholder="留空则未接入。只接受本机 HTTP 或 HTTPS"></label>' +
+      '<label><input type="checkbox" id="download-streaming"' + (downloadSettings.streaming_enabled ? " checked" : "") + '> 流媒体回退（已启用的站点都没有精确匹配时，再尝试流媒体）</label>' +
+      '<label>本机流媒体引擎地址<input type="text" id="download-engine" value="' + escapeText(downloadSettings.engine_url || "") + '" placeholder="留空则未接入。本机用 HTTP，其他机器用 HTTPS"></label>' +
       '<p><button type="button" id="save-download" class="primary">保存</button></p>' +
       '<p class="meta">流媒体回退顺序（可上下调整）：</p>' + orderHtml +
-      '<p class="meta">回退顺序默认先 Tidal、Apple Music，再 QQ 音乐、网易云，最后是已导入的歌单文件。go-music-dl 是 AGPL-3.0，不会打进这个程序；只有用户本机服务返回并通过音频校验的文件才算下载，而且仍未入库。</p></article>';
+      '<p class="meta">实际会尝试的顺序是 Tidal、Apple Music、QQ 音乐、网易云，最后是已导入的歌单文件。Qobuz 和 Deezer 排在表里，但默认不启用。这个程序不内置流媒体引擎，只连接你填的地址。只有返回的文件通过音频校验才算下载，而且这时仍未入库。</p></article>';
   }
   function cookieCard() {
     var rows = cookieSettings.map(function (site) {
@@ -327,11 +324,11 @@ const appJS = `(function () {
         '<textarea id="cookie-' + escapeText(site.name) + '" rows="3" placeholder="粘贴 Cookie-Editor JSON；留空保留已保存的值"></textarea></label>' +
         '<p><button type="button" data-cookie-site="' + escapeText(site.name) + '">保存 ' + escapeText(site.name) + ' Cookie</button></p>';
     }).join("");
-    return '<article><h2>四站 Cookie</h2><p class="meta">每站的 Cookie 加密存在 Vault 里，只显示“已保存”，不回显内容。搜索、预检、下载时优先用这里保存的 Cookie；检索表单里现填的 Cookie 优先于已存值。</p>' + rows + '</article>';
+    return '<article><h2>站点 Cookie</h2><p class="meta">每站的 Cookie 加密保存在本机，只显示“已保存”，不回显内容。搜索、登录检查和下载优先用这里保存的 Cookie；检索时临时填写的 Cookie 只用于那一次。</p>' + rows + '</article>';
   }
   function aiCard() {
     if (!aiSettings) return "";
-    return '<article><h2>AI 设置</h2><p class="meta">核对模型：启用后，待核对的候选会走这里的模型再核对一次；模型结论仍要过本地校验才能通过。API Key 只存 Vault，不回显。</p>' +
+    return '<article><h2>AI 设置</h2><p class="meta">启用后，待核对的候选会再交给这里的模型看一次。模型不能单独放行，仍要通过本地的标题、艺人和版本校验。API Key 加密保存在本机，不回显。</p>' +
       '<label><input type="checkbox" id="ai-enabled"' + (aiSettings.enabled ? " checked" : "") + '> 启用 AI 核对</label>' +
       '<label>AI 地址<input type="text" id="ai-base-url" value="' + escapeText(aiSettings.base_url || "") + '" placeholder="如 https://ai.example.com/v1"></label>' +
       '<label>模型<input type="text" id="ai-model" value="' + escapeText(aiSettings.model || "") + '"></label>' +
@@ -343,7 +340,7 @@ const appJS = `(function () {
   }
   function qbtCard() {
     if (!qbtSettings) return "";
-    return '<article><h2>qBittorrent</h2><p class="meta">下载用的 qBittorrent 地址与登录。登录只存 Vault，不回显；用户名和密码须一起填，密码留空保留已保存的登录。</p>' +
+    return '<article><h2>qBittorrent</h2><p class="meta">下载用的 qBittorrent 地址和登录。登录加密保存在本机，不回显。用户名和密码要一起填；密码留空则保留已保存的登录。</p>' +
       '<label>地址<input type="text" id="qbt-base-url" value="' + escapeText(qbtSettings.base_url || "") + '" placeholder="http://127.0.0.1:8080"></label>' +
       '<label>用户名<input type="text" id="qbt-username" autocomplete="off"></label>' +
       '<label>密码（' + escapeText(savedMark(qbtSettings.login_saved, qbtSettings.login_revision)) + '，留空保留）<input type="password" id="qbt-password" autocomplete="off"></label>' +
@@ -364,7 +361,7 @@ const appJS = `(function () {
   }
   function lyricsCard() {
     if (!lyricsSettings) return "";
-    return '<article><h2>歌词与封面服务</h2><p class="meta">主服务须为 HTTPS；鉴权值是原始值，不补 Bearer 前缀，只存 Vault。设置可保存、可测试，但目前还没有拉取歌词/封面的客户端。</p>' +
+    return '<article><h2>歌词与封面服务</h2><p class="meta">主服务须为 HTTPS。鉴权值按原样保存，不会自动加上 Bearer 前缀，并且加密保存在本机。设置可以保存和测试；自动拉取歌词和封面还没有接入，保存后不会自己去下载。</p>' +
       '<label>服务地址<input type="text" id="lyrics-base-url" value="' + escapeText(lyricsSettings.base_url || "") + '"></label>' +
       '<label>歌词路径<input type="text" id="lyrics-path" value="' + escapeText(lyricsSettings.lyrics_path || "") + '"></label>' +
       '<label>候选路径<input type="text" id="lyrics-candidates-path" value="' + escapeText(lyricsSettings.candidates_path || "") + '"></label>' +
@@ -376,7 +373,7 @@ const appJS = `(function () {
   }
   function discogsCard() {
     if (!discogsSettings) return "";
-    return '<article><h2>Discogs</h2><p class="meta">在线专辑识别用的 Token，只存 Vault。保存后，目录识别会向 Discogs 查询候选；候选不能单独确认发行身份。</p>' +
+    return '<article><h2>Discogs</h2><p class="meta">在线专辑识别用的 Token，加密保存在本机。保存后，目录识别会向 Discogs 查询候选；这些候选不能单独确认是哪一张发行。</p>' +
       '<label>Token（' + escapeText(savedMark(discogsSettings.token_saved, discogsSettings.token_revision)) + '，留空保留）<input type="password" id="discogs-token" autocomplete="off"></label>' +
       '<p><button type="button" id="save-discogs" class="primary">保存</button> <button type="button" id="test-discogs">测试连接</button></p><p id="discogs-test-result" class="meta"></p></article>';
   }
@@ -391,7 +388,7 @@ const appJS = `(function () {
     if (!serverSettings) return "";
     var plex = serverSettings.plex || {};
     var navidrome = serverSettings.navidrome || {};
-    return '<article><h2>音乐服务器</h2><p class="meta">入库完成后通知服务器重新扫描：先 Navidrome，再 Plex；通知失败只记在任务说明里，不会阻断入库。Token 与密码只存 Vault，不回显。</p>' +
+    return '<article><h2>音乐服务器</h2><p class="meta">入库完成后通知服务器重新扫描：先 Navidrome，再 Plex。通知失败只写在任务说明里，不会挡住入库。Token 和密码加密保存在本机，不回显。</p>' +
       '<h2>Plex</h2>' +
       '<label><input type="checkbox" id="plex-enabled"' + (plex.enabled ? " checked" : "") + '> 启用 Plex 通知</label>' +
       '<label>地址<input type="text" id="plex-url" value="' + escapeText(plex.url || "") + '" placeholder="http://127.0.0.1:32400"></label>' +
@@ -443,7 +440,7 @@ const appJS = `(function () {
     var counts = report.report || {};
     var summary = report.found ? ("已迁入曲目 " + (counts.library || 0) + "，待核对任务 " + (counts.jobs || 0) + "，令牌记录 " + (counts.tokens || 0) + "。") : "还没有旧版活动数据回执。";
     return '<article><h2>从旧版迁入</h2><p class="meta">' + escapeText(report.note || "启动时会读取旧版数据库。音乐文件不移动。") + "</p><p>" + escapeText(summary) + "</p>" +
-      '<p class="meta">冷归档' + (report.cold_archive ? "仍在" : "还没有") + "。自动安装更新：" + (report.auto_install ? "会" : "不会") + "。</p>" +
+      '<p class="meta">旧库归档' + (report.cold_archive ? "仍保留" : "还没有") + "。自动安装更新：" + (report.auto_install ? "会" : "不会") + "。</p>" +
       '<p><button type="button" id="rollback-migration">回退迁入的索引</button></p><p id="migration-result" class="meta"></p></article>';
   }
   function renderSettings() {
@@ -454,11 +451,9 @@ const appJS = `(function () {
     }
     setStatus("", "");
     var html = '<div class="cards">' + migrationCard() + downloadCard() + cookieCard() + aiCard() + qbtCard() + solverCard() + lyricsCard() + discogsCard() + libraryCard() + serversCard() + playlistsCard() +
-      '<article><h2>站点登录检查</h2><p class="meta">只读检查：只验证登录与余额，不下载、不花 token。Cookie 留空用已保存的，填了则只用于这次检查，不保存。</p>' +
+      '<article><h2>站点登录检查</h2><p class="meta">只读检查：只验证登录和余额，不下载，也不消耗令牌。Cookie 留空则用已保存的；填写的只用于这次检查，不保存。</p>' +
       '<label>站点<select id="preflight-site">' + siteRows.map(function (site) { return '<option value="' + escapeText(site.name) + '">' + escapeText(site.name) + "</option>"; }).join("") + '</select></label>' +
       '<label>Cookie<input type="password" id="preflight-cookie" autocomplete="off"></label>' +
-      '<label><input type="checkbox" id="preflight-synthetic"> 使用测试服务器（不访问真实站点）</label>' +
-      '<label>测试服务器地址<input type="text" id="preflight-base-url"></label>' +
       '<p><button type="button" id="run-preflight" class="primary">检查登录</button></p><p id="preflight-result" class="meta"></p></article></div>';
     list.innerHTML = html;
     var save = document.getElementById("save-download");
@@ -904,8 +899,7 @@ const appJS = `(function () {
         setStatus("fail", "保存失败。" + (body && (body.error || body.code) ? "（" + (body.error || body.code) + "）" : ""));
         return;
       }
-      setStatus("ok", "歌单已保存：" + (body.playlist.name || body.playlist.id) + "，" + body.playlist.track_count + " 首。");
-      load();
+      await reloadThen("ok", "歌单已保存：" + (body.playlist.name || body.playlist.id) + "，" + body.playlist.track_count + " 首。");
     } catch (err) {
       setStatus("fail", "保存中断。");
     } finally {
@@ -945,8 +939,7 @@ const appJS = `(function () {
       var body = await postSetting("/v1/playlists/fetch", payload);
       var result = document.getElementById("playlist-fetch-result");
       if (result) result.textContent = body.note || "";
-      setStatus("ok", body.note || "已读取曲目名单。");
-      load();
+      await reloadThen("ok", body.note || "已读取曲目名单。");
     } catch (err) {
       setStatus("fail", "没有读到歌单。" + (err && err.message ? "（" + err.message + "）" : ""));
     } finally {
@@ -960,8 +953,7 @@ const appJS = `(function () {
     setBusy(true);
     try {
       await postSetting("/v1/subscriptions", {playlist_id: playlistID, interval_hours: parseInt(document.getElementById("subscription-hours").value, 10) || 6, include_existing: document.getElementById("subscription-existing").checked});
-      setStatus("ok", "已订阅。首次检查前不会创建任务。");
-      load();
+      await reloadThen("ok", "已订阅。首次检查前不会创建任务。");
     } catch (err) {
       setStatus("fail", "订阅失败。" + (err && err.message ? "（" + err.message + "）" : ""));
     } finally {
@@ -974,8 +966,7 @@ const appJS = `(function () {
     setStatus("info", "正在检查订阅");
     try {
       var body = await postSetting("/v1/subscriptions/check", {playlist_id: playlistID});
-      setStatus("ok", body.message || "检查完成。");
-      load();
+      await reloadThen("ok", body.message || "检查完成。");
     } catch (err) {
       setStatus("fail", "检查失败。" + (err && err.message ? "（" + err.message + "）" : ""));
     } finally {
@@ -987,8 +978,7 @@ const appJS = `(function () {
     setBusy(true);
     try {
       await postSetting("/v1/subscriptions/pause", {playlist_id: playlistID, paused: paused});
-      setStatus("ok", paused ? "已暂停订阅。" : "已恢复订阅。");
-      load();
+      await reloadThen("ok", paused ? "已暂停订阅。" : "已恢复订阅。");
     } catch (err) {
       setStatus("fail", "操作失败。");
     } finally {
@@ -1000,8 +990,7 @@ const appJS = `(function () {
     setBusy(true);
     try {
       await postSetting("/v1/subscriptions/delete", {playlist_id: playlistID});
-      setStatus("ok", "已删除订阅。");
-      load();
+      await reloadThen("ok", "已删除订阅。");
     } catch (err) {
       setStatus("fail", "删除失败。");
     } finally {
@@ -1011,13 +1000,10 @@ const appJS = `(function () {
   async function preflight() {
     if (loading) return;
     var cookie = document.getElementById("preflight-cookie").value;
-    var synthetic = document.getElementById("preflight-synthetic").checked;
-    var baseURL = document.getElementById("preflight-base-url").value.trim();
-    if (synthetic && !baseURL) { setStatus("fail", "使用测试服务器时需要填写地址。"); return; }
     setBusy(true);
     setStatus("info", "正在检查登录");
     try {
-      var response = await fetch("/v1/sites/preflight", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({site: document.getElementById("preflight-site").value, cookie: cookie, synthetic: synthetic, base_url: baseURL})});
+      var response = await fetch("/v1/sites/preflight", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({site: document.getElementById("preflight-site").value, cookie: cookie, synthetic: false})});
       var body = await response.json();
       var result = document.getElementById("preflight-result");
       if (!response.ok || !body || !body.ok) {
@@ -1069,7 +1055,7 @@ const appJS = `(function () {
       '<p><button type="button" id="scan-duplicates" class="primary">扫描重复</button></p>' + duplicateHtml +
       '<label>恢复编号<input type="text" id="restore-merge-id" placeholder="合并后返回的编号"></label><p><button type="button" id="restore-duplicates">恢复这次合并</button></p></article>' +
       '<article><form id="transcode-form"><h2>WAV 无损转 FLAC</h2>' +
-      '<p class="meta">整数 PCM（16/24/32 位、多声道、可扩展格式）用纯 Go 转成 FLAC，样本逐个比对并写入 MD5。浮点和压缩 WAV 会拒绝，不会降级。标签从 LIST/INFO、ID3 和 BWF 迁入，封面写入内嵌图片。没有标签时只按文件名和目录补显示名，不把它当成已确认的发行。</p>' +
+      '<p class="meta">整数 PCM（16/24/32 位、多声道、可扩展格式）转成 FLAC，样本逐个比对并写入 MD5。浮点和压缩 WAV 会拒绝，不会降级。标签从 LIST/INFO、ID3 和 BWF 迁入，封面写入内嵌图片。没有标签时只按文件名和目录补显示名，不把它当成已确认的发行。</p>' +
       '<label><input type="checkbox" id="wav-auto" checked> 下载进入待入库或重新索引时，先转成 FLAC 再识别入库（默认开启）</label>' +
       '<label>原 WAV<select id="wav-disposal"><option value="keep">保留原文件</option><option value="recycle">移入可恢复回收目录</option><option value="delete">校验通过后删除</option></select></label>' +
       '<p><button type="button" id="save-wav" class="primary">保存转换设置</button></p><p id="wav-setting-note" class="meta"></p>' +
@@ -1336,7 +1322,7 @@ const appJS = `(function () {
   }
   async function rollbackMigration() {
     var target = document.getElementById("migration-result");
-    if (!window.confirm("只撤掉迁入的曲目索引、待核对任务和令牌记录。音乐文件和冷归档会保留。")) return;
+    if (!window.confirm("只撤掉迁入的曲目索引、待核对任务和令牌记录。音乐文件和旧库归档会保留。")) return;
     try {
       var body = await postSetting("/v1/migration/rollback", {});
       if (target) target.textContent = body.audio_unchanged ? "已回退索引，音乐文件未改动。" : "已回退。";
@@ -1508,6 +1494,11 @@ const appJS = `(function () {
       setBusy(false);
     }
     openJob(currentJob.job_id);
+  }
+  async function reloadThen(kind, text) {
+    setBusy(false);
+    await load();
+    setStatus(kind, text);
   }
   async function load(quiet) {
     if (loading) return;

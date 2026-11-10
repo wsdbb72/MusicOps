@@ -14,10 +14,12 @@ import (
 )
 
 var (
-	positiveID = regexp.MustCompile(`^[1-9][0-9]*$`)
-	flCost     = regexp.MustCompile(`(?i)\bFL\s*(?:\((\d+)\)|\[(\d+)\])?`)
-	tokenWords = regexp.MustCompile(`(?i)(?:use\s+|使用\s*)?(\d+)\s*(?:枚|个)?\s*(?:FL\s*)?(?:tokens?\b|令牌|代币)`)
-	balanceRE  = regexp.MustCompile(`令牌\s*[:：]\s*(\d+)`)
+	positiveID       = regexp.MustCompile(`^[1-9][0-9]*$`)
+	flCost           = regexp.MustCompile(`(?i)\bFL\s*(?:\((\d+)\)|\[(\d+)\])?`)
+	tokenWords       = regexp.MustCompile(`(?i)(?:use\s+|使用\s*)?(\d+)\s*(?:枚|个)?\s*(?:FL\s*)?(?:tokens?\b|令牌|代币)`)
+	pageTokenBalance = regexp.MustCompile(`(?i)(?:FL\s*令牌|令牌|Tokens?)\s*[:：]\s*([\d,]+(?:\s*\+\s*[\d,]+)*)`)
+	groupedBalance   = regexp.MustCompile(`^(?:\d+|\d{1,3}(?:,\d{3})+)$`)
+	plusSplit        = regexp.MustCompile(`\s*\+\s*`)
 )
 
 // Decision is one offline reading of a detail response. Kind is empty when the
@@ -32,6 +34,11 @@ type Decision struct {
 	ObservedAt time.Time `json:"observed_at"`
 	Source     string    `json:"source"`
 	Mode       string    `json:"mode"`
+	// RowFree is the free label inside this torrent's own row: "personal",
+	// "global", or empty. A JSON isFreeleech flag does not set it. A token
+	// spend is confirmed only from personal free or this row, not from the
+	// flag alone and not from the torrent bytes.
+	RowFree string `json:"row_free,omitempty"`
 }
 
 // Read merges Gazelle JSON and the torrent row HTML. observedAt is the time
@@ -109,18 +116,75 @@ func readGazelle(decision *Decision, body []byte) {
 func readHTML(decision *Decision, page string) {
 	if status := rowStatus(page, decision.ResourceID); status == "personal" {
 		decision.Personal = true
+		decision.RowFree = "personal"
 	} else if status == "global" {
 		decision.Global = true
+		decision.RowFree = "global"
 	}
 	if cost, ok := tokenButton(page, decision.ResourceID); ok {
 		decision.TokenCost = cost
 	}
-	if match := balanceRE.FindStringSubmatch(page); match != nil {
-		value, err := strconv.Atoi(match[1])
-		if err == nil {
-			decision.Balance = &value
+	if value, ok := pageTokenTotal(page); ok {
+		decision.Balance = &value
+	}
+}
+
+// pageTokenTotal reads one visible token total. "令牌: 0+1" is 1, and
+// "令牌: 1,000" is 1000. A partial number, or two different totals, is not a balance.
+func pageTokenTotal(page string) (int, bool) {
+	visible := strings.Join(strings.Fields(html.UnescapeString(stripTags(page))), " ")
+	found := map[int]bool{}
+	for _, match := range pageTokenBalance.FindAllStringSubmatch(visible, -1) {
+		sum := 0
+		okAll := true
+		for _, part := range plusSplit.Split(match[1], -1) {
+			value, ok := groupedToken(part)
+			if !ok {
+				okAll = false
+				break
+			}
+			sum += value
+		}
+		if okAll {
+			found[sum] = true
 		}
 	}
+	if len(found) != 1 {
+		return 0, false
+	}
+	for value := range found {
+		return value, true
+	}
+	return 0, false
+}
+
+func groupedToken(value string) (int, bool) {
+	text := strings.TrimSpace(value)
+	if !groupedBalance.MatchString(text) {
+		return 0, false
+	}
+	parsed, err := strconv.Atoi(strings.ReplaceAll(text, ",", ""))
+	if err != nil || parsed < 0 || parsed > 1_000_000 {
+		return 0, false
+	}
+	return parsed, true
+}
+
+func stripTags(page string) string {
+	var b strings.Builder
+	inside := false
+	for _, r := range page {
+		switch {
+		case r == '<':
+			inside = true
+		case r == '>':
+			inside = false
+			b.WriteByte(' ')
+		case !inside:
+			b.WriteRune(r)
+		}
+	}
+	return b.String()
 }
 
 func rowStatus(page, resource string) string {
@@ -341,10 +405,14 @@ func stringify(value any) string {
 func integer(value any) (int, bool) {
 	switch typed := value.(type) {
 	case float64:
+		if typed != float64(int(typed)) || typed < 0 || typed > 1_000_000 {
+			return 0, false
+		}
 		return int(typed), true
 	case string:
-		parsed, err := strconv.Atoi(typed)
-		return parsed, err == nil
+		return groupedToken(typed)
+	case json.Number:
+		return groupedToken(typed.String())
 	default:
 		return 0, false
 	}

@@ -48,6 +48,7 @@ func (l *Ledger) ImportHistorical(now time.Time, site, resourceID, requestID, st
 		if existing, ok, err := l.replay(Quote{Site: site, ResourceID: resourceID, RequestID: requestID, BudgetRef: "migrated", Cost: cost}); err != nil || ok {
 			return existing, err
 		}
+		snap.Items = compactIndex(snap.Items)
 		next := row{
 			ID: requestID, Site: site, ResourceID: resourceID, RequestID: requestID,
 			Cost: storedCost, RequestedCost: cost, State: target, Class: class,
@@ -61,6 +62,9 @@ func (l *Ledger) ImportHistorical(now time.Time, site, resourceID, requestID, st
 		}
 		snap.Generation++
 		snap.Items = append(snap.Items, item)
+		if len(snap.Items) > maxIndexItems {
+			return Result{}, dataengine.ErrInvalidRequest
+		}
 		encodedIndex, err := json.Marshal(snap)
 		if err != nil {
 			return Result{}, err

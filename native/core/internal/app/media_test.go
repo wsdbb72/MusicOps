@@ -373,10 +373,16 @@ func TestFLACTagsRejects(t *testing.T) {
 	if code != http.StatusBadRequest {
 		t.Fatal(code, decoded)
 	}
-	// Non-FLAC file.
-	wav := writeTestWAV(t, filepath.Join(incoming, "tone.wav"))
-	_ = wav
+	// A WAV is readable. Its LIST/INFO and ID3 tags are not a confirmed identity.
+	_ = writeTestWAV(t, filepath.Join(incoming, "tone.wav"))
 	code, decoded = mediaGet(t, application, "/v1/library/tags?path=incoming/tone.wav")
+	if code != http.StatusOK || decoded["identity_confirmed"] != false {
+		t.Fatal(code, decoded)
+	}
+	if err := os.WriteFile(filepath.Join(incoming, "notes.txt"), []byte("not audio"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	code, decoded = mediaGet(t, application, "/v1/library/tags?path=incoming/notes.txt")
 	if code != http.StatusBadRequest {
 		t.Fatal(code, decoded)
 	}

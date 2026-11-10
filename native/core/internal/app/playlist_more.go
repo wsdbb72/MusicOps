@@ -20,7 +20,7 @@ var remoteIDPatterns = map[string]*regexp.Regexp{
 	"qqmusic":    remotePlaylistID,
 	"kuwo":       remotePlaylistID,
 	"netease":    remotePlaylistID,
-	"kugou":      remotePlaylistID,
+	"kugou":      regexp.MustCompile(`^(?:[1-9][0-9]{0,18}|(?:gcid|collection)_[A-Za-z0-9_-]{1,64})$`),
 	"migu":       remotePlaylistID,
 	"qishui":     regexp.MustCompile(`^[A-Za-z0-9_-]{4,80}$`),
 	"spotify":    regexp.MustCompile(`^[A-Za-z0-9]{22}$`),

@@ -46,6 +46,8 @@ const appJS = `(function () {
   var streamingOrder = [];
   var libraryRows = [];
   var duplicateRows = [];
+  var libraryFileOffset = 0;
+  var selectedTracks = {};
   var transcodeRows = [];
   var logRows = [];
   var selectedJobs = {};
@@ -367,6 +369,7 @@ const appJS = `(function () {
       '<label>歌词路径<input type="text" id="lyrics-path" value="' + escapeText(lyricsSettings.lyrics_path || "") + '"></label>' +
       '<label>候选路径<input type="text" id="lyrics-candidates-path" value="' + escapeText(lyricsSettings.candidates_path || "") + '"></label>' +
       '<label>封面路径<input type="text" id="lyrics-cover-path" value="' + escapeText(lyricsSettings.cover_path || "") + '"></label>' +
+      '<label>封面写入<select id="lyrics-write-mode"><option value="sidecar"' + (lyricsSettings.write_mode === "embedded" ? "" : " selected") + '>内嵌并保留同名 jpg</option><option value="embedded"' + (lyricsSettings.write_mode === "embedded" ? " selected" : "") + '>只写入 FLAC 内嵌图片</option></select></label>' +
       '<label>鉴权请求头<input type="text" id="lyrics-auth-header" value="' + escapeText(lyricsSettings.auth_header || "") + '"></label>' +
       '<label>鉴权值（' + escapeText(savedMark(lyricsSettings.auth_saved, lyricsSettings.auth_revision)) + '，留空保留）<input type="password" id="lyrics-auth" autocomplete="off"></label>' +
       '<p><button type="button" id="save-lyrics" class="primary">保存</button> <button type="button" id="test-lyrics">测试连接</button></p><p id="lyrics-test-result" class="meta"></p></article>';
@@ -714,6 +717,7 @@ const appJS = `(function () {
         lyrics_path: document.getElementById("lyrics-path").value.trim(),
         candidates_path: document.getElementById("lyrics-candidates-path").value.trim(),
         cover_path: document.getElementById("lyrics-cover-path").value.trim(),
+        write_mode: document.getElementById("lyrics-write-mode").value,
         auth_header: document.getElementById("lyrics-auth-header").value.trim(),
         authorization: document.getElementById("lyrics-auth").value
       });
@@ -1042,17 +1046,19 @@ const appJS = `(function () {
     } else {
       duplicateHtml = '<p class="meta">尚未扫描，或没有可合并的重复项。</p>';
     }
-    var html = '<div class="cards"><article><h2>本地资料库</h2><p class="meta">重新索引只补充新文件，不删除磁盘上的音乐。先选出一个库内文件，再补缺、升级或把单曲扩成整专。任务会进入检索；下载仍受令牌规则约束，这一步不会扣费，也不会入库。</p>' +
+    var html = '<div class="cards"><article><h2>本地资料库</h2><p class="meta">重新索引只补充新文件，不删除磁盘上的音乐。先逐页勾选曲目，确认后才进入检索。下载仍受令牌规则约束，这一步不会扣费，也不会入库。</p>' +
       '<p><button type="button" id="reindex-library" class="primary">重新索引</button> <button type="button" id="list-gaps">列出缺失曲目</button></p>' +
-      '<label>本地文件<select id="library-file"><option value="">先列出库内文件</option></select></label>' +
-      '<p><button type="button" id="fill-gaps">按缺口进入下载</button> <button type="button" id="upgrade-album">升级所选文件</button> <button type="button" id="expand-album">把所选单曲扩成整专</button></p>' +
+      '<p><button type="button" id="library-page-prev">上一页</button> <button type="button" id="library-page-next">下一页</button> <span id="library-page-label" class="meta"></span></p>' +
+      '<div id="library-file"></div>' +
+      '<p><button type="button" id="fill-gaps">确认所选并补缺</button> <button type="button" id="upgrade-album">确认所选并升级</button> <button type="button" id="expand-album">确认所选并扩成整专</button></p>' +
       '<p id="library-ops-result" class="meta"></p></article>' +
-      '<article><h2>标签、封面和歌词</h2><p class="meta">目录确认后，标签、歌词和封面同一次写入。写之前会备份，任何一步失败都恢复原文件。目录、歌词和封面地址只接受本机。</p>' +
+      '<article><h2>标签、封面和歌词</h2><p class="meta">目录确认后，标签、歌词和封面同一次写入。封面写入 FLAC 内嵌图片；按设置可以同时保留同名 jpg。写之前会备份，任何一步失败都恢复原文件。目录、歌词和封面地址只接受本机。</p>' +
       '<label>文件路径<input type="text" id="meta-path" placeholder="库内 .flac"></label>' +
       '<label>艺人<input type="text" id="meta-artist"></label><label>专辑<input type="text" id="meta-album"></label><label>曲名<input type="text" id="meta-title"></label>' +
       '<label>目录地址<input type="text" id="meta-catalog" placeholder="本机 MusicBrainz"></label>' +
       '<label>歌词地址<input type="text" id="meta-lyrics" placeholder="留空则不写歌词"></label>' +
       '<label>封面地址<input type="text" id="meta-cover" placeholder="留空则不写封面"></label>' +
+      '<label>封面写入<select id="meta-cover-mode"><option value="sidecar">内嵌并保留同名 jpg</option><option value="embedded">只写入 FLAC 内嵌图片</option></select></label>' +
       '<p><button type="button" id="complete-metadata">补齐标签封面歌词</button></p><p id="metadata-result" class="meta"></p></article>' +
       '<article><h2>合辑</h2><p class="meta">预览不会移动文件。合并只把名称里带“合辑”或 Various Artists 的文件夹移进音乐库的 Compilations。</p>' +
       '<p><button type="button" id="preview-compilations">预览合辑</button> <button type="button" id="merge-compilations">合并合辑</button></p><p id="compilation-result" class="meta"></p></article>' +
@@ -1062,9 +1068,16 @@ const appJS = `(function () {
       '<article><h2>重复歌曲</h2><p class="meta">同名不等于重复。内容一致且可以确定保留哪一份时才能合并，其余进入核对。合并后的旧文件进隔离区，可以恢复。</p>' +
       '<p><button type="button" id="scan-duplicates" class="primary">扫描重复</button></p>' + duplicateHtml +
       '<label>恢复编号<input type="text" id="restore-merge-id" placeholder="合并后返回的编号"></label><p><button type="button" id="restore-duplicates">恢复这次合并</button></p></article>' +
-      '<article><form id="transcode-form"><h2>转码为 FLAC</h2>' +
-      '<label>源文件（库内 WAV 路径，应用数据目录内）<input type="text" id="transcode-source" required placeholder="如 library-audio/Artist/Album/01 Title.wav"></label>' +
-      '<p><button type="submit" class="primary">开始转码</button></p><p class="meta">只支持 PCM WAV 转 FLAC；转码前后 PCM 内容逐字节比对，源文件不动，输出已存在时拒绝覆盖。</p></form></article>';
+      '<article><form id="transcode-form"><h2>WAV 无损转 FLAC</h2>' +
+      '<p class="meta">整数 PCM（16/24/32 位、多声道、可扩展格式）用纯 Go 转成 FLAC，样本逐个比对并写入 MD5。浮点和压缩 WAV 会拒绝，不会降级。标签从 LIST/INFO、ID3 和 BWF 迁入，封面写入内嵌图片。没有标签时只按文件名和目录补显示名，不把它当成已确认的发行。</p>' +
+      '<label><input type="checkbox" id="wav-auto"> 下载进入待入库或重新索引时，先转成 FLAC 再识别入库</label>' +
+      '<label>原 WAV<select id="wav-disposal"><option value="keep">保留原文件</option><option value="recycle">移入可恢复回收目录</option><option value="delete">校验通过后删除</option></select></label>' +
+      '<p><button type="button" id="save-wav" class="primary">保存转换设置</button></p><p id="wav-setting-note" class="meta"></p>' +
+      '<label>单个 WAV<input type="text" id="transcode-source" placeholder="库内或待入库 .wav"></label>' +
+      '<label>批量目录<input type="text" id="transcode-dir" placeholder="留空则只转上面一个文件"></label>' +
+      '<label>多个文件，一行一个<textarea id="transcode-paths" rows="3" placeholder="可选"></textarea></label>' +
+      '<p><button type="submit" class="primary">开始批量转换</button> <button type="button" id="transcode-pause">暂停</button> <button type="button" id="transcode-cancel">取消</button></p>' +
+      '<p id="transcode-result" class="meta"></p></form></article>';
     if (transcodeRows.length) {
       html += '<article><h2>转码记录</h2>';
       transcodeRows.forEach(function (receipt) {
@@ -1088,16 +1101,27 @@ const appJS = `(function () {
   function bindLibrary() {
     var form = document.getElementById("transcode-form");
     if (form) form.addEventListener("submit", submitTranscode);
+    var saveWav = document.getElementById("save-wav");
+    if (saveWav) saveWav.addEventListener("click", saveWAVSettings);
+    var pauseWav = document.getElementById("transcode-pause");
+    if (pauseWav) pauseWav.addEventListener("click", function () { controlTranscode("pause"); });
+    var cancelWav = document.getElementById("transcode-cancel");
+    if (cancelWav) cancelWav.addEventListener("click", function () { controlTranscode("cancel"); });
+    loadWAVSettings();
     var reindex = document.getElementById("reindex-library");
     if (reindex) reindex.addEventListener("click", function () { libraryAction("/v1/library/reindex", {}, "library-ops-result"); });
     var gaps = document.getElementById("list-gaps");
     if (gaps) gaps.addEventListener("click", function () { libraryAction("/v1/library/gaps", null, "library-ops-result"); });
     var fill = document.getElementById("fill-gaps");
-    if (fill) fill.addEventListener("click", function () { libraryAction("/v1/library/workflow", workflowBody("fill", "补缺"), "library-ops-result"); });
+    if (fill) fill.addEventListener("click", function () { confirmTracks("fill", "补缺"); });
     var upgrade = document.getElementById("upgrade-album");
-    if (upgrade) upgrade.addEventListener("click", function () { libraryAction("/v1/library/workflow", workflowBody("upgrade", "音质升级"), "library-ops-result"); });
+    if (upgrade) upgrade.addEventListener("click", function () { confirmTracks("upgrade", "音质升级"); });
     var expand = document.getElementById("expand-album");
-    if (expand) expand.addEventListener("click", function () { libraryAction("/v1/library/workflow", workflowBody("expand", "单曲升级整专"), "library-ops-result"); });
+    if (expand) expand.addEventListener("click", function () { confirmTracks("expand", "单曲升级整专"); });
+    var pagePrev = document.getElementById("library-page-prev");
+    if (pagePrev) pagePrev.addEventListener("click", function () { libraryFileOffset = Math.max(0, libraryFileOffset - 20); loadLibraryFiles(); });
+    var pageNext = document.getElementById("library-page-next");
+    if (pageNext) pageNext.addEventListener("click", function () { libraryFileOffset += 20; loadLibraryFiles(); });
     var metadata = document.getElementById("complete-metadata");
     if (metadata) metadata.addEventListener("click", completeMetadata);
     loadLibraryFiles();
@@ -1119,25 +1143,37 @@ const appJS = `(function () {
       button.addEventListener("click", function () { mergeDuplicates(button.getAttribute("data-merge")); });
     });
   }
-  function workflowBody(scene, label) {
-    var field = document.getElementById("library-file");
-    return {scene: scene, label: label, path: field ? field.value.trim() : ""};
+  function confirmTracks(scene, label) {
+    var paths = Object.keys(selectedTracks).filter(function (path) { return selectedTracks[path]; });
+    var result = document.getElementById("library-ops-result");
+    if (!paths.length) {
+      if (result) result.textContent = "请先逐首勾选，再进入下载。这一步尚未下载、尚未入库。";
+      return;
+    }
+    libraryAction("/v1/library/workflow", {scene: scene, label: label, paths: paths, confirmed: true}, "library-ops-result");
   }
   async function loadLibraryFiles() {
-    var select = document.getElementById("library-file");
-    if (!select) return;
+    var list = document.getElementById("library-file");
+    var label = document.getElementById("library-page-label");
+    if (!list) return;
     try {
-      var response = await fetch("/v1/library/files", {headers: {Accept: "application/json"}});
+      var response = await fetch("/v1/library/files?offset=" + libraryFileOffset + "&limit=20", {headers: {Accept: "application/json"}});
       var body = await response.json();
-      var current = select.value;
-      var options = '<option value="">选择库内文件</option>';
+      var total = body.total || 0;
+      if (libraryFileOffset > 0 && libraryFileOffset >= total) {
+        libraryFileOffset = Math.max(0, total - 20);
+      }
+      var html = "";
       (body.files || []).forEach(function (file) {
-        options += '<option value="' + escapeText(file) + '">' + escapeText(file) + "</option>";
+        html += '<label><input type="checkbox" class="library-track" value="' + escapeText(file) + '"' + (selectedTracks[file] ? " checked" : "") + "> " + escapeText(file) + "</label>";
       });
-      select.innerHTML = options;
-      if (current) select.value = current;
+      list.innerHTML = html || '<p class="meta">这一页没有音频文件。</p>';
+      if (label) label.textContent = "第 " + (libraryFileOffset + 1) + "–" + (libraryFileOffset + (body.files || []).length) + " 首，共 " + total + " 首";
+      list.querySelectorAll(".library-track").forEach(function (box) {
+        box.addEventListener("change", function () { selectedTracks[box.value] = box.checked; });
+      });
     } catch (err) {
-      select.innerHTML = '<option value="">没有读到库内文件</option>';
+      list.innerHTML = '<p class="meta">没有读到库内文件。</p>';
     }
   }
   async function completeMetadata() {
@@ -1148,7 +1184,8 @@ const appJS = `(function () {
       title: document.getElementById("meta-title").value.trim(),
       catalog_base_url: document.getElementById("meta-catalog").value.trim(),
       lyrics_base_url: document.getElementById("meta-lyrics").value.trim(),
-      cover_base_url: document.getElementById("meta-cover").value.trim()
+      cover_base_url: document.getElementById("meta-cover").value.trim(),
+      cover_mode: document.getElementById("meta-cover-mode").value
     }, "metadata-result");
   }
   async function libraryAction(path, body, targetID) {
@@ -1213,27 +1250,73 @@ const appJS = `(function () {
       setBusy(false);
     }
   }
+  async function loadWAVSettings() {
+    var box = document.getElementById("wav-auto");
+    if (!box) return;
+    try {
+      var response = await fetch("/v1/settings/wav", {headers: {Accept: "application/json"}});
+      var body = await response.json();
+      if (!body || !body.wav) return;
+      box.checked = !!body.wav.auto_convert_wav;
+      var disposal = document.getElementById("wav-disposal");
+      if (disposal && body.wav.wav_disposal) disposal.value = body.wav.wav_disposal;
+      var note = document.getElementById("wav-setting-note");
+      if (note) note.textContent = body.note || "";
+    } catch (err) {}
+  }
+  async function saveWAVSettings() {
+    var note = document.getElementById("wav-setting-note");
+    try {
+      var body = await postSetting("/v1/settings/wav", {auto_convert_wav: document.getElementById("wav-auto").checked, wav_disposal: document.getElementById("wav-disposal").value});
+      if (note) note.textContent = (body && body.note) || "已保存";
+    } catch (err) {
+      if (note) note.textContent = err.message;
+    }
+  }
+  async function controlTranscode(action) {
+    var result = document.getElementById("transcode-result");
+    if (!window.musicopsTranscodeBatch) {
+      if (result) result.textContent = "还没有一批正在转换的文件。";
+      return;
+    }
+    try {
+      var response = await fetch("/v1/library/transcode/batch/control", {method: "POST", headers: {"Content-Type": "application/json", Accept: "application/json"}, body: JSON.stringify({batch_id: window.musicopsTranscodeBatch, action: action})});
+      var body = await response.json();
+      if (result) result.textContent = body.note || body.error || action;
+    } catch (err) {
+      if (result) result.textContent = err.message;
+    }
+  }
   async function submitTranscode(event) {
     event.preventDefault();
     if (loading) return;
     var source = document.getElementById("transcode-source");
-    if (!source || !source.value.trim()) { setStatus("fail", "先填源文件路径。"); return; }
+    var dir = document.getElementById("transcode-dir");
+    var extra = document.getElementById("transcode-paths");
+    var paths = [];
+    if (extra && extra.value.trim()) extra.value.split(/\n/).forEach(function (line) { if (line.trim()) paths.push(line.trim()); });
+    if (source && source.value.trim()) paths.push(source.value.trim());
+    if (!paths.length && !(dir && dir.value.trim())) { setStatus("fail", "先选择 WAV 文件或目录。"); return; }
     setBusy(true);
-    setStatus("info", "正在提交转码");
+    setStatus("info", "正在提交转换");
     try {
-      var response = await fetch("/v1/library/transcode", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({request_id: "tc-" + Date.now().toString(36), source: source.value.trim(), format: "flac"})});
+      var response = await fetch("/v1/library/transcode/batch", {method: "POST", headers: {"Content-Type": "application/json", Accept: "application/json"}, body: JSON.stringify({paths: paths, dir: dir ? dir.value.trim() : "", wav_disposal: document.getElementById("wav-disposal").value})});
       var body = await response.json();
       if (!response.ok || !body || !body.ok) {
-        setStatus("fail", "转码提交失败。" + (body && body.code ? "（" + body.code + "）" : ""));
+        setStatus("fail", "转换没有提交。" + (body && (body.error || body.code) ? "（" + (body.error || body.code) + "）" : ""));
         return;
       }
-      setStatus("ok", "已提交转码，完成后在转码记录里查看。");
+      window.musicopsTranscodeBatch = body.batch_id;
+      window.musicopsTranscodeNote = body.note || "已提交";
+      setStatus("ok", "已提交 " + (body.count || 0) + " 个文件");
     } catch (err) {
-      setStatus("fail", "转码提交中断。");
+      setStatus("fail", "转换提交中断。");
     } finally {
       setBusy(false);
     }
-    load(true);
+    await load(true);
+    var result = document.getElementById("transcode-result");
+    if (result && window.musicopsTranscodeNote) result.textContent = window.musicopsTranscodeNote;
   }
   function renderLogs() {
     if (!logRows.length && !logEvents.length) {

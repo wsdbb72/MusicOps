@@ -1,6 +1,7 @@
 package app
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -17,6 +18,7 @@ import (
 	"time"
 
 	"github.com/wsdbb72/MusicOps/native/core/internal/audiorelease"
+	"github.com/wsdbb72/MusicOps/native/core/internal/flactags"
 	"github.com/wsdbb72/MusicOps/native/core/internal/musicbrainz"
 	"github.com/wsdbb72/MusicOps/native/core/internal/workflow"
 )
@@ -53,6 +55,10 @@ func (a *App) indexLibraryTree(root string) (added, kept int, err error) {
 		ext := strings.TrimPrefix(strings.ToLower(filepath.Ext(path)), ".")
 		if !audioExtensions[ext] {
 			return nil
+		}
+		if ext == "wav" {
+			path = a.maybeConvertIndexedWAV(path)
+			ext = strings.TrimPrefix(strings.ToLower(filepath.Ext(path)), ".")
 		}
 		abs, err := filepath.Abs(path)
 		if err != nil || abs != filepath.Clean(abs) {
@@ -131,10 +137,12 @@ func (a *App) libraryGaps(w http.ResponseWriter, _ *http.Request) {
 
 func (a *App) libraryWorkflow(w http.ResponseWriter, r *http.Request) {
 	var body struct {
-		Scene string `json:"scene"`
-		Root  string `json:"root_id"`
-		Label string `json:"label"`
-		Path  string `json:"path"`
+		Scene     string   `json:"scene"`
+		Root      string   `json:"root_id"`
+		Label     string   `json:"label"`
+		Path      string   `json:"path"`
+		Paths     []string `json:"paths"`
+		Confirmed bool     `json:"confirmed"`
 	}
 	if err := decode(r, &body); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "code": "INVALID_REQUEST"})
@@ -146,9 +154,20 @@ func (a *App) libraryWorkflow(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "code": "INVALID_REQUEST"})
 		return
 	}
-	chosen := ""
+	rawPaths := []string{}
 	if strings.TrimSpace(body.Path) != "" {
-		resolved, err := a.resolveLibraryPath(body.Path)
+		rawPaths = append(rawPaths, body.Path)
+	}
+	rawPaths = append(rawPaths, body.Paths...)
+	chosen := []string{}
+	seen := map[string]bool{}
+	for _, raw := range rawPaths {
+		raw = strings.TrimSpace(raw)
+		if raw == "" || seen[raw] {
+			continue
+		}
+		seen[raw] = true
+		resolved, err := a.resolveLibraryPath(raw)
 		if err != nil {
 			writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "code": "INVALID_REQUEST", "error": "请选择音乐库里的文件"})
 			return
@@ -158,14 +177,29 @@ func (a *App) libraryWorkflow(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "code": "INVALID_REQUEST", "error": "本地文件不存在"})
 			return
 		}
-		chosen = resolved
+		chosen = append(chosen, resolved)
+	}
+	if !body.Confirmed {
+		files, total, offset := a.libraryFilePage(0, 20)
+		writeJSON(w, http.StatusOK, map[string]any{
+			"ok": true, "started": false, "downloaded": false, "imported": false,
+			"files": files, "total": total, "offset": offset, "paths": chosen,
+			"note": "请逐页勾选曲目并确认。这一步尚未下载、尚未入库。",
+		})
+		return
+	}
+	if len(chosen) == 0 {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "code": "INVALID_REQUEST", "error": "请先逐首确认，再进入下载", "downloaded": false})
+		return
 	}
 	label := strings.TrimSpace(body.Label)
 	if label == "" {
-		label = body.Scene + " " + firstNonEmpty(body.Root, chosen, "本地专辑")
+		label = body.Scene + " " + firstNonEmpty(body.Root, chosen[0], "本地专辑")
 	}
-	if chosen != "" && !strings.Contains(label, chosen) {
-		label = label + " " + chosen
+	for _, path := range chosen {
+		if !strings.Contains(label, path) {
+			label = label + " " + path
+		}
 	}
 	if len(label) > 500 {
 		label = label[:500]
@@ -179,8 +213,9 @@ func (a *App) libraryWorkflow(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusAccepted, map[string]any{
-		"ok": true, "job_id": id, "scene": body.Scene, "path": chosen, "downloaded": false,
-		"note": "已进入检索。下载仍受令牌规则约束，这一步尚未下载、尚未入库。",
+		"ok": true, "started": true, "job_id": id, "scene": body.Scene, "path": chosen[0], "paths": chosen,
+		"downloaded": false, "imported": false,
+		"note": "已逐首确认并进入检索。下载仍受令牌规则约束，这一步尚未下载、尚未入库。",
 	})
 }
 
@@ -193,6 +228,7 @@ func (a *App) completeMetadata(w http.ResponseWriter, r *http.Request) {
 		CatalogBaseURL string `json:"catalog_base_url"`
 		LyricsBaseURL  string `json:"lyrics_base_url"`
 		CoverBaseURL   string `json:"cover_base_url"`
+		CoverMode      string `json:"cover_mode"`
 	}
 	if err := decode(r, &body); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "code": "INVALID_REQUEST"})
@@ -256,14 +292,32 @@ func (a *App) completeMetadata(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusUnprocessableEntity, map[string]any{"ok": false, "code": "TAG_WRITE_FAILED", "written": false, "restored": true})
 		return
 	}
+	settings, _ := a.loadLyricsSettings()
+	mode := coverWriteMode(body.CoverMode, settings)
 	sidecar := strings.TrimSuffix(path, filepath.Ext(path)) + ".jpg"
 	if cover != nil {
-		if err = os.WriteFile(sidecar, cover, 0o600); err != nil {
+		current, readErr := os.ReadFile(path)
+		var embedded []byte
+		if readErr == nil {
+			embedded, err = flactags.EmbedFrontCover(current, cover)
+		}
+		if readErr != nil || err != nil || os.WriteFile(path, embedded, 0o600) != nil || !bytes.Equal(flactags.FrontCover(embedded), cover) {
 			restoreBackup(path, backup)
 			_ = os.Remove(sidecar)
 			_ = os.Remove(backup)
 			writeJSON(w, http.StatusUnprocessableEntity, map[string]any{"ok": false, "code": "COVER_WRITE_FAILED", "written": false, "restored": true})
 			return
+		}
+		if mode == "sidecar" {
+			if err = os.WriteFile(sidecar, cover, 0o600); err != nil {
+				restoreBackup(path, backup)
+				_ = os.Remove(sidecar)
+				_ = os.Remove(backup)
+				writeJSON(w, http.StatusUnprocessableEntity, map[string]any{"ok": false, "code": "COVER_WRITE_FAILED", "written": false, "restored": true})
+				return
+			}
+		} else {
+			_ = os.Remove(sidecar)
 		}
 	}
 	_ = os.Remove(backup)
@@ -272,10 +326,27 @@ func (a *App) completeMetadata(w http.ResponseWriter, r *http.Request) {
 		note += "、歌词"
 	}
 	if cover != nil {
-		note += "、封面"
+		note += "、内嵌封面"
+		if mode == "sidecar" {
+			note += "和同名 jpg"
+		}
 	}
 	note += "。写之前有备份，失败会恢复原文件。这不是下载。"
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "written": true, "path": path, "lyrics": lyrics != "", "cover": cover != nil, "note": note})
+	writeJSON(w, http.StatusOK, map[string]any{
+		"ok": true, "written": true, "path": path, "lyrics": lyrics != "", "cover": cover != nil,
+		"cover_mode": mode, "embedded_cover": cover != nil, "note": note,
+	})
+}
+
+func coverWriteMode(requested string, settings lyricsSettings) string {
+	mode := strings.TrimSpace(requested)
+	if mode == "" {
+		mode = strings.TrimSpace(settings.WriteMode)
+	}
+	if mode == "embedded" {
+		return "embedded"
+	}
+	return "sidecar"
 }
 
 func (a *App) compilationPreview(w http.ResponseWriter, _ *http.Request) {
@@ -392,7 +463,21 @@ func firstNonEmpty(values ...string) string {
 	return ""
 }
 
-func (a *App) libraryFiles(w http.ResponseWriter, _ *http.Request) {
+func (a *App) libraryFiles(w http.ResponseWriter, r *http.Request) {
+	offset, limit := 0, 20
+	if r != nil {
+		if value, err := strconv.Atoi(r.URL.Query().Get("offset")); err == nil && value > 0 {
+			offset = value
+		}
+		if value, err := strconv.Atoi(r.URL.Query().Get("limit")); err == nil && value > 0 && value <= 100 {
+			limit = value
+		}
+	}
+	files, total, offset := a.libraryFilePage(offset, limit)
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "files": files, "total": total, "offset": offset, "downloaded": false})
+}
+
+func (a *App) libraryFilePage(offset, limit int) ([]string, int, int) {
 	root := a.libraryDir()
 	files := []string{}
 	_ = filepath.WalkDir(root, func(path string, entry fs.DirEntry, walkErr error) error {
@@ -409,7 +494,18 @@ func (a *App) libraryFiles(w http.ResponseWriter, _ *http.Request) {
 		}
 		return nil
 	})
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "files": files})
+	sort.Strings(files)
+	if offset > len(files) {
+		offset = len(files)
+	}
+	if limit <= 0 {
+		limit = 20
+	}
+	end := offset + limit
+	if end > len(files) {
+		end = len(files)
+	}
+	return append([]string(nil), files[offset:end]...), len(files), offset
 }
 
 func (a *App) fetchArtwork(lyricsBase, coverBase, artist, album, title string) (string, []byte, error) {

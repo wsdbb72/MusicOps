@@ -37,6 +37,7 @@ import (
 	"github.com/wsdbb72/MusicOps/native/core/internal/audiorelease"
 	"github.com/wsdbb72/MusicOps/native/core/internal/dataengine"
 	"github.com/wsdbb72/MusicOps/native/core/internal/flactags"
+	"github.com/wsdbb72/MusicOps/native/core/internal/wavflac"
 )
 
 // ---------------------------------------------------------------------------
@@ -702,9 +703,17 @@ func (a *App) planArtistFolder(entry audiorelease.Entry, library string) artistF
 	// name: the folder at the root is the untrusted part.
 	var artists []string
 	var album string
-	if strings.EqualFold(filepath.Ext(full), ".flac") {
+	switch strings.ToLower(filepath.Ext(full)) {
+	case ".flac":
 		if tags, err := flactags.ReadFile(full); err == nil {
 			artists = tags.Artists
+			album = tags.Album
+		}
+	case ".wav":
+		if tags, err := wavflac.ReadDescription(full); err == nil {
+			if tags.Artist != "" {
+				artists = []string{tags.Artist}
+			}
 			album = tags.Album
 		}
 	}

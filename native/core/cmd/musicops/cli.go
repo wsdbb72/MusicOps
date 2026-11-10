@@ -121,7 +121,12 @@ func runCLI(args []string) int {
 	case "status", "jobs", "job", "control", "stop", "migrate", "pause", "resume", "reindex", "gaps", "migration", "fetch", "metadata", "workflow":
 		// Parsed below.
 	default:
-		return printError(fmt.Errorf("未知命令: %s", cmd))
+		if unwiredWorker[cmd] {
+			return printError(fmt.Errorf("%s 尚未接入，没有执行", cmd))
+		}
+		if !workerCommand(cmd) {
+			return printError(fmt.Errorf("未知命令: %s", cmd))
+		}
 	}
 	flags, err := parseCLIFlags(cmd, args[1:])
 	if err != nil {
@@ -132,6 +137,9 @@ func runCLI(args []string) int {
 		return printError(err)
 	}
 	ctx := context.Background()
+	if code, handled := runMappedWorker(ctx, cmd, profile, flags); handled {
+		return code
+	}
 	switch cmd {
 	case "migrate":
 		if len(flags.args) != 0 {

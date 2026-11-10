@@ -77,6 +77,12 @@ func (a *App) Handler() http.Handler {
 	mux.HandleFunc("POST /v1/audio/incoming", a.uploadIncoming)
 	mux.HandleFunc("POST /v1/library/transcode", a.transcodeEnqueue)
 	mux.HandleFunc("GET /v1/library/transcode", a.transcodeList)
+	mux.HandleFunc("POST /v1/library/transcode/batch", a.transcodeBatch)
+	mux.HandleFunc("GET /v1/library/transcode/batch", a.transcodeBatchStatus)
+	mux.HandleFunc("POST /v1/library/transcode/batch/control", a.transcodeBatchControl)
+	mux.HandleFunc("POST /v1/library/transcode/restore", a.restoreRecycledWAV)
+	mux.HandleFunc("GET /v1/settings/wav", a.wavSettingsHandler)
+	mux.HandleFunc("POST /v1/settings/wav", a.saveWAVSettings)
 	mux.HandleFunc("POST /v1/library/ncm/decrypt", a.decryptNCM)
 	mux.HandleFunc("GET /v1/library/tags", a.libraryTags)
 	mux.HandleFunc("POST /v1/library/tags", a.saveLibraryTags)
@@ -524,10 +530,36 @@ func (a *App) releaseAudio(w http.ResponseWriter, r *http.Request) {
 	}
 	// One request id per (root, track): a second track for the same root is a
 	// separate publish, not a replay of the first track's receipt.
+	sourceName := body.SourceName
+	artist, album, title := body.Artist, body.Album, body.Title
+	var compared identityCompare
+	var identified bool
+	if strings.EqualFold(filepath.Ext(sourceName), ".wav") || strings.EqualFold(filepath.Ext(sourceName), ".flac") {
+		var convErr error
+		compared, convErr = a.compareIncomingIdentity(incoming, sourceName)
+		if convErr != nil {
+			writeJSON(w, http.StatusUnprocessableEntity, map[string]any{"ok": false, "code": "AUDIO_REJECTED", "error": "入库识别没有读到音频标签", "downloaded": false, "library_published": false, "production_verified": false, "needs_review": true})
+			return
+		}
+		identified = true
+		sourceName = compared.PublishedName
+		if artist == "" && album == "" && title == "" {
+			if compared.After.NeedsReview {
+				writeJSON(w, http.StatusUnprocessableEntity, map[string]any{
+					"ok": false, "code": "NEEDS_REVIEW", "error": compared.After.Reason,
+					"downloaded": false, "library_published": false, "production_verified": false,
+					"needs_review": true, "identity_confirmed": false,
+					"before": compared.Before, "after": compared.After,
+				})
+				return
+			}
+			artist, album, title = compared.After.Artist, compared.After.Album, compared.After.Title
+		}
+	}
 	sum := sha256.Sum256([]byte("album-audio/" + root + "/track/" + strconv.Itoa(body.Track)))
 	result, err := audiorelease.Release(r.Context(), a.engine, audiorelease.Request{
-		RequestID: "audio-" + hex.EncodeToString(sum[:16]), RootID: root, Artist: body.Artist, Album: body.Album, Title: body.Title,
-		Track: body.Track, SourceName: body.SourceName, Origin: body.Origin, Incoming: incoming, Library: library, Decoder: audiorelease.SystemDecoder(),
+		RequestID: "audio-" + hex.EncodeToString(sum[:16]), RootID: root, Artist: artist, Album: album, Title: title,
+		Track: body.Track, SourceName: sourceName, Origin: body.Origin, Incoming: incoming, Library: library, Decoder: audiorelease.SystemDecoder(),
 	})
 	if err != nil {
 		status, code := http.StatusBadRequest, "INVALID_REQUEST"
@@ -583,11 +615,19 @@ func (a *App) releaseAudio(w http.ResponseWriter, r *http.Request) {
 	if recorded.Task != nil {
 		publishTask = recorded.Task.ID
 	}
-	writeJSON(w, http.StatusOK, map[string]any{
+	response := map[string]any{
 		"ok": true, "format": result.Format, "decode_state": result.DecodeState, "sha256": result.SHA256,
 		"origin": result.Origin, "source_name": result.SourceName, "stage": stage, "publish_task_id": publishTask,
 		"downloaded": result.Downloaded, "library_published": result.LibraryPublished, "production_verified": false,
-	})
+		"identity_confirmed": false,
+	}
+	if identified {
+		response["needs_review"] = compared.After.NeedsReview
+		response["tag_source"] = compared.After.TagSource
+		response["before"] = compared.Before
+		response["after"] = compared.After
+	}
+	writeJSON(w, http.StatusOK, response)
 }
 
 // publishAudio queues a publish task for a root job. Two shapes are

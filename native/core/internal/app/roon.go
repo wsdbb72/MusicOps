@@ -3,6 +3,7 @@ package app
 import (
 	"crypto/sha1"
 	"encoding/base64"
+	"encoding/binary"
 	"encoding/json"
 	"io"
 	"net"
@@ -10,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 )
 
 const roonInfoRequest = "MOO/1 REQUEST com.roonlabs.registry:1/info\nRequest-Id: 0\n\n"
@@ -101,20 +103,75 @@ func probeRoonInfo(conn net.Conn) (string, string, bool) {
 	if err != nil || n < 2 {
 		return "", "", false
 	}
-	body := unmaskServerFrame(buf[:n])
-	if strings.Contains(body, "Unauthorized") || strings.Contains(body, "register") {
-		return "", "", strings.Contains(body, "Unauthorized")
+	return parseMooInfo(unmaskServerFrame(buf[:n]))
+}
+
+// parseMooInfo accepts only the old read-only COMPLETE Success envelope.
+// Unauthorized names stay unauthorized. A bare JSON body is not a core.
+func parseMooInfo(body string) (string, string, bool) {
+	if !utf8.ValidString(body) || len(body) > 1<<20 {
+		return "", "", false
+	}
+	header, rest, ok := strings.Cut(body, "\n\n")
+	if !ok || len(header) > 8192 || header == "" {
+		return "", "", false
+	}
+	lines := strings.Split(header, "\n")
+	kind, status, ok := strings.Cut(strings.TrimPrefix(lines[0], "MOO/1 "), " ")
+	if !ok || !strings.HasPrefix(lines[0], "MOO/1 ") {
+		return "", "", false
+	}
+	switch status {
+	case "Unauthorized", "NotRegistered", "AuthorizationRequired", "NotAuthorized":
+		return "", "", true
+	}
+	if kind != "COMPLETE" || status != "Success" {
+		return "", "", false
+	}
+	headers := map[string]string{}
+	for _, line := range lines[1:] {
+		name, value, found := strings.Cut(line, ":")
+		name = strings.TrimSpace(name)
+		if !found || name == "" || headers[name] != "" {
+			return "", "", false
+		}
+		headers[name] = strings.TrimSpace(value)
+	}
+	if headers["Request-Id"] != "0" {
+		return "", "", false
+	}
+	if headers["Content-Length"] == "" {
+		if rest != "" || headers["Content-Type"] != "" {
+			return "", "", false
+		}
+		return "", "", false
+	}
+	length, err := strconv.Atoi(headers["Content-Length"])
+	if err != nil || length != len(rest) || headers["Content-Type"] != "application/json" {
+		return "", "", false
 	}
 	var decoded struct {
 		CoreID         string `json:"core_id"`
 		DisplayName    string `json:"display_name"`
 		DisplayVersion string `json:"display_version"`
 	}
-	start := strings.Index(body, "{")
-	if start < 0 || json.Unmarshal([]byte(body[start:]), &decoded) != nil || decoded.CoreID == "" || decoded.DisplayName == "" {
+	if json.Unmarshal([]byte(rest), &decoded) != nil || !roonText(decoded.CoreID) || !roonText(decoded.DisplayName) || !roonText(decoded.DisplayVersion) {
 		return "", "", false
 	}
 	return decoded.DisplayName, decoded.DisplayVersion, false
+}
+
+func roonText(value string) bool {
+	value = strings.TrimSpace(value)
+	if value == "" || len(value) > 500 {
+		return false
+	}
+	for _, r := range value {
+		if r < 32 {
+			return false
+		}
+	}
+	return true
 }
 
 func acceptKey(key string) string {
@@ -128,11 +185,27 @@ func unmaskServerFrame(frame []byte) string {
 	}
 	length := int(frame[1] & 0x7f)
 	offset := 2
-	if frame[1]&0x80 != 0 {
-		offset += 4
+	if length == 126 {
+		if len(frame) < 4 {
+			return ""
+		}
+		length = int(binary.BigEndian.Uint16(frame[2:4]))
+		offset = 4
 	}
-	if length == 126 || offset+length > len(frame) {
-		return string(frame)
+	if frame[1]&0x80 != 0 {
+		if len(frame) < offset+4+length {
+			return ""
+		}
+		mask := frame[offset : offset+4]
+		offset += 4
+		out := make([]byte, length)
+		for i := 0; i < length; i++ {
+			out[i] = frame[offset+i] ^ mask[i%4]
+		}
+		return string(out)
+	}
+	if offset+length > len(frame) {
+		return ""
 	}
 	return string(frame[offset : offset+length])
 }

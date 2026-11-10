@@ -31,6 +31,7 @@ import (
 	"github.com/wsdbb72/MusicOps/native/core/internal/flactags"
 	"github.com/wsdbb72/MusicOps/native/core/internal/lrc"
 	"github.com/wsdbb72/MusicOps/native/core/internal/ncm"
+	"github.com/wsdbb72/MusicOps/native/core/internal/wavflac"
 )
 
 // ---------------------------------------------------------------------------
@@ -212,16 +213,40 @@ var tagFieldWhitelist = map[string]string{
 
 func (a *App) libraryTags(w http.ResponseWriter, r *http.Request) {
 	path, err := a.resolveLibraryPath(r.URL.Query().Get("path"))
-	if err != nil || !strings.EqualFold(filepath.Ext(path), ".flac") {
+	if err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "code": "INVALID_REQUEST"})
 		return
 	}
-	tags, err := flactags.ReadFile(path)
-	if err != nil {
-		writeJSON(w, http.StatusUnprocessableEntity, map[string]any{"ok": false, "code": "TAG_READ_FAILED", "error": err.Error()})
-		return
+	switch strings.ToLower(filepath.Ext(path)) {
+	case ".flac":
+		tags, err := flactags.ReadFile(path)
+		if err != nil {
+			writeJSON(w, http.StatusUnprocessableEntity, map[string]any{"ok": false, "code": "TAG_READ_FAILED", "error": err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "path": path, "tags": tagView(tags), "stream_info": streamInfoView(tags.StreamInfo), "identity_confirmed": false})
+	case ".wav":
+		described, err := wavflac.ReadDescription(path)
+		if err != nil {
+			writeJSON(w, http.StatusUnprocessableEntity, map[string]any{"ok": false, "code": "TAG_READ_FAILED", "error": err.Error(), "identity_confirmed": false})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "path": path, "tags": wavTagView(described), "tag_source": described.Source, "identity_confirmed": false, "note": "这是 WAV 里原来的标签，还不是目录确认的发行身份。"})
+	default:
+		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "code": "INVALID_REQUEST"})
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "path": path, "tags": tagView(tags), "stream_info": streamInfoView(tags.StreamInfo)})
+}
+
+func wavTagView(tags wavflac.Tags) map[string]any {
+	artists := []string{}
+	if tags.Artist != "" {
+		artists = []string{tags.Artist}
+	}
+	return map[string]any{
+		"title": tags.Title, "artist": artists, "album": tags.Album,
+		"date": tags.Date, "genre": tags.Genre, "tracknumber": tags.Track,
+		"comment": tags.Comment, "encoder": tags.Encoder,
+	}
 }
 
 func tagView(tags *flactags.Tags) map[string]any {

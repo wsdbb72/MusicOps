@@ -106,6 +106,7 @@ type pythonConfig struct {
 				CoverPath      string `json:"cover_path"`
 				AuthHeader     string `json:"auth_header"`
 			} `json:"primary"`
+			WriteMode string `json:"write_mode"`
 		} `json:"lyrics"`
 		Catalog struct {
 			Discogs struct {
@@ -413,10 +414,15 @@ func lyricsSettings(cfg *pythonConfig, nowNS int64) ([]byte, bool, error) {
 	if header == "" {
 		header = "Authorization"
 	}
+	mode := strings.TrimSpace(cfg.Values.Lyrics.WriteMode)
+	if mode != "sidecar" && mode != "embedded" {
+		mode = "sidecar"
+	}
 	encoded, err := json.Marshal(map[string]any{
 		"base_url": primary.BaseURL, "lyrics_path": pathOr(primary.LyricsPath, "/lyrics"),
 		"candidates_path": pathOr(primary.CandidatesPath, "/jsonapi"),
-		"cover_path":      pathOr(primary.CoverPath, "/cover"), "auth_header": header, "updated_ns": nowNS,
+		"cover_path":      pathOr(primary.CoverPath, "/cover"), "auth_header": header,
+		"write_mode": mode, "updated_ns": nowNS,
 	})
 	return encoded, err == nil, err
 }

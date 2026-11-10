@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"io"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -42,6 +41,7 @@ type remotePlaylist struct {
 	Name      string
 	Tracks    []playlistTrack
 	Truncated bool
+	Preview   bool
 }
 
 func (a *App) fetchPlaylist(w http.ResponseWriter, r *http.Request) {
@@ -75,11 +75,16 @@ func (a *App) fetchPlaylist(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	note := "只读取了公开曲目名单。没有下载音频，也没有写入音乐库。"
+	if remote.Preview {
+		note = "只读取了公开嵌入清单，不保证完整。没有下载音频，也没有写入音乐库。"
+	} else if remote.Truncated {
+		note = "这份名单可能不完整。没有下载音频，也没有写入音乐库。"
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"ok": true, "platform": remote.Platform, "playlist_id": slug, "remote_id": remote.ID,
 		"name": remote.Name, "track_count": len(remote.Tracks), "truncated": remote.Truncated,
-		"downloaded": false, "imported": false,
-		"note": "只读取了公开曲目名单。没有下载音频，也没有写入音乐库。",
+		"preview": remote.Preview, "downloaded": false, "imported": false, "note": note,
 	})
 }
 
@@ -105,32 +110,24 @@ func (a *App) fetchRemotePlaylist(ctx context.Context, platform, id, base string
 	if platform == "youtube" && header == "" && bearer == "" && !loopbackURL(origin) {
 		return remotePlaylist{}, errors.New("YouTube 需要用户自己的 API Key，不会改去读取网页")
 	}
-	var tracks []playlistTrack
-	name := spec.Name
-	truncated := false
-	for page := 0; page < 3; page++ {
-		payload, err := a.readPlaylistPage(ctx, spec, origin, id, page, header, bearer)
-		if err != nil {
-			return remotePlaylist{}, err
-		}
-		part, partName, total, err := decodePlaylistPage(platform, id, payload)
-		if err != nil {
-			return remotePlaylist{}, err
-		}
-		if partName != "" {
-			name = partName
-		}
-		tracks = append(tracks, part...)
-		if total <= len(tracks) || len(part) == 0 {
-			truncated = false
-			break
-		}
-		truncated = page == 2
+	if platform == "netease" {
+		return a.fetchNetease(ctx, spec, origin, id, header, bearer)
 	}
-	if len(tracks) == 0 {
-		return remotePlaylist{}, errors.New(spec.Name + " 歌单没有可读曲目")
+	if platform == "kugou" && (strings.HasPrefix(id, "collection_") || strings.HasPrefix(id, "gcid_")) {
+		return a.fetchKugouList(ctx, origin, id)
 	}
-	return remotePlaylist{Platform: platform, ID: id, Name: name, Tracks: tracks, Truncated: truncated}, nil
+	if platform == "spotify" && header == "" && bearer == "" {
+		return a.fetchSpotifyEmbed(ctx, origin, id)
+	}
+	remote, err := a.fetchPaged(ctx, spec, platform, origin, id, header, bearer)
+	if err != nil && platform == "spotify" {
+		embedded, embedErr := a.fetchSpotifyEmbed(ctx, origin, id)
+		if embedErr == nil {
+			embedded.Preview = true
+			return embedded, nil
+		}
+	}
+	return remote, err
 }
 
 func (a *App) playlistBase(platform string) string {
@@ -206,31 +203,12 @@ func (a *App) readPlaylistPage(ctx context.Context, spec remotePlatform, origin,
 	if err != nil {
 		return nil, errors.New("歌单地址无效")
 	}
-	request.Header.Set("Accept", "application/json")
-	request.Header.Set("User-Agent", "MusicOps")
 	if request.Method == http.MethodPost && request.Header.Get("Content-Type") == "" {
 		request.Header.Set("Content-Type", "application/json")
 	}
-	if cookie != "" {
-		request.Header.Set("Cookie", cookie)
-	}
-	if bearer != "" {
-		request.Header.Set("Authorization", "Bearer "+bearer)
-	}
-	client := &http.Client{Timeout: 15 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error {
-		return http.ErrUseLastResponse
-	}}
-	response, err := client.Do(request)
+	body, err := a.playlistDo(request, spec.Name, cookie, bearer)
 	if err != nil {
-		return nil, errors.New(spec.Name + " 没有连上")
-	}
-	defer response.Body.Close()
-	if response.StatusCode != http.StatusOK {
-		return nil, errors.New(spec.Name + " 没有返回歌单")
-	}
-	body, err := io.ReadAll(io.LimitReader(response.Body, 8<<20))
-	if err != nil {
-		return nil, errors.New(spec.Name + " 响应不完整")
+		return nil, err
 	}
 	return body, nil
 }

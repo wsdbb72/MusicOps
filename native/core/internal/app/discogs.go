@@ -13,6 +13,8 @@ import (
 type discogsHit struct {
 	Title             string `json:"title"`
 	ID                int    `json:"id"`
+	Year              string `json:"year,omitempty"`
+	Format            string `json:"format,omitempty"`
 	TrackCount        int    `json:"track_count,omitempty"`
 	IdentityConfirmed bool   `json:"identity_confirmed"`
 }
@@ -75,8 +77,10 @@ func (a *App) discogsSearch(base, artist, album string) ([]discogsHit, string, b
 	}
 	var decoded struct {
 		Results []struct {
-			Title string `json:"title"`
-			ID    int    `json:"id"`
+			Title  string `json:"title"`
+			ID     int    `json:"id"`
+			Year   any    `json:"year"`
+			Format any    `json:"format"`
 		} `json:"results"`
 	}
 	if json.NewDecoder(io.LimitReader(response.Body, 1<<20)).Decode(&decoded) != nil {
@@ -87,9 +91,9 @@ func (a *App) discogsSearch(base, artist, album string) ([]discogsHit, string, b
 		if strings.TrimSpace(result.Title) == "" {
 			continue
 		}
-		hit := discogsHit{Title: result.Title, ID: result.ID, IdentityConfirmed: false}
+		hit := discogsHit{Title: result.Title, ID: result.ID, Year: yearText(result.Year), Format: formatText(result.Format), IdentityConfirmed: false}
 		if loopbackURL(base) {
-			hit.TrackCount = a.discogsTrackCount(base, result.ID, token)
+			a.fillDiscogsDetail(base, &hit, token)
 		}
 		hits = append(hits, hit)
 		if len(hits) == 8 {
@@ -99,14 +103,14 @@ func (a *App) discogsSearch(base, artist, album string) ([]discogsHit, string, b
 	return hits, "Discogs 候选不能单独确认发行身份", true
 }
 
-func (a *App) discogsTrackCount(base string, id int, token string) int {
-	if id <= 0 || !loopbackURL(base) {
-		return 0
+func (a *App) fillDiscogsDetail(base string, hit *discogsHit, token string) {
+	if hit == nil || hit.ID <= 0 || !loopbackURL(base) {
+		return
 	}
-	endpoint := strings.TrimRight(base, "/") + "/releases/" + strconv.Itoa(id)
+	endpoint := strings.TrimRight(base, "/") + "/releases/" + strconv.Itoa(hit.ID)
 	request, err := http.NewRequest(http.MethodGet, endpoint, nil)
 	if err != nil {
-		return 0
+		return
 	}
 	request.Header.Set("Authorization", "Discogs token="+token)
 	request.Header.Set("Accept", "application/json")
@@ -116,19 +120,21 @@ func (a *App) discogsTrackCount(base string, id int, token string) int {
 	}}
 	response, err := client.Do(request)
 	if err != nil {
-		return 0
+		return
 	}
 	defer response.Body.Close()
 	if response.StatusCode != http.StatusOK {
-		return 0
+		return
 	}
 	var decoded struct {
+		Year      any `json:"year"`
+		Formats   any `json:"formats"`
 		Tracklist []struct {
 			Title string `json:"title"`
 		} `json:"tracklist"`
 	}
 	if json.NewDecoder(io.LimitReader(response.Body, 1<<20)).Decode(&decoded) != nil {
-		return 0
+		return
 	}
 	count := 0
 	for _, track := range decoded.Tracklist {
@@ -136,5 +142,46 @@ func (a *App) discogsTrackCount(base string, id int, token string) int {
 			count++
 		}
 	}
-	return count
+	hit.TrackCount = count
+	if year := yearText(decoded.Year); year != "" {
+		hit.Year = year
+	}
+	if format := formatText(decoded.Formats); format != "" {
+		hit.Format = format
+	}
+	hit.IdentityConfirmed = false
+}
+
+func yearText(raw any) string {
+	switch value := raw.(type) {
+	case string:
+		return strings.TrimSpace(value)
+	case float64:
+		if value >= 1000 && value <= 3000 && value == float64(int(value)) {
+			return strconv.Itoa(int(value))
+		}
+	}
+	return ""
+}
+
+func formatText(raw any) string {
+	switch value := raw.(type) {
+	case string:
+		return strings.TrimSpace(value)
+	case []any:
+		parts := []string{}
+		for _, item := range value {
+			if row, ok := item.(map[string]any); ok {
+				if name := textField(row["name"]); name != "" {
+					parts = append(parts, name)
+					continue
+				}
+			}
+			if name := textField(item); name != "" {
+				parts = append(parts, name)
+			}
+		}
+		return strings.Join(parts, ", ")
+	}
+	return ""
 }

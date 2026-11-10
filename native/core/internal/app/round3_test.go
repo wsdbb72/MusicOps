@@ -17,6 +17,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/wsdbb72/MusicOps/native/core/internal/flactags"
 	"github.com/wsdbb72/MusicOps/native/core/internal/searchdecision"
 	"github.com/wsdbb72/MusicOps/native/core/internal/workflow"
 )
@@ -69,8 +70,8 @@ func TestMetadataWritesTagsLyricsAndCoverTogether(t *testing.T) {
 		t.Fatal(written)
 	}
 	after, err := os.ReadFile(path)
-	if err != nil || bytes.Equal(after, original) || !bytes.Contains(after, []byte("[00:01.00]hello")) {
-		t.Fatal("combined write did not keep the lyrics", err)
+	if err != nil || bytes.Equal(after, original) || !bytes.Contains(after, []byte("[00:01.00]hello")) || !bytes.Equal(flactags.FrontCover(after), coverBody) {
+		t.Fatal("combined write did not keep the lyrics and embedded cover", err)
 	}
 	sidecar, err := os.ReadFile(strings.TrimSuffix(path, ".flac") + ".jpg")
 	if err != nil || !bytes.Equal(sidecar, coverBody) {
@@ -93,7 +94,7 @@ func TestWorkflowUsesTheSelectedFileWithoutSpending(t *testing.T) {
 	if missing.Code != http.StatusBadRequest {
 		t.Fatal(missing.Code, missing.Body.String())
 	}
-	started := post(t, application, "/v1/library/workflow", map[string]any{"scene": "fill", "label": "补缺", "path": path})
+	started := post(t, application, "/v1/library/workflow", map[string]any{"scene": "fill", "label": "补缺", "path": path, "confirmed": true})
 	note, _ := started["note"].(string)
 	gotPath, _ := started["path"].(string)
 	if started["downloaded"] != false || !strings.Contains(note, "令牌规则") || !strings.Contains(note, "尚未下载") || filepath.Base(gotPath) != "01 opening.flac" {
@@ -124,14 +125,14 @@ func TestDiscogsReleaseDetailDoesNotConfirmIdentity(t *testing.T) {
 			return
 		}
 		if strings.HasPrefix(r.URL.Path, "/releases/") {
-			_, _ = io.WriteString(w, `{"tracklist":[{"title":"Opening"},{"title":"Second"}]}`)
+			_, _ = io.WriteString(w, `{"year":1999,"formats":[{"name":"CD"}],"tracklist":[{"title":"Opening"},{"title":"Second"}]}`)
 			return
 		}
 		_, _ = io.WriteString(w, `{"results":[{"title":"Some Artist - First Album","id":42}]}`)
 	}))
 	defer server.Close()
 	hits, _, ok := application.discogsSearch(server.URL, "Some Artist", "First Album")
-	if !ok || len(hits) != 1 || hits[0].IdentityConfirmed || hits[0].TrackCount != 2 {
+	if !ok || len(hits) != 1 || hits[0].IdentityConfirmed || hits[0].TrackCount != 2 || hits[0].Year != "1999" || hits[0].Format != "CD" {
 		t.Fatal(hits, ok)
 	}
 }
@@ -159,8 +160,10 @@ func TestRoonInfoProbeDoesNotRegister(t *testing.T) {
 		if bytes.Contains(buf[:n], []byte("register")) && !bytes.Contains(buf[:n], []byte("registry")) {
 			return
 		}
-		payload := []byte("{\"core_id\":\"c1\",\"display_name\":\"Living Room\",\"display_version\":\"2.0\"}")
-		frame := append([]byte{0x81, byte(len(payload))}, payload...)
+		jsonBody := `{"core_id":"c1","display_name":"Living Room","display_version":"2.0"}`
+		payload := []byte("MOO/1 COMPLETE Success\nRequest-Id: 0\nContent-Type: application/json\nContent-Length: " + strconv.Itoa(len(jsonBody)) + "\n\n" + jsonBody)
+		frame := []byte{0x81, 126, byte(len(payload) >> 8), byte(len(payload))}
+		frame = append(frame, payload...)
 		_, _ = conn.Write(frame)
 	}()
 	application := newApp(t)

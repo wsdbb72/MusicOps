@@ -59,20 +59,18 @@ func (a *App) researchAlias(ctx context.Context, job workflow.Job, plan SearchPl
 	if json.NewDecoder(io.LimitReader(response.Body, 1<<20)).Decode(&decoded) != nil {
 		return "", false
 	}
-	query := strings.TrimSpace(decoded.Query)
-	if query == "" {
-		for _, alias := range decoded.Aliases {
-			if strings.TrimSpace(alias) != "" {
-				query = strings.TrimSpace(alias)
-				break
-			}
+	candidates := []string{decoded.Query}
+	candidates = append(candidates, decoded.Aliases...)
+	if strings.TrimSpace(decoded.Artist) != "" {
+		candidates = append(candidates, decoded.Artist+" "+plan.ExpectedTitle)
+	}
+	original := strings.TrimSpace(plan.Query)
+	for _, candidate := range candidates {
+		query := strings.TrimSpace(candidate)
+		if query == "" || query == original || len([]rune(query)) > 300 {
+			continue
 		}
+		return query, true
 	}
-	if query == "" && strings.TrimSpace(decoded.Artist) != "" {
-		query = strings.TrimSpace(decoded.Artist + " " + plan.ExpectedTitle)
-	}
-	if query == "" || query == strings.TrimSpace(plan.Query) || len([]rune(query)) > 300 {
-		return "", false
-	}
-	return query, true
+	return "", false
 }

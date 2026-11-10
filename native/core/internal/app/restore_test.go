@@ -55,7 +55,7 @@ func TestReindexListsGapsAndDoesNotDeleteAudio(t *testing.T) {
 		t.Fatal("reindex changed the audio file", err)
 	}
 	started := post(t, application, "/v1/library/workflow", map[string]any{"scene": "fill", "label": "补缺"})
-	if started["downloaded"] != false || started["scene"] != "fill" {
+	if started["downloaded"] != false || started["started"] != false {
 		t.Fatal(started)
 	}
 }

@@ -130,12 +130,15 @@ func (a *App) acquireWithToken(ctx context.Context, execution *scheduler.Executi
 	quote := tokenledger.Quote{
 		Site: site, AccountID: observation.AccountID, CookieID: tokenledger.Fingerprint(a.cookieFor(plan.RootJobID, site)),
 		ResourceID: resource, RequestID: job.ID, Cost: decision.TokenCost,
-		SafetyMargin: plan.SafetyMargin, BudgetRef: job.BatchID, Scene: job.Scene,
+		Budget: plan.Budget, SafetyMargin: plan.SafetyMargin, BudgetRef: job.BatchID, Scene: job.Scene,
 		IdentityConfirmed: plan.Identity.IdentityConfirmed, StreamingEnabled: plan.StreamingEnabled,
 	}
 	reserved, err := a.ledger.ReserveObserved(a.now(), quote, observation.AccountID)
 	if err != nil {
-		return scheduler.Outcome{}, err
+		// The site has not been asked yet. A ledger rejection stays on this
+		// task for review instead of failing the executor, which would retry
+		// the same quote.
+		return a.finishAcquire(held, job, "token", "令牌预留没有成立，未向站点请求；尚未下载、尚未入库", "ledger_rejected", nil)
 	}
 	if reserved.State != tokenledger.StateReserved {
 		return a.finishAcquire(held, job, "token", "令牌预留没有成立，未向站点请求；尚未下载、尚未入库", reserved.Class, nil)

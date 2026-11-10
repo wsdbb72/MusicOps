@@ -187,7 +187,7 @@ func (a *App) acquireFallback(ctx context.Context, execution *scheduler.Executio
 			}
 			imported, importedName = rows, name
 			outcomes = append(outcomes, downloadpolicy.Outcome{Source: "playlist", Class: downloadpolicy.ClassImport})
-			notes = append(notes, fmt.Sprintf("playlist 已导入 %d 首歌单曲目", len(rows)))
+			notes = append(notes, fmt.Sprintf("playlist 已读取 %d 首歌单曲目", len(rows)))
 		default:
 			// No credentials or engine for the platform sources: the
 			// attempt is recorded as no result, never as a download.
@@ -204,7 +204,7 @@ func (a *App) acquireFallback(ctx context.Context, execution *scheduler.Executio
 		Message: "流媒体回退已走完：" + strings.Join(notes, "、") + "；尚未下载、尚未入库", NowNS: a.now().UnixNano(),
 	}
 	if walk.ReviewRequired && len(imported) > 0 {
-		complete.Message = fmt.Sprintf("歌单已导入 %d 首曲目%s，待核对；尚未下载、尚未入库", len(imported), playlistSuffix(importedName))
+		complete.Message = fmt.Sprintf("歌单已读取 %d 首曲目%s，待核对；尚未下载、尚未入库", len(imported), playlistSuffix(importedName))
 	}
 	if walk.Recoverable {
 		complete.Message += fmt.Sprintf("（%d 秒后可重试）", walk.RetryAfterSec)

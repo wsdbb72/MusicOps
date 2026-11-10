@@ -269,7 +269,7 @@ func (a *App) archiveRecord(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "code": "INVALID_REQUEST"})
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "found": found, "record": record})
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "found": found, "record": publicRecord(record)})
 }
 
 func (a *App) startSearch(w http.ResponseWriter, r *http.Request) {

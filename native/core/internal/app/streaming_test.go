@@ -77,7 +77,7 @@ func TestStreamingFallbackImportsPlaylist(t *testing.T) {
 	}
 	post(t, application, "/v1/search", searchBody("album-pl", server.URL, []string{"dicmusic", "orpheus"}, true))
 	job := waitJob(t, application, "process:search:album-pl", "needs_review")
-	if job.ReviewKind != "candidate" || !strings.Contains(job.Message, "已导入 2 首曲目") || !strings.Contains(job.Message, "Test Mix") {
+	if job.ReviewKind != "candidate" || !strings.Contains(job.Message, "已读取 2 首曲目") || !strings.Contains(job.Message, "Test Mix") {
 		t.Fatal(job)
 	}
 	detail := inspect(t, application, "process:search:album-pl")

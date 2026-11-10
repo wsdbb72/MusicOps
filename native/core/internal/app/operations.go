@@ -297,7 +297,7 @@ func (a *App) logs(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "code": "LOGS_UNAVAILABLE"})
 		return
 	}
-	tasks := page.Tasks
+	tasks := publicTasks(page.Tasks)
 	if tasks == nil {
 		tasks = []taskrepo.Task{}
 	}

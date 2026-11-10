@@ -100,8 +100,13 @@ func Same(left, right Hit) bool {
 
 func artistsAgree(expected string, observed []string) bool {
 	wanted := artistKey([]string{expected})
-	if wanted == "" || len(observed) == 0 {
+	// A caller who did not name an artist is not asking for an artist check.
+	// A named artist with no artist on the hit is missing evidence, not a match.
+	if wanted == "" {
 		return true
+	}
+	if len(observed) == 0 {
+		return false
 	}
 	for _, name := range observed {
 		if fold(name) == wanted {

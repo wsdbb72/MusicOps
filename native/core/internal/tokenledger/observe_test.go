@@ -60,6 +60,31 @@ func TestLateObservationDoesNotOverwrite(t *testing.T) {
 	}
 }
 
+func TestHighBalanceReservesWithinTheBatchCap(t *testing.T) {
+	ledger := openLedger(t)
+	now := time.Unix(1_700_000_100, 0)
+	obs := Observation{Site: "dicmusic", AccountID: "7", CookieID: "cookie", Balance: 252, Known: true, Source: "userstats.tokens", ObservedAtNS: now.UnixNano(), Generation: 1}
+	if _, err := ledger.CommitObservation(obs); err != nil {
+		t.Fatal(err)
+	}
+	unset := quote("dicmusic", "resource-1", "request-1", 1, 0, 0, 0)
+	unset.AccountID = "7"
+	unset.CookieID = "cookie"
+	unset.BalanceKnown = false
+	got, err := ledger.ReserveObserved(now, unset, "7")
+	if err != nil || !got.Spent || got.Cost != 1 || got.Class != ClassReserved {
+		t.Fatal(got, err)
+	}
+	limited := quote("dicmusic", "resource-2", "request-2", 1, 0, 1, 0)
+	limited.AccountID = "7"
+	limited.CookieID = "cookie"
+	limited.BalanceKnown = false
+	blocked, err := ledger.ReserveObserved(now, limited, "7")
+	if err != nil || blocked.Spent || blocked.Class != ClassTokenBudget {
+		t.Fatal(blocked, err)
+	}
+}
+
 func TestCallerBalanceCannotAuthorizeAReservation(t *testing.T) {
 	ledger := openLedger(t)
 	now := time.Unix(1_700_000_100, 0)

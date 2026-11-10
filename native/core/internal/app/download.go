@@ -764,7 +764,7 @@ func (a *App) finishDownload(execution *scheduler.Execution, held taskrepo.Token
 	}
 	if _, err := a.flows.Complete(intentID("download", held.ID, held.Fence), held, workflow.Complete{
 		Edge: workflow.EdgeAdvance, NextStage: "validating", TaskState: "completed",
-		Message:  "下载完成，已归档做种，音频已入库，等待发布校验",
+		Message:  "下载完成，已归档做种，音频已交给发布校验；尚未确认入库",
 		Result:   payloadJSON,
 		Evidence: []workflow.EvidenceInput{{ID: evidenceID(held.ID, held.Fence, "qbittorrent"), Kind: "catalog", Source: "qbittorrent", SubjectID: plan.RootJobID, Payload: archiveJSON}},
 		NowNS:    a.now().UnixNano(),
@@ -780,7 +780,7 @@ func (a *App) finishDownload(execution *scheduler.Execution, held taskrepo.Token
 		Evidence: workflow.EvidenceInput{ID: "pub-" + payload.RequestID, Kind: "catalog", Source: "local-library", SubjectID: plan.RootJobID, TracklistVerified: true, Payload: payloadJSON},
 		Payload:  payloadJSON, NowNS: time.Now().UnixNano(),
 	})
-	return scheduler.Outcome{State: "completed", Message: "下载完成，已归档做种，音频已入库"}, nil
+	return scheduler.Outcome{State: "completed", Message: "下载完成，已归档做种，音频已交给发布校验；尚未确认入库"}, nil
 }
 
 // archiveReceipt is the durable record of a finished download's move into
@@ -1157,7 +1157,7 @@ func (a *App) finishValidating(execution *scheduler.Execution, held taskrepo.Tok
 	if err != nil {
 		return scheduler.Outcome{}, err
 	}
-	message := "音频已入库，发布校验由根任务进行"
+	message := "音频已交给发布校验，根任务确认后才算入库"
 	if _, err := a.flows.RecordRelease(workflow.RecordReleaseInput{
 		JobID: receipt.RootID, RequestID: "record-" + receipt.RequestID,
 		Evidence: workflow.EvidenceInput{ID: "pub-" + receipt.RequestID, Kind: "catalog", Source: "local-library", SubjectID: receipt.RootID, TracklistVerified: true, Payload: encoded},
@@ -1168,7 +1168,7 @@ func (a *App) finishValidating(execution *scheduler.Execution, held taskrepo.Tok
 		// store refused it). Say so in the completion message instead of
 		// failing a finished download: the operator can re-record the
 		// release through POST /v1/audio/release.
-		message = "音频已入库，但根任务未能进入发布：" + err.Error()
+		message = "音频已复制待发布，但根任务未能进入发布：" + err.Error()
 	}
 	if _, err := a.flows.Complete(intentID("validating", held.ID, held.Fence), held, workflow.Complete{
 		Edge: workflow.EdgeTerminal, NextStage: "completed", TaskState: "completed",

@@ -109,6 +109,21 @@ func TestMergeVetoesConflictingReleaseEvidence(t *testing.T) {
 	}
 }
 
+func TestNamedArtistWithoutHitArtistsDoesNotPass(t *testing.T) {
+	missing := Compare("Example", "Artist", Hit{Title: "Example"})
+	if missing.Pass || missing.Reason != "artist" {
+		t.Fatal(missing)
+	}
+	blank := Compare("Example", "Artist", Hit{Title: "Example", Artists: []string{" "}})
+	if blank.Pass || blank.Reason != "artist" {
+		t.Fatal(blank)
+	}
+	unnamed := Compare("Example", "", Hit{Title: "Example", Artists: []string{"Artist"}})
+	if !unnamed.Pass {
+		t.Fatal(unnamed)
+	}
+}
+
 func simplifiedTitleAccept(expected, observed string) bool {
 	expected = strings.TrimSpace(expected)
 	observed = strings.TrimSpace(observed)

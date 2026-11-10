@@ -15,6 +15,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/wsdbb72/MusicOps/native/core/internal/dataengine"
@@ -41,6 +42,9 @@ var (
 	downloadSettingsKey = []byte("app/settings/download")
 	siteSettingsKey     = []byte("app/settings/sites")
 	updatesSettingsKey  = []byte("app/settings/updates")
+	qbtSettingsKey      = []byte("app/settings/qbittorrent")
+	aiSettingsKey       = []byte("app/settings/ai")
+	librarySettingsKey  = []byte("app/settings/library")
 )
 
 // knownSites is the display order of the four tracker sites, matching
@@ -69,6 +73,19 @@ type pythonConfig struct {
 		Workflow struct {
 			SetupDone bool `json:"setup_done"`
 		} `json:"workflow"`
+		QBT struct {
+			BaseURL   string `json:"base_url"`
+			Category  string `json:"category"`
+			TagPrefix string `json:"tag_prefix"`
+		} `json:"qbt"`
+		AI struct {
+			Enabled         *bool    `json:"enabled"`
+			BaseURL         string   `json:"base_url"`
+			Model           string   `json:"model"`
+			Timeout         *int     `json:"timeout"`
+			MaxOutputTokens *int     `json:"max_output_tokens"`
+			Temperature     *float64 `json:"temperature"`
+		} `json:"ai"`
 	} `json:"values"`
 }
 
@@ -156,15 +173,41 @@ func MaybeMigrate(profile string) (*Report, error) {
 		return nil, err
 	}
 	// Write only absent keys: a Go setting the user already changed is
-	// never overwritten by the old Python value.
-	for _, kv := range []struct {
+	// never overwritten by the old Python value. Secrets stay in the
+	// vault; these documents are addresses and switches only.
+	settings := []struct {
 		key   []byte
 		value []byte
 	}{
 		{downloadSettingsKey, download},
 		{siteSettingsKey, sites},
 		{updatesSettingsKey, updates},
-	} {
+	}
+	if extra, ok, err := qbtSettings(cfg, nowNS); err != nil {
+		return nil, err
+	} else if ok {
+		settings = append(settings, struct {
+			key   []byte
+			value []byte
+		}{qbtSettingsKey, extra})
+	}
+	if extra, ok, err := aiSettings(cfg, nowNS); err != nil {
+		return nil, err
+	} else if ok {
+		settings = append(settings, struct {
+			key   []byte
+			value []byte
+		}{aiSettingsKey, extra})
+	}
+	if extra, ok, err := librarySettings(cfg, nowNS); err != nil {
+		return nil, err
+	} else if ok {
+		settings = append(settings, struct {
+			key   []byte
+			value []byte
+		}{librarySettingsKey, extra})
+	}
+	for _, kv := range settings {
 		ok, err := engine.CompareAndSwap(
 			[]dataengine.Condition{{Key: kv.key, Absent: true}},
 			[]dataengine.Mutation{{Key: kv.key, Value: kv.value}},
@@ -181,9 +224,10 @@ func MaybeMigrate(profile string) (*Report, error) {
 		library = "（未配置）"
 	}
 	report.Notes = append(report.Notes,
-		fmt.Sprintf("Python 音乐库位于 %s；Go 核心的库在状态目录内，本次不搬运音频文件", library),
+		fmt.Sprintf("Python 音乐库位于 %s；绝对路径会写入 Go 音乐库目录，本次不搬运音频文件，旧曲目索引不会自动变成新曲目", library),
 		fmt.Sprintf("Python 配置 offline=%v，workflow.setup_done=%v", cfg.Values.Offline, cfg.Values.Workflow.SetupDone),
-		"未映射的段（qbt/ai/catalog/lyrics 等）的凭据引用保留在 Python 配置与 vault 中，Go 侧按需读取，本次不迁移其值",
+		"qBittorrent 地址、分类、标签和 AI 地址、模型已写入 Go 设置；密码和 API Key 仍只在 vault",
+		"未映射的段（catalog、lyrics、音乐服务器等）的凭据引用仍在 vault 中，本次不迁移这些段",
 		"本次不迁移音频文件与任务数据库；任务数据库迁移由 sqlitemigrate 负责",
 	)
 	if err := writeReceipt(receiptPath, report); err != nil {
@@ -234,6 +278,51 @@ func readPythonConfig(source string) (*pythonConfig, error) {
 		return nil, errors.New("Python 配置版本无效")
 	}
 	return &cfg, nil
+}
+
+func qbtSettings(cfg *pythonConfig, nowNS int64) ([]byte, bool, error) {
+	if strings.TrimSpace(cfg.Values.QBT.BaseURL) == "" {
+		return nil, false, nil
+	}
+	encoded, err := json.Marshal(map[string]any{
+		"base_url": cfg.Values.QBT.BaseURL, "category": cfg.Values.QBT.Category,
+		"tags": cfg.Values.QBT.TagPrefix, "updated_ns": nowNS,
+	})
+	return encoded, err == nil, err
+}
+
+func aiSettings(cfg *pythonConfig, nowNS int64) ([]byte, bool, error) {
+	ai := cfg.Values.AI
+	if strings.TrimSpace(ai.BaseURL) == "" && strings.TrimSpace(ai.Model) == "" && ai.Enabled == nil {
+		return nil, false, nil
+	}
+	enabled := false
+	if ai.Enabled != nil {
+		enabled = *ai.Enabled
+	}
+	body := map[string]any{
+		"enabled": enabled, "base_url": ai.BaseURL, "model": ai.Model, "updated_ns": nowNS,
+	}
+	if ai.Timeout != nil {
+		body["timeout"] = *ai.Timeout
+	}
+	if ai.MaxOutputTokens != nil {
+		body["max_output_tokens"] = *ai.MaxOutputTokens
+	}
+	if ai.Temperature != nil {
+		body["temperature"] = *ai.Temperature
+	}
+	encoded, err := json.Marshal(body)
+	return encoded, err == nil, err
+}
+
+func librarySettings(cfg *pythonConfig, nowNS int64) ([]byte, bool, error) {
+	library := strings.TrimSpace(cfg.Values.Paths.Library)
+	if library == "" || !filepath.IsAbs(library) {
+		return nil, false, nil
+	}
+	encoded, err := json.Marshal(map[string]any{"library_dir": library, "updated_ns": nowNS})
+	return encoded, err == nil, err
 }
 
 func copyFile(source, dest string) error {

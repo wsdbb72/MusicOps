@@ -207,8 +207,8 @@ const appJS = `(function () {
       '<label><input type="checkbox" id="search-identity-tracklist"> 已核对曲目清单</label>' +
       '<label><input type="checkbox" id="search-identity-confirmed"> 确认这是同一发行（须先核对曲目清单）</label></fieldset>' +
       '<label>本次检索的 Cookie（只用于这次检索，不保存；留空用已保存的 Cookie）<input type="password" id="search-cookie" autocomplete="off"></label>' +
-      '<label><input type="checkbox" id="search-synthetic"> 合成测试（仅开发联调用，需填测试服务地址）</label>' +
-      '<label>测试服务地址<input type="text" id="search-base-url" placeholder="合成测试时必填"></label>' +
+      '<label><input type="checkbox" id="search-synthetic"> 使用测试服务器（不访问真实站点）</label>' +
+      '<label>测试服务器地址<input type="text" id="search-base-url" placeholder="使用测试服务器时必填"></label>' +
       '<p><button type="submit" class="primary">提交搜索</button></p></form></article></div>';
     list.innerHTML = html;
     var sitesBox = document.getElementById("search-sites");
@@ -233,7 +233,7 @@ const appJS = `(function () {
     if (confirmed && !tracklist) { setStatus("fail", "确认身份前须先核对曲目清单。"); return; }
     var synthetic = document.getElementById("search-synthetic").checked;
     var baseURL = document.getElementById("search-base-url").value.trim();
-    if (synthetic && !baseURL) { setStatus("fail", "合成测试需要填测试服务地址。"); return; }
+    if (synthetic && !baseURL) { setStatus("fail", "使用测试服务器时需要填写地址。"); return; }
     var tracks = document.getElementById("search-tracks").value.split(",").map(function (v) { return v.trim(); }).filter(function (v) { return v; });
     var scene = document.getElementById("search-scene").value;
     if (scene === "playlist" && !tracks.length) { setStatus("fail", "歌单场景需要至少一个来源曲目 ID。"); return; }
@@ -301,8 +301,7 @@ const appJS = `(function () {
       '<label><input type="checkbox" id="download-streaming"' + (downloadSettings.streaming_enabled ? " checked" : "") + '> 流媒体回退（四站无精确匹配时走流媒体）</label>' +
       '<p><button type="button" id="save-download" class="primary">保存</button></p>' +
       '<p class="meta">流媒体回退顺序（可上下调整）：</p>' + orderHtml +
-      '<p class="meta">回退执行已接入：' + (downloadSettings.streaming_source_status || []).map(function (source) { return escapeText(source.name) + (source.configured ? "已接入" : "未接入"); }).join("、") + '。四站无凭证与引擎，歌单文件只导入曲目元数据。</p>' +
-      '<p class="meta">各功能状态：四站 Cookie 已接入 Vault 保存；AI 核对已接入；qBittorrent 地址与登录已接入保存；FlareSolverr 设置已保存但暂不拦截请求；歌词服务设置已保存但暂无拉取客户端；Discogs Token 已保存，目录核对仍只用 MusicBrainz；歌单可导入并接入回退；音乐库目录与 Plex/Navidrome 已接入；媒体与库维护已接入（NCM 解密、FLAC 标签、歌词、去重、艺人文件夹；OpenCC 无字典数据，未接入）；转码已接入（需系统 ffmpeg/ffprobe）。</p></article>';
+      '<p class="meta">回退顺序默认先 Tidal、Apple Music，再 QQ 音乐、网易云，最后是已导入的歌单文件。这些平台目前不会直接下载音频；歌单文件只记下曲目，不算入库。</p></article>';
   }
   function cookieCard() {
     var rows = cookieSettings.map(function (site) {
@@ -409,8 +408,8 @@ const appJS = `(function () {
       '<article><h2>站点登录检查</h2><p class="meta">只读检查：只验证登录与余额，不下载、不花 token。Cookie 留空用已保存的，填了则只用于这次检查，不保存。</p>' +
       '<label>站点<select id="preflight-site">' + siteRows.map(function (site) { return '<option value="' + escapeText(site.name) + '">' + escapeText(site.name) + "</option>"; }).join("") + '</select></label>' +
       '<label>Cookie<input type="password" id="preflight-cookie" autocomplete="off"></label>' +
-      '<label><input type="checkbox" id="preflight-synthetic"> 合成测试（需填测试服务地址）</label>' +
-      '<label>测试服务地址<input type="text" id="preflight-base-url"></label>' +
+      '<label><input type="checkbox" id="preflight-synthetic"> 使用测试服务器（不访问真实站点）</label>' +
+      '<label>测试服务器地址<input type="text" id="preflight-base-url"></label>' +
       '<p><button type="button" id="run-preflight" class="primary">检查登录</button></p><p id="preflight-result" class="meta"></p></article></div>';
     list.innerHTML = html;
     var save = document.getElementById("save-download");
@@ -819,7 +818,7 @@ const appJS = `(function () {
     var cookie = document.getElementById("preflight-cookie").value;
     var synthetic = document.getElementById("preflight-synthetic").checked;
     var baseURL = document.getElementById("preflight-base-url").value.trim();
-    if (synthetic && !baseURL) { setStatus("fail", "合成测试需要填测试服务地址。"); return; }
+    if (synthetic && !baseURL) { setStatus("fail", "使用测试服务器时需要填写地址。"); return; }
     setBusy(true);
     setStatus("info", "正在检查登录");
     try {

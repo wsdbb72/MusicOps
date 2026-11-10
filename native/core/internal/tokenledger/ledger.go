@@ -22,8 +22,12 @@ const (
 	StateReleased       = "RELEASED"
 	StateRejected       = "REJECTED"
 
-	ClassReserved        = "reserved"
-	ClassTokenBudget     = "token_budget"
+	ClassReserved    = "reserved"
+	ClassTokenBudget = "token_budget"
+	// maxQuoteBudget is the largest batch cap the ledger will store. A site
+	// balance may be higher; callers must cap the batch instead of copying
+	// the whole balance into Budget.
+	maxQuoteBudget       = 100
 	ClassBalanceUnknown  = "balance_unknown"
 	ClassBalanceStale    = "balance_stale"
 	ClassPending         = "token_pending"
@@ -124,6 +128,12 @@ type indexDoc struct {
 func (l *Ledger) Reserve(now time.Time, quote Quote) (Result, error) {
 	if l == nil || l.engine == nil || now.IsZero() {
 		return Result{}, dataengine.ErrInvalidRequest
+	}
+	if quote.Budget > maxQuoteBudget {
+		quote.Budget = maxQuoteBudget
+	}
+	if quote.Budget < 0 {
+		quote.Budget = 0
 	}
 	if err := validateQuote(quote); err != nil {
 		return Result{}, err
@@ -423,7 +433,7 @@ func validateQuote(quote Quote) error {
 	if !tokenSite(quote.Site) || !validID(quote.ResourceID) || !validID(quote.RequestID) || !validID(quote.BudgetRef) {
 		return dataengine.ErrInvalidRequest
 	}
-	if quote.Cost < 1 || quote.Cost > 100 || quote.Budget < 0 || quote.Budget > 100 || quote.SafetyMargin < 0 || quote.SafetyMargin > 100 {
+	if quote.Cost < 1 || quote.Cost > maxQuoteBudget || quote.Budget < 0 || quote.Budget > maxQuoteBudget || quote.SafetyMargin < 0 || quote.SafetyMargin > maxQuoteBudget {
 		return dataengine.ErrInvalidRequest
 	}
 	if quote.BalanceKnown && (quote.Balance < 0 || quote.Balance > 1_000_000) {

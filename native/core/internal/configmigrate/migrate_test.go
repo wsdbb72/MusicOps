@@ -2,6 +2,7 @@ package configmigrate
 
 import (
 	"crypto/sha256"
+	"database/sql"
 	"encoding/hex"
 	"encoding/json"
 	"os"
@@ -154,7 +155,7 @@ func TestMaybeMigratePythonFixture(t *testing.T) {
 	if report.ConfigVersion != 2 {
 		t.Fatalf("ConfigVersion = %d, want 2 (default config v1 + one save)", report.ConfigVersion)
 	}
-	wantMapped := []string{"app/settings/download", "app/settings/sites", "app/settings/updates"}
+	wantMapped := []string{"app/settings/download", "app/settings/sites", "app/settings/updates", "app/settings/qbittorrent", "app/settings/ai", "app/settings/library"}
 	if len(report.Mapped) != len(wantMapped) {
 		t.Fatalf("Mapped = %v, want %v", report.Mapped, wantMapped)
 	}
@@ -213,7 +214,7 @@ func TestMaybeMigratePythonFixture(t *testing.T) {
 	if err := json.Unmarshal(raw, &receipt); err != nil {
 		t.Fatalf("receipt JSON: %v", err)
 	}
-	if receipt.ConfigVersion != 2 || len(receipt.Mapped) != 3 {
+	if receipt.ConfigVersion != 2 || len(receipt.Mapped) != 6 {
 		t.Fatalf("receipt = %+v", receipt)
 	}
 	if got := sha256File(t, sqlite); got != beforeSQLite {
@@ -267,8 +268,14 @@ func TestMaybeMigrateDoesNotOverwriteGoSettings(t *testing.T) {
 	if err != nil {
 		t.Fatalf("MaybeMigrate: %v", err)
 	}
-	if len(report.Mapped) != 1 || report.Mapped[0] != "app/settings/updates" {
-		t.Fatalf("Mapped = %v, want only [app/settings/updates]", report.Mapped)
+	wantMapped := []string{"app/settings/updates", "app/settings/qbittorrent", "app/settings/ai", "app/settings/library"}
+	if len(report.Mapped) != len(wantMapped) {
+		t.Fatalf("Mapped = %v, want %v", report.Mapped, wantMapped)
+	}
+	for i, key := range wantMapped {
+		if report.Mapped[i] != key {
+			t.Fatalf("Mapped = %v, want %v", report.Mapped, wantMapped)
+		}
 	}
 	download := readNative(t, profile, "app/settings/download")
 	if download["streaming_enabled"] != false || download["updated_ns"] != float64(123) {
@@ -278,5 +285,70 @@ func TestMaybeMigrateDoesNotOverwriteGoSettings(t *testing.T) {
 	enabled, _ := sites["enabled_sites"].([]any)
 	if len(enabled) != 1 || enabled[0] != "redacted" {
 		t.Fatalf("sites settings overwritten: %v", sites)
+	}
+}
+
+func TestMaybeMigrateCopiesServiceSettingsWithoutSecrets(t *testing.T) {
+	profile := t.TempDir()
+	state := filepath.Join(profile, "state")
+	if err := os.MkdirAll(state, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	db, err := sql.Open("sqlite", filepath.Join(state, "musicops.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload := `{
+		"version": 2,
+		"values": {
+			"streaming": {"enabled": false},
+			"providers": {"dicmusic": {"enabled": true}},
+			"updates": {"enabled": true},
+			"paths": {"library": "/library/music"},
+			"offline": false,
+			"workflow": {"setup_done": true},
+			"qbt": {"base_url": "http://127.0.0.1:8085", "category": "MusicOps", "tag_prefix": "Seed", "credential_ref": "vault://user/qbt/abcdefabcdef", "password": "must-not-copy"},
+			"ai": {"enabled": true, "base_url": "https://ai.example.invalid/v1", "model": "review", "timeout": 60, "max_output_tokens": 2048, "temperature": 0.2, "auth_secret_ref": "vault://ai/default/key", "api_key": "must-not-copy"}
+		}
+	}`
+	if _, err = db.Exec(`CREATE TABLE config_versions (id TEXT PRIMARY KEY, payload TEXT NOT NULL, updated_at TEXT NOT NULL)`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = db.Exec(`INSERT INTO config_versions(id, payload, updated_at) VALUES('2', ?, '2026-01-01T00:00:00Z')`, payload); err != nil {
+		t.Fatal(err)
+	}
+	if err = db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	report, err := MaybeMigrate(profile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, key := range []string{"app/settings/qbittorrent", "app/settings/ai", "app/settings/library"} {
+		found := false
+		for _, mapped := range report.Mapped {
+			if mapped == key {
+				found = true
+			}
+		}
+		if !found {
+			t.Fatal(report.Mapped)
+		}
+	}
+	qbt := readNative(t, profile, "app/settings/qbittorrent")
+	if qbt["base_url"] != "http://127.0.0.1:8085" || qbt["category"] != "MusicOps" || qbt["tags"] != "Seed" {
+		t.Fatal(qbt)
+	}
+	ai := readNative(t, profile, "app/settings/ai")
+	if ai["enabled"] != true || ai["base_url"] != "https://ai.example.invalid/v1" || ai["model"] != "review" || ai["timeout"] != float64(60) {
+		t.Fatal(ai)
+	}
+	library := readNative(t, profile, "app/settings/library")
+	if library["library_dir"] != "/library/music" {
+		t.Fatal(library)
+	}
+	encoded, err := json.Marshal([]any{qbt, ai, library, report})
+	if err != nil || strings.Contains(string(encoded), "must-not-copy") || strings.Contains(string(encoded), "vault://") {
+		t.Fatal(string(encoded), err)
 	}
 }

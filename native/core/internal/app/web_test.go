@@ -6,6 +6,8 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"github.com/wsdbb72/MusicOps/native/core/internal/taskrepo"
 )
 
 func TestOperationsBoardReadsStoredJobsAndHidesSecrets(t *testing.T) {
@@ -34,6 +36,14 @@ func TestOperationsBoardReadsStoredJobsAndHidesSecrets(t *testing.T) {
 	}
 	if got := scrub("authkey=sentinel-dic-auth&torrent_pass=sentinel-orpheus-pass"); strings.Contains(got, "sentinel") || !strings.Contains(got, "authkey=redacted") {
 		t.Fatal(got)
+	}
+	column := scrubColumn(`T{"cookie":"session=sentinel-cookie","note":"authkey=sentinel-dic-auth&torrent_pass=sentinel-orpheus-pass","tokens":252}`)
+	if strings.Contains(column, "sentinel") || !strings.Contains(column, `"cookie":"redacted"`) || !strings.Contains(column, "authkey=redacted") || !strings.Contains(column, "252") {
+		t.Fatal(column)
+	}
+	redactedTasks := publicTasks([]taskrepo.Task{{Message: "fetch authkey=sentinel-dic-auth", ErrorClass: "ok"}})
+	if strings.Contains(redactedTasks[0].Message, "sentinel") || redactedTasks[0].Message == "" {
+		t.Fatal(redactedTasks)
 	}
 
 	empty := getAuth(t, application, "/v1/jobs")

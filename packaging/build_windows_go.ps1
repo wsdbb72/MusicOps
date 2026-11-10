@@ -96,7 +96,7 @@ function New-VersionResource([string]$Out, [string]$FileName, [string]$Icon) {
 Push-Location $coreRoot
 try {
     New-VersionResource $coreSyso 'musicops-core.exe' ''
-    New-VersionResource $shellSyso 'MusicOps.exe' (Join-Path $projectRoot 'src/musicops/assets/musicops.ico')
+    New-VersionResource $shellSyso 'MusicOps.exe' (Join-Path $projectRoot 'packaging/assets/musicops.ico')
 
     # 3. Go binaries.
     $ldflags="-s -w -X github.com/wsdbb72/MusicOps/native/core/internal/version.Version=$Version"

@@ -13,7 +13,7 @@
 #      (CGO_ENABLED=1: WKWebView needs CGO) with the version injected
 #      via -ldflags; verify both report the version by executing them;
 #   2. assemble MusicOps.app (Info.plist from packaging/macos/Info.plist,
-#      icon from src/musicops/assets/musicops.png via sips + iconutil,
+#      icon from packaging/assets/musicops.png via sips + iconutil,
 #      LICENSE + THIRD-PARTY-NOTICES.md, managed engines from
 #      packaging/prepare_engines.py);
 #   3. audit the bundle (no private/runtime state, no escaping symlink);
@@ -146,7 +146,7 @@ for spec in "icon_16x16:16" "icon_16x16@2x:32" "icon_32x32:32" "icon_32x32@2x:64
             "icon_128x128:128" "icon_128x128@2x:256" "icon_256x256:256" \
             "icon_256x256@2x:512" "icon_512x512:512" "icon_512x512@2x:1024"; do
   name="${spec%%:*}"; px="${spec##*:}"
-  /usr/bin/sips -z "$px" "$px" "$ROOT/src/musicops/assets/musicops.png" \
+  /usr/bin/sips -z "$px" "$px" "$ROOT/packaging/assets/musicops.png" \
     --out "$ICONSET/$name.png" >/dev/null
 done
 /usr/bin/iconutil -c icns "$ICONSET" -o "$APP/Contents/Resources/MusicOps.icns"

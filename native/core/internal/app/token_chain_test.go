@@ -14,6 +14,58 @@ import (
 
 const sampleTorrent = "d8:announce12:http://a.com4:infod6:lengthi1e4:name4:test12:piece lengthi16384e6:pieces20:01234567890123456789ee"
 
+func TestHighSiteBalanceReservesAndHonorsTheBatchBudget(t *testing.T) {
+	var downloads atomic.Int32
+	var query string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if noteTokenEvidence(w, r) {
+			return
+		}
+		values := r.URL.Query()
+		switch {
+		case values.Get("action") == "index":
+			io.WriteString(w, `{"status":"success","response":{"id":7,"userstats":{"tokens":252}}}`)
+		case values.Get("action") == "browse" && values.Get("searchstr") == "Album B":
+			io.WriteString(w, gazelleHit("22"))
+		case values.Get("action") == "download":
+			downloads.Add(1)
+			query = r.URL.RawQuery
+			io.WriteString(w, sampleTorrent)
+		default:
+			io.WriteString(w, gazelleHit("11"))
+		}
+	}))
+	defer server.Close()
+	application := newApp(t)
+	first := tokenBody("album-high", server.URL, []string{"dicmusic"})
+	first["budget"] = 1
+	first["dicmusic_authkey"] = "sentinel-dic-auth"
+	post(t, application, "/v1/search", first)
+	job := waitJob(t, application, "process:search:album-high", "needs_review")
+	if downloads.Load() != 1 || job.ErrorClass != "REQUEST_UNKNOWN" || !strings.Contains(query, "usetoken=1") || strings.Contains(query, "torrent_pass=") {
+		t.Fatal(downloads.Load(), job.ErrorClass, job.Message, query)
+	}
+	confirmed := postRecheck(t, application, map[string]any{
+		"site": "dicmusic",
+		"proof": map[string]any{
+			"contract": "musicops.fixture.v1", "state": "CONSUMED", "account_id": "7",
+			"resource_id": "11", "request_id": "process:search:album-high",
+		},
+	})
+	if nested(t, confirmed, "reservation")["state"] != "CONFIRMED" {
+		t.Fatal(confirmed)
+	}
+	second := tokenBody("album-high-2", server.URL, []string{"dicmusic"})
+	second["query"] = "Album B"
+	second["budget"] = 1
+	second["dicmusic_authkey"] = "sentinel-dic-auth"
+	post(t, application, "/v1/search", second)
+	again := waitJob(t, application, "process:search:album-high-2", "needs_review")
+	if downloads.Load() != 1 || again.ErrorClass != "token_budget" || !strings.Contains(again.Message, "未向站点请求") {
+		t.Fatal(downloads.Load(), again.ErrorClass, again.Message)
+	}
+}
+
 func TestCallerBalanceCannotAuthorizeOrBlockTheSiteBalance(t *testing.T) {
 	var downloads atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

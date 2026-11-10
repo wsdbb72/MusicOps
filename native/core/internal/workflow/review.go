@@ -152,10 +152,8 @@ func (r *Repository) retryAction(job *Job, task *taskrepo.Task) ReviewAction {
 	if task.Command == cmdSearch && job.SearchRetryCount >= 3 {
 		return ReviewAction{Action: "retry", Reason: "已达 3 次重试上限"}
 	}
-	if stage, err := r.retryStage(*job, task); err != nil {
+	if _, err := r.retryStage(*job, task); err != nil {
 		return ReviewAction{Action: "retry", Reason: "无法确认重回阶段"}
-	} else if stage == "fallback" {
-		return ReviewAction{Action: "retry", Reason: "流媒体回退尚未接入，重试也不会推进"}
 	}
 	return ReviewAction{Action: "retry", Allowed: true}
 }
@@ -359,9 +357,6 @@ func (r *Repository) reviewRetry(requestID string, job Job, task *taskrepo.Task,
 	stage, err := r.retryStage(job, task)
 	if err != nil {
 		return Result{}, err
-	}
-	if stage == "fallback" {
-		return Result{}, ErrStale
 	}
 	extra, _ := json.Marshal(struct{ JobID, Action string }{job.ID, "retry"})
 	result, err := r.tasks.ControlOwned(requestID, task.ID, "retry", nowNS, extra, func(v *dataengine.View, _, after *taskrepo.Task, _ []taskrepo.Task) ([]dataengine.Condition, []dataengine.Mutation, json.RawMessage, error) {

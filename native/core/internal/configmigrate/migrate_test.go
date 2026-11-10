@@ -1,7 +1,9 @@
 package configmigrate
 
 import (
+	"bytes"
 	"crypto/sha256"
+	"database/sql"
 	"encoding/hex"
 	"encoding/json"
 	"os"
@@ -154,7 +156,7 @@ func TestMaybeMigratePythonFixture(t *testing.T) {
 	if report.ConfigVersion != 2 {
 		t.Fatalf("ConfigVersion = %d, want 2 (default config v1 + one save)", report.ConfigVersion)
 	}
-	wantMapped := []string{"app/settings/download", "app/settings/sites", "app/settings/updates"}
+	wantMapped := []string{"app/settings/download", "app/settings/sites", "app/settings/updates", "app/settings/qbittorrent", "app/settings/ai", "app/settings/library"}
 	if len(report.Mapped) != len(wantMapped) {
 		t.Fatalf("Mapped = %v, want %v", report.Mapped, wantMapped)
 	}
@@ -213,7 +215,7 @@ func TestMaybeMigratePythonFixture(t *testing.T) {
 	if err := json.Unmarshal(raw, &receipt); err != nil {
 		t.Fatalf("receipt JSON: %v", err)
 	}
-	if receipt.ConfigVersion != 2 || len(receipt.Mapped) != 3 {
+	if receipt.ConfigVersion != 2 || len(receipt.Mapped) != 6 {
 		t.Fatalf("receipt = %+v", receipt)
 	}
 	if got := sha256File(t, sqlite); got != beforeSQLite {
@@ -267,8 +269,14 @@ func TestMaybeMigrateDoesNotOverwriteGoSettings(t *testing.T) {
 	if err != nil {
 		t.Fatalf("MaybeMigrate: %v", err)
 	}
-	if len(report.Mapped) != 1 || report.Mapped[0] != "app/settings/updates" {
-		t.Fatalf("Mapped = %v, want only [app/settings/updates]", report.Mapped)
+	wantMapped := []string{"app/settings/updates", "app/settings/qbittorrent", "app/settings/ai", "app/settings/library"}
+	if len(report.Mapped) != len(wantMapped) {
+		t.Fatalf("Mapped = %v, want %v", report.Mapped, wantMapped)
+	}
+	for i, key := range wantMapped {
+		if report.Mapped[i] != key {
+			t.Fatalf("Mapped = %v, want %v", report.Mapped, wantMapped)
+		}
 	}
 	download := readNative(t, profile, "app/settings/download")
 	if download["streaming_enabled"] != false || download["updated_ns"] != float64(123) {
@@ -278,5 +286,184 @@ func TestMaybeMigrateDoesNotOverwriteGoSettings(t *testing.T) {
 	enabled, _ := sites["enabled_sites"].([]any)
 	if len(enabled) != 1 || enabled[0] != "redacted" {
 		t.Fatalf("sites settings overwritten: %v", sites)
+	}
+}
+
+func TestMaybeMigrateCopiesServiceSettingsWithoutSecrets(t *testing.T) {
+	profile := t.TempDir()
+	state := filepath.Join(profile, "state")
+	if err := os.MkdirAll(state, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	db, err := sql.Open("sqlite", filepath.Join(state, "musicops.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	libraryDir := filepath.Join(profile, "library-music")
+	libraryJSON, err := json.Marshal(libraryDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload := `{
+		"version": 2,
+		"values": {
+			"streaming": {"enabled": false},
+			"providers": {"dicmusic": {"enabled": true}},
+			"updates": {"enabled": true},
+			"paths": {"library": ` + string(libraryJSON) + `},
+			"offline": false,
+			"workflow": {"setup_done": true},
+			"qbt": {"base_url": "http://127.0.0.1:8085", "category": "MusicOps", "tag_prefix": "Seed", "credential_ref": "vault://user/qbt/abcdefabcdef", "password": "must-not-copy"},
+			"ai": {"enabled": true, "base_url": "https://ai.example.invalid/v1", "model": "review", "timeout": 60, "max_output_tokens": 2048, "temperature": 0.2, "auth_secret_ref": "vault://ai/default/key", "api_key": "must-not-copy"}
+		}
+	}`
+	if _, err = db.Exec(`CREATE TABLE config_versions (id TEXT PRIMARY KEY, payload TEXT NOT NULL, updated_at TEXT NOT NULL)`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = db.Exec(`INSERT INTO config_versions(id, payload, updated_at) VALUES('2', ?, '2026-01-01T00:00:00Z')`, payload); err != nil {
+		t.Fatal(err)
+	}
+	if err = db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	report, err := MaybeMigrate(profile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, key := range []string{"app/settings/qbittorrent", "app/settings/ai", "app/settings/library"} {
+		found := false
+		for _, mapped := range report.Mapped {
+			if mapped == key {
+				found = true
+			}
+		}
+		if !found {
+			t.Fatal(report.Mapped)
+		}
+	}
+	qbt := readNative(t, profile, "app/settings/qbittorrent")
+	if qbt["base_url"] != "http://127.0.0.1:8085" || qbt["category"] != "MusicOps" || qbt["tags"] != "Seed" {
+		t.Fatal(qbt)
+	}
+	ai := readNative(t, profile, "app/settings/ai")
+	if ai["enabled"] != true || ai["base_url"] != "https://ai.example.invalid/v1" || ai["model"] != "review" || ai["timeout"] != float64(60) {
+		t.Fatal(ai)
+	}
+	library := readNative(t, profile, "app/settings/library")
+	if library["library_dir"] != libraryDir {
+		t.Fatal(library)
+	}
+	encoded, err := json.Marshal([]any{qbt, ai, library, report})
+	if err != nil || strings.Contains(string(encoded), "must-not-copy") || strings.Contains(string(encoded), "vault://") {
+		t.Fatal(string(encoded), err)
+	}
+}
+
+func TestMaybeMigrateCopiesRemainingSectionsAndRerunsOldReceipts(t *testing.T) {
+	profile := t.TempDir()
+	state := filepath.Join(profile, "state")
+	if err := os.MkdirAll(state, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	db, err := sql.Open("sqlite", filepath.Join(state, "musicops.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload := `{
+		"version": 2,
+		"values": {
+			"updates": {"enabled": false},
+			"paths": {"library": "/library/music"},
+			"lyrics": {"primary": {"base_url": "https://lyrics.example.com", "lyrics_path": "/lyrics", "candidates_path": "/jsonapi", "cover_path": "/cover", "auth_header": "Authorization", "auth_secret_ref": "vault://lyrics/default/authorization"}},
+			"browser_solver": {"managed": true, "enabled": true, "base_url": "http://127.0.0.1:8191", "timeout": 30},
+			"music_servers": {"plex": {"enabled": true, "url": "http://127.0.0.1:32400", "section_id": "1", "auth_secret_ref": "vault://user/plex/secret"}, "navidrome": {"enabled": true, "url": "http://127.0.0.1:4533", "username": "ada", "password_ref": "vault://user/nav/secret"}, "roon": {"enabled": true, "host": "127.0.0.1", "port": 9330, "library": "/library/music"}},
+			"playlist_sources": {"qqmusic": {"credential_ref": "vault://user/qqmusic/cookie", "timeout": 15}},
+			"catalog": {"discogs": {"credential_ref": "vault://catalog/discogs/token", "token": "must-not-copy"}}
+		}
+	}`
+	if _, err = db.Exec(`CREATE TABLE config_versions (id TEXT PRIMARY KEY, payload TEXT NOT NULL, updated_at TEXT NOT NULL)`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = db.Exec(`INSERT INTO config_versions(id, payload, updated_at) VALUES('2', ?, '2026-01-01T00:00:00Z')`, payload); err != nil {
+		t.Fatal(err)
+	}
+	if err = db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	report, err := MaybeMigrate(profile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, key := range []string{"app/settings/lyrics", "app/settings/solver", "app/settings/servers", "app/settings/roon", "app/settings/playlist-sources", "app/settings/updates"} {
+		found := false
+		for _, mapped := range report.Mapped {
+			if mapped == key {
+				found = true
+			}
+		}
+		if !found {
+			t.Fatal(report.Mapped)
+		}
+	}
+	if report.MapperGeneration != 2 {
+		t.Fatal(report.MapperGeneration)
+	}
+	lyrics := readNative(t, profile, "app/settings/lyrics")
+	if lyrics["base_url"] != "https://lyrics.example.com" {
+		t.Fatal(lyrics)
+	}
+	servers := readNative(t, profile, "app/settings/servers")
+	encoded, err := json.Marshal([]any{lyrics, servers, report})
+	if err != nil || strings.Contains(string(encoded), "must-not-copy") || strings.Contains(string(encoded), "vault://") {
+		t.Fatal(string(encoded), err)
+	}
+	sources := readNative(t, profile, "app/settings/playlist-sources")
+	qq, _ := sources["qqmusic"].(map[string]any)
+	if qq["credential_ref"] != "vault://user/qqmusic/cookie" {
+		t.Fatal(sources)
+	}
+	raw, err := os.ReadFile(filepath.Join(state, "migration-report.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw = bytes.Replace(raw, []byte(`"mapper_generation": 2`), []byte(`"mapper_generation": 0`), 1)
+	if err = os.WriteFile(filepath.Join(state, "migration-report.json"), raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	engine, err := dataengine.Open(filepath.Join(state, "native"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var current []byte
+	var present bool
+	if err = engine.View(func(v *dataengine.View) error {
+		var err error
+		current, present, err = v.Get([]byte("app/settings/updates"))
+		return err
+	}); err != nil || !present {
+		t.Fatal(err, present)
+	}
+	ok, err := engine.CompareAndSwap(
+		[]dataengine.Condition{{Key: []byte("app/settings/updates"), Value: current}},
+		[]dataengine.Mutation{{Key: []byte("app/settings/updates"), Delete: true}},
+	)
+	if err != nil || !ok {
+		t.Fatal(ok, err)
+	}
+	if err = engine.Close(); err != nil {
+		t.Fatal(err)
+	}
+	again, err := MaybeMigrate(profile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	foundUpdates := false
+	for _, mapped := range again.Mapped {
+		if mapped == "app/settings/updates" {
+			foundUpdates = true
+		}
+	}
+	if !foundUpdates || again.MapperGeneration != 2 {
+		t.Fatal(again.Mapped, again.MapperGeneration)
 	}
 }

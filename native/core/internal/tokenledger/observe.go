@@ -357,8 +357,25 @@ func (l *Ledger) ReserveObserved(now time.Time, quote Quote, accountID string) (
 	quote.BalanceKnown = true
 	quote.Balance = obs.Balance
 	quote.ObservedAt = observed
-	if quote.Budget <= 0 || quote.Budget > obs.Balance {
-		quote.Budget = obs.Balance
-	}
+	quote.Budget = capBudget(quote.Budget, obs.Balance)
 	return l.Reserve(now, quote)
+}
+
+// capBudget turns an unset or oversized batch cap into a value Reserve can
+// store. An explicit cap within the balance is kept. Zero means "no caller
+// cap", so the batch is limited by the balance and by maxQuoteBudget. A
+// balance above maxQuoteBudget must not be copied through: validateQuote
+// rejects Budget > maxQuoteBudget and that error used to fail the download
+// before any token request.
+func capBudget(budget, balance int) int {
+	if budget <= 0 || budget > balance {
+		budget = balance
+	}
+	if budget > maxQuoteBudget {
+		budget = maxQuoteBudget
+	}
+	if budget < 0 {
+		return 0
+	}
+	return budget
 }

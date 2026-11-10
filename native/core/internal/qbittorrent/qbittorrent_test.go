@@ -1185,6 +1185,28 @@ func TestClassifyState(t *testing.T) {
 	}
 }
 
+func TestUnifyLegacyTagsAddsTheProjectTag(t *testing.T) {
+	fake := newFakeQBT(t, "5.0.4")
+	client := loggedInClient(t, fake)
+	torrent := buildV1Single()
+	meta := mustMeta(t, torrent)
+	fake.seed(&fakeTorrent{
+		hash: meta.InfoHashV1, state: "stoppedDL", tags: "musicops-task-1",
+		files: []TorrentFile{{Name: "song.flac", Size: 100, Progress: 0, Priority: 1}},
+	})
+	changed, err := client.UnifyLegacyTags(context.Background())
+	if err != nil || changed != 1 {
+		t.Fatal(changed, err)
+	}
+	rows, err := client.Info(context.Background())
+	if err != nil || len(rows) != 1 || !parseTags(rows[0].Tags)[ProjectTag] || parseTags(rows[0].Tags)["musicops-task-1"] {
+		t.Fatal(rows, err)
+	}
+	if len(fake.deletedTags) != 1 || fake.deletedTags[0] != "musicops-task-1" {
+		t.Fatal(fake.deletedTags)
+	}
+}
+
 func TestParseVersion(t *testing.T) {
 	v, err := ParseVersion("v5.0.4")
 	if err != nil || v != (Version{5, 0, 4}) {

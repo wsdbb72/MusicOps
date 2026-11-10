@@ -1,9 +1,12 @@
 package app
 
 import (
+	"encoding/json"
 	"regexp"
 	"strings"
 
+	"github.com/wsdbb72/MusicOps/native/core/internal/sqlitemigrate"
+	"github.com/wsdbb72/MusicOps/native/core/internal/taskrepo"
 	"github.com/wsdbb72/MusicOps/native/core/internal/workflow"
 )
 
@@ -11,6 +14,87 @@ var secretValue = regexp.MustCompile(`(?i)(authkey|torrent_pass|cookie|password|
 
 func scrub(value string) string {
 	return secretValue.ReplaceAllString(value, "$1=redacted")
+}
+
+var sensitiveKeys = map[string]bool{
+	"cookie": true, "cookies": true, "password": true, "passwd": true,
+	"authkey": true, "torrent_pass": true, "passkey": true, "secret": true,
+	"api_key": true, "apikey": true, "authorization": true, "session": true,
+	"credential": true, "credentials": true,
+}
+
+// publicTasks is the log view. Stored messages stay intact; the response
+// must not repeat a cookie, authkey or torrent_pass that an executor put
+// in a task message.
+func publicTasks(tasks []taskrepo.Task) []taskrepo.Task {
+	out := make([]taskrepo.Task, len(tasks))
+	for i, task := range tasks {
+		task.Message = scrub(task.Message)
+		task.Phase = scrub(task.Phase)
+		task.ErrorClass = scrub(task.ErrorClass)
+		out[i] = task
+	}
+	return out
+}
+
+// publicRecord redacts an imported SQLite row before it leaves the process.
+// The stored archive is unchanged. Text columns may be old task payloads.
+func publicRecord(record sqlitemigrate.Record) sqlitemigrate.Record {
+	for i := range record.Columns {
+		record.Columns[i].Enc = scrubColumn(record.Columns[i].Enc)
+	}
+	return record
+}
+
+func scrubColumn(enc string) string {
+	if len(enc) < 2 {
+		return scrub(enc)
+	}
+	switch enc[0] {
+	case 'T':
+		return "T" + scrubText(enc[1:])
+	default:
+		return enc[:1] + scrub(enc[1:])
+	}
+}
+
+func scrubText(value string) string {
+	trimmed := strings.TrimSpace(value)
+	if trimmed == "" || (trimmed[0] != '{' && trimmed[0] != '[') {
+		return scrub(value)
+	}
+	var parsed any
+	if json.Unmarshal([]byte(value), &parsed) != nil {
+		return scrub(value)
+	}
+	encoded, err := json.Marshal(redactJSON(parsed))
+	if err != nil {
+		return scrub(value)
+	}
+	return string(encoded)
+}
+
+func redactJSON(value any) any {
+	switch typed := value.(type) {
+	case map[string]any:
+		for key, child := range typed {
+			if sensitiveKeys[strings.ToLower(key)] {
+				typed[key] = "redacted"
+				continue
+			}
+			typed[key] = redactJSON(child)
+		}
+		return typed
+	case []any:
+		for i, child := range typed {
+			typed[i] = redactJSON(child)
+		}
+		return typed
+	case string:
+		return scrub(typed)
+	default:
+		return value
+	}
 }
 
 type jobView struct {

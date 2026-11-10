@@ -47,7 +47,7 @@ jobs:
         shell: bash
         working-directory: native/core
         run: |
-          go test ./... -count=1 -timeout=120s
+          go test ./... -count=1 -timeout=180s
           go vet ./...
       - name: Build the actual private data service
         shell: python

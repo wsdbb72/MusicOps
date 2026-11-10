@@ -542,3 +542,38 @@ func TestCLIDetachedCoreSurvivesAcrossInvocations(t *testing.T) {
 		time.Sleep(200 * time.Millisecond)
 	}
 }
+
+func TestWorkerCommandsCallTheCore(t *testing.T) {
+	var seen []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "Basic "+base64.StdEncoding.EncodeToString([]byte("musicops:"+testCorePassword)) {
+			writeTestJSON(w, http.StatusUnauthorized, map[string]any{"ok": false, "code": "AUTH_REQUIRED"})
+			return
+		}
+		seen = append(seen, r.Method+" "+r.URL.Path)
+		writeTestJSON(w, http.StatusOK, map[string]any{"ok": true})
+	}))
+	defer server.Close()
+	client := &coreClient{base: server.URL, password: testCorePassword}
+	calls := []struct {
+		method string
+		path   string
+		body   any
+	}{
+		{http.MethodPost, "/v1/control", map[string]any{"action": "pause"}},
+		{http.MethodPost, "/v1/library/reindex", map[string]any{}},
+		{http.MethodGet, "/v1/library/gaps", nil},
+		{http.MethodGet, "/v1/migration", nil},
+		{http.MethodPost, "/v1/playlists/fetch", map[string]any{"platform": "netease", "playlist_id": "1"}},
+		{http.MethodPost, "/v1/library/metadata", map[string]any{"path": "album.flac"}},
+		{http.MethodPost, "/v1/library/workflow", map[string]any{"scene": "upgrade"}},
+	}
+	for _, call := range calls {
+		if _, err := client.do(context.Background(), call.method, call.path, call.body); err != nil {
+			t.Fatal(call.path, err)
+		}
+	}
+	if len(seen) != len(calls) {
+		t.Fatal(seen)
+	}
+}

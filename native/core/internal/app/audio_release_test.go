@@ -11,6 +11,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/wsdbb72/MusicOps/native/core/internal/wavflac"
 	"github.com/wsdbb72/MusicOps/native/core/internal/workflow"
 )
 
@@ -84,10 +85,10 @@ func TestVerifiedAudioIngestsLocallyAndTorrentDoesNot(t *testing.T) {
 	if err := json.Unmarshal(released.Body.Bytes(), &receipt); err != nil || (receipt.Stage != "publishing" && receipt.Stage != "completed") {
 		t.Fatal(receipt, err, released.Body.String())
 	}
-	source, err := os.ReadFile(filepath.Join(incoming, "song.wav"))
-	published, readErr := os.ReadFile(filepath.Join(application.Dir, "library-audio", "Artist", "Album", "01 Title.wav"))
-	if err != nil || readErr != nil || !bytes.Equal(source, published) {
-		t.Fatal(err, readErr)
+	sourceHash, err := wavflac.PCMHash(filepath.Join(incoming, "song.wav"))
+	publishedHash, readErr := wavflac.PCMHash(filepath.Join(application.Dir, "library-audio", "Artist", "Album", "01 Title.flac"))
+	if err != nil || readErr != nil || sourceHash != publishedHash {
+		t.Fatal(err, readErr, sourceHash, publishedHash)
 	}
 	still := waitJob(t, application, "search:board-audio", "needs_review")
 	if still.Stage != "needs_review" {
@@ -205,7 +206,7 @@ func TestSecondTrackAndOriginThroughHTTP(t *testing.T) {
 	if first.Code != http.StatusOK {
 		t.Fatal(first.Code, first.Body.String())
 	}
-	if err := json.Unmarshal(first.Body.Bytes(), &receipt); err != nil || !receipt.OK || receipt.Origin != "manual" || receipt.SourceName != "one.wav" || receipt.Downloaded || receipt.SHA256 == "" {
+	if err := json.Unmarshal(first.Body.Bytes(), &receipt); err != nil || !receipt.OK || receipt.Origin != "manual" || receipt.SourceName != "one.flac" || receipt.Downloaded || receipt.SHA256 == "" {
 		t.Fatal(receipt, err, first.Body.String())
 	}
 	second := postCode(t, application, "/v1/audio/release", map[string]any{
@@ -221,10 +222,13 @@ func TestSecondTrackAndOriginThroughHTTP(t *testing.T) {
 	if err := json.Unmarshal(second.Body.Bytes(), &secondReceipt); err != nil || secondReceipt.SHA256 == "" || secondReceipt.SHA256 == receipt.SHA256 || secondReceipt.Origin != "local_import" {
 		t.Fatal(secondReceipt, err, second.Body.String())
 	}
-	if _, err := os.Stat(filepath.Join(application.Dir, "library-audio", "Artist", "Album", "01 One.wav")); err != nil {
+	if _, err := os.Stat(filepath.Join(incoming, "one.wav")); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := os.Stat(filepath.Join(application.Dir, "library-audio", "Artist", "Album", "02 Two.wav")); err != nil {
+	if _, err := os.Stat(filepath.Join(application.Dir, "library-audio", "Artist", "Album", "01 One.flac")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(application.Dir, "library-audio", "Artist", "Album", "02 Two.flac")); err != nil {
 		t.Fatal(err)
 	}
 	bad := postCode(t, application, "/v1/audio/release", map[string]any{

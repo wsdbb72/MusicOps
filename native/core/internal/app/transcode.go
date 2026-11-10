@@ -1,10 +1,9 @@
-// Transcode is the library audio conversion lane. It converts one PCM WAV
-// already inside this process's state directory to FLAC with the system
-// ffmpeg, and proves the conversion by decoding both files to raw PCM and
-// comparing hashes. The source is never modified or overwritten; the output
-// is written to a temp file and renamed into place, and only then recorded.
-// DSD and every non-PCM source are refused: only PCM-to-FLAC is implemented,
-// matching the Python prepare_media_copy contract.
+// Transcode is the library audio conversion lane. It converts one integer
+// PCM WAV already inside this process's state directory to FLAC in pure Go,
+// then checks the decoded samples match. The source stays in place until
+// that check passes. Float, compressed and non-WAV input is refused.
+// The old ffmpeg path resampled to 16-bit 44.1 kHz stereo, which hid
+// bit-depth and channel differences, so it is not used for this conversion.
 package app
 
 import (
@@ -24,10 +23,10 @@ import (
 	"strings"
 	"time"
 
-	"github.com/wsdbb72/MusicOps/native/core/internal/audiorelease"
 	"github.com/wsdbb72/MusicOps/native/core/internal/dataengine"
 	"github.com/wsdbb72/MusicOps/native/core/internal/scheduler"
 	"github.com/wsdbb72/MusicOps/native/core/internal/taskrepo"
+	"github.com/wsdbb72/MusicOps/native/core/internal/wavflac"
 )
 
 // transcodeCommand is the durable queue name for library conversion tasks.
@@ -54,6 +53,9 @@ type transcodeReceipt struct {
 	Output       string `json:"output"`
 	SHA256       string `json:"sha256"`
 	PCMSHA256    string `json:"pcm_sha256"`
+	AudioMD5     string `json:"audio_md5,omitempty"`
+	TagSource    string `json:"tag_source,omitempty"`
+	Disposal     string `json:"disposal,omitempty"`
 	Format       string `json:"format"`
 	Replayed     bool   `json:"replayed,omitempty"`
 }
@@ -73,10 +75,6 @@ func (a *App) transcode(ctx context.Context, execution *scheduler.Execution, pay
 	source, err := a.resolveLibraryPath(in.Source)
 	if err != nil {
 		return scheduler.Outcome{State: "failed", ErrorClass: "INVALID_REQUEST", Message: "转码源文件必须在应用数据目录内"}, nil
-	}
-	decoder := audiorelease.SystemDecoder()
-	if decoder == nil {
-		return scheduler.Outcome{State: "failed", ErrorClass: "DECODER_MISSING", Message: "转码需要系统 ffmpeg/ffprobe，当前不可用"}, nil
 	}
 	if err := execution.Checkpoint(ctx, "transcode_validate", 10, "校验源文件"); err != nil {
 		return scheduler.Outcome{}, err
@@ -100,67 +98,39 @@ func (a *App) transcode(ctx context.Context, execution *scheduler.Execution, pay
 		}
 		return scheduler.Outcome{State: "failed", ErrorClass: "CONFLICT", Message: "同一转码请求对应另一源文件或输出"}, nil
 	}
-	if err := checkWAVPCM(source); err != nil {
-		return scheduler.Outcome{State: "failed", ErrorClass: "INVALID_REQUEST", Message: "只支持 PCM WAV 转 FLAC： " + err.Error()}, nil
-	}
-	if err := decoder(ctx, source); err != nil {
-		return scheduler.Outcome{State: "failed", ErrorClass: "AUDIO_REJECTED", Message: "源文件未通过全解码校验"}, nil
-	}
 	output := strings.TrimSuffix(source, filepath.Ext(source)) + ".flac"
-	if output == source {
-		return scheduler.Outcome{State: "failed", ErrorClass: "INVALID_REQUEST", Message: "转码输出与源文件同名"}, nil
+	if output == source || !strings.EqualFold(filepath.Ext(source), ".wav") {
+		return scheduler.Outcome{State: "failed", ErrorClass: "INVALID_REQUEST", Message: "只支持 PCM WAV 转 FLAC"}, nil
 	}
-	if _, err := os.Stat(output); err == nil {
-		return scheduler.Outcome{State: "failed", ErrorClass: "CONFLICT", Message: "转码输出已存在，不能覆盖"}, nil
-	} else if err != nil && !errors.Is(err, os.ErrNotExist) {
+	if err := execution.Checkpoint(ctx, "transcode_convert", 40, "正在无损转码"); err != nil {
 		return scheduler.Outcome{}, err
 	}
-	if err := execution.Checkpoint(ctx, "transcode_convert", 40, "正在转码"); err != nil {
-		return scheduler.Outcome{}, err
-	}
-	temp := filepath.Join(filepath.Dir(output), ".musicops-"+in.RequestID+".transcode.flac")
-	runCtx, cancel := context.WithTimeout(ctx, transcodeTimeout)
-	defer cancel()
-	ffmpeg, err := exec.LookPath("ffmpeg")
+	converted, err := wavflac.ConvertFile(source, output, true)
 	if err != nil {
-		return scheduler.Outcome{State: "failed", ErrorClass: "DECODER_MISSING", Message: "转码需要系统 ffmpeg，当前不可用"}, nil
-	}
-	convert := exec.CommandContext(runCtx, ffmpeg, "-nostdin", "-v", "error", "-xerror", "-i", source, "-map", "0:a:0", "-map_metadata", "0", "-c:a", "flac", "-f", "flac", "-y", temp)
-	stderr, err := convert.CombinedOutput()
-	if err != nil || strings.TrimSpace(string(stderr)) != "" {
-		os.Remove(temp)
-		if runCtx.Err() != nil {
-			return scheduler.Outcome{}, runCtx.Err()
+		var refused *wavflac.Error
+		if errors.As(err, &refused) {
+			return scheduler.Outcome{State: "failed", ErrorClass: refused.Code, Message: refused.Message}, nil
 		}
 		return scheduler.Outcome{State: "failed", ErrorClass: "TRANSCODE_FAILED", Message: "转码失败"}, nil
 	}
-	if err := decoder(ctx, temp); err != nil {
-		os.Remove(temp)
-		return scheduler.Outcome{State: "failed", ErrorClass: "AUDIO_REJECTED", Message: "转码输出未通过全解码校验"}, nil
-	}
-	sourcePCM, err := pcmHash(ctx, source)
-	if err != nil {
-		os.Remove(temp)
+	if err := execution.Checkpoint(ctx, "transcode_verify", 80, "正在比对 PCM"); err != nil {
 		return scheduler.Outcome{}, err
 	}
-	outputPCM, err := pcmHash(ctx, temp)
-	if err != nil {
-		os.Remove(temp)
-		return scheduler.Outcome{}, err
-	}
-	if sourcePCM != outputPCM {
-		os.Remove(temp)
-		return scheduler.Outcome{State: "failed", ErrorClass: "TRANSCODE_FAILED", Message: "转码前后 PCM 内容不一致"}, nil
-	}
-	if err := os.Rename(temp, output); err != nil {
-		os.Remove(temp)
-		return scheduler.Outcome{}, err
+	settings := a.loadWAVSettings()
+	disposal := "keep"
+	if !converted.Replayed {
+		disposal = a.finishWAV(source, output, settings.Disposal)
+		a.indexConverted(output)
 	}
 	digest, err := hashFile(output)
 	if err != nil {
 		return scheduler.Outcome{}, err
 	}
-	receipt := transcodeReceipt{RequestID: in.RequestID, Source: source, SourceSHA256: sourceHash, Output: output, SHA256: digest, PCMSHA256: sourcePCM, Format: "flac"}
+	receipt := transcodeReceipt{
+		RequestID: in.RequestID, Source: source, SourceSHA256: sourceHash, Output: output,
+		SHA256: digest, PCMSHA256: converted.PCMSHA256, AudioMD5: converted.MD5,
+		TagSource: converted.TagSource, Disposal: disposal, Format: "flac", Replayed: converted.Replayed,
+	}
 	encoded, err := json.Marshal(receipt)
 	if err != nil {
 		return scheduler.Outcome{}, err

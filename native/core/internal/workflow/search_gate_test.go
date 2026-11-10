@@ -2,6 +2,7 @@ package workflow
 
 import (
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/wsdbb72/MusicOps/native/core/internal/dataengine"
@@ -159,6 +160,52 @@ func TestAuthAndDisabledSitesDoNotOpenStreaming(t *testing.T) {
 	job, err := repo.Job("search:album1")
 	if err != nil || job.Stage != "searching" {
 		t.Fatal(job, err)
+	}
+}
+
+func TestFallbackReviewRetriesTheStreamingWalk(t *testing.T) {
+	repo, tasks, token := openSearch(t)
+	report := matchedReport()
+	report.StreamingEnabled = true
+	report.ExplicitFallback = true
+	report.SelectedSite = ""
+	report.SelectedCandidateID = ""
+	report.Sites = fourSites(map[string]searchdecision.SiteReport{"orpheus": {Status: "AUTH_REQUIRED", Attempted: true}})
+	queued, err := repo.Complete("confirmed", token, Complete{JobID: "search:album1", Edge: edgeQueueProcess, NextStage: "fallback", TaskState: "completed", NowNS: 4000, Evidence: searchEvidence(), Search: &report})
+	if err != nil || len(queued.Children) != 1 || queued.Children[0].Stage != "fallback" {
+		t.Fatal(queued, err)
+	}
+	childID := queued.Children[0].ID
+	held := begin(t, tasks, childID, "aux")
+	if held.ID != childID {
+		t.Fatal(held.ID)
+	}
+	if _, err = repo.Complete("fallback-block", held, Complete{JobID: childID, Edge: edgeTerminal, NextStage: "needs_review", ReviewKind: "candidate", TaskState: "blocked", Message: "回退需要核对；尚未下载、尚未入库", NowNS: 5000}); err != nil {
+		t.Fatal(err)
+	}
+	actions, err := repo.ReviewActions(childID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	allowed := false
+	for _, action := range actions {
+		if action.Action == "retry" && action.Allowed {
+			allowed = true
+		}
+		if action.Action == "retry" && !action.Allowed && strings.Contains(action.Reason, "尚未接入") {
+			t.Fatal(action)
+		}
+	}
+	if !allowed {
+		t.Fatal(actions)
+	}
+	result, err := repo.Review("review-fallback", childID, ReviewDecision{Action: "retry"}, 6000)
+	if err != nil || result.Job == nil || result.Job.Stage != "fallback" {
+		t.Fatalf("%+v %v", result.Job, err)
+	}
+	retried, err := tasks.Get(childID)
+	if err != nil || retried == nil || retried.State != "queued" {
+		t.Fatalf("%+v %v", retried, err)
 	}
 }
 

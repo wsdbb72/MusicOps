@@ -13,8 +13,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/url"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/wsdbb72/MusicOps/native/core/internal/dataengine"
@@ -26,13 +28,14 @@ import (
 // Report is the migration receipt, also written to
 // <profile>/state/migration-report.json.
 type Report struct {
-	At            time.Time `json:"at"`
-	Profile       string    `json:"profile"`
-	ConfigVersion int       `json:"config_version"`
-	Mapped        []string  `json:"mapped"`
-	VaultRefs     []string  `json:"vault_refs"`
-	Skipped       []string  `json:"skipped"`
-	Notes         []string  `json:"notes"`
+	At               time.Time `json:"at"`
+	Profile          string    `json:"profile"`
+	ConfigVersion    int       `json:"config_version"`
+	MapperGeneration int       `json:"mapper_generation"`
+	Mapped           []string  `json:"mapped"`
+	VaultRefs        []string  `json:"vault_refs"`
+	Skipped          []string  `json:"skipped"`
+	Notes            []string  `json:"notes"`
 }
 
 // Keys written into the native store, in the exact JSON shape the Go
@@ -41,7 +44,20 @@ var (
 	downloadSettingsKey = []byte("app/settings/download")
 	siteSettingsKey     = []byte("app/settings/sites")
 	updatesSettingsKey  = []byte("app/settings/updates")
+	qbtSettingsKey      = []byte("app/settings/qbittorrent")
+	aiSettingsKey       = []byte("app/settings/ai")
+	librarySettingsKey  = []byte("app/settings/library")
+	lyricsSettingsKey   = []byte("app/settings/lyrics")
+	solverSettingsKey   = []byte("app/settings/solver")
+	serverSettingsKey   = []byte("app/settings/servers")
+	roonSettingsKey     = []byte("app/settings/roon")
+	playlistSourcesKey  = []byte("app/settings/playlist-sources")
 )
+
+// mapperGeneration is bumped when new setting sections are copied. An older
+// receipt is not treated as finished, so a profile migrated by a previous
+// build still receives the new keys. Existing Go values are still left alone.
+const mapperGeneration = 2
 
 // knownSites is the display order of the four tracker sites, matching
 // internal/app.
@@ -69,6 +85,65 @@ type pythonConfig struct {
 		Workflow struct {
 			SetupDone bool `json:"setup_done"`
 		} `json:"workflow"`
+		QBT struct {
+			BaseURL   string `json:"base_url"`
+			Category  string `json:"category"`
+			TagPrefix string `json:"tag_prefix"`
+		} `json:"qbt"`
+		AI struct {
+			Enabled         *bool    `json:"enabled"`
+			BaseURL         string   `json:"base_url"`
+			Model           string   `json:"model"`
+			Timeout         *int     `json:"timeout"`
+			MaxOutputTokens *int     `json:"max_output_tokens"`
+			Temperature     *float64 `json:"temperature"`
+		} `json:"ai"`
+		Lyrics struct {
+			Primary struct {
+				BaseURL        string `json:"base_url"`
+				LyricsPath     string `json:"lyrics_path"`
+				CandidatesPath string `json:"candidates_path"`
+				CoverPath      string `json:"cover_path"`
+				AuthHeader     string `json:"auth_header"`
+			} `json:"primary"`
+			WriteMode string `json:"write_mode"`
+		} `json:"lyrics"`
+		Catalog struct {
+			Discogs struct {
+				CredentialRef string `json:"credential_ref"`
+			} `json:"discogs"`
+		} `json:"catalog"`
+		BrowserSolver struct {
+			Managed    bool   `json:"managed"`
+			Enabled    bool   `json:"enabled"`
+			BaseURL    string `json:"base_url"`
+			Timeout    int    `json:"timeout"`
+			Executable string `json:"executable"`
+			AutoStart  bool   `json:"auto_start"`
+		} `json:"browser_solver"`
+		MusicServers struct {
+			Plex struct {
+				Enabled   bool   `json:"enabled"`
+				URL       string `json:"url"`
+				SectionID string `json:"section_id"`
+			} `json:"plex"`
+			Navidrome struct {
+				Enabled  bool   `json:"enabled"`
+				URL      string `json:"url"`
+				Username string `json:"username"`
+			} `json:"navidrome"`
+			Roon struct {
+				Enabled bool   `json:"enabled"`
+				Host    string `json:"host"`
+				Port    int    `json:"port"`
+				Timeout int    `json:"timeout"`
+				Library string `json:"library"`
+			} `json:"roon"`
+		} `json:"music_servers"`
+		PlaylistSources map[string]struct {
+			CredentialRef string `json:"credential_ref"`
+			Timeout       int    `json:"timeout"`
+		} `json:"playlist_sources"`
 	} `json:"values"`
 }
 
@@ -96,10 +171,11 @@ func MaybeMigrate(profile string) (*Report, error) {
 		return nil, err
 	}
 	report.ConfigVersion = cfg.Version
+	report.MapperGeneration = mapperGeneration
 	receiptPath := filepath.Join(abs, "state", "migration-report.json")
 	if raw, err := os.ReadFile(receiptPath); err == nil {
 		var old Report
-		if err := json.Unmarshal(raw, &old); err == nil && old.ConfigVersion == cfg.Version && cfg.Version != 0 {
+		if err := json.Unmarshal(raw, &old); err == nil && old.ConfigVersion == cfg.Version && cfg.Version != 0 && old.MapperGeneration >= mapperGeneration {
 			report.Skipped = []string{"already migrated"}
 			return report, nil
 		}
@@ -156,15 +232,62 @@ func MaybeMigrate(profile string) (*Report, error) {
 		return nil, err
 	}
 	// Write only absent keys: a Go setting the user already changed is
-	// never overwritten by the old Python value.
-	for _, kv := range []struct {
+	// never overwritten by the old Python value. Secrets stay in the
+	// vault; these documents are addresses and switches only.
+	settings := []struct {
 		key   []byte
 		value []byte
 	}{
 		{downloadSettingsKey, download},
 		{siteSettingsKey, sites},
 		{updatesSettingsKey, updates},
+	}
+	if extra, ok, err := qbtSettings(cfg, nowNS); err != nil {
+		return nil, err
+	} else if ok {
+		settings = append(settings, struct {
+			key   []byte
+			value []byte
+		}{qbtSettingsKey, extra})
+	}
+	if extra, ok, err := aiSettings(cfg, nowNS); err != nil {
+		return nil, err
+	} else if ok {
+		settings = append(settings, struct {
+			key   []byte
+			value []byte
+		}{aiSettingsKey, extra})
+	}
+	if extra, ok, err := librarySettings(cfg, nowNS); err != nil {
+		return nil, err
+	} else if ok {
+		settings = append(settings, struct {
+			key   []byte
+			value []byte
+		}{librarySettingsKey, extra})
+	}
+	for _, extra := range []struct {
+		key []byte
+		fn  func(*pythonConfig, int64) ([]byte, bool, error)
+	}{
+		{lyricsSettingsKey, lyricsSettings},
+		{solverSettingsKey, solverSettings},
+		{serverSettingsKey, serverSettings},
+		{roonSettingsKey, roonSettings},
+		{playlistSourcesKey, playlistSourceSettings},
 	} {
+		encoded, ok, err := extra.fn(cfg, nowNS)
+		if err != nil {
+			return nil, err
+		}
+		if ok {
+			settings = append(settings, struct {
+				key   []byte
+				value []byte
+			}{extra.key, encoded})
+		}
+	}
+	for _, kv := range settings {
 		ok, err := engine.CompareAndSwap(
 			[]dataengine.Condition{{Key: kv.key, Absent: true}},
 			[]dataengine.Mutation{{Key: kv.key, Value: kv.value}},
@@ -181,10 +304,13 @@ func MaybeMigrate(profile string) (*Report, error) {
 		library = "（未配置）"
 	}
 	report.Notes = append(report.Notes,
-		fmt.Sprintf("Python 音乐库位于 %s；Go 核心的库在状态目录内，本次不搬运音频文件", library),
+		fmt.Sprintf("Python 音乐库位于 %s；绝对路径会写入 Go 音乐库目录，本次不搬运音频文件，旧曲目索引不会自动变成新曲目", library),
 		fmt.Sprintf("Python 配置 offline=%v，workflow.setup_done=%v", cfg.Values.Offline, cfg.Values.Workflow.SetupDone),
-		"未映射的段（qbt/ai/catalog/lyrics 等）的凭据引用保留在 Python 配置与 vault 中，Go 侧按需读取，本次不迁移其值",
-		"本次不迁移音频文件与任务数据库；任务数据库迁移由 sqlitemigrate 负责",
+		"qBittorrent 地址、分类、标签和 AI 地址、模型已写入 Go 设置；密码和 API Key 仍只在 vault",
+		"歌词服务、FlareSolverr、Plex、Navidrome、Roon 和歌单凭据引用会在不是占位默认值时写入 Go 设置；密码、API Key 和令牌值仍只在 vault",
+		"Discogs 令牌沿用旧版 vault 引用，本次不复制令牌值",
+		"updates.enabled 已写入 Go 设置。本程序不会在启动时自动安装更新",
+		"本次不迁移音频文件与任务数据库；任务数据库迁移由 sqlitemigrate 负责，启动时的活动数据迁移另由 livemigrate 完成",
 	)
 	if err := writeReceipt(receiptPath, report); err != nil {
 		return nil, err
@@ -234,6 +360,138 @@ func readPythonConfig(source string) (*pythonConfig, error) {
 		return nil, errors.New("Python 配置版本无效")
 	}
 	return &cfg, nil
+}
+
+func qbtSettings(cfg *pythonConfig, nowNS int64) ([]byte, bool, error) {
+	if strings.TrimSpace(cfg.Values.QBT.BaseURL) == "" {
+		return nil, false, nil
+	}
+	encoded, err := json.Marshal(map[string]any{
+		"base_url": cfg.Values.QBT.BaseURL, "category": cfg.Values.QBT.Category,
+		"tags": cfg.Values.QBT.TagPrefix, "updated_ns": nowNS,
+	})
+	return encoded, err == nil, err
+}
+
+func aiSettings(cfg *pythonConfig, nowNS int64) ([]byte, bool, error) {
+	ai := cfg.Values.AI
+	if strings.TrimSpace(ai.BaseURL) == "" && strings.TrimSpace(ai.Model) == "" && ai.Enabled == nil {
+		return nil, false, nil
+	}
+	enabled := false
+	if ai.Enabled != nil {
+		enabled = *ai.Enabled
+	}
+	body := map[string]any{
+		"enabled": enabled, "base_url": ai.BaseURL, "model": ai.Model, "updated_ns": nowNS,
+	}
+	if ai.Timeout != nil {
+		body["timeout"] = *ai.Timeout
+	}
+	if ai.MaxOutputTokens != nil {
+		body["max_output_tokens"] = *ai.MaxOutputTokens
+	}
+	if ai.Temperature != nil {
+		body["temperature"] = *ai.Temperature
+	}
+	encoded, err := json.Marshal(body)
+	return encoded, err == nil, err
+}
+
+func lyricsSettings(cfg *pythonConfig, nowNS int64) ([]byte, bool, error) {
+	primary := cfg.Values.Lyrics.Primary
+	parsed, err := url.Parse(strings.TrimSpace(primary.BaseURL))
+	if err != nil || parsed.Hostname() == "" || parsed.Hostname() == "lyrics.example.invalid" {
+		return nil, false, nil
+	}
+	pathOr := func(value, fallback string) string {
+		if strings.TrimSpace(value) == "" {
+			return fallback
+		}
+		return value
+	}
+	header := strings.TrimSpace(primary.AuthHeader)
+	if header == "" {
+		header = "Authorization"
+	}
+	mode := strings.TrimSpace(cfg.Values.Lyrics.WriteMode)
+	if mode != "sidecar" && mode != "embedded" {
+		mode = "sidecar"
+	}
+	encoded, err := json.Marshal(map[string]any{
+		"base_url": primary.BaseURL, "lyrics_path": pathOr(primary.LyricsPath, "/lyrics"),
+		"candidates_path": pathOr(primary.CandidatesPath, "/jsonapi"),
+		"cover_path":      pathOr(primary.CoverPath, "/cover"), "auth_header": header,
+		"write_mode": mode, "updated_ns": nowNS,
+	})
+	return encoded, err == nil, err
+}
+
+func solverSettings(cfg *pythonConfig, nowNS int64) ([]byte, bool, error) {
+	solver := cfg.Values.BrowserSolver
+	if !solver.Enabled || strings.TrimSpace(solver.BaseURL) == "" {
+		return nil, false, nil
+	}
+	timeout := solver.Timeout
+	if timeout == 0 {
+		timeout = 60
+	}
+	encoded, err := json.Marshal(map[string]any{
+		"managed": solver.Managed, "enabled": true, "base_url": solver.BaseURL,
+		"timeout": timeout, "executable": solver.Executable, "auto_start": solver.AutoStart, "updated_ns": nowNS,
+	})
+	return encoded, err == nil, err
+}
+
+func serverSettings(cfg *pythonConfig, nowNS int64) ([]byte, bool, error) {
+	plex := cfg.Values.MusicServers.Plex
+	nav := cfg.Values.MusicServers.Navidrome
+	if !plex.Enabled && strings.TrimSpace(plex.URL) == "" && !nav.Enabled && strings.TrimSpace(nav.URL) == "" {
+		return nil, false, nil
+	}
+	encoded, err := json.Marshal(map[string]any{
+		"plex":       map[string]any{"enabled": plex.Enabled, "url": plex.URL, "section_id": plex.SectionID},
+		"navidrome":  map[string]any{"enabled": nav.Enabled, "url": nav.URL, "username": nav.Username},
+		"updated_ns": nowNS,
+	})
+	return encoded, err == nil, err
+}
+
+func roonSettings(cfg *pythonConfig, nowNS int64) ([]byte, bool, error) {
+	roon := cfg.Values.MusicServers.Roon
+	if !roon.Enabled {
+		return nil, false, nil
+	}
+	encoded, err := json.Marshal(map[string]any{
+		"enabled": true, "host": roon.Host, "port": roon.Port, "timeout": roon.Timeout,
+		"library": roon.Library, "updated_ns": nowNS,
+	})
+	return encoded, err == nil, err
+}
+
+func playlistSourceSettings(cfg *pythonConfig, nowNS int64) ([]byte, bool, error) {
+	kept := map[string]any{}
+	for name, source := range cfg.Values.PlaylistSources {
+		if strings.TrimSpace(source.CredentialRef) == "" {
+			continue
+		}
+		kept[name] = map[string]any{"credential_ref": source.CredentialRef, "timeout": source.Timeout}
+	}
+	if len(kept) == 0 {
+		return nil, false, nil
+	}
+	kept["updated_ns"] = nowNS
+	encoded, err := json.Marshal(kept)
+	return encoded, err == nil, err
+}
+
+func librarySettings(cfg *pythonConfig, nowNS int64) ([]byte, bool, error) {
+	library := strings.TrimSpace(cfg.Values.Paths.Library)
+	if library == "" || !filepath.IsAbs(library) {
+		return nil, false, nil
+	}
+	encoded, err := json.Marshal(map[string]any{"library_dir": library, "updated_ns": nowNS})
+	return encoded, err == nil, err
 }
 
 func copyFile(source, dest string) error {

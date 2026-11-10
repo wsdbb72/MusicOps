@@ -34,7 +34,7 @@ func TestLabeledComparisonKeepsConflictsAndAcceptsNormalizedEvidence(t *testing.
 		{name: "fullwidth-live", title: "Album Live", hit: Hit{Title: "Ａｌｂｕｍ　Ｌｉｖｅ"}, want: true},
 		{name: "live-studio", title: "Album", hit: Hit{Title: "Album Live"}, want: false},
 		{name: "studio-live-query", title: "Album Live", hit: Hit{Title: "Album"}, want: false},
-		{name: "remaster", title: "Album", hit: Hit{Title: "Album", Edition: "Remastered"}, want: false},
+		{name: "remaster", title: "Album", hit: Hit{Title: "Album", Edition: "Remastered"}, want: true},
 		{name: "chinese-live", title: "专辑", hit: Hit{Title: "专辑 现场"}, want: false},
 		{name: "remix", title: "Album", hit: Hit{Title: "Album Remix"}, want: false},
 		{name: "compilation-artist", title: "Example", artist: "Artist", hit: Hit{Title: "Example", Artists: []string{"群星"}}, want: false},
@@ -42,7 +42,7 @@ func TestLabeledComparisonKeepsConflictsAndAcceptsNormalizedEvidence(t *testing.
 		{name: "other-artist", title: "Example", artist: "Artist", hit: Hit{Title: "Example", Artists: []string{"Tribute Band"}}, want: false},
 		{name: "alias-on-live", title: "Blue", artist: "Artist", hit: Hit{Title: "蓝 Live", Artists: []string{"Artist"}, Aliases: []string{"Blue"}}, want: false},
 		{name: "missing-title", title: "Example", hit: Hit{Title: " "}, want: false},
-		{name: "deluxe", title: "Album", hit: Hit{Title: "Album Deluxe"}, want: false},
+		{name: "deluxe", title: "Album", hit: Hit{Title: "Album Deluxe"}, want: true},
 		{name: "rerecord", title: "Album", hit: Hit{Title: "Album", Edition: "重录"}, want: false},
 	}
 	baselinePass, newPass, baselineFalse, newFalse, wantPass := 0, 0, 0, 0, 0
@@ -106,6 +106,42 @@ func TestMergeVetoesConflictingReleaseEvidence(t *testing.T) {
 	bare := Hit{Title: "Example", Artists: []string{"Artist"}}
 	if !Same(base, bare) {
 		t.Fatal("missing evidence must not veto the merge")
+	}
+}
+
+func TestNamedArtistWithoutHitArtistsDoesNotPass(t *testing.T) {
+	missing := Compare("Example", "Artist", Hit{Title: "Example"})
+	if missing.Pass || missing.Reason != "artist" {
+		t.Fatal(missing)
+	}
+	blank := Compare("Example", "Artist", Hit{Title: "Example", Artists: []string{" "}})
+	if blank.Pass || blank.Reason != "artist" {
+		t.Fatal(blank)
+	}
+	unnamed := Compare("Example", "", Hit{Title: "Example", Artists: []string{"Artist"}})
+	if !unnamed.Pass {
+		t.Fatal(unnamed)
+	}
+}
+
+func TestOpenCDPrefixCoversFormatAndYearOnly(t *testing.T) {
+	hit := Hit{Title: "Artist - Album [FLAC]", Artists: []string{}}
+	got := CompareSource("open.cd", "Album", "Artist", hit)
+	if !got.Pass || got.Reason != "open_cd_prefix" {
+		t.Fatal(got)
+	}
+	if CompareSource("dicmusic", "Album", "Artist", hit).Pass {
+		t.Fatal("prefix cover is only for open.cd")
+	}
+	live := Hit{Title: "Artist - Album Live"}
+	if CompareSource("open.cd", "Album", "Artist", live).Pass {
+		t.Fatal(live)
+	}
+	if Compare("Album", "", Hit{Title: "Album Deluxe Edition"}).Pass != true {
+		t.Fatal("deluxe edition base should match the studio title")
+	}
+	if Compare("Album", "", Hit{Title: "Album Live"}).Pass {
+		t.Fatal("live must stay a different recording")
 	}
 }
 

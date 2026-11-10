@@ -633,7 +633,7 @@ func TestPlaylistSaveAttachAndFallback(t *testing.T) {
 	body["playlist_id"] = "test-mix"
 	post(t, application, "/v1/search", body)
 	job := waitJob(t, application, "process:search:album-pl-attach", "needs_review")
-	if job.ReviewKind != "candidate" || !strings.Contains(job.Message, "已导入 2 首曲目") || !strings.Contains(job.Message, "Test Mix") {
+	if job.ReviewKind != "candidate" || !strings.Contains(job.Message, "已读取 2 首曲目") || !strings.Contains(job.Message, "Test Mix") {
 		t.Fatal(job)
 	}
 }

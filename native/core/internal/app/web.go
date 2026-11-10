@@ -38,10 +38,16 @@ const appJS = `(function () {
   var lyricsSettings = null;
   var discogsSettings = null;
   var librarySettings = null;
+  var migrationReport = null;
+  var logEvents = [];
   var serverSettings = null;
   var playlistRows = [];
+  var subscriptionRows = [];
   var streamingOrder = [];
   var libraryRows = [];
+  var duplicateRows = [];
+  var libraryFileOffset = 0;
+  var selectedTracks = {};
   var transcodeRows = [];
   var logRows = [];
   var selectedJobs = {};
@@ -95,13 +101,14 @@ const appJS = `(function () {
     if (view === "logs") { renderLogs(); return; }
     var rows = visible();
     if (!rows.length) {
-      list.innerHTML = "";
+      list.innerHTML = (view === "tasks" || view === "queue") ? pipelineBar() : "";
+      if (view === "tasks" || view === "queue") bindPipeline();
       setStatus("", view === "review" ? "没有待核对的任务。" : (view === "queue" ? "没有正在进行的任务。" : "还没有任务。"));
       return;
     }
     setStatus("", "");
     var html = "";
-    if (view === "tasks" || view === "queue") html += batchBar();
+    if (view === "tasks" || view === "queue") html += pipelineBar() + batchBar();
     html += '<div class="cards">';
     rows.forEach(function (job) {
       var checked = selectedJobs[job.job_id] ? " checked" : "";
@@ -109,6 +116,16 @@ const appJS = `(function () {
       html += '<article>' + box + '<button type="button" data-job="' + escapeText(job.job_id) + '"><h2>' + escapeText(job.label || "未命名") + '</h2><p class="meta">' + pill(job) + '</p><p>' + escapeText(job.headline || "") + "</p></button></article>";
     });
     list.innerHTML = html + "</div>";
+    if (view === "tasks" || view === "queue") bindPipeline();
+  }
+  function pipelineBar() {
+    return '<p><button type="button" id="pipeline-pause">暂停全部后台</button> <button type="button" id="pipeline-resume">继续后台</button></p>';
+  }
+  function bindPipeline() {
+    var pause = document.getElementById("pipeline-pause");
+    var resume = document.getElementById("pipeline-resume");
+    if (pause) pause.addEventListener("click", function () { postSetting("/v1/control", {action: "pause"}).then(function () { setStatus("ok", "后台已暂停。正在跑的检索会停在下一步，不会新扣令牌。"); }); });
+    if (resume) resume.addEventListener("click", function () { postSetting("/v1/control", {action: "resume"}).then(function () { setStatus("ok", "后台已继续。"); }); });
   }
   function selectedCount() {
     var count = 0;
@@ -207,8 +224,8 @@ const appJS = `(function () {
       '<label><input type="checkbox" id="search-identity-tracklist"> 已核对曲目清单</label>' +
       '<label><input type="checkbox" id="search-identity-confirmed"> 确认这是同一发行（须先核对曲目清单）</label></fieldset>' +
       '<label>本次检索的 Cookie（只用于这次检索，不保存；留空用已保存的 Cookie）<input type="password" id="search-cookie" autocomplete="off"></label>' +
-      '<label><input type="checkbox" id="search-synthetic"> 合成测试（仅开发联调用，需填测试服务地址）</label>' +
-      '<label>测试服务地址<input type="text" id="search-base-url" placeholder="合成测试时必填"></label>' +
+      '<label><input type="checkbox" id="search-synthetic"> 使用测试服务器（不访问真实站点）</label>' +
+      '<label>测试服务器地址<input type="text" id="search-base-url" placeholder="使用测试服务器时必填"></label>' +
       '<p><button type="submit" class="primary">提交搜索</button></p></form></article></div>';
     list.innerHTML = html;
     var sitesBox = document.getElementById("search-sites");
@@ -233,7 +250,7 @@ const appJS = `(function () {
     if (confirmed && !tracklist) { setStatus("fail", "确认身份前须先核对曲目清单。"); return; }
     var synthetic = document.getElementById("search-synthetic").checked;
     var baseURL = document.getElementById("search-base-url").value.trim();
-    if (synthetic && !baseURL) { setStatus("fail", "合成测试需要填测试服务地址。"); return; }
+    if (synthetic && !baseURL) { setStatus("fail", "使用测试服务器时需要填写地址。"); return; }
     var tracks = document.getElementById("search-tracks").value.split(",").map(function (v) { return v.trim(); }).filter(function (v) { return v; });
     var scene = document.getElementById("search-scene").value;
     if (scene === "playlist" && !tracks.length) { setStatus("fail", "歌单场景需要至少一个来源曲目 ID。"); return; }
@@ -299,10 +316,10 @@ const appJS = `(function () {
     }).join("");
     return '<article><h2>下载默认</h2><p class="meta">搜索时不指定流媒体回退，就用这里的选择。</p>' +
       '<label><input type="checkbox" id="download-streaming"' + (downloadSettings.streaming_enabled ? " checked" : "") + '> 流媒体回退（四站无精确匹配时走流媒体）</label>' +
+      '<label>本机 go-music-dl 地址<input type="text" id="download-engine" value="' + escapeText(downloadSettings.engine_url || "") + '" placeholder="留空则未接入。只接受本机 HTTP 或 HTTPS"></label>' +
       '<p><button type="button" id="save-download" class="primary">保存</button></p>' +
       '<p class="meta">流媒体回退顺序（可上下调整）：</p>' + orderHtml +
-      '<p class="meta">回退执行已接入：' + (downloadSettings.streaming_source_status || []).map(function (source) { return escapeText(source.name) + (source.configured ? "已接入" : "未接入"); }).join("、") + '。四站无凭证与引擎，歌单文件只导入曲目元数据。</p>' +
-      '<p class="meta">各功能状态：四站 Cookie 已接入 Vault 保存；AI 核对已接入；qBittorrent 地址与登录已接入保存；FlareSolverr 设置已保存但暂不拦截请求；歌词服务设置已保存但暂无拉取客户端；Discogs Token 已保存，目录核对仍只用 MusicBrainz；歌单可导入并接入回退；音乐库目录与 Plex/Navidrome 已接入；媒体与库维护已接入（NCM 解密、FLAC 标签、歌词、去重、艺人文件夹；OpenCC 无字典数据，未接入）；转码已接入（需系统 ffmpeg/ffprobe）。</p></article>';
+      '<p class="meta">回退顺序默认先 Tidal、Apple Music，再 QQ 音乐、网易云，最后是已导入的歌单文件。go-music-dl 是 AGPL-3.0，不会打进这个程序；只有用户本机服务返回并通过音频校验的文件才算下载，而且仍未入库。</p></article>';
   }
   function cookieCard() {
     var rows = cookieSettings.map(function (site) {
@@ -332,7 +349,7 @@ const appJS = `(function () {
       '<label>密码（' + escapeText(savedMark(qbtSettings.login_saved, qbtSettings.login_revision)) + '，留空保留）<input type="password" id="qbt-password" autocomplete="off"></label>' +
       '<label>分类<input type="text" id="qbt-category" value="' + escapeText(qbtSettings.category || "") + '"></label>' +
       '<label>标签<input type="text" id="qbt-tags" value="' + escapeText(qbtSettings.tags || "") + '"></label>' +
-      '<p><button type="button" id="save-qbt" class="primary">保存</button> <button type="button" id="test-qbt">测试连接</button></p><p id="qbt-test-result" class="meta"></p></article>';
+      '<p><button type="button" id="save-qbt" class="primary">保存</button> <button type="button" id="test-qbt">测试连接</button> <button type="button" id="unify-qbt-tags">统一旧标签</button></p><p id="qbt-test-result" class="meta"></p></article>';
   }
   function solverCard() {
     if (!solverSettings) return "";
@@ -352,13 +369,14 @@ const appJS = `(function () {
       '<label>歌词路径<input type="text" id="lyrics-path" value="' + escapeText(lyricsSettings.lyrics_path || "") + '"></label>' +
       '<label>候选路径<input type="text" id="lyrics-candidates-path" value="' + escapeText(lyricsSettings.candidates_path || "") + '"></label>' +
       '<label>封面路径<input type="text" id="lyrics-cover-path" value="' + escapeText(lyricsSettings.cover_path || "") + '"></label>' +
+      '<label>封面写入<select id="lyrics-write-mode"><option value="sidecar"' + (lyricsSettings.write_mode === "embedded" ? "" : " selected") + '>内嵌并保留同名 jpg</option><option value="embedded"' + (lyricsSettings.write_mode === "embedded" ? " selected" : "") + '>只写入 FLAC 内嵌图片</option></select></label>' +
       '<label>鉴权请求头<input type="text" id="lyrics-auth-header" value="' + escapeText(lyricsSettings.auth_header || "") + '"></label>' +
       '<label>鉴权值（' + escapeText(savedMark(lyricsSettings.auth_saved, lyricsSettings.auth_revision)) + '，留空保留）<input type="password" id="lyrics-auth" autocomplete="off"></label>' +
       '<p><button type="button" id="save-lyrics" class="primary">保存</button> <button type="button" id="test-lyrics">测试连接</button></p><p id="lyrics-test-result" class="meta"></p></article>';
   }
   function discogsCard() {
     if (!discogsSettings) return "";
-    return '<article><h2>Discogs</h2><p class="meta">在线专辑识别用的 Token，只存 Vault。Token 已保存也不代表目录核对会用 Discogs——目前核对仍只用 MusicBrainz。</p>' +
+    return '<article><h2>Discogs</h2><p class="meta">在线专辑识别用的 Token，只存 Vault。保存后，目录识别会向 Discogs 查询候选；候选不能单独确认发行身份。</p>' +
       '<label>Token（' + escapeText(savedMark(discogsSettings.token_saved, discogsSettings.token_revision)) + '，留空保留）<input type="password" id="discogs-token" autocomplete="off"></label>' +
       '<p><button type="button" id="save-discogs" class="primary">保存</button> <button type="button" id="test-discogs">测试连接</button></p><p id="discogs-test-result" class="meta"></p></article>';
   }
@@ -385,18 +403,48 @@ const appJS = `(function () {
       '<label>地址<input type="text" id="navidrome-url" value="' + escapeText(navidrome.url || "") + '"></label>' +
       '<label>用户名<input type="text" id="navidrome-username" value="' + escapeText(navidrome.username || "") + '" autocomplete="off"></label>' +
       '<label>密码（' + escapeText(savedMark(navidrome.password_saved, navidrome.password_revision)) + '，留空保留）<input type="password" id="navidrome-password" autocomplete="off"></label>' +
-      '<p><button type="button" id="save-navidrome" class="primary">保存 Navidrome</button> <button type="button" id="test-navidrome">测试连接</button></p><p id="navidrome-test-result" class="meta"></p></article>';
+      '<p><button type="button" id="save-navidrome" class="primary">保存 Navidrome</button> <button type="button" id="test-navidrome">测试连接</button></p><p id="navidrome-test-result" class="meta"></p>' +
+      '<h2>Roon</h2><p class="meta">只检查端口是否可连接，不注册、不扫描。</p><label>主机<input type="text" id="roon-host" value="127.0.0.1"></label><label>端口<input type="number" id="roon-port" value="9330"></label><p><button type="button" id="test-roon">检查 Roon</button></p><p id="roon-result" class="meta"></p></article>';
   }
   function playlistsCard() {
     var rows = playlistRows.map(function (row) {
       return '<p class="meta">' + escapeText((row.name || row.id) + "（" + row.track_count + " 首）") + (row.error ? " · " + escapeText(row.error) : "") + '</p>';
     }).join("");
-    return '<article><h2>歌单</h2><p class="meta">导入 .m3u/.m3u8（只读 EXTINF 里的艺人/歌名，文件里的链接不会被打开）。上传保存到歌单库，可在搜索时选用；回退时读该歌单的曲目。</p>' +
-      '<label>歌单名称<input type="text" id="playlist-name" placeholder="留空用文件里的 #PLAYLIST 名或文件名"></label>' +
-      '<label>上传歌单文件<input type="file" id="playlist-file" accept=".m3u,.m3u8"></label>' +
-      '<label>或粘贴歌单内容<textarea id="playlist-content" rows="4" placeholder="#EXTINF:0,艺人 - 歌名&#10;file:///…"></textarea></label>' +
+    var subs = subscriptionRows.map(function (row) {
+      return '<p class="meta">' + escapeText((row.name || row.playlist_id) + " · 每 " + row.interval_hours + " 小时 · " + (row.paused ? "已暂停 · " : "") + (row.last_result || "")) +
+        ' <button type="button" data-sub-check="' + escapeText(row.playlist_id) + '">立即检查</button>' +
+        ' <button type="button" data-sub-pause="' + escapeText(row.playlist_id) + '" data-paused="' + (row.paused ? "1" : "0") + '">' + (row.paused ? "恢复" : "暂停") + '</button>' +
+        ' <button type="button" data-sub-delete="' + escapeText(row.playlist_id) + '">删除</button></p>';
+    }).join("");
+    return '<article><h2>歌单</h2><p class="meta">可导入 .m3u、.m3u8、.json、.csv、.tsv、.txt、.xlsx。只读取歌名、艺人和专辑列，文件里的链接不会被打开。保存后可在搜索时选用。xlsx 不执行宏。</p>' +
+      '<label>歌单名称<input type="text" id="playlist-name" placeholder="留空用文件里的名称"></label>' +
+      '<label>文本顺序（仅 TXT）<select id="playlist-order"><option value="artist-title">歌手 - 歌名</option><option value="title-artist">歌名 - 歌手</option></select></label>' +
+      '<label>上传歌单文件<input type="file" id="playlist-file" accept=".m3u,.m3u8,.json,.csv,.tsv,.txt,.xlsx"></label>' +
+      '<label>或粘贴歌单内容<textarea id="playlist-content" rows="4" placeholder="歌手 - 歌名，或带表头的 CSV / JSON"></textarea></label>' +
       '<p><button type="button" id="save-playlist" class="primary">保存歌单</button></p>' +
-      (rows || '<p class="meta">还没有已存歌单。</p>') + '</article>';
+      (rows || '<p class="meta">还没有已存歌单。</p>') +
+      '<h2>识别歌单链接</h2><p class="meta">只从链接里读出平台和歌单 ID，不访问平台，也不拉取曲目。</p>' +
+      '<label>分享链接或歌单 ID<input type="text" id="playlist-link" placeholder="https://music.163.com/playlist?id=123"></label>' +
+      '<p><button type="button" id="locate-playlist">识别链接</button></p><p id="playlist-locate-result" class="meta"></p>' +
+      '<h2>拉取公开歌单</h2><p class="meta">按旧版只读接口读取网易云、酷狗、汽水、咪咕、Apple Music、Spotify、YouTube、QQ 音乐或酷我的曲目名单。不下载音频。YouTube 必须用用户自己的 API Key，不会改去读网页。本机测试地址只接受回环。</p>' +
+      '<label>平台<select id="remote-platform"><option value="netease">网易云音乐</option><option value="kugou">酷狗</option><option value="qishui">汽水</option><option value="migu">咪咕</option><option value="applemusic">Apple Music</option><option value="spotify">Spotify</option><option value="youtube">YouTube</option><option value="qqmusic">QQ 音乐</option><option value="kuwo">酷我</option></select></label>' +
+      '<label>歌单 ID<input type="text" id="remote-playlist-id" placeholder="数字 ID，或 Spotify / Apple / YouTube 的歌单 ID"></label>' +
+      '<label>本机测试地址<input type="text" id="remote-base" placeholder="留空则访问各平台公开接口"></label>' +
+      '<p><button type="button" id="fetch-playlist">拉取并订阅</button></p><p id="playlist-fetch-result" class="meta"></p>' +
+      '<h2>订阅已存歌单</h2><p class="meta">未绑定平台时只重新读取本机歌单。绑定了公开歌单后，检查会向该平台读取新增曲目。首次默认只记下现有曲目。删除的曲目不会从音乐库移除。</p>' +
+      '<label>歌单<select id="subscription-playlist"><option value="">选择已存歌单</option>' + playlistRows.map(function (row) { return '<option value="' + escapeText(row.id) + '">' + escapeText(row.name || row.id) + "</option>"; }).join("") + '</select></label>' +
+      '<label>间隔（小时）<input type="number" id="subscription-hours" min="1" max="168" value="6"></label>' +
+      '<label><input type="checkbox" id="subscription-existing"> 现有曲目也入库</label>' +
+      '<p><button type="button" id="save-subscription" class="primary">订阅</button></p>' +
+      (subs || '<p class="meta">还没有订阅。</p>') + '</article>';
+  }
+  function migrationCard() {
+    var report = migrationReport || {};
+    var counts = report.report || {};
+    var summary = report.found ? ("已迁入曲目 " + (counts.library || 0) + "，待核对任务 " + (counts.jobs || 0) + "，令牌记录 " + (counts.tokens || 0) + "。") : "还没有旧版活动数据回执。";
+    return '<article><h2>从旧版迁入</h2><p class="meta">' + escapeText(report.note || "启动时会读取旧版数据库。音乐文件不移动。") + "</p><p>" + escapeText(summary) + "</p>" +
+      '<p class="meta">冷归档' + (report.cold_archive ? "仍在" : "还没有") + "。自动安装更新：" + (report.auto_install ? "会" : "不会") + "。</p>" +
+      '<p><button type="button" id="rollback-migration">回退迁入的索引</button></p><p id="migration-result" class="meta"></p></article>';
   }
   function renderSettings() {
     if (!downloadSettings && !cookieSettings.length && !aiSettings && !qbtSettings && !solverSettings && !lyricsSettings && !discogsSettings && !librarySettings && !serverSettings) {
@@ -405,12 +453,12 @@ const appJS = `(function () {
       return;
     }
     setStatus("", "");
-    var html = '<div class="cards">' + downloadCard() + cookieCard() + aiCard() + qbtCard() + solverCard() + lyricsCard() + discogsCard() + libraryCard() + serversCard() + playlistsCard() +
+    var html = '<div class="cards">' + migrationCard() + downloadCard() + cookieCard() + aiCard() + qbtCard() + solverCard() + lyricsCard() + discogsCard() + libraryCard() + serversCard() + playlistsCard() +
       '<article><h2>站点登录检查</h2><p class="meta">只读检查：只验证登录与余额，不下载、不花 token。Cookie 留空用已保存的，填了则只用于这次检查，不保存。</p>' +
       '<label>站点<select id="preflight-site">' + siteRows.map(function (site) { return '<option value="' + escapeText(site.name) + '">' + escapeText(site.name) + "</option>"; }).join("") + '</select></label>' +
       '<label>Cookie<input type="password" id="preflight-cookie" autocomplete="off"></label>' +
-      '<label><input type="checkbox" id="preflight-synthetic"> 合成测试（需填测试服务地址）</label>' +
-      '<label>测试服务地址<input type="text" id="preflight-base-url"></label>' +
+      '<label><input type="checkbox" id="preflight-synthetic"> 使用测试服务器（不访问真实站点）</label>' +
+      '<label>测试服务器地址<input type="text" id="preflight-base-url"></label>' +
       '<p><button type="button" id="run-preflight" class="primary">检查登录</button></p><p id="preflight-result" class="meta"></p></article></div>';
     list.innerHTML = html;
     var save = document.getElementById("save-download");
@@ -446,6 +494,8 @@ const appJS = `(function () {
     if (testDiscogsButton) testDiscogsButton.addEventListener("click", testDiscogs);
     var saveLibraryButton = document.getElementById("save-library");
     if (saveLibraryButton) saveLibraryButton.addEventListener("click", saveLibrary);
+    var rollbackMigrationButton = document.getElementById("rollback-migration");
+    if (rollbackMigrationButton) rollbackMigrationButton.addEventListener("click", rollbackMigration);
     var savePlexButton = document.getElementById("save-plex");
     if (savePlexButton) savePlexButton.addEventListener("click", savePlex);
     var testPlexButton = document.getElementById("test-plex");
@@ -454,8 +504,27 @@ const appJS = `(function () {
     if (saveNavidromeButton) saveNavidromeButton.addEventListener("click", saveNavidrome);
     var testNavidromeButton = document.getElementById("test-navidrome");
     if (testNavidromeButton) testNavidromeButton.addEventListener("click", testNavidrome);
+    var unifyQbt = document.getElementById("unify-qbt-tags");
+    if (unifyQbt) unifyQbt.addEventListener("click", unifyQbtTags);
+    var testRoonButton = document.getElementById("test-roon");
+    if (testRoonButton) testRoonButton.addEventListener("click", testRoon);
     var savePlaylistButton = document.getElementById("save-playlist");
     if (savePlaylistButton) savePlaylistButton.addEventListener("click", savePlaylist);
+    var locatePlaylistButton = document.getElementById("locate-playlist");
+    if (locatePlaylistButton) locatePlaylistButton.addEventListener("click", locatePlaylist);
+    var fetchPlaylistButton = document.getElementById("fetch-playlist");
+    if (fetchPlaylistButton) fetchPlaylistButton.addEventListener("click", fetchRemotePlaylist);
+    var saveSubscriptionButton = document.getElementById("save-subscription");
+    if (saveSubscriptionButton) saveSubscriptionButton.addEventListener("click", saveSubscription);
+    document.querySelectorAll("[data-sub-check]").forEach(function (button) {
+      button.addEventListener("click", function () { checkSubscription(button.getAttribute("data-sub-check")); });
+    });
+    document.querySelectorAll("[data-sub-pause]").forEach(function (button) {
+      button.addEventListener("click", function () { pauseSubscription(button.getAttribute("data-sub-pause"), button.getAttribute("data-paused") !== "1"); });
+    });
+    document.querySelectorAll("[data-sub-delete]").forEach(function (button) {
+      button.addEventListener("click", function () { deleteSubscription(button.getAttribute("data-sub-delete")); });
+    });
     var run = document.getElementById("run-preflight");
     if (run) run.addEventListener("click", preflight);
   }
@@ -464,8 +533,10 @@ const appJS = `(function () {
     setBusy(true);
     setStatus("info", "正在保存");
     try {
-      var body = await postSetting("/v1/settings/download", {streaming_enabled: document.getElementById("download-streaming").checked, streaming_order: streamingOrder});
+      var engine = document.getElementById("download-engine");
+      var body = await postSetting("/v1/settings/download", {streaming_enabled: document.getElementById("download-streaming").checked, streaming_order: streamingOrder, engine_url: engine ? engine.value.trim() : ""});
       downloadSettings.streaming_enabled = body.streaming_enabled;
+      downloadSettings.engine_url = body.engine_url || "";
       if (body.streaming_order && body.streaming_order.length) streamingOrder = body.streaming_order.slice();
       setStatus("ok", "已保存。");
     } catch (err) {
@@ -527,6 +598,31 @@ const appJS = `(function () {
       setStatus("fail", "测试失败。" + (err && err.message ? "（" + err.message + "）" : ""));
     } finally {
       setBusy(false);
+    }
+  }
+  async function unifyQbtTags() {
+    var result = document.getElementById("qbt-test-result");
+    try {
+      var body = await postSetting("/v1/settings/qbittorrent/tags", {
+        base_url: document.getElementById("qbt-base-url").value.trim(),
+        username: document.getElementById("qbt-username").value.trim(),
+        password: document.getElementById("qbt-password").value
+      });
+      if (result) result.textContent = body.note || "已统一旧标签。";
+    } catch (err) {
+      if (result) result.textContent = err.message;
+    }
+  }
+  async function testRoon() {
+    var result = document.getElementById("roon-result");
+    try {
+      var body = await postSetting("/v1/settings/servers/roon/test", {
+        host: document.getElementById("roon-host").value.trim(),
+        port: parseInt(document.getElementById("roon-port").value, 10) || 9330
+      });
+      if (result) result.textContent = body.note || "";
+    } catch (err) {
+      if (result) result.textContent = err.message;
     }
   }
   async function saveQBT() {
@@ -621,6 +717,7 @@ const appJS = `(function () {
         lyrics_path: document.getElementById("lyrics-path").value.trim(),
         candidates_path: document.getElementById("lyrics-candidates-path").value.trim(),
         cover_path: document.getElementById("lyrics-cover-path").value.trim(),
+        write_mode: document.getElementById("lyrics-write-mode").value,
         auth_header: document.getElementById("lyrics-auth-header").value.trim(),
         authorization: document.getElementById("lyrics-auth").value
       });
@@ -794,9 +891,10 @@ const appJS = `(function () {
         var form = new FormData();
         form.append("file", fileInput.files[0]);
         if (name) form.append("name", name);
+        form.append("text_order", document.getElementById("playlist-order").value);
         response = await fetch("/v1/playlists", {method: "POST", body: form});
       } else if (content.trim()) {
-        response = await fetch("/v1/playlists", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({content: content, name: name})});
+        response = await fetch("/v1/playlists", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({content: content, name: name, text_order: document.getElementById("playlist-order").value})});
       } else {
         setStatus("fail", "先上传歌单文件或粘贴歌单内容。");
         return;
@@ -814,12 +912,108 @@ const appJS = `(function () {
       setBusy(false);
     }
   }
+  async function locatePlaylist() {
+    if (loading) return;
+    var text = document.getElementById("playlist-link").value.trim();
+    if (!text) { setStatus("fail", "先粘贴歌单链接或 ID。"); return; }
+    setBusy(true);
+    setStatus("info", "正在识别链接");
+    try {
+      var body = await postSetting("/v1/playlists/locate", {text: text, platform: "auto"});
+      var lines = (body.playlists || []).map(function (row) {
+        return (row.name || row.platform) + (row.playlist_id ? " · " + row.playlist_id : "") + " · " + (row.note || "");
+      });
+      var result = document.getElementById("playlist-locate-result");
+      if (result) result.textContent = lines.join("；") || body.note || "";
+      setStatus("ok", body.note || "已识别。");
+    } catch (err) {
+      setStatus("fail", "识别失败。" + (err && err.message ? "（" + err.message + "）" : ""));
+    } finally {
+      setBusy(false);
+    }
+  }
+  async function fetchRemotePlaylist() {
+    if (loading) return;
+    var id = document.getElementById("remote-playlist-id").value.trim();
+    if (!id) { setStatus("fail", "先填写歌单 ID。"); return; }
+    setBusy(true);
+    setStatus("info", "正在读取公开歌单");
+    try {
+      var payload = {platform: document.getElementById("remote-platform").value, playlist_id: id, save: true, subscribe: true};
+      var base = document.getElementById("remote-base");
+      if (base && base.value.trim()) payload.base_url = base.value.trim();
+      var body = await postSetting("/v1/playlists/fetch", payload);
+      var result = document.getElementById("playlist-fetch-result");
+      if (result) result.textContent = body.note || "";
+      setStatus("ok", body.note || "已读取曲目名单。");
+      load();
+    } catch (err) {
+      setStatus("fail", "没有读到歌单。" + (err && err.message ? "（" + err.message + "）" : ""));
+    } finally {
+      setBusy(false);
+    }
+  }
+  async function saveSubscription() {
+    if (loading) return;
+    var playlistID = document.getElementById("subscription-playlist").value;
+    if (!playlistID) { setStatus("fail", "先选择已存歌单。"); return; }
+    setBusy(true);
+    try {
+      await postSetting("/v1/subscriptions", {playlist_id: playlistID, interval_hours: parseInt(document.getElementById("subscription-hours").value, 10) || 6, include_existing: document.getElementById("subscription-existing").checked});
+      setStatus("ok", "已订阅。首次检查前不会创建任务。");
+      load();
+    } catch (err) {
+      setStatus("fail", "订阅失败。" + (err && err.message ? "（" + err.message + "）" : ""));
+    } finally {
+      setBusy(false);
+    }
+  }
+  async function checkSubscription(playlistID) {
+    if (loading || !playlistID) return;
+    setBusy(true);
+    setStatus("info", "正在检查订阅");
+    try {
+      var body = await postSetting("/v1/subscriptions/check", {playlist_id: playlistID});
+      setStatus("ok", body.message || "检查完成。");
+      load();
+    } catch (err) {
+      setStatus("fail", "检查失败。" + (err && err.message ? "（" + err.message + "）" : ""));
+    } finally {
+      setBusy(false);
+    }
+  }
+  async function pauseSubscription(playlistID, paused) {
+    if (loading || !playlistID) return;
+    setBusy(true);
+    try {
+      await postSetting("/v1/subscriptions/pause", {playlist_id: playlistID, paused: paused});
+      setStatus("ok", paused ? "已暂停订阅。" : "已恢复订阅。");
+      load();
+    } catch (err) {
+      setStatus("fail", "操作失败。");
+    } finally {
+      setBusy(false);
+    }
+  }
+  async function deleteSubscription(playlistID) {
+    if (loading || !playlistID) return;
+    setBusy(true);
+    try {
+      await postSetting("/v1/subscriptions/delete", {playlist_id: playlistID});
+      setStatus("ok", "已删除订阅。");
+      load();
+    } catch (err) {
+      setStatus("fail", "删除失败。");
+    } finally {
+      setBusy(false);
+    }
+  }
   async function preflight() {
     if (loading) return;
     var cookie = document.getElementById("preflight-cookie").value;
     var synthetic = document.getElementById("preflight-synthetic").checked;
     var baseURL = document.getElementById("preflight-base-url").value.trim();
-    if (synthetic && !baseURL) { setStatus("fail", "合成测试需要填测试服务地址。"); return; }
+    if (synthetic && !baseURL) { setStatus("fail", "使用测试服务器时需要填写地址。"); return; }
     setBusy(true);
     setStatus("info", "正在检查登录");
     try {
@@ -843,9 +1037,47 @@ const appJS = `(function () {
     }
   }
   function renderLibrary() {
-    var html = '<div class="cards"><article><form id="transcode-form"><h2>转码为 FLAC</h2>' +
-      '<label>源文件（库内 WAV 路径，应用数据目录内）<input type="text" id="transcode-source" required placeholder="如 library-audio/Artist/Album/01 Title.wav"></label>' +
-      '<p><button type="submit" class="primary">开始转码</button></p><p class="meta">只支持 PCM WAV 转 FLAC；转码前后 PCM 内容逐字节比对，源文件不动，输出已存在时拒绝覆盖。</p></form></article>';
+    var duplicateHtml = "";
+    if (duplicateRows.length) {
+      duplicateRows.forEach(function (group) {
+        duplicateHtml += '<p>' + escapeText((group.artists || []).join("、") + " / " + (group.album || "")) + " · " + escapeText(group.state || "") + " · " + escapeText(group.reason || "") +
+          (group.state === "ready" ? ' <button type="button" data-merge="' + escapeText(group.group_id) + '">合并重复项</button>' : "") + "</p>";
+      });
+    } else {
+      duplicateHtml = '<p class="meta">尚未扫描，或没有可合并的重复项。</p>';
+    }
+    var html = '<div class="cards"><article><h2>本地资料库</h2><p class="meta">重新索引只补充新文件，不删除磁盘上的音乐。先逐页勾选曲目，确认后才进入检索。下载仍受令牌规则约束，这一步不会扣费，也不会入库。</p>' +
+      '<p><button type="button" id="reindex-library" class="primary">重新索引</button> <button type="button" id="list-gaps">列出缺失曲目</button></p>' +
+      '<p><button type="button" id="library-page-prev">上一页</button> <button type="button" id="library-page-next">下一页</button> <span id="library-page-label" class="meta"></span></p>' +
+      '<div id="library-file"></div>' +
+      '<p><button type="button" id="fill-gaps">确认所选并补缺</button> <button type="button" id="upgrade-album">确认所选并升级</button> <button type="button" id="expand-album">确认所选并扩成整专</button></p>' +
+      '<p id="library-ops-result" class="meta"></p></article>' +
+      '<article><h2>标签、封面和歌词</h2><p class="meta">目录确认后，标签、歌词和封面同一次写入。封面写入 FLAC 内嵌图片；按设置可以同时保留同名 jpg。写之前会备份，任何一步失败都恢复原文件。目录、歌词和封面地址只接受本机。</p>' +
+      '<label>文件路径<input type="text" id="meta-path" placeholder="库内 .flac"></label>' +
+      '<label>艺人<input type="text" id="meta-artist"></label><label>专辑<input type="text" id="meta-album"></label><label>曲名<input type="text" id="meta-title"></label>' +
+      '<label>目录地址<input type="text" id="meta-catalog" placeholder="本机 MusicBrainz"></label>' +
+      '<label>歌词地址<input type="text" id="meta-lyrics" placeholder="留空则不写歌词"></label>' +
+      '<label>封面地址<input type="text" id="meta-cover" placeholder="留空则不写封面"></label>' +
+      '<label>封面写入<select id="meta-cover-mode"><option value="sidecar">内嵌并保留同名 jpg</option><option value="embedded">只写入 FLAC 内嵌图片</option></select></label>' +
+      '<p><button type="button" id="complete-metadata">补齐标签封面歌词</button></p><p id="metadata-result" class="meta"></p></article>' +
+      '<article><h2>合辑</h2><p class="meta">预览不会移动文件。合并只把名称里带“合辑”或 Various Artists 的文件夹移进音乐库的 Compilations。</p>' +
+      '<p><button type="button" id="preview-compilations">预览合辑</button> <button type="button" id="merge-compilations">合并合辑</button></p><p id="compilation-result" class="meta"></p></article>' +
+      '<article><h2>艺人目录与 NCM</h2><p class="meta">艺人目录把专辑文件夹整理成“艺人/专辑”。NCM 解密不改源文件。</p>' +
+      '<p><button type="button" id="plan-artist-folders">查看艺人目录</button> <button type="button" id="apply-artist-folders">整理艺人目录</button></p>' +
+      '<label>NCM 路径<input type="text" id="ncm-source" placeholder="库内 .ncm 路径"></label><p><button type="button" id="decrypt-ncm">解密 NCM</button></p><p id="library-tools-result" class="meta"></p></article>' +
+      '<article><h2>重复歌曲</h2><p class="meta">同名不等于重复。内容一致且可以确定保留哪一份时才能合并，其余进入核对。合并后的旧文件进隔离区，可以恢复。</p>' +
+      '<p><button type="button" id="scan-duplicates" class="primary">扫描重复</button></p>' + duplicateHtml +
+      '<label>恢复编号<input type="text" id="restore-merge-id" placeholder="合并后返回的编号"></label><p><button type="button" id="restore-duplicates">恢复这次合并</button></p></article>' +
+      '<article><form id="transcode-form"><h2>WAV 无损转 FLAC</h2>' +
+      '<p class="meta">整数 PCM（16/24/32 位、多声道、可扩展格式）用纯 Go 转成 FLAC，样本逐个比对并写入 MD5。浮点和压缩 WAV 会拒绝，不会降级。标签从 LIST/INFO、ID3 和 BWF 迁入，封面写入内嵌图片。没有标签时只按文件名和目录补显示名，不把它当成已确认的发行。</p>' +
+      '<label><input type="checkbox" id="wav-auto" checked> 下载进入待入库或重新索引时，先转成 FLAC 再识别入库（默认开启）</label>' +
+      '<label>原 WAV<select id="wav-disposal"><option value="keep">保留原文件</option><option value="recycle">移入可恢复回收目录</option><option value="delete">校验通过后删除</option></select></label>' +
+      '<p><button type="button" id="save-wav" class="primary">保存转换设置</button></p><p id="wav-setting-note" class="meta"></p>' +
+      '<label>单个 WAV<input type="text" id="transcode-source" placeholder="库内或待入库 .wav"></label>' +
+      '<label>批量目录<input type="text" id="transcode-dir" placeholder="留空则只转上面一个文件"></label>' +
+      '<label>多个文件，一行一个<textarea id="transcode-paths" rows="3" placeholder="可选"></textarea></label>' +
+      '<p><button type="submit" class="primary">开始批量转换</button> <button type="button" id="transcode-pause">暂停</button> <button type="button" id="transcode-cancel">取消</button></p>' +
+      '<p id="transcode-result" class="meta"></p></form></article>';
     if (transcodeRows.length) {
       html += '<article><h2>转码记录</h2>';
       transcodeRows.forEach(function (receipt) {
@@ -856,8 +1088,7 @@ const appJS = `(function () {
     if (!libraryRows.length) {
       list.innerHTML = html + "</div>";
       setStatus("", "库里还没有已入库的音频。");
-      var form = document.getElementById("transcode-form");
-      if (form) form.addEventListener("submit", submitTranscode);
+      bindLibrary();
       return;
     }
     setStatus("", "");
@@ -865,43 +1096,254 @@ const appJS = `(function () {
       html += '<article><h2>' + escapeText(entry.file || entry.source_name || "未命名") + '</h2><p class="meta"><span class="pill">' + escapeText(entry.format || "") + '</span><span class="pill">' + escapeText(entry.decode_state || "") + '</span><span class="pill">' + escapeText(entry.origin || "") + '</span></p><p>' + (entry.file_present ? "文件在库中" : "文件不在库中") + " · " + escapeText((entry.sha256 || "").slice(0, 12)) + "</p></article>";
     });
     list.innerHTML = html + "</div>";
+    bindLibrary();
+  }
+  function bindLibrary() {
     var form = document.getElementById("transcode-form");
     if (form) form.addEventListener("submit", submitTranscode);
+    var saveWav = document.getElementById("save-wav");
+    if (saveWav) saveWav.addEventListener("click", saveWAVSettings);
+    var pauseWav = document.getElementById("transcode-pause");
+    if (pauseWav) pauseWav.addEventListener("click", function () { controlTranscode("pause"); });
+    var cancelWav = document.getElementById("transcode-cancel");
+    if (cancelWav) cancelWav.addEventListener("click", function () { controlTranscode("cancel"); });
+    loadWAVSettings();
+    var reindex = document.getElementById("reindex-library");
+    if (reindex) reindex.addEventListener("click", function () { libraryAction("/v1/library/reindex", {}, "library-ops-result"); });
+    var gaps = document.getElementById("list-gaps");
+    if (gaps) gaps.addEventListener("click", function () { libraryAction("/v1/library/gaps", null, "library-ops-result"); });
+    var fill = document.getElementById("fill-gaps");
+    if (fill) fill.addEventListener("click", function () { confirmTracks("fill", "补缺"); });
+    var upgrade = document.getElementById("upgrade-album");
+    if (upgrade) upgrade.addEventListener("click", function () { confirmTracks("upgrade", "音质升级"); });
+    var expand = document.getElementById("expand-album");
+    if (expand) expand.addEventListener("click", function () { confirmTracks("expand", "单曲升级整专"); });
+    var pagePrev = document.getElementById("library-page-prev");
+    if (pagePrev) pagePrev.addEventListener("click", function () { libraryFileOffset = Math.max(0, libraryFileOffset - 20); loadLibraryFiles(); });
+    var pageNext = document.getElementById("library-page-next");
+    if (pageNext) pageNext.addEventListener("click", function () { libraryFileOffset += 20; loadLibraryFiles(); });
+    var metadata = document.getElementById("complete-metadata");
+    if (metadata) metadata.addEventListener("click", completeMetadata);
+    loadLibraryFiles();
+    var previewCompilations = document.getElementById("preview-compilations");
+    if (previewCompilations) previewCompilations.addEventListener("click", function () { libraryAction("/v1/library/compilations", null, "compilation-result"); });
+    var mergeCompilations = document.getElementById("merge-compilations");
+    if (mergeCompilations) mergeCompilations.addEventListener("click", function () { libraryAction("/v1/library/compilations/merge", {}, "compilation-result"); });
+    var planArtists = document.getElementById("plan-artist-folders");
+    if (planArtists) planArtists.addEventListener("click", function () { libraryAction("/v1/library/artist-folders", null, "library-tools-result"); });
+    var applyArtists = document.getElementById("apply-artist-folders");
+    if (applyArtists) applyArtists.addEventListener("click", function () { libraryAction("/v1/library/artist-folders", {}, "library-tools-result"); });
+    var decrypt = document.getElementById("decrypt-ncm");
+    if (decrypt) decrypt.addEventListener("click", function () { libraryAction("/v1/library/ncm/decrypt", {source: document.getElementById("ncm-source").value.trim()}, "library-tools-result"); });
+    var scan = document.getElementById("scan-duplicates");
+    if (scan) scan.addEventListener("click", scanDuplicates);
+    var restore = document.getElementById("restore-duplicates");
+    if (restore) restore.addEventListener("click", restoreDuplicates);
+    document.querySelectorAll("[data-merge]").forEach(function (button) {
+      button.addEventListener("click", function () { mergeDuplicates(button.getAttribute("data-merge")); });
+    });
+  }
+  function confirmTracks(scene, label) {
+    var paths = Object.keys(selectedTracks).filter(function (path) { return selectedTracks[path]; });
+    var result = document.getElementById("library-ops-result");
+    if (!paths.length) {
+      if (result) result.textContent = "请先逐首勾选，再进入下载。这一步尚未下载、尚未入库。";
+      return;
+    }
+    libraryAction("/v1/library/workflow", {scene: scene, label: label, paths: paths, confirmed: true}, "library-ops-result");
+  }
+  async function loadLibraryFiles() {
+    var list = document.getElementById("library-file");
+    var label = document.getElementById("library-page-label");
+    if (!list) return;
+    try {
+      var response = await fetch("/v1/library/files?offset=" + libraryFileOffset + "&limit=20", {headers: {Accept: "application/json"}});
+      var body = await response.json();
+      var total = body.total || 0;
+      if (libraryFileOffset > 0 && libraryFileOffset >= total) {
+        libraryFileOffset = Math.max(0, total - 20);
+      }
+      var html = "";
+      (body.files || []).forEach(function (file) {
+        html += '<label><input type="checkbox" class="library-track" value="' + escapeText(file) + '"' + (selectedTracks[file] ? " checked" : "") + "> " + escapeText(file) + "</label>";
+      });
+      list.innerHTML = html || '<p class="meta">这一页没有音频文件。</p>';
+      if (label) label.textContent = "第 " + (libraryFileOffset + 1) + "–" + (libraryFileOffset + (body.files || []).length) + " 首，共 " + total + " 首";
+      list.querySelectorAll(".library-track").forEach(function (box) {
+        box.addEventListener("change", function () { selectedTracks[box.value] = box.checked; });
+      });
+    } catch (err) {
+      list.innerHTML = '<p class="meta">没有读到库内文件。</p>';
+    }
+  }
+  async function completeMetadata() {
+    libraryAction("/v1/library/metadata", {
+      path: document.getElementById("meta-path").value.trim(),
+      artist: document.getElementById("meta-artist").value.trim(),
+      album: document.getElementById("meta-album").value.trim(),
+      title: document.getElementById("meta-title").value.trim(),
+      catalog_base_url: document.getElementById("meta-catalog").value.trim(),
+      lyrics_base_url: document.getElementById("meta-lyrics").value.trim(),
+      cover_base_url: document.getElementById("meta-cover").value.trim(),
+      cover_mode: document.getElementById("meta-cover-mode").value
+    }, "metadata-result");
+  }
+  async function libraryAction(path, body, targetID) {
+    var target = document.getElementById(targetID);
+    try {
+      var response = await fetch(path, {method: body === null ? "GET" : "POST", headers: {"Content-Type": "application/json", Accept: "application/json"}, body: body === null ? undefined : JSON.stringify(body)});
+      var decoded = await response.json();
+      if (!response.ok || decoded.ok === false) throw new Error(decoded.error || decoded.code || "没有完成");
+      if (target) target.textContent = decoded.note || decoded.error || "已完成。";
+      load(true);
+    } catch (err) {
+      if (target) target.textContent = err.message;
+    }
+  }
+  async function scanDuplicates() {
+    if (loading) return;
+    setBusy(true);
+    setStatus("info", "正在扫描重复");
+    try {
+      var response = await fetch("/v1/library/duplicates", {headers: {Accept: "application/json"}});
+      var body = await response.json();
+      if (!response.ok || !body || !body.ok) {
+        setStatus("fail", "扫描失败。" + (body && body.code ? "（" + body.code + "）" : ""));
+        return;
+      }
+      duplicateRows = body.groups || [];
+      setStatus("ok", "扫描完成，" + duplicateRows.length + " 组。同名未确认的不会合并。");
+      renderLibrary();
+    } catch (err) {
+      setStatus("fail", "扫描中断。");
+    } finally {
+      setBusy(false);
+    }
+  }
+  async function mergeDuplicates(groupID) {
+    if (loading || !groupID) return;
+    setBusy(true);
+    setStatus("info", "正在合并");
+    try {
+      var body = await postSetting("/v1/library/duplicates/merge", {group_id: groupID});
+      var box = document.getElementById("restore-merge-id");
+      if (box && body.merge_id) box.value = body.merge_id;
+      setStatus("ok", "已合并，旧副本在隔离区。恢复编号 " + (body.merge_id || "") + "。");
+      duplicateRows = [];
+    } catch (err) {
+      setStatus("fail", "合并失败。" + (err && err.message ? "（" + err.message + "）" : ""));
+    } finally {
+      setBusy(false);
+    }
+  }
+  async function restoreDuplicates() {
+    if (loading) return;
+    var mergeID = document.getElementById("restore-merge-id").value.trim();
+    if (!mergeID) { setStatus("fail", "先填写恢复编号。"); return; }
+    setBusy(true);
+    try {
+      await postSetting("/v1/library/duplicates/restore", {merge_id: mergeID});
+      setStatus("ok", "已从隔离区恢复。");
+    } catch (err) {
+      setStatus("fail", "恢复失败。" + (err && err.message ? "（" + err.message + "）" : ""));
+    } finally {
+      setBusy(false);
+    }
+  }
+  async function loadWAVSettings() {
+    var box = document.getElementById("wav-auto");
+    if (!box) return;
+    try {
+      var response = await fetch("/v1/settings/wav", {headers: {Accept: "application/json"}});
+      var body = await response.json();
+      if (!body || !body.wav) return;
+      box.checked = !!body.wav.auto_convert_wav;
+      var disposal = document.getElementById("wav-disposal");
+      if (disposal && body.wav.wav_disposal) disposal.value = body.wav.wav_disposal;
+      var note = document.getElementById("wav-setting-note");
+      if (note) note.textContent = body.note || "";
+    } catch (err) {}
+  }
+  async function saveWAVSettings() {
+    var note = document.getElementById("wav-setting-note");
+    try {
+      var body = await postSetting("/v1/settings/wav", {auto_convert_wav: document.getElementById("wav-auto").checked, wav_disposal: document.getElementById("wav-disposal").value});
+      if (note) note.textContent = (body && body.note) || "已保存";
+    } catch (err) {
+      if (note) note.textContent = err.message;
+    }
+  }
+  async function controlTranscode(action) {
+    var result = document.getElementById("transcode-result");
+    if (!window.musicopsTranscodeBatch) {
+      if (result) result.textContent = "还没有一批正在转换的文件。";
+      return;
+    }
+    try {
+      var response = await fetch("/v1/library/transcode/batch/control", {method: "POST", headers: {"Content-Type": "application/json", Accept: "application/json"}, body: JSON.stringify({batch_id: window.musicopsTranscodeBatch, action: action})});
+      var body = await response.json();
+      if (result) result.textContent = body.note || body.error || action;
+    } catch (err) {
+      if (result) result.textContent = err.message;
+    }
   }
   async function submitTranscode(event) {
     event.preventDefault();
     if (loading) return;
     var source = document.getElementById("transcode-source");
-    if (!source || !source.value.trim()) { setStatus("fail", "先填源文件路径。"); return; }
+    var dir = document.getElementById("transcode-dir");
+    var extra = document.getElementById("transcode-paths");
+    var paths = [];
+    if (extra && extra.value.trim()) extra.value.split(/\n/).forEach(function (line) { if (line.trim()) paths.push(line.trim()); });
+    if (source && source.value.trim()) paths.push(source.value.trim());
+    if (!paths.length && !(dir && dir.value.trim())) { setStatus("fail", "先选择 WAV 文件或目录。"); return; }
     setBusy(true);
-    setStatus("info", "正在提交转码");
+    setStatus("info", "正在提交转换");
     try {
-      var response = await fetch("/v1/library/transcode", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({request_id: "tc-" + Date.now().toString(36), source: source.value.trim(), format: "flac"})});
+      var response = await fetch("/v1/library/transcode/batch", {method: "POST", headers: {"Content-Type": "application/json", Accept: "application/json"}, body: JSON.stringify({paths: paths, dir: dir ? dir.value.trim() : "", wav_disposal: document.getElementById("wav-disposal").value})});
       var body = await response.json();
       if (!response.ok || !body || !body.ok) {
-        setStatus("fail", "转码提交失败。" + (body && body.code ? "（" + body.code + "）" : ""));
+        setStatus("fail", "转换没有提交。" + (body && (body.error || body.code) ? "（" + (body.error || body.code) + "）" : ""));
         return;
       }
-      setStatus("ok", "已提交转码，完成后在转码记录里查看。");
+      window.musicopsTranscodeBatch = body.batch_id;
+      window.musicopsTranscodeNote = body.note || "已提交";
+      setStatus("ok", "已提交 " + (body.count || 0) + " 个文件");
     } catch (err) {
-      setStatus("fail", "转码提交中断。");
+      setStatus("fail", "转换提交中断。");
     } finally {
       setBusy(false);
     }
-    load(true);
+    await load(true);
+    var result = document.getElementById("transcode-result");
+    if (result && window.musicopsTranscodeNote) result.textContent = window.musicopsTranscodeNote;
   }
   function renderLogs() {
-    if (!logRows.length) {
+    if (!logRows.length && !logEvents.length) {
       list.innerHTML = "";
       setStatus("", "还没有运行记录。");
       return;
     }
     setStatus("", "");
     var html = '<div class="cards">';
+    logEvents.forEach(function (event) {
+      html += '<article><h2>' + escapeText(event.phase || "旧事件") + '</h2><p class="meta"><span class="pill">' + escapeText(event.at || "") + "</span><span class=\"pill\">" + escapeText(event.task_id || "") + "</span></p><p>" + escapeText(event.message || "") + "</p></article>";
+    });
     logRows.forEach(function (task) {
       html += '<article><h2>' + escapeText(task.task_id || "") + '</h2><p class="meta"><span class="pill">' + escapeText(task.state || "") + '</span><span class="pill">' + escapeText(task.command || "") + "</span></p><p>" + escapeText(task.message || "") + "</p></article>";
     });
     list.innerHTML = html + "</div>";
+  }
+  async function rollbackMigration() {
+    var target = document.getElementById("migration-result");
+    if (!window.confirm("只撤掉迁入的曲目索引、待核对任务和令牌记录。音乐文件和冷归档会保留。")) return;
+    try {
+      var body = await postSetting("/v1/migration/rollback", {});
+      if (target) target.textContent = body.audio_unchanged ? "已回退索引，音乐文件未改动。" : "已回退。";
+      load(true);
+    } catch (err) {
+      if (target) target.textContent = err.message;
+    }
   }
   function field(name, value) {
     var row = document.createElement("div");
@@ -1118,6 +1560,12 @@ const appJS = `(function () {
         var savedPlaylistResponse = await fetch("/v1/playlists", {headers: {Accept: "application/json"}});
         var savedPlaylistBody = await savedPlaylistResponse.json();
         playlistRows = savedPlaylistBody && Array.isArray(savedPlaylistBody.playlists) ? savedPlaylistBody.playlists : [];
+        var subscriptionResponse = await fetch("/v1/subscriptions", {headers: {Accept: "application/json"}});
+        var subscriptionBody = await subscriptionResponse.json();
+        subscriptionRows = subscriptionBody && Array.isArray(subscriptionBody.subscriptions) ? subscriptionBody.subscriptions : [];
+        var migrationResponse = await fetch("/v1/migration", {headers: {Accept: "application/json"}});
+        var migrationBody = await migrationResponse.json();
+        migrationReport = migrationBody && migrationBody.ok ? migrationBody : null;
       } else if (view === "library") {
         var libraryResponse = await fetch("/v1/library", {headers: {Accept: "application/json"}});
         var libraryBody = await libraryResponse.json();
@@ -1129,6 +1577,7 @@ const appJS = `(function () {
         var logResponse = await fetch("/v1/logs", {headers: {Accept: "application/json"}});
         var logBody = await logResponse.json();
         logRows = logBody && Array.isArray(logBody.tasks) ? logBody.tasks : [];
+        logEvents = logBody && Array.isArray(logBody.events) ? logBody.events : [];
       } else {
         var response = await fetch("/v1/jobs", {headers: {Accept: "application/json"}});
         var body = await response.json();

@@ -14,6 +14,7 @@ import (
 
 	"github.com/wsdbb72/MusicOps/native/core/internal/audiorelease"
 	"github.com/wsdbb72/MusicOps/native/core/internal/taskrepo"
+	"github.com/wsdbb72/MusicOps/native/core/internal/wavflac"
 )
 
 // writeTestWAV builds a one-second 44.1kHz mono 16-bit PCM WAV with a sine
@@ -184,11 +185,11 @@ func TestTranscodeWAVToFLAC(t *testing.T) {
 	if err := decoder(context.Background(), wantOutput); err != nil {
 		t.Fatal("transcoded output did not fully decode", err)
 	}
-	sourcePCM, err := pcmHash(context.Background(), source)
+	sourcePCM, err := wavflac.PCMHash(source)
 	if err != nil {
 		t.Fatal(err)
 	}
-	outputPCM, err := pcmHash(context.Background(), wantOutput)
+	outputPCM, err := wavflac.PCMHash(wantOutput)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -234,11 +235,11 @@ func TestTranscodeWAVWithExtraChunksToFLAC(t *testing.T) {
 	if receipt.Format != "flac" {
 		t.Fatal(receipt)
 	}
-	sourcePCM, err := pcmHash(context.Background(), source)
+	sourcePCM, err := wavflac.PCMHash(source)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if receipt.PCMSHA256 != sourcePCM {
+	if receipt.PCMSHA256 != sourcePCM || receipt.AudioMD5 == "" {
 		t.Fatal("PCM hash mismatch after transcode", receipt)
 	}
 }

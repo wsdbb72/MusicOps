@@ -77,6 +77,12 @@ func (a *App) Handler() http.Handler {
 	mux.HandleFunc("POST /v1/audio/incoming", a.uploadIncoming)
 	mux.HandleFunc("POST /v1/library/transcode", a.transcodeEnqueue)
 	mux.HandleFunc("GET /v1/library/transcode", a.transcodeList)
+	mux.HandleFunc("POST /v1/library/transcode/batch", a.transcodeBatch)
+	mux.HandleFunc("GET /v1/library/transcode/batch", a.transcodeBatchStatus)
+	mux.HandleFunc("POST /v1/library/transcode/batch/control", a.transcodeBatchControl)
+	mux.HandleFunc("POST /v1/library/transcode/restore", a.restoreRecycledWAV)
+	mux.HandleFunc("GET /v1/settings/wav", a.wavSettingsHandler)
+	mux.HandleFunc("POST /v1/settings/wav", a.saveWAVSettings)
 	mux.HandleFunc("POST /v1/library/ncm/decrypt", a.decryptNCM)
 	mux.HandleFunc("GET /v1/library/tags", a.libraryTags)
 	mux.HandleFunc("POST /v1/library/tags", a.saveLibraryTags)
@@ -89,6 +95,20 @@ func (a *App) Handler() http.Handler {
 	mux.HandleFunc("POST /v1/library/artist-folders", a.artistFolderRelocate)
 	mux.HandleFunc("GET /v1/library", a.library)
 	mux.HandleFunc("GET /v1/logs", a.logs)
+	mux.HandleFunc("GET /v1/control", a.pipelineControl)
+	mux.HandleFunc("POST /v1/control", a.pipelineControl)
+	mux.HandleFunc("POST /v1/library/reindex", a.reindexLibrary)
+	mux.HandleFunc("GET /v1/library/gaps", a.libraryGaps)
+	mux.HandleFunc("POST /v1/library/workflow", a.libraryWorkflow)
+	mux.HandleFunc("POST /v1/library/metadata", a.completeMetadata)
+	mux.HandleFunc("GET /v1/library/files", a.libraryFiles)
+	mux.HandleFunc("GET /v1/library/compilations", a.compilationPreview)
+	mux.HandleFunc("POST /v1/library/compilations/merge", a.compilationMerge)
+	mux.HandleFunc("POST /v1/settings/qbittorrent/tags", a.unifyQBittorrentTags)
+	mux.HandleFunc("POST /v1/settings/servers/roon/test", a.testRoon)
+	mux.HandleFunc("GET /v1/migration", a.migrationStatus)
+	mux.HandleFunc("POST /v1/migration/rollback", a.migrationRollback)
+	mux.HandleFunc("GET /v1/settings/updates", a.updateSettings)
 	mux.HandleFunc("GET /v1/sites", a.sites)
 	mux.HandleFunc("POST /v1/sites", a.saveSites)
 	mux.HandleFunc("POST /v1/tokens/recheck", a.recheckToken)
@@ -127,6 +147,13 @@ func (a *App) Handler() http.Handler {
 	mux.HandleFunc("POST /v1/settings/servers/navidrome/test", a.testNavidrome)
 	mux.HandleFunc("GET /v1/playlists", a.listPlaylists)
 	mux.HandleFunc("POST /v1/playlists", a.savePlaylist)
+	mux.HandleFunc("POST /v1/playlists/locate", a.locatePlaylist)
+	mux.HandleFunc("POST /v1/playlists/fetch", a.fetchPlaylist)
+	mux.HandleFunc("GET /v1/subscriptions", a.listSubscriptions)
+	mux.HandleFunc("POST /v1/subscriptions", a.saveSubscription)
+	mux.HandleFunc("POST /v1/subscriptions/check", a.checkSubscription)
+	mux.HandleFunc("POST /v1/subscriptions/pause", a.pauseSubscription)
+	mux.HandleFunc("POST /v1/subscriptions/delete", a.deleteSubscription)
 	mux.HandleFunc("GET /v1/jobs/{id}/playlist", a.jobPlaylistHandler)
 	mux.HandleFunc("POST /v1/jobs/{id}/playlist", a.saveJobPlaylist)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -269,7 +296,7 @@ func (a *App) archiveRecord(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "code": "INVALID_REQUEST"})
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "found": found, "record": record})
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "found": found, "record": publicRecord(record)})
 }
 
 func (a *App) startSearch(w http.ResponseWriter, r *http.Request) {
@@ -503,10 +530,36 @@ func (a *App) releaseAudio(w http.ResponseWriter, r *http.Request) {
 	}
 	// One request id per (root, track): a second track for the same root is a
 	// separate publish, not a replay of the first track's receipt.
+	sourceName := body.SourceName
+	artist, album, title := body.Artist, body.Album, body.Title
+	var compared identityCompare
+	var identified bool
+	if strings.EqualFold(filepath.Ext(sourceName), ".wav") || strings.EqualFold(filepath.Ext(sourceName), ".flac") {
+		var convErr error
+		compared, convErr = a.compareIncomingIdentity(incoming, sourceName)
+		if convErr != nil {
+			writeJSON(w, http.StatusUnprocessableEntity, map[string]any{"ok": false, "code": "AUDIO_REJECTED", "error": "入库识别没有读到音频标签", "downloaded": false, "library_published": false, "production_verified": false, "needs_review": true})
+			return
+		}
+		identified = true
+		sourceName = compared.PublishedName
+		if artist == "" && album == "" && title == "" {
+			if compared.After.NeedsReview {
+				writeJSON(w, http.StatusUnprocessableEntity, map[string]any{
+					"ok": false, "code": "NEEDS_REVIEW", "error": compared.After.Reason,
+					"downloaded": false, "library_published": false, "production_verified": false,
+					"needs_review": true, "identity_confirmed": false,
+					"before": compared.Before, "after": compared.After,
+				})
+				return
+			}
+			artist, album, title = compared.After.Artist, compared.After.Album, compared.After.Title
+		}
+	}
 	sum := sha256.Sum256([]byte("album-audio/" + root + "/track/" + strconv.Itoa(body.Track)))
 	result, err := audiorelease.Release(r.Context(), a.engine, audiorelease.Request{
-		RequestID: "audio-" + hex.EncodeToString(sum[:16]), RootID: root, Artist: body.Artist, Album: body.Album, Title: body.Title,
-		Track: body.Track, SourceName: body.SourceName, Origin: body.Origin, Incoming: incoming, Library: library, Decoder: audiorelease.SystemDecoder(),
+		RequestID: "audio-" + hex.EncodeToString(sum[:16]), RootID: root, Artist: artist, Album: album, Title: title,
+		Track: body.Track, SourceName: sourceName, Origin: body.Origin, Incoming: incoming, Library: library, Decoder: audiorelease.SystemDecoder(),
 	})
 	if err != nil {
 		status, code := http.StatusBadRequest, "INVALID_REQUEST"
@@ -562,11 +615,19 @@ func (a *App) releaseAudio(w http.ResponseWriter, r *http.Request) {
 	if recorded.Task != nil {
 		publishTask = recorded.Task.ID
 	}
-	writeJSON(w, http.StatusOK, map[string]any{
+	response := map[string]any{
 		"ok": true, "format": result.Format, "decode_state": result.DecodeState, "sha256": result.SHA256,
 		"origin": result.Origin, "source_name": result.SourceName, "stage": stage, "publish_task_id": publishTask,
 		"downloaded": result.Downloaded, "library_published": result.LibraryPublished, "production_verified": false,
-	})
+		"identity_confirmed": false,
+	}
+	if identified {
+		response["needs_review"] = compared.After.NeedsReview
+		response["tag_source"] = compared.After.TagSource
+		response["before"] = compared.Before
+		response["after"] = compared.After
+	}
+	writeJSON(w, http.StatusOK, response)
 }
 
 // publishAudio queues a publish task for a root job. Two shapes are

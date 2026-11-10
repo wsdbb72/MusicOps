@@ -59,6 +59,7 @@ type lyricsSettings struct {
 	CandidatesPath string `json:"candidates_path"`
 	CoverPath      string `json:"cover_path"`
 	AuthHeader     string `json:"auth_header"`
+	WriteMode      string `json:"write_mode,omitempty"`
 	UpdatedNS      int64  `json:"updated_ns"`
 }
 
@@ -69,6 +70,7 @@ func defaultLyricsSettings() lyricsSettings {
 	return lyricsSettings{
 		BaseURL: "https://lyrics.example.invalid", LyricsPath: "/lyrics",
 		CandidatesPath: "/jsonapi", CoverPath: "/cover", AuthHeader: "Authorization",
+		WriteMode: "sidecar",
 	}
 }
 
@@ -122,6 +124,9 @@ func validateLyricsSettings(in lyricsSettings) error {
 	if !tokenPattern.MatchString(in.AuthHeader) {
 		return errors.New("鉴权请求头名无效")
 	}
+	if in.WriteMode != "" && in.WriteMode != "sidecar" && in.WriteMode != "embedded" {
+		return errors.New("资源写入模式仅支持 sidecar 或 embedded")
+	}
 	return nil
 }
 
@@ -153,7 +158,8 @@ func (a *App) lyricsSettingsHandler(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "lyrics": map[string]any{
 		"base_url": settings.BaseURL, "lyrics_path": settings.LyricsPath,
 		"candidates_path": settings.CandidatesPath, "cover_path": settings.CoverPath,
-		"auth_header": settings.AuthHeader, "auth_saved": saved, "auth_revision": revision,
+		"auth_header": settings.AuthHeader, "write_mode": coverWriteMode(settings.WriteMode, settings),
+		"auth_saved": saved, "auth_revision": revision,
 	}})
 }
 
@@ -167,6 +173,7 @@ func (a *App) saveLyrics(w http.ResponseWriter, r *http.Request) {
 		CandidatesPath string `json:"candidates_path"`
 		CoverPath      string `json:"cover_path"`
 		AuthHeader     string `json:"auth_header"`
+		WriteMode      string `json:"write_mode"`
 		Authorization  string `json:"authorization"`
 	}
 	if err := decode(r, &body); err != nil || strings.ContainsAny(body.Authorization, "\r\n\x00") {
@@ -193,6 +200,9 @@ func (a *App) saveLyrics(w http.ResponseWriter, r *http.Request) {
 	}
 	if body.AuthHeader != "" {
 		next.AuthHeader = body.AuthHeader
+	}
+	if body.WriteMode == "sidecar" || body.WriteMode == "embedded" {
+		next.WriteMode = body.WriteMode
 	}
 	if err := validateLyricsSettings(next); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "code": "INVALID_REQUEST", "error": err.Error()})
@@ -222,7 +232,8 @@ func (a *App) saveLyrics(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "lyrics": map[string]any{
 		"base_url": saved.BaseURL, "lyrics_path": saved.LyricsPath,
 		"candidates_path": saved.CandidatesPath, "cover_path": saved.CoverPath,
-		"auth_header": saved.AuthHeader, "auth_saved": authSaved, "auth_revision": revision,
+		"auth_header": saved.AuthHeader, "write_mode": coverWriteMode(saved.WriteMode, saved),
+		"auth_saved": authSaved, "auth_revision": revision,
 	}})
 }
 

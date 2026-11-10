@@ -92,6 +92,9 @@ func (a *App) search(ctx context.Context, execution *scheduler.Execution, payloa
 			return scheduler.Outcome{}, err
 		}
 	}
+	if err = a.waitIfPaused(ctx); err != nil {
+		return scheduler.Outcome{}, err
+	}
 	report, evidence, adviseClass, err := a.observe(ctx, execution, *job, plan, token)
 	if errors.Is(err, scheduler.ErrCancelled) {
 		return scheduler.Outcome{}, a.stop(execution)
@@ -115,9 +118,19 @@ func (a *App) search(ctx context.Context, execution *scheduler.Execution, payloa
 	if err != nil {
 		return scheduler.Outcome{}, err
 	}
+	if alias, ok := a.researchAlias(ctx, *job, plan, decision); ok {
+		decision.Action = searchdecision.ActionResearch
+		plan.Query = alias
+		if encoded, err := json.Marshal(plan); err == nil {
+			payload = encoded
+		}
+	}
 	complete, err := completion(decision)
 	if err != nil {
 		return scheduler.Outcome{}, err
+	}
+	if decision.Action == searchdecision.ActionResearch && job.AIResearchCount == 0 && strings.TrimSpace(plan.Query) != "" {
+		complete.Message = "AI 找到别名，只用于重新检索；尚未下载，也不能据此通过核对"
 	}
 	if adviseClass == "infrastructure" && (decision.Action == searchdecision.ActionReviewSearch || decision.Action == searchdecision.ActionReviewCandidate) {
 		complete.Message = "检索服务暂时没有完成自动核对；尚未下载"
@@ -157,7 +170,11 @@ func (a *App) observe(ctx context.Context, execution *scheduler.Execution, job w
 	}
 	report := searchdecision.Report{
 		Scene: job.Scene, IdentityConfirmed: plan.Identity.IdentityConfirmed, StreamingEnabled: plan.StreamingEnabled,
-		RetryCount: job.SearchRetryCount, Query: plan.Query, Sites: make([]searchdecision.SiteReport, 0, 4),
+		RetryCount: job.SearchRetryCount, AIResearchCount: job.AIResearchCount, Query: plan.Query, Sites: make([]searchdecision.SiteReport, 0, 4),
+	}
+	solverURL := ""
+	if settings, err := a.loadSolverSettings(); err == nil && settings.Enabled {
+		solverURL = settings.BaseURL
 	}
 	evidence := []workflow.EvidenceInput{}
 	var picks []identityPick
@@ -174,14 +191,14 @@ func (a *App) observe(ctx context.Context, execution *scheduler.Execution, job w
 			return report, nil, "", err
 		}
 		observation, err := a.searcher.Search(ctx, trackersearch.Query{
-			Site: site, Text: plan.Query, Cookie: a.cookieFor(plan.RootJobID, site), Synthetic: plan.Synthetic, BaseURL: plan.BaseURL,
+			Site: site, Text: plan.Query, Cookie: a.cookieFor(plan.RootJobID, site), Synthetic: plan.Synthetic, BaseURL: plan.BaseURL, SolverURL: solverURL,
 		})
 		if err != nil {
 			return report, nil, "", err
 		}
 		if observation.Status == "OK" && !observation.SearchComplete && observation.Pages != nil && observation.Page > 0 && *observation.Pages > observation.Page {
 			next, nextErr := a.searcher.Search(ctx, trackersearch.Query{
-				Site: site, Text: plan.Query, Page: observation.Page + 1, Cookie: a.cookieFor(plan.RootJobID, site), Synthetic: plan.Synthetic, BaseURL: plan.BaseURL,
+				Site: site, Text: plan.Query, Page: observation.Page + 1, Cookie: a.cookieFor(plan.RootJobID, site), Synthetic: plan.Synthetic, BaseURL: plan.BaseURL, SolverURL: solverURL,
 			})
 			if nextErr == nil && next.Status == "OK" {
 				observation.Candidates = append(observation.Candidates, next.Candidates...)
@@ -246,7 +263,7 @@ func summarizeSite(plan SearchPlan, site string, observation trackersearch.Obser
 	for _, candidate := range observation.Candidates {
 		hit := releaseHit(candidate)
 		pool = append(pool, reviewai.Candidate{ID: hit.ID, Title: hit.Title, Artists: hit.Artists, Aliases: hit.Aliases, Edition: hit.Edition, GroupID: hit.GroupID, Format: hit.Format, Year: hit.Year})
-		if !reviewmatch.Compare(plan.ExpectedTitle, plan.ExpectedArtist, hit).Pass {
+		if !reviewmatch.CompareSource(site, plan.ExpectedTitle, plan.ExpectedArtist, hit).Pass {
 			continue
 		}
 		row.Exact = true

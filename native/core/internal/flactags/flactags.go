@@ -582,3 +582,162 @@ func writeFileAtomic(dst string, data []byte, src string) error {
 	}
 	return nil
 }
+
+// EmbedFrontCover returns a copy of the FLAC with a type-3 front cover.
+// Existing front covers are replaced. Other pictures, comments and audio
+// bytes stay. Width and height are filled when the image header has them.
+func EmbedFrontCover(data, image []byte) ([]byte, error) {
+	if len(image) < 32 || len(image) > 8<<20 {
+		return nil, errors.New("flactags: cover is empty or too large")
+	}
+	mime := coverMIME(image)
+	if mime == "" {
+		return nil, errors.New("flactags: cover must be JPEG or PNG")
+	}
+	pf, err := parseFLAC(data)
+	if err != nil {
+		return nil, err
+	}
+	payload := frontCoverPayload(mime, image)
+	blocks := make([]block, 0, len(pf.blocks)+1)
+	for _, item := range pf.blocks {
+		if item.typ == blockPicture && pictureType(item.data) == 3 {
+			continue
+		}
+		blocks = append(blocks, item)
+	}
+	blocks = append(blocks, block{typ: blockPicture, data: payload})
+	var out bytes.Buffer
+	out.WriteString(flacMagic)
+	for i, item := range blocks {
+		if err := writeBlockHeader(&out, item.typ, len(item.data), i == len(blocks)-1); err != nil {
+			return nil, err
+		}
+		out.Write(item.data)
+	}
+	out.Write(pf.audio)
+	return out.Bytes(), nil
+}
+
+// FrontCover returns the type-3 picture bytes, or nil when there is none.
+func FrontCover(data []byte) []byte {
+	pf, err := parseFLAC(data)
+	if err != nil {
+		return nil
+	}
+	for _, item := range pf.blocks {
+		if item.typ == blockPicture && pictureType(item.data) == 3 {
+			if picture := pictureBytes(item.data); picture != nil {
+				return picture
+			}
+		}
+	}
+	return nil
+}
+
+func coverMIME(image []byte) string {
+	if len(image) >= 2 && image[0] == 0xff && image[1] == 0xd8 {
+		return "image/jpeg"
+	}
+	if len(image) >= 8 && string(image[:8]) == "\x89PNG\r\n\x1a\n" {
+		return "image/png"
+	}
+	return ""
+}
+
+func frontCoverPayload(mime string, image []byte) []byte {
+	width, height := imageSize(image)
+	desc := "MusicOps approved front cover"
+	var buf bytes.Buffer
+	writeU32BE(&buf, 3)
+	writeU32BE(&buf, uint32(len(mime)))
+	buf.WriteString(mime)
+	writeU32BE(&buf, uint32(len(desc)))
+	buf.WriteString(desc)
+	writeU32BE(&buf, uint32(width))
+	writeU32BE(&buf, uint32(height))
+	writeU32BE(&buf, 24)
+	writeU32BE(&buf, 0)
+	writeU32BE(&buf, uint32(len(image)))
+	buf.Write(image)
+	return buf.Bytes()
+}
+
+func writeU32BE(buf *bytes.Buffer, v uint32) {
+	var b [4]byte
+	binary.BigEndian.PutUint32(b[:], v)
+	buf.Write(b[:])
+}
+
+func pictureType(data []byte) uint32 {
+	if len(data) < 4 {
+		return 0xffffffff
+	}
+	return binary.BigEndian.Uint32(data[:4])
+}
+
+func pictureBytes(data []byte) []byte {
+	r := bytes.NewReader(data)
+	readU32 := func() (uint32, bool) {
+		var b [4]byte
+		if _, err := io.ReadFull(r, b[:]); err != nil {
+			return 0, false
+		}
+		return binary.BigEndian.Uint32(b[:]), true
+	}
+	if _, ok := readU32(); !ok {
+		return nil
+	}
+	mimeLen, ok := readU32()
+	if !ok || !skipReader(r, mimeLen) {
+		return nil
+	}
+	descLen, ok := readU32()
+	if !ok || !skipReader(r, descLen) {
+		return nil
+	}
+	for i := 0; i < 4; i++ {
+		if _, ok = readU32(); !ok {
+			return nil
+		}
+	}
+	dataLen, ok := readU32()
+	if !ok || dataLen == 0 || dataLen > 8<<20 {
+		return nil
+	}
+	out := make([]byte, dataLen)
+	if _, err := io.ReadFull(r, out); err != nil {
+		return nil
+	}
+	return out
+}
+
+func skipReader(r *bytes.Reader, n uint32) bool {
+	if n > 1<<20 {
+		return false
+	}
+	_, err := r.Seek(int64(n), io.SeekCurrent)
+	return err == nil
+}
+
+func imageSize(image []byte) (int, int) {
+	if len(image) >= 24 && string(image[:8]) == "\x89PNG\r\n\x1a\n" {
+		return int(binary.BigEndian.Uint32(image[16:20])), int(binary.BigEndian.Uint32(image[20:24]))
+	}
+	for i := 0; i+8 < len(image); i++ {
+		if image[i] != 0xff {
+			continue
+		}
+		marker := image[i+1]
+		if marker != 0xc0 && marker != 0xc1 && marker != 0xc2 {
+			continue
+		}
+		if i+9 >= len(image) {
+			return 0, 0
+		}
+		height := int(binary.BigEndian.Uint16(image[i+5 : i+7]))
+		width := int(binary.BigEndian.Uint16(image[i+7 : i+9]))
+		return width, height
+	}
+	return 0, 0
+}

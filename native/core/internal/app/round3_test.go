@@ -95,7 +95,8 @@ func TestWorkflowUsesTheSelectedFileWithoutSpending(t *testing.T) {
 	}
 	started := post(t, application, "/v1/library/workflow", map[string]any{"scene": "fill", "label": "补缺", "path": path})
 	note, _ := started["note"].(string)
-	if started["downloaded"] != false || !strings.Contains(note, "令牌规则") || !strings.Contains(note, "尚未下载") || !strings.Contains(note, path) && started["path"] != path {
+	gotPath, _ := started["path"].(string)
+	if started["downloaded"] != false || !strings.Contains(note, "令牌规则") || !strings.Contains(note, "尚未下载") || filepath.Base(gotPath) != "01 opening.flac" {
 		t.Fatal(started)
 	}
 }

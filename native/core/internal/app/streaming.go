@@ -18,6 +18,10 @@ import (
 
 // Streaming fallback for fallback-stage process jobs.
 //
+// 0.4.31 reached TIDAL, Apple Music, QQ Music and NetEase through external
+// go-music-dl and musicdl processes. Those programs are not part of this
+// core. A missing engine stays "未接入" and is never reported as a download.
+//
 // The walk follows downloadpolicy order (tidal, applemusic, qqmusic,
 // netease, playlist). The four platform sources have no credentials or
 // engine in this core, so each attempt is honestly recorded as no_result

@@ -422,7 +422,11 @@ const appJS = `(function () {
       '<h2>识别歌单链接</h2><p class="meta">只从链接里读出平台和歌单 ID，不访问平台，也不拉取曲目。</p>' +
       '<label>分享链接或歌单 ID<input type="text" id="playlist-link" placeholder="https://music.163.com/playlist?id=123"></label>' +
       '<p><button type="button" id="locate-playlist">识别链接</button></p><p id="playlist-locate-result" class="meta"></p>' +
-      '<h2>订阅已存歌单</h2><p class="meta">按间隔重新读取本机已存歌单。首次默认只记下现有曲目；之后的新增曲目会创建任务。删除的曲目不会从音乐库移除，也不会向平台发请求。</p>' +
+      '<h2>拉取公开歌单</h2><p class="meta">只读取 QQ 音乐或酷我的公开曲目名单。不下载音频。非公开歌单会如实失败，不会当成已导入。</p>' +
+      '<label>平台<select id="remote-platform"><option value="qqmusic">QQ 音乐</option><option value="kuwo">酷我</option></select></label>' +
+      '<label>歌单数字 ID<input type="text" id="remote-playlist-id" placeholder="例如 123456"></label>' +
+      '<p><button type="button" id="fetch-playlist">拉取并订阅</button></p><p id="playlist-fetch-result" class="meta"></p>' +
+      '<h2>订阅已存歌单</h2><p class="meta">未绑定平台时只重新读取本机歌单。绑定了公开歌单后，检查会向该平台读取新增曲目。首次默认只记下现有曲目。删除的曲目不会从音乐库移除。</p>' +
       '<label>歌单<select id="subscription-playlist"><option value="">选择已存歌单</option>' + playlistRows.map(function (row) { return '<option value="' + escapeText(row.id) + '">' + escapeText(row.name || row.id) + "</option>"; }).join("") + '</select></label>' +
       '<label>间隔（小时）<input type="number" id="subscription-hours" min="1" max="168" value="6"></label>' +
       '<label><input type="checkbox" id="subscription-existing"> 现有曲目也入库</label>' +
@@ -503,6 +507,8 @@ const appJS = `(function () {
     if (savePlaylistButton) savePlaylistButton.addEventListener("click", savePlaylist);
     var locatePlaylistButton = document.getElementById("locate-playlist");
     if (locatePlaylistButton) locatePlaylistButton.addEventListener("click", locatePlaylist);
+    var fetchPlaylistButton = document.getElementById("fetch-playlist");
+    if (fetchPlaylistButton) fetchPlaylistButton.addEventListener("click", fetchRemotePlaylist);
     var saveSubscriptionButton = document.getElementById("save-subscription");
     if (saveSubscriptionButton) saveSubscriptionButton.addEventListener("click", saveSubscription);
     document.querySelectorAll("[data-sub-check]").forEach(function (button) {
@@ -914,6 +920,24 @@ const appJS = `(function () {
       setStatus("ok", body.note || "已识别。");
     } catch (err) {
       setStatus("fail", "识别失败。" + (err && err.message ? "（" + err.message + "）" : ""));
+    } finally {
+      setBusy(false);
+    }
+  }
+  async function fetchRemotePlaylist() {
+    if (loading) return;
+    var id = document.getElementById("remote-playlist-id").value.trim();
+    if (!id) { setStatus("fail", "先填写歌单数字 ID。"); return; }
+    setBusy(true);
+    setStatus("info", "正在读取公开歌单");
+    try {
+      var body = await postSetting("/v1/playlists/fetch", {platform: document.getElementById("remote-platform").value, playlist_id: id, save: true, subscribe: true});
+      var result = document.getElementById("playlist-fetch-result");
+      if (result) result.textContent = body.note || "";
+      setStatus("ok", body.note || "已读取曲目名单。");
+      load();
+    } catch (err) {
+      setStatus("fail", "没有读到歌单。" + (err && err.message ? "（" + err.message + "）" : ""));
     } finally {
       setBusy(false);
     }

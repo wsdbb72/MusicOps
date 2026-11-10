@@ -1,6 +1,7 @@
 package app
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -13,9 +14,10 @@ import (
 	"github.com/wsdbb72/MusicOps/native/core/internal/workflow"
 )
 
-// Playlist subscriptions re-read a saved local playlist. They do not call
-// a streaming platform. New tracks are queued as playlist-scene jobs; the
-// first check can record the current tracks without queueing them.
+// Playlist subscriptions re-read a saved local playlist. A row that records
+// a public QQ Music or Kuwo id refreshes that playlist first. New tracks are
+// queued as playlist-scene jobs; the first check can record the current
+// tracks without queueing them. Nothing here downloads audio.
 
 type playlistSubscription struct {
 	PlaylistID      string   `json:"playlist_id"`
@@ -24,6 +26,8 @@ type playlistSubscription struct {
 	IncludeExisting bool     `json:"include_existing"`
 	Paused          bool     `json:"paused"`
 	Seen            []string `json:"seen"`
+	Platform        string   `json:"platform,omitempty"`
+	RemoteID        string   `json:"remote_id,omitempty"`
 	LastChecked     string   `json:"last_checked,omitempty"`
 	NextCheck       string   `json:"next_check,omitempty"`
 	LastResult      string   `json:"last_result,omitempty"`
@@ -81,6 +85,8 @@ func (a *App) saveSubscription(w http.ResponseWriter, r *http.Request) {
 		PlaylistID      string `json:"playlist_id"`
 		IntervalHours   int    `json:"interval_hours"`
 		IncludeExisting bool   `json:"include_existing"`
+		Platform        string `json:"platform"`
+		RemoteID        string `json:"remote_id"`
 	}
 	if err := decode(r, &body); err != nil || !playlistSlugPattern.MatchString(body.PlaylistID) {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "code": "INVALID_REQUEST"})
@@ -95,6 +101,10 @@ func (a *App) saveSubscription(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "code": "INVALID_REQUEST", "error": err.Error()})
 		return
 	}
+	if body.Platform != "" && (remotePlatforms[body.Platform].Host == "" || !remotePlaylistID.MatchString(body.RemoteID)) {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "code": "INVALID_REQUEST", "error": "只订阅公开的 QQ 音乐或酷我歌单"})
+		return
+	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	rows, err := a.loadSubscriptions()
@@ -107,6 +117,7 @@ func (a *App) saveSubscription(w http.ResponseWriter, r *http.Request) {
 	row := playlistSubscription{
 		PlaylistID: body.PlaylistID, Name: name, IntervalHours: body.IntervalHours,
 		IncludeExisting: body.IncludeExisting, NextCheck: next, LastResult: "已订阅，尚未检查",
+		Platform: body.Platform, RemoteID: body.RemoteID,
 	}
 	if name == "" {
 		row.Name = body.PlaylistID
@@ -119,6 +130,10 @@ func (a *App) saveSubscription(w http.ResponseWriter, r *http.Request) {
 			row.Paused = rows[i].Paused
 			row.LastChecked = rows[i].LastChecked
 			row.LastResult = rows[i].LastResult
+			if body.Platform == "" {
+				row.Platform = rows[i].Platform
+				row.RemoteID = rows[i].RemoteID
+			}
 			rows[i] = row
 			replaced = true
 		}
@@ -256,9 +271,22 @@ func (a *App) runSubscriptionCheck(playlistID string, manual bool) (map[string]a
 	}
 	a.mu.Unlock()
 
-	tracks, _, err := a.readSavedPlaylist(playlistID)
-	if err != nil {
-		return nil, err
+	var tracks []playlistTrack
+	if row.Platform != "" && row.RemoteID != "" {
+		remote, remoteErr := a.fetchRemotePlaylist(context.Background(), row.Platform, row.RemoteID, a.playlistBase(row.Platform))
+		if remoteErr != nil {
+			return nil, remoteErr
+		}
+		tracks = remote.Tracks
+		if writeErr := a.writeSavedPlaylist(playlistID, remote.Name, tracks); writeErr != nil {
+			return nil, writeErr
+		}
+	} else {
+		var readErr error
+		tracks, _, readErr = a.readSavedPlaylist(playlistID)
+		if readErr != nil {
+			return nil, readErr
+		}
 	}
 	seen := map[string]bool{}
 	for _, key := range row.Seen {

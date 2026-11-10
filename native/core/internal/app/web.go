@@ -40,8 +40,10 @@ const appJS = `(function () {
   var librarySettings = null;
   var serverSettings = null;
   var playlistRows = [];
+  var subscriptionRows = [];
   var streamingOrder = [];
   var libraryRows = [];
+  var duplicateRows = [];
   var transcodeRows = [];
   var logRows = [];
   var selectedJobs = {};
@@ -390,12 +392,28 @@ const appJS = `(function () {
     var rows = playlistRows.map(function (row) {
       return '<p class="meta">' + escapeText((row.name || row.id) + "（" + row.track_count + " 首）") + (row.error ? " · " + escapeText(row.error) : "") + '</p>';
     }).join("");
-    return '<article><h2>歌单</h2><p class="meta">导入 .m3u/.m3u8（只读 EXTINF 里的艺人/歌名，文件里的链接不会被打开）。上传保存到歌单库，可在搜索时选用；回退时读该歌单的曲目。</p>' +
-      '<label>歌单名称<input type="text" id="playlist-name" placeholder="留空用文件里的 #PLAYLIST 名或文件名"></label>' +
-      '<label>上传歌单文件<input type="file" id="playlist-file" accept=".m3u,.m3u8"></label>' +
-      '<label>或粘贴歌单内容<textarea id="playlist-content" rows="4" placeholder="#EXTINF:0,艺人 - 歌名&#10;file:///…"></textarea></label>' +
+    var subs = subscriptionRows.map(function (row) {
+      return '<p class="meta">' + escapeText((row.name || row.playlist_id) + " · 每 " + row.interval_hours + " 小时 · " + (row.paused ? "已暂停 · " : "") + (row.last_result || "")) +
+        ' <button type="button" data-sub-check="' + escapeText(row.playlist_id) + '">立即检查</button>' +
+        ' <button type="button" data-sub-pause="' + escapeText(row.playlist_id) + '" data-paused="' + (row.paused ? "1" : "0") + '">' + (row.paused ? "恢复" : "暂停") + '</button>' +
+        ' <button type="button" data-sub-delete="' + escapeText(row.playlist_id) + '">删除</button></p>';
+    }).join("");
+    return '<article><h2>歌单</h2><p class="meta">可导入 .m3u、.m3u8、.json、.csv、.tsv、.txt。只读取歌名、艺人和专辑列，文件里的链接不会被打开。保存后可在搜索时选用。</p>' +
+      '<label>歌单名称<input type="text" id="playlist-name" placeholder="留空用文件里的名称"></label>' +
+      '<label>文本顺序（仅 TXT）<select id="playlist-order"><option value="artist-title">歌手 - 歌名</option><option value="title-artist">歌名 - 歌手</option></select></label>' +
+      '<label>上传歌单文件<input type="file" id="playlist-file" accept=".m3u,.m3u8,.json,.csv,.tsv,.txt"></label>' +
+      '<label>或粘贴歌单内容<textarea id="playlist-content" rows="4" placeholder="歌手 - 歌名，或带表头的 CSV / JSON"></textarea></label>' +
       '<p><button type="button" id="save-playlist" class="primary">保存歌单</button></p>' +
-      (rows || '<p class="meta">还没有已存歌单。</p>') + '</article>';
+      (rows || '<p class="meta">还没有已存歌单。</p>') +
+      '<h2>识别歌单链接</h2><p class="meta">只从链接里读出平台和歌单 ID，不访问平台，也不拉取曲目。</p>' +
+      '<label>分享链接或歌单 ID<input type="text" id="playlist-link" placeholder="https://music.163.com/playlist?id=123"></label>' +
+      '<p><button type="button" id="locate-playlist">识别链接</button></p><p id="playlist-locate-result" class="meta"></p>' +
+      '<h2>订阅已存歌单</h2><p class="meta">按间隔重新读取本机已存歌单。首次默认只记下现有曲目；之后的新增曲目会创建任务。删除的曲目不会从音乐库移除，也不会向平台发请求。</p>' +
+      '<label>歌单<select id="subscription-playlist"><option value="">选择已存歌单</option>' + playlistRows.map(function (row) { return '<option value="' + escapeText(row.id) + '">' + escapeText(row.name || row.id) + "</option>"; }).join("") + '</select></label>' +
+      '<label>间隔（小时）<input type="number" id="subscription-hours" min="1" max="168" value="6"></label>' +
+      '<label><input type="checkbox" id="subscription-existing"> 现有曲目也入库</label>' +
+      '<p><button type="button" id="save-subscription" class="primary">订阅</button></p>' +
+      (subs || '<p class="meta">还没有订阅。</p>') + '</article>';
   }
   function renderSettings() {
     if (!downloadSettings && !cookieSettings.length && !aiSettings && !qbtSettings && !solverSettings && !lyricsSettings && !discogsSettings && !librarySettings && !serverSettings) {
@@ -455,6 +473,19 @@ const appJS = `(function () {
     if (testNavidromeButton) testNavidromeButton.addEventListener("click", testNavidrome);
     var savePlaylistButton = document.getElementById("save-playlist");
     if (savePlaylistButton) savePlaylistButton.addEventListener("click", savePlaylist);
+    var locatePlaylistButton = document.getElementById("locate-playlist");
+    if (locatePlaylistButton) locatePlaylistButton.addEventListener("click", locatePlaylist);
+    var saveSubscriptionButton = document.getElementById("save-subscription");
+    if (saveSubscriptionButton) saveSubscriptionButton.addEventListener("click", saveSubscription);
+    document.querySelectorAll("[data-sub-check]").forEach(function (button) {
+      button.addEventListener("click", function () { checkSubscription(button.getAttribute("data-sub-check")); });
+    });
+    document.querySelectorAll("[data-sub-pause]").forEach(function (button) {
+      button.addEventListener("click", function () { pauseSubscription(button.getAttribute("data-sub-pause"), button.getAttribute("data-paused") !== "1"); });
+    });
+    document.querySelectorAll("[data-sub-delete]").forEach(function (button) {
+      button.addEventListener("click", function () { deleteSubscription(button.getAttribute("data-sub-delete")); });
+    });
     var run = document.getElementById("run-preflight");
     if (run) run.addEventListener("click", preflight);
   }
@@ -793,9 +824,10 @@ const appJS = `(function () {
         var form = new FormData();
         form.append("file", fileInput.files[0]);
         if (name) form.append("name", name);
+        form.append("text_order", document.getElementById("playlist-order").value);
         response = await fetch("/v1/playlists", {method: "POST", body: form});
       } else if (content.trim()) {
-        response = await fetch("/v1/playlists", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({content: content, name: name})});
+        response = await fetch("/v1/playlists", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({content: content, name: name, text_order: document.getElementById("playlist-order").value})});
       } else {
         setStatus("fail", "先上传歌单文件或粘贴歌单内容。");
         return;
@@ -809,6 +841,81 @@ const appJS = `(function () {
       load();
     } catch (err) {
       setStatus("fail", "保存中断。");
+    } finally {
+      setBusy(false);
+    }
+  }
+  async function locatePlaylist() {
+    if (loading) return;
+    var text = document.getElementById("playlist-link").value.trim();
+    if (!text) { setStatus("fail", "先粘贴歌单链接或 ID。"); return; }
+    setBusy(true);
+    setStatus("info", "正在识别链接");
+    try {
+      var body = await postSetting("/v1/playlists/locate", {text: text, platform: "auto"});
+      var lines = (body.playlists || []).map(function (row) {
+        return (row.name || row.platform) + (row.playlist_id ? " · " + row.playlist_id : "") + " · " + (row.note || "");
+      });
+      var result = document.getElementById("playlist-locate-result");
+      if (result) result.textContent = lines.join("；") || body.note || "";
+      setStatus("ok", body.note || "已识别。");
+    } catch (err) {
+      setStatus("fail", "识别失败。" + (err && err.message ? "（" + err.message + "）" : ""));
+    } finally {
+      setBusy(false);
+    }
+  }
+  async function saveSubscription() {
+    if (loading) return;
+    var playlistID = document.getElementById("subscription-playlist").value;
+    if (!playlistID) { setStatus("fail", "先选择已存歌单。"); return; }
+    setBusy(true);
+    try {
+      await postSetting("/v1/subscriptions", {playlist_id: playlistID, interval_hours: parseInt(document.getElementById("subscription-hours").value, 10) || 6, include_existing: document.getElementById("subscription-existing").checked});
+      setStatus("ok", "已订阅。首次检查前不会创建任务。");
+      load();
+    } catch (err) {
+      setStatus("fail", "订阅失败。" + (err && err.message ? "（" + err.message + "）" : ""));
+    } finally {
+      setBusy(false);
+    }
+  }
+  async function checkSubscription(playlistID) {
+    if (loading || !playlistID) return;
+    setBusy(true);
+    setStatus("info", "正在检查订阅");
+    try {
+      var body = await postSetting("/v1/subscriptions/check", {playlist_id: playlistID});
+      setStatus("ok", body.message || "检查完成。");
+      load();
+    } catch (err) {
+      setStatus("fail", "检查失败。" + (err && err.message ? "（" + err.message + "）" : ""));
+    } finally {
+      setBusy(false);
+    }
+  }
+  async function pauseSubscription(playlistID, paused) {
+    if (loading || !playlistID) return;
+    setBusy(true);
+    try {
+      await postSetting("/v1/subscriptions/pause", {playlist_id: playlistID, paused: paused});
+      setStatus("ok", paused ? "已暂停订阅。" : "已恢复订阅。");
+      load();
+    } catch (err) {
+      setStatus("fail", "操作失败。");
+    } finally {
+      setBusy(false);
+    }
+  }
+  async function deleteSubscription(playlistID) {
+    if (loading || !playlistID) return;
+    setBusy(true);
+    try {
+      await postSetting("/v1/subscriptions/delete", {playlist_id: playlistID});
+      setStatus("ok", "已删除订阅。");
+      load();
+    } catch (err) {
+      setStatus("fail", "删除失败。");
     } finally {
       setBusy(false);
     }
@@ -842,7 +949,19 @@ const appJS = `(function () {
     }
   }
   function renderLibrary() {
-    var html = '<div class="cards"><article><form id="transcode-form"><h2>转码为 FLAC</h2>' +
+    var duplicateHtml = "";
+    if (duplicateRows.length) {
+      duplicateRows.forEach(function (group) {
+        duplicateHtml += '<p>' + escapeText((group.artists || []).join("、") + " / " + (group.album || "")) + " · " + escapeText(group.state || "") + " · " + escapeText(group.reason || "") +
+          (group.state === "ready" ? ' <button type="button" data-merge="' + escapeText(group.group_id) + '">合并重复项</button>' : "") + "</p>";
+      });
+    } else {
+      duplicateHtml = '<p class="meta">尚未扫描，或没有可合并的重复项。</p>';
+    }
+    var html = '<div class="cards"><article><h2>重复歌曲</h2><p class="meta">同名不等于重复。内容一致且可以确定保留哪一份时才能合并，其余进入核对。合并后的旧文件进隔离区，可以恢复。</p>' +
+      '<p><button type="button" id="scan-duplicates" class="primary">扫描重复</button></p>' + duplicateHtml +
+      '<label>恢复编号<input type="text" id="restore-merge-id" placeholder="合并后返回的编号"></label><p><button type="button" id="restore-duplicates">恢复这次合并</button></p></article>' +
+      '<article><form id="transcode-form"><h2>转码为 FLAC</h2>' +
       '<label>源文件（库内 WAV 路径，应用数据目录内）<input type="text" id="transcode-source" required placeholder="如 library-audio/Artist/Album/01 Title.wav"></label>' +
       '<p><button type="submit" class="primary">开始转码</button></p><p class="meta">只支持 PCM WAV 转 FLAC；转码前后 PCM 内容逐字节比对，源文件不动，输出已存在时拒绝覆盖。</p></form></article>';
     if (transcodeRows.length) {
@@ -855,8 +974,7 @@ const appJS = `(function () {
     if (!libraryRows.length) {
       list.innerHTML = html + "</div>";
       setStatus("", "库里还没有已入库的音频。");
-      var form = document.getElementById("transcode-form");
-      if (form) form.addEventListener("submit", submitTranscode);
+      bindLibrary();
       return;
     }
     setStatus("", "");
@@ -864,8 +982,68 @@ const appJS = `(function () {
       html += '<article><h2>' + escapeText(entry.file || entry.source_name || "未命名") + '</h2><p class="meta"><span class="pill">' + escapeText(entry.format || "") + '</span><span class="pill">' + escapeText(entry.decode_state || "") + '</span><span class="pill">' + escapeText(entry.origin || "") + '</span></p><p>' + (entry.file_present ? "文件在库中" : "文件不在库中") + " · " + escapeText((entry.sha256 || "").slice(0, 12)) + "</p></article>";
     });
     list.innerHTML = html + "</div>";
+    bindLibrary();
+  }
+  function bindLibrary() {
     var form = document.getElementById("transcode-form");
     if (form) form.addEventListener("submit", submitTranscode);
+    var scan = document.getElementById("scan-duplicates");
+    if (scan) scan.addEventListener("click", scanDuplicates);
+    var restore = document.getElementById("restore-duplicates");
+    if (restore) restore.addEventListener("click", restoreDuplicates);
+    document.querySelectorAll("[data-merge]").forEach(function (button) {
+      button.addEventListener("click", function () { mergeDuplicates(button.getAttribute("data-merge")); });
+    });
+  }
+  async function scanDuplicates() {
+    if (loading) return;
+    setBusy(true);
+    setStatus("info", "正在扫描重复");
+    try {
+      var response = await fetch("/v1/library/duplicates", {headers: {Accept: "application/json"}});
+      var body = await response.json();
+      if (!response.ok || !body || !body.ok) {
+        setStatus("fail", "扫描失败。" + (body && body.code ? "（" + body.code + "）" : ""));
+        return;
+      }
+      duplicateRows = body.groups || [];
+      setStatus("ok", "扫描完成，" + duplicateRows.length + " 组。同名未确认的不会合并。");
+      renderLibrary();
+    } catch (err) {
+      setStatus("fail", "扫描中断。");
+    } finally {
+      setBusy(false);
+    }
+  }
+  async function mergeDuplicates(groupID) {
+    if (loading || !groupID) return;
+    setBusy(true);
+    setStatus("info", "正在合并");
+    try {
+      var body = await postSetting("/v1/library/duplicates/merge", {group_id: groupID});
+      var box = document.getElementById("restore-merge-id");
+      if (box && body.merge_id) box.value = body.merge_id;
+      setStatus("ok", "已合并，旧副本在隔离区。恢复编号 " + (body.merge_id || "") + "。");
+      duplicateRows = [];
+    } catch (err) {
+      setStatus("fail", "合并失败。" + (err && err.message ? "（" + err.message + "）" : ""));
+    } finally {
+      setBusy(false);
+    }
+  }
+  async function restoreDuplicates() {
+    if (loading) return;
+    var mergeID = document.getElementById("restore-merge-id").value.trim();
+    if (!mergeID) { setStatus("fail", "先填写恢复编号。"); return; }
+    setBusy(true);
+    try {
+      await postSetting("/v1/library/duplicates/restore", {merge_id: mergeID});
+      setStatus("ok", "已从隔离区恢复。");
+    } catch (err) {
+      setStatus("fail", "恢复失败。" + (err && err.message ? "（" + err.message + "）" : ""));
+    } finally {
+      setBusy(false);
+    }
   }
   async function submitTranscode(event) {
     event.preventDefault();
@@ -1117,6 +1295,9 @@ const appJS = `(function () {
         var savedPlaylistResponse = await fetch("/v1/playlists", {headers: {Accept: "application/json"}});
         var savedPlaylistBody = await savedPlaylistResponse.json();
         playlistRows = savedPlaylistBody && Array.isArray(savedPlaylistBody.playlists) ? savedPlaylistBody.playlists : [];
+        var subscriptionResponse = await fetch("/v1/subscriptions", {headers: {Accept: "application/json"}});
+        var subscriptionBody = await subscriptionResponse.json();
+        subscriptionRows = subscriptionBody && Array.isArray(subscriptionBody.subscriptions) ? subscriptionBody.subscriptions : [];
       } else if (view === "library") {
         var libraryResponse = await fetch("/v1/library", {headers: {Accept: "application/json"}});
         var libraryBody = await libraryResponse.json();

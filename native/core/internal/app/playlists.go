@@ -4,10 +4,9 @@
 // accepts three inputs — a pasted link/share text, a track ID, or an
 // imported file (absolute path, .json/.csv/.tsv/.txt/.m3u/.m3u8/.xlsx,
 // at most 20MB and 50000 tracks) — and refresh_playlist turns it into
-// target tracks. Go has no platform playlist readers, so only the file
-// path is real here: an M3U/M3U8 upload or paste, validated by the same
-// parseM3U the fallback step uses (EXTINF entries only, the URI line is
-// metadata-only and is never opened or fetched).
+// target tracks. Uploaded M3U, JSON, CSV, TSV and TXT are normalized to
+// M3U. The URI line is metadata-only and is never opened or fetched.
+// Pasted platform links are recognized locally and are not requested.
 //
 // Two places hold playlists:
 //
@@ -22,12 +21,9 @@
 //     track counts. A saved playlist is attached to a job with
 //     {playlist_id} on the per-job endpoint.
 //
-// What is deliberately NOT built: the ten-platform link parser and the
-// per-platform playlist credentials (vault://playlist/<platform>) —
-// no Go reader consumes them, and storing credentials with no consumer
-// is worse than not having the entry. The NetEase playlist_ids config
-// list is skipped for the same reason. Both are recorded in
-// MIGRATION_PLAN.md.
+// Platform playlist credentials are not stored: there is no reader that
+// would call those platforms. Link text is recognized locally and the
+// user imports an exported file for the tracks.
 package app
 
 import (
@@ -86,14 +82,14 @@ func playlistSlug(name string) string {
 // part named "file" or a JSON body {content}. The content is capped at
 // 20MB. It returns the content and the suggested name (the uploaded file
 // name without extension, or the JSON name field).
-func readPlaylistUpload(r *http.Request) ([]byte, string, error) {
+func readPlaylistUpload(r *http.Request) ([]byte, string, string, error) {
 	if strings.HasPrefix(r.Header.Get("Content-Type"), "multipart/form-data") {
 		if err := r.ParseMultipartForm(32 << 20); err != nil {
-			return nil, "", errors.New("无法解析上传表单")
+			return nil, "", "", errors.New("无法解析上传表单")
 		}
 		file, header, err := r.FormFile("file")
 		if err != nil {
-			return nil, "", errors.New("请上传一个歌单文件")
+			return nil, "", "", errors.New("请上传一个歌单文件")
 		}
 		defer file.Close()
 		name := strings.TrimSuffix(header.Filename, filepath.Ext(header.Filename))
@@ -101,40 +97,43 @@ func readPlaylistUpload(r *http.Request) ([]byte, string, error) {
 			name = field
 		}
 		ext := strings.ToLower(filepath.Ext(header.Filename))
-		if ext != ".m3u" && ext != ".m3u8" {
-			return nil, "", errors.New("歌单文件须为 .m3u 或 .m3u8")
+		switch ext {
+		case ".m3u", ".m3u8", ".json", ".csv", ".tsv", ".txt":
+		default:
+			return nil, "", "", errors.New("歌单文件须为 .m3u、.m3u8、.json、.csv、.tsv 或 .txt")
 		}
 		data, err := io.ReadAll(io.LimitReader(file, maxPlaylistBytes+1))
 		if err != nil {
-			return nil, "", err
+			return nil, "", "", err
 		}
 		if len(data) > maxPlaylistBytes {
-			return nil, "", errors.New("单个歌单文件最多 20MB")
+			return nil, "", "", errors.New("单个歌单文件最多 20MB")
 		}
-		return data, name, nil
+		return data, name, strings.TrimSpace(r.FormValue("text_order")), nil
 	}
 	raw, err := io.ReadAll(io.LimitReader(r.Body, maxPlaylistBytes+1))
 	if err != nil {
-		return nil, "", err
+		return nil, "", "", err
 	}
 	if len(raw) > maxPlaylistBytes {
-		return nil, "", errors.New("单个歌单最多 20MB")
+		return nil, "", "", errors.New("单个歌单最多 20MB")
 	}
 	var body struct {
 		Content    string `json:"content"`
 		Name       string `json:"name"`
 		PlaylistID string `json:"playlist_id"`
+		TextOrder  string `json:"text_order"`
 	}
 	if err := json.Unmarshal(raw, &body); err != nil {
-		return nil, "", errors.New("请求体须为歌单内容 JSON 或 multipart 文件上传")
+		return nil, "", "", errors.New("请求体须为歌单内容 JSON 或 multipart 文件上传")
 	}
 	if body.PlaylistID != "" {
-		return nil, "", errAttachPlaylist{ID: body.PlaylistID}
+		return nil, "", "", errAttachPlaylist{ID: body.PlaylistID}
 	}
 	if strings.TrimSpace(body.Content) == "" {
-		return nil, "", errors.New("歌单内容为空")
+		return nil, "", "", errors.New("歌单内容为空")
 	}
-	return []byte(body.Content), body.Name, nil
+	return []byte(body.Content), body.Name, body.TextOrder, nil
 }
 
 // errAttachPlaylist signals that the caller asked to attach a saved
@@ -203,7 +202,7 @@ func (a *App) saveJobPlaylist(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "code": "INVALID_REQUEST"})
 		return
 	}
-	data, name, err := readPlaylistUpload(r)
+	data, name, textOrder, err := readPlaylistUpload(r)
 	if err != nil {
 		var attach errAttachPlaylist
 		if errors.As(err, &attach) {
@@ -218,7 +217,7 @@ func (a *App) saveJobPlaylist(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "code": "INVALID_REQUEST", "error": err.Error()})
 		return
 	}
-	tracks, playlistName, err := parseM3U(data)
+	tracks, playlistName, data, err := normalizePlaylist(data, name, textOrder)
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "code": "INVALID_REQUEST", "error": err.Error()})
 		return
@@ -277,12 +276,12 @@ func (a *App) listPlaylists(w http.ResponseWriter, r *http.Request) {
 // paste. The slug comes from the name (uploaded file name or JSON name
 // field); re-uploading the same slug replaces the saved file.
 func (a *App) savePlaylist(w http.ResponseWriter, r *http.Request) {
-	data, name, err := readPlaylistUpload(r)
+	data, name, textOrder, err := readPlaylistUpload(r)
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "code": "INVALID_REQUEST", "error": err.Error()})
 		return
 	}
-	tracks, playlistName, err := parseM3U(data)
+	tracks, playlistName, data, err := normalizePlaylist(data, name, textOrder)
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "code": "INVALID_REQUEST", "error": err.Error()})
 		return

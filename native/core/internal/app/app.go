@@ -49,6 +49,7 @@ type App struct {
 	aiHTTPClient *http.Client
 	mu           sync.Mutex
 	secrets      map[string]string
+	stopSubs     chan struct{}
 }
 
 // Open creates the native store and starts the scheduler. Torrent bytes are
@@ -111,6 +112,8 @@ func Open(dir, backup, password string) (*App, error) {
 		return nil, err
 	}
 	app.runner = runner
+	app.stopSubs = make(chan struct{})
+	go app.runSubscriptions(app.stopSubs)
 	return app, nil
 }
 
@@ -133,6 +136,13 @@ func (a *App) handlers() map[string]scheduler.Handler {
 func (a *App) Close() error {
 	if a == nil {
 		return nil
+	}
+	a.mu.Lock()
+	stop := a.stopSubs
+	a.stopSubs = nil
+	a.mu.Unlock()
+	if stop != nil {
+		close(stop)
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()

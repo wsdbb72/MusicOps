@@ -32,6 +32,7 @@ import (
 type playlistTrack struct {
 	Artist   string `json:"artist"`
 	Title    string `json:"title"`
+	Album    string `json:"album,omitempty"`
 	Duration string `json:"duration"`
 }
 
@@ -45,6 +46,7 @@ var extinfPattern = regexp.MustCompile(`^#EXTINF:([+-]?[\d.]+)(?:\s+[^,]*)?,(.*)
 func parseM3U(data []byte) ([]playlistTrack, string, error) {
 	var rows []playlistTrack
 	var name string
+	var album string
 	var pending *playlistTrack
 	for _, raw := range strings.Split(string(data), "\n") {
 		value := strings.TrimSpace(raw)
@@ -53,6 +55,10 @@ func parseM3U(data []byte) ([]playlistTrack, string, error) {
 		}
 		if strings.HasPrefix(value, "#PLAYLIST:") {
 			name = strings.TrimSpace(strings.TrimPrefix(value, "#PLAYLIST:"))
+			continue
+		}
+		if strings.HasPrefix(value, "#MUSICOPS-ALBUM:") {
+			album = strings.TrimSpace(strings.TrimPrefix(value, "#MUSICOPS-ALBUM:"))
 			continue
 		}
 		if strings.HasPrefix(value, "#EXTINF:") {
@@ -69,6 +75,8 @@ func parseM3U(data []byte) ([]playlistTrack, string, error) {
 			if len(parts) == 2 {
 				track.Artist = parts[0]
 			}
+			track.Album = album
+			album = ""
 			pending = &track
 			continue
 		}

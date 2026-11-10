@@ -127,6 +127,12 @@ func (a *App) Handler() http.Handler {
 	mux.HandleFunc("POST /v1/settings/servers/navidrome/test", a.testNavidrome)
 	mux.HandleFunc("GET /v1/playlists", a.listPlaylists)
 	mux.HandleFunc("POST /v1/playlists", a.savePlaylist)
+	mux.HandleFunc("POST /v1/playlists/locate", a.locatePlaylist)
+	mux.HandleFunc("GET /v1/subscriptions", a.listSubscriptions)
+	mux.HandleFunc("POST /v1/subscriptions", a.saveSubscription)
+	mux.HandleFunc("POST /v1/subscriptions/check", a.checkSubscription)
+	mux.HandleFunc("POST /v1/subscriptions/pause", a.pauseSubscription)
+	mux.HandleFunc("POST /v1/subscriptions/delete", a.deleteSubscription)
 	mux.HandleFunc("GET /v1/jobs/{id}/playlist", a.jobPlaylistHandler)
 	mux.HandleFunc("POST /v1/jobs/{id}/playlist", a.saveJobPlaylist)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

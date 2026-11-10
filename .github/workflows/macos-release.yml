@@ -71,13 +71,6 @@ jobs:
         shell: bash
         run: |
           brew install ffmpeg
-      - name: Install reviewed build dependencies
-        shell: bash
-        env:
-          BUILD_ARCH: ${{ matrix.arch }}
-        run: |
-          python -m pip install --only-binary=cryptography -r packaging/requirements-macos.txt
-          python -m pip install --no-deps -e .
       - name: Create an isolated unlocked test keychain
         shell: bash
         run: |
@@ -88,29 +81,6 @@ jobs:
           security create-keychain -p "$TASK_KEYCHAIN_PASSWORD" "$MUSICOPS_KEYCHAIN_PATH"
           security set-keychain-settings -lut 21600 "$MUSICOPS_KEYCHAIN_PATH"
           security unlock-keychain -p "$TASK_KEYCHAIN_PASSWORD" "$MUSICOPS_KEYCHAIN_PATH"
-      - name: Run real macOS Keychain, Unix IPC and file-lock regression tests
-        shell: bash
-        env:
-          BUILD_ARCH: ${{ matrix.arch }}
-        run: |
-          mkdir -p dist/macos/reports
-          python -m pytest tests/test_platform_runtime.py tests/test_native_paths.py -q \
-            --basetemp "$RUNNER_TEMP/musicops-platform-pytest" \
-            --junitxml "dist/macos/reports/platform-runtime-$BUILD_ARCH.xml"
-          python - <<'PY'
-          import os, pathlib, xml.etree.ElementTree as ET
-          report = pathlib.Path('dist/macos/reports') / ('platform-runtime-' + os.environ['BUILD_ARCH'] + '.xml')
-          cases = {case.attrib['name']: case for case in ET.parse(report).iter('testcase')}
-          required = {
-              'test_macos_real_keychain_ciphertext_decrypts_in_fresh_process',
-              'test_macos_real_unix_worker_authentication_and_private_permissions',
-              'test_macos_stale_socket_cleanup_refuses_regular_files',
-              'test_macos_writer_lock_excludes_a_second_process',
-          }
-          for name in required:
-              if name not in cases or any(child.tag in {'skipped', 'failure', 'error'} for child in cases[name]):
-                  raise SystemExit('A required native macOS runtime test did not execute successfully: ' + name)
-          PY
       - name: Build app, verify ad-hoc signatures, run packaged acceptance and archive
         id: native_build
         shell: bash

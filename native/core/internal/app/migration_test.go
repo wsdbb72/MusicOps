@@ -166,8 +166,28 @@ func writeLegacyDB(t *testing.T, profile, library, audio string) {
 			t.Fatal(err)
 		}
 	}
-	config := `{"version":2,"values":{"streaming":{"enabled":false},"providers":{"dicmusic":{"enabled":true}},"updates":{"enabled":true},"paths":{"library":"` + library + `"},"offline":false,"workflow":{"setup_done":true}}}`
-	filePayload := `{"path":"` + audio + `","albumartist":"测试艺人","album":"测试专辑","tracknumber":1,"location_state":"library"}`
+	configRaw, err := json.Marshal(map[string]any{
+		"version": 2,
+		"values": map[string]any{
+			"streaming": map[string]any{"enabled": false},
+			"providers": map[string]any{"dicmusic": map[string]any{"enabled": true}},
+			"updates":   map[string]any{"enabled": true},
+			"paths":     map[string]any{"library": library},
+			"offline":   false,
+			"workflow":  map[string]any{"setup_done": true},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	fileRaw, err := json.Marshal(map[string]any{
+		"path": audio, "albumartist": "测试艺人", "album": "测试专辑", "tracknumber": 1, "location_state": "library",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	config := string(configRaw)
+	filePayload := string(fileRaw)
 	active := `{"stage":"searching","scene":"complete","label":"旧任务","message":"上次停在检索"}`
 	done := `{"stage":"completed","scene":"complete","label":"已完成"}`
 	hidden := `{"stage":"searching","scene":"complete","label":"隐藏","hidden":true}`

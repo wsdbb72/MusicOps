@@ -299,13 +299,18 @@ func TestMaybeMigrateCopiesServiceSettingsWithoutSecrets(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	libraryDir := filepath.Join(profile, "library-music")
+	libraryJSON, err := json.Marshal(libraryDir)
+	if err != nil {
+		t.Fatal(err)
+	}
 	payload := `{
 		"version": 2,
 		"values": {
 			"streaming": {"enabled": false},
 			"providers": {"dicmusic": {"enabled": true}},
 			"updates": {"enabled": true},
-			"paths": {"library": "/library/music"},
+			"paths": {"library": ` + string(libraryJSON) + `},
 			"offline": false,
 			"workflow": {"setup_done": true},
 			"qbt": {"base_url": "http://127.0.0.1:8085", "category": "MusicOps", "tag_prefix": "Seed", "credential_ref": "vault://user/qbt/abcdefabcdef", "password": "must-not-copy"},
@@ -345,7 +350,7 @@ func TestMaybeMigrateCopiesServiceSettingsWithoutSecrets(t *testing.T) {
 		t.Fatal(ai)
 	}
 	library := readNative(t, profile, "app/settings/library")
-	if library["library_dir"] != "/library/music" {
+	if library["library_dir"] != libraryDir {
 		t.Fatal(library)
 	}
 	encoded, err := json.Marshal([]any{qbt, ai, library, report})

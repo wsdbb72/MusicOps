@@ -1,11 +1,11 @@
 name: Native core development checks
 on:
   push:
-    branches: ['refactor/go-core', 'refactor/go-desktop']
-    paths: ['native/**', 'src/musicops/state/native_client.py', 'tests/test_native_data_transport.py', '.github/workflows/native-core.yml']
+    branches: ['refactor/go-core', 'refactor/go-desktop', 'main']
+    paths: ['native/**', '.github/workflows/native-core.yml']
   pull_request:
-    branches: ['refactor/go-core', 'refactor/go-desktop']
-    paths: ['native/**', 'src/musicops/state/native_client.py', 'tests/test_native_data_transport.py', '.github/workflows/native-core.yml']
+    branches: ['refactor/go-core', 'refactor/go-desktop', 'main']
+    paths: ['native/**', '.github/workflows/native-core.yml']
   workflow_dispatch:
 permissions:
   contents: read

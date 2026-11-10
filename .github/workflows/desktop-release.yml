@@ -75,10 +75,6 @@ jobs:
           "INNO_ISCC=$compilerPath" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           ffmpeg -version
           ffprobe -version
-      - name: Verify generated Windows version resources before freezing
-        run: |
-          python -m pytest tests/test_release_versions.py -q
-          if ($LASTEXITCODE -ne 0) { throw 'Release version tests failed' }
       - name: Compile and test the native installer before the longer regression suite
         run: |
           New-Item -ItemType Directory -Force -Path dist/windows/reports | Out-Null

@@ -48,15 +48,18 @@ func TestDesktopReleasePublishesOnlyAfterAllThreePlatforms(t *testing.T) {
 	docker := readWorkflow(t, "docker-release.yml")
 	requireText(t, desktop, "branches: ['codex/release-*']")
 	requireText(t, desktop, "workflow_dispatch:")
-	if strings.Contains(desktop, "pull_request:") {
-		t.Fatal("desktop release is armed for pull requests")
+	requireText(t, desktop, "pull_request:")
+	publishIf := "if: github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.publish)"
+	if strings.Count(desktop, publishIf) != 2 {
+		t.Fatalf("publish and Docker latest must both be limited to a real publication, count=%d", strings.Count(desktop, publishIf))
 	}
 	requireText(t, desktop, "needs: [windows, macos, linux]")
 	requireText(t, desktop, "name: Publish only the complete verified desktop release")
 	requireText(t, desktop, "needs: [publish, linux]")
 	requireText(t, desktop, "name: Advance Docker latest after the complete release")
-	requireText(t, desktop, "group: musicops-desktop-publication")
-	requireText(t, desktop, "cancel-in-progress: false")
+	requireText(t, desktop, "musicops-desktop-publication")
+	requireText(t, desktop, "cancel-in-progress: ${{ github.event_name == 'pull_request' }}")
+	requireText(t, desktop, "push_image: ${{ github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.publish) }}")
 	requireText(t, desktop, "'MusicOps '+version")
 	requireText(t, desktop, "A release with this version already exists")
 	requireText(t, macos, "arch: arm64")
@@ -66,4 +69,9 @@ func TestDesktopReleasePublishesOnlyAfterAllThreePlatforms(t *testing.T) {
 	}
 	requireText(t, docker, "platforms: linux/amd64")
 	requireText(t, docker, "refusing to overwrite")
+	requireText(t, docker, "push_image:")
+	if strings.Count(docker, "if: inputs.push_image") < 2 {
+		t.Fatal("Docker login and push must both stay behind push_image")
+	}
+	requireText(t, docker, "!inputs.push_image")
 }

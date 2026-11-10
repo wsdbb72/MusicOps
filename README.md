@@ -5,7 +5,7 @@
   <p>桌面应用 / 原生 WebUI · 十个平台歌单 · 资料补全 · 音质升级 · 去重合并</p>
   <p>
     <a href="https://github.com/wsdbb72/MusicOps/releases/latest"><img src="https://img.shields.io/github/v/release/wsdbb72/MusicOps?label=%E6%9C%80%E6%96%B0%E7%89%88%E6%9C%AC&amp;color=16857d" alt="最新版本"></a>
-    <a href="https://github.com/wsdbb72/MusicOps/actions/workflows/windows-tests.yml"><img src="https://github.com/wsdbb72/MusicOps/actions/workflows/windows-tests.yml/badge.svg" alt="Windows 测试"></a>
+    <a href="https://github.com/wsdbb72/MusicOps/actions/workflows/native-core.yml"><img src="https://github.com/wsdbb72/MusicOps/actions/workflows/native-core.yml/badge.svg" alt="原生核心测试"></a>
     <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue" alt="MIT 许可证"></a>
     <img src="https://img.shields.io/badge/Windows-10%20%2F%2011-0078D4" alt="Windows 10 / 11">
     <img src="https://img.shields.io/badge/macOS-15%2B-555555" alt="macOS 15 及以上">

@@ -6,6 +6,11 @@ on:
         description: 'Release version (X.Y.Z) supplied by the desktop release workflow'
         type: string
         required: true
+      push_image:
+        description: 'Push the tested image to Docker Hub. Acceptance runs leave this false and never move latest.'
+        type: boolean
+        default: true
+        required: false
     outputs:
       digest:
         description: Tested Docker Hub image digest
@@ -21,7 +26,7 @@ jobs:
     permissions:
       contents: read
     outputs:
-      digest: ${{ steps.push.outputs.digest }}
+      digest: ${{ steps.push.outputs.digest || steps.local.outputs.digest }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -63,6 +68,14 @@ jobs:
           docker cp musicops-gate:/opt/musicops /tmp/musicops-bundle
           docker rm musicops-gate
           /tmp/musicops-bundle/releasegate --bundle /tmp/musicops-bundle --version ${{ inputs.version }} --layout docker --require-engines --smoke-report container-reports/acceptance.json
+      - name: Migrate a synthetic 0.4.31 profile with the packaged binary
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd native/core
+          MUSICOPS_SMOKE_BUNDLE=/tmp/musicops-bundle \
+          MUSICOPS_SMOKE_MIGRATE_REPORT="$GITHUB_WORKSPACE/container-reports/legacy-migrate.json" \
+            go test ./internal/smoke/ -run TestPackagedLegacyMigrate -count=1 -timeout 3m
       - name: Preserve synthetic Linux acceptance evidence
         if: always()
         uses: actions/upload-artifact@v7
@@ -72,11 +85,13 @@ jobs:
           if-no-files-found: ignore
           retention-days: 14
       - uses: docker/login-action@v4
+        if: inputs.push_image
         with:
           username: wsdbb72
           password: ${{ secrets.DOCKERHUB_TOKEN }}
       - name: Push the tested image without rebuilding
         id: push
+        if: inputs.push_image
         env:
           VERSION: ${{ inputs.version }}
           REVISION: ${{ github.sha }}
@@ -95,3 +110,28 @@ jobs:
           data=json.load(open('manifest.json'))
           with open(os.environ['GITHUB_OUTPUT'],'a') as stream:stream.write('digest='+data['digest']+'\n')
           PY
+      - name: Record the tested image without publishing it
+        id: local
+        if: ${{ !inputs.push_image }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$GITHUB_WORKSPACE/container-reports" "$GITHUB_WORKSPACE/release-image"
+          docker image inspect musicops-ci:tested --format '{{.Id}} {{.Size}}' | tee "$GITHUB_WORKSPACE/container-reports/image-id.txt"
+          docker save musicops-ci:tested | gzip -1 > "$GITHUB_WORKSPACE/release-image/MusicOps-linux-amd64.tar.gz"
+          python - <<'PY'
+          import os
+          image_id=open(os.environ["GITHUB_WORKSPACE"]+"/container-reports/image-id.txt").read().split()[0]
+          with open(os.environ["GITHUB_OUTPUT"], "a") as stream:
+              stream.write("digest="+image_id+"\n")
+          note={"pushed": False, "latest": False, "image_id": image_id, "tag": "musicops-ci:tested"}
+          open(os.environ["GITHUB_WORKSPACE"]+"/container-reports/image-publish.json","w").write(__import__("json").dumps(note)+"\n")
+          PY
+      - name: Save the tested Linux image
+        if: ${{ !inputs.push_image }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: MusicOps-Linux-amd64-image
+          path: release-image/MusicOps-linux-amd64.tar.gz
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 14

@@ -229,7 +229,7 @@ set +e
 MUSICOPS_SMOKE_BUNDLE="$APP" MUSICOPS_SMOKE_VERSION="$VERSION" \
   MUSICOPS_SMOKE_DESKTOP="MusicOps" MUSICOPS_SMOKE_REQUIRE_MANIFEST=1 \
   MUSICOPS_SMOKE_REQUIRE_ENGINES=1 MUSICOPS_SMOKE_REPORT="$SMOKE_REPORT" \
-  go test ./internal/smoke/ -run 'TestBundle' -count=1 -v > "$SMOKE_LOG" 2>&1
+  go test ./internal/smoke/ -run 'TestBundle|TestPackagedLegacyMigrate' -count=1 -v > "$SMOKE_LOG" 2>&1
 SMOKE_STATUS=$?
 set -e
 cd "$ROOT"

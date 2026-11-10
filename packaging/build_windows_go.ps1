@@ -169,7 +169,7 @@ $env:MUSICOPS_SMOKE_REQUIRE_ENGINES='1'
 $env:MUSICOPS_SMOKE_REPORT=$smokeReport
 Push-Location $coreRoot
 try {
-    & $Go test ./internal/smoke/ -run TestBundle -count=1 -v
+    & $Go test ./internal/smoke/ -run 'TestBundle|TestWindowsPEVersion|TestPackagedLegacyMigrate' -count=1 -v
     if ($LASTEXITCODE -ne 0) { throw 'Go bundle smoke tests failed' }
     & $Go run ./cmd/releasegate --bundle $bundleRoot --version $Version --layout windows --desktop MusicOps.exe --require-engines --require-manifest --smoke-report $smokeReport
     if ($LASTEXITCODE -ne 0) { throw 'Releasegate rejected the Windows bundle' }

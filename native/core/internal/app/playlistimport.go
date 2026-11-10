@@ -38,6 +38,13 @@ func normalizePlaylist(data []byte, name, textOrder string) ([]playlistTrack, st
 }
 
 func parsePlaylistDocument(data []byte, textOrder string) ([]playlistTrack, string, error) {
+	if bytes.HasPrefix(data, []byte("PK\x03\x04")) {
+		text, err := xlsxToTable(data)
+		if err != nil {
+			return nil, "", err
+		}
+		return parseTablePlaylist(text)
+	}
 	if !utf8.Valid(data) {
 		return nil, "", errors.New("歌单须为 UTF-8 文本")
 	}

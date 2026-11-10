@@ -147,3 +147,38 @@ func TestRateLimitIsRememberedWithoutAnotherRequest(t *testing.T) {
 		t.Fatal(first, second, err, doer.urls)
 	}
 }
+
+func TestFlareSolverrReadsTheSearchPage(t *testing.T) {
+	page := `{"status":"success","response":{"currentPage":1,"pages":1,"results":[{"groupId":10,"groupName":"Example","artist":"Artist","torrents":[{"torrentId":11,"format":"FLAC","encoding":"Lossless","seeders":1}]}]}}`
+	var sawSolver bool
+	var sawTracker bool
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/v1" && r.Method == http.MethodPost {
+			sawSolver = true
+			var body map[string]any
+			if json.NewDecoder(r.Body).Decode(&body) != nil || body["cmd"] != "request.get" {
+				t.Errorf("solver body = %v", body)
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{"status": "ok", "solution": map[string]any{"status": 200, "response": page}})
+			return
+		}
+		sawTracker = true
+		http.NotFound(w, r)
+	}))
+	defer server.Close()
+	out, err := (&Client{}).Search(context.Background(), Query{
+		Site: "dicmusic", Text: "Example", Cookie: "session=virtual", Synthetic: true,
+		BaseURL: "http://127.0.0.1:9", SolverURL: server.URL,
+	})
+	if err != nil || !out.SolverUsed || out.Status == "NETWORK_ERROR" || !sawSolver || sawTracker {
+		t.Fatal(out, err, sawSolver, sawTracker)
+	}
+	direct, err := (&Client{}).Search(context.Background(), Query{
+		Site: "dicmusic", Text: "Example", Cookie: "session=virtual", Synthetic: true,
+		BaseURL: "http://127.0.0.1:9", SolverURL: "https://solver.example",
+	})
+	if err != nil || direct.SolverUsed {
+		t.Fatal(direct, err)
+	}
+}

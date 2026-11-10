@@ -363,3 +363,26 @@ func (a *App) effectiveDownloadRequest(body downloadRequest) (downloadRequest, b
 	}
 	return body, true
 }
+
+func (a *App) unifyQBittorrentTags(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		BaseURL  string `json:"base_url"`
+		Username string `json:"username"`
+		Password string `json:"password"`
+	}
+	if err := decode(r, &body); err != nil || body.BaseURL == "" || body.Username == "" || body.Password == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "code": "INVALID_REQUEST"})
+		return
+	}
+	client, err := qbittorrent.NewClient(qbittorrent.Config{BaseURL: body.BaseURL, Username: body.Username, Password: body.Password})
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "code": "INVALID_REQUEST"})
+		return
+	}
+	changed, err := client.UnifyLegacyTags(r.Context())
+	if err != nil {
+		writeJSON(w, http.StatusBadGateway, map[string]any{"ok": false, "code": "QBITTORRENT_UNAVAILABLE", "error": "旧标签没有改完"})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "changed": changed, "note": "旧的 musicops-task 标签已并入 MusicOps。没有开始下载。"})
+}

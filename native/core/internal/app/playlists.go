@@ -98,9 +98,9 @@ func readPlaylistUpload(r *http.Request) ([]byte, string, string, error) {
 		}
 		ext := strings.ToLower(filepath.Ext(header.Filename))
 		switch ext {
-		case ".m3u", ".m3u8", ".json", ".csv", ".tsv", ".txt":
+		case ".m3u", ".m3u8", ".json", ".csv", ".tsv", ".txt", ".xlsx":
 		default:
-			return nil, "", "", errors.New("歌单文件须为 .m3u、.m3u8、.json、.csv、.tsv 或 .txt")
+			return nil, "", "", errors.New("歌单文件须为 .m3u、.m3u8、.json、.csv、.tsv、.txt 或 .xlsx")
 		}
 		data, err := io.ReadAll(io.LimitReader(file, maxPlaylistBytes+1))
 		if err != nil {

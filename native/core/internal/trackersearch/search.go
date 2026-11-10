@@ -4,6 +4,7 @@
 package trackersearch
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -50,6 +51,9 @@ type Query struct {
 	BaseURL   string
 	Timeout   time.Duration
 	Kind      string // search or preflight; empty means search
+	// SolverURL is a loopback FlareSolverr. When set, the search page is
+	// read through it. A solver failure falls back to the direct read.
+	SolverURL string
 }
 
 // Candidate is a search hit. Eligibility stays unknown and download stays blocked.
@@ -81,6 +85,7 @@ type Candidate struct {
 // Observation is the classified read. It is not a download result.
 type Observation struct {
 	Status             string         `json:"status"`
+	SolverUsed         bool           `json:"solver_used,omitempty"`
 	Source             string         `json:"source"`
 	Candidates         []Candidate    `json:"candidates"`
 	Page               int            `json:"page,omitempty"`
@@ -210,73 +215,126 @@ func (c *Client) roundTrip(ctx context.Context, q Query) (Observation, error) {
 		return Observation{}, err
 	}
 	req.Header.Set("Cookie", q.Cookie)
-	if endpoint.Path == "/ajax.php" {
-		req.Header.Set("Accept", "application/json")
+	var body []byte
+	solverUsed := false
+	if solved, ok := c.solve(ctx, q, endpoint.String()); ok {
+		body = solved
+		solverUsed = true
 	} else {
-		req.Header.Set("Accept", "text/html")
+		if endpoint.Path == "/ajax.php" {
+			req.Header.Set("Accept", "application/json")
+		} else {
+			req.Header.Set("Accept", "text/html")
+		}
+		if q.Synthetic {
+			req.Header.Set("X-MusicOps-Site", q.Site)
+		}
+		timeout := q.Timeout
+		response, err := c.doer(timeout).Do(req)
+		if err != nil {
+			out := base
+			out.Status = "NETWORK_ERROR"
+			out.ErrorClass = "NETWORK_ERROR"
+			out.Reason = "连接失败"
+			return out, nil
+		}
+		defer response.Body.Close()
+		body, err = io.ReadAll(io.LimitReader(response.Body, maxBody+1))
+		if err != nil {
+			out := base
+			out.Status = "NETWORK_ERROR"
+			out.ErrorClass = "NETWORK_ERROR"
+			out.Reason = "连接失败"
+			return out, nil
+		}
+		if len(body) > maxBody {
+			out := base
+			out.Status = "PARSE_ERROR"
+			out.ErrorClass = "PARSE_ERROR"
+			out.Reason = "站点响应超过大小限制"
+			return out, nil
+		}
+		if response.StatusCode == http.StatusTooManyRequests {
+			delay := retryAfter(response.Header.Get("Retry-After"))
+			c.block(q.Site, delay)
+			out := base
+			out.Status = "RATE_LIMITED"
+			out.ErrorClass = "RATE_LIMITED"
+			out.Reason = "站点限流；停止请求"
+			out.RetryAfterSec = delay
+			return out, nil
+		}
+		if response.StatusCode == http.StatusUnauthorized || response.StatusCode == http.StatusForbidden {
+			out := base
+			out.Status = "AUTH_FAILED"
+			out.ErrorClass = "AUTH_FAILED"
+			out.Reason = "站点拒绝鉴权"
+			return out, nil
+		}
+		if response.StatusCode >= 300 && response.StatusCode < 400 {
+			return c.redirect(base, q, response.Header.Get("Location")), nil
+		}
+		if response.StatusCode != http.StatusOK {
+			out := base
+			out.Status = "NETWORK_ERROR"
+			out.ErrorClass = "NETWORK_ERROR"
+			out.Reason = "站点请求失败"
+			return out, nil
+		}
 	}
-	if q.Synthetic {
-		req.Header.Set("X-MusicOps-Site", q.Site)
+	var observation Observation
+	if q.Kind == "preflight" {
+		observation = c.preflightBody(base, q, body)
+	} else if q.Site == "open.cd" {
+		observation = c.nexus(base, q, string(body))
+	} else {
+		observation = c.gazelle(base, q, body)
 	}
-	timeout := q.Timeout
-	response, err := c.doer(timeout).Do(req)
+	observation.SolverUsed = solverUsed
+	return observation, nil
+}
+
+func (c *Client) solve(ctx context.Context, q Query, pageURL string) ([]byte, bool) {
+	raw := strings.TrimSpace(q.SolverURL)
+	if raw == "" {
+		return nil, false
+	}
+	parsed, err := url.Parse(raw)
+	if err != nil || parsed.Hostname() != "127.0.0.1" && parsed.Hostname() != "localhost" && parsed.Hostname() != "::1" {
+		return nil, false
+	}
+	payload, err := json.Marshal(map[string]any{"cmd": "request.get", "url": pageURL, "maxTimeout": 60000})
 	if err != nil {
-		out := base
-		out.Status = "NETWORK_ERROR"
-		out.ErrorClass = "NETWORK_ERROR"
-		out.Reason = "连接失败"
-		return out, nil
+		return nil, false
+	}
+	endpoint := strings.TrimRight(raw, "/") + "/v1"
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(payload))
+	if err != nil {
+		return nil, false
+	}
+	req.Header.Set("Content-Type", "application/json")
+	response, err := c.doer(q.Timeout).Do(req)
+	if err != nil {
+		return nil, false
 	}
 	defer response.Body.Close()
-	body, err := io.ReadAll(io.LimitReader(response.Body, maxBody+1))
-	if err != nil {
-		out := base
-		out.Status = "NETWORK_ERROR"
-		out.ErrorClass = "NETWORK_ERROR"
-		out.Reason = "连接失败"
-		return out, nil
-	}
-	if len(body) > maxBody {
-		out := base
-		out.Status = "PARSE_ERROR"
-		out.ErrorClass = "PARSE_ERROR"
-		out.Reason = "站点响应超过大小限制"
-		return out, nil
-	}
-	if response.StatusCode == http.StatusTooManyRequests {
-		delay := retryAfter(response.Header.Get("Retry-After"))
-		c.block(q.Site, delay)
-		out := base
-		out.Status = "RATE_LIMITED"
-		out.ErrorClass = "RATE_LIMITED"
-		out.Reason = "站点限流；停止请求"
-		out.RetryAfterSec = delay
-		return out, nil
-	}
-	if response.StatusCode == http.StatusUnauthorized || response.StatusCode == http.StatusForbidden {
-		out := base
-		out.Status = "AUTH_FAILED"
-		out.ErrorClass = "AUTH_FAILED"
-		out.Reason = "站点拒绝鉴权"
-		return out, nil
-	}
-	if response.StatusCode >= 300 && response.StatusCode < 400 {
-		return c.redirect(base, q, response.Header.Get("Location")), nil
-	}
 	if response.StatusCode != http.StatusOK {
-		out := base
-		out.Status = "NETWORK_ERROR"
-		out.ErrorClass = "NETWORK_ERROR"
-		out.Reason = "站点请求失败"
-		return out, nil
+		return nil, false
 	}
-	if q.Kind == "preflight" {
-		return c.preflightBody(base, q, body), nil
+	var decoded struct {
+		Status   string `json:"status"`
+		Solution struct {
+			Status   int    `json:"status"`
+			Response string `json:"response"`
+		} `json:"solution"`
 	}
-	if q.Site == "open.cd" {
-		return c.nexus(base, q, string(body)), nil
+	if json.NewDecoder(io.LimitReader(response.Body, maxBody)).Decode(&decoded) != nil {
+		return nil, false
 	}
-	return c.gazelle(base, q, body), nil
+	if decoded.Status != "ok" || decoded.Solution.Status != http.StatusOK || decoded.Solution.Response == "" {
+		return nil, false
+	}
+	return []byte(decoded.Solution.Response), true
 }
 
 func (c *Client) base(q Query) Observation {

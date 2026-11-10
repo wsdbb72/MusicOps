@@ -28,6 +28,7 @@ type App struct {
 	Dir         string
 	Backup      string
 	password    string
+	paused      bool
 	engine      *dataengine.Engine
 	tasks       *taskrepo.Repository
 	flows       *workflow.Repository
@@ -96,6 +97,7 @@ func Open(dir, backup, password string) (*App, error) {
 	// search executor keeps its local-only classification.
 	app.refreshReviewModel()
 	app.flows = workflow.New(engine, app.tasks)
+	app.loadPipelinePause()
 	if _, statErr := os.Stat(legacyDB); statErr == nil {
 		if _, err = livemigrate.Activate(engine, profile, app.flows, app.ledger, app.now()); err != nil {
 			engine.Close()

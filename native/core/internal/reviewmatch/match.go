@@ -40,19 +40,31 @@ var (
 		name string
 		expr *regexp.Regexp
 	}{
-		{"live", regexp.MustCompile(`(?i)\blive\b|现场`)},
-		{"remaster", regexp.MustCompile(`(?i)\bremaster(?:ed)?\b|重制`)},
+		{"live", regexp.MustCompile(`(?i)\blive\b|现场|現場|演唱会|演唱會`)},
 		{"remix", regexp.MustCompile(`(?i)\bremix(?:ed)?\b|混音`)},
-		{"deluxe", regexp.MustCompile(`(?i)\bdeluxe\b|豪华`)},
-		{"instrumental", regexp.MustCompile(`(?i)\binstrumental\b`)},
-		{"karaoke", regexp.MustCompile(`(?i)\bkaraoke\b`)},
-		{"rerecord", regexp.MustCompile(`(?i)\bre[- ]?record(?:ed|ing)\b|重录`)},
+		{"instrumental", regexp.MustCompile(`(?i)\binstrumental\b|伴奏`)},
+		{"karaoke", regexp.MustCompile(`(?i)\bkaraoke\b|卡拉`)},
+		{"rerecord", regexp.MustCompile(`(?i)\bre[- ]?record(?:ed|ing)\b|重录|重錄`)},
 	}
-	compilation = regexp.MustCompile(`(?i)(?:\bcompilation\b|\bvarious artists\b|^va$)|合辑|精选|群星`)
+	compilation     = regexp.MustCompile(`(?i)(?:\bcompilation\b|\bvarious artists\b|^va$)|合辑|精选|群星`)
+	specialEdition  = regexp.MustCompile(`(?i)deluxe|expanded|anniversary|remaster(?:ed)?|bonus|special edition|japan(?:ese)? edition|豪华|周年|重制|加曲|日本版|限定版`)
+	bracketed       = regexp.MustCompile(`\([^)]*\)|\[[^]]*\]|（[^）]*）`)
+	trailingSpecial = regexp.MustCompile(`(?i)(?:\s*[-–:]?\s*(?:\d{4}\s*)?(?:deluxe|expanded|anniversary|remaster(?:ed)?|bonus|special edition|japan(?:ese)? edition|豪华|周年|重制|加曲|日本版|限定版)(?:\s+(?:edition|version|\d{4}))*)+\s*$`)
+	openCDTail      = regexp.MustCompile(`(?i)^(?:\(?\d{4}\)?|\[?(?:flac|alac|mp3|wav|24\s*bit|16\s*bit)\b)`)
 )
 
 // Compare decides whether the hit is the expected release.
+// Deluxe, remaster and anniversary wording is removed before the title
+// comparison, matching the 0.4.31 edition base. Live, remix, instrumental,
+// karaoke and re-recordings still have to be the same on both sides.
 func Compare(expectedTitle, expectedArtist string, hit Hit) Result {
+	return CompareSource("", expectedTitle, expectedArtist, hit)
+}
+
+// CompareSource is Compare plus the open.cd title form "艺人 - 专辑",
+// optionally followed by a year or a format mark. That cover applies only
+// when source is open.cd and there is one expected artist.
+func CompareSource(source, expectedTitle, expectedArtist string, hit Hit) Result {
 	if strings.TrimSpace(expectedTitle) == "" || strings.TrimSpace(hit.Title) == "" {
 		return Result{Reason: "missing_title"}
 	}
@@ -62,10 +74,12 @@ func Compare(expectedTitle, expectedArtist string, hit Hit) Result {
 	if editionKey(expectedTitle, "") != editionKey(hit.Title, hit.Edition) {
 		return Result{Reason: "edition"}
 	}
-	titleOK := fold(hit.Title) == fold(expectedTitle)
+	prefix := source == "open.cd" && openCDTitle(expectedArtist, expectedTitle, hit.Title)
+	sameBase := albumBase(expectedTitle) != "" && albumBase(hit.Title) == albumBase(expectedTitle)
+	titleOK := prefix || fold(hit.Title) == fold(expectedTitle) || sameBase
 	if !titleOK {
 		for _, alias := range hit.Aliases {
-			if fold(alias) == fold(expectedTitle) {
+			if fold(alias) == fold(expectedTitle) || albumBase(alias) == albumBase(expectedTitle) {
 				titleOK = true
 				break
 			}
@@ -74,10 +88,16 @@ func Compare(expectedTitle, expectedArtist string, hit Hit) Result {
 	if !titleOK {
 		return Result{Reason: "title"}
 	}
-	if !artistsAgree(expectedArtist, hit.Artists) {
+	if !prefix && !artistsAgree(expectedArtist, hit.Artists) {
 		return Result{Reason: "artist"}
 	}
 	if titleOK && fold(hit.Title) != fold(expectedTitle) {
+		if prefix {
+			return Result{Pass: true, Reason: "open_cd_prefix"}
+		}
+		if albumBase(hit.Title) == albumBase(expectedTitle) {
+			return Result{Pass: true, Reason: "edition_base"}
+		}
 		return Result{Pass: true, Reason: "alias"}
 	}
 	return Result{Pass: true, Reason: "title"}
@@ -141,6 +161,34 @@ func artistKey(names []string) string {
 	}
 	sort.Strings(keys)
 	return strings.Join(keys, "\n")
+}
+
+func albumBase(title string) string {
+	text := fold(title)
+	text = bracketed.ReplaceAllStringFunc(text, func(part string) string {
+		if specialEdition.MatchString(part) {
+			return ""
+		}
+		return part
+	})
+	text = trailingSpecial.ReplaceAllString(text, "")
+	text = strings.Trim(text, " -:–")
+	return strings.Join(strings.Fields(text), " ")
+}
+
+func openCDTitle(artist, album, observed string) bool {
+	artist = fold(artist)
+	album = fold(album)
+	observed = fold(observed)
+	if artist == "" || album == "" || strings.Contains(artist, "/") {
+		return false
+	}
+	prefix := artist + " - " + album
+	if !strings.HasPrefix(observed, prefix) {
+		return false
+	}
+	tail := strings.TrimSpace(observed[len(prefix):])
+	return tail == "" || openCDTail.MatchString(tail)
 }
 
 func fold(value string) string {

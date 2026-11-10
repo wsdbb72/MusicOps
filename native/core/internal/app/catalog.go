@@ -73,11 +73,12 @@ type catalogTrackRequest struct {
 }
 
 type catalogIdentifyRequest struct {
-	Artist string                `json:"artist"`
-	Album  string                `json:"album"`
-	Title  string                `json:"title"`
-	MBID   string                `json:"mbid"`
-	Tracks []catalogTrackRequest `json:"tracks"`
+	Artist         string                `json:"artist"`
+	Album          string                `json:"album"`
+	Title          string                `json:"title"`
+	MBID           string                `json:"mbid"`
+	Tracks         []catalogTrackRequest `json:"tracks"`
+	DiscogsBaseURL string                `json:"discogs_base_url,omitempty"`
 }
 
 type catalogSourceStatus struct {
@@ -116,6 +117,7 @@ type catalogIdentifyResponse struct {
 	Results            []catalogTrackResult    `json:"results"`
 	Summary            releaseidentity.Summary `json:"summary"`
 	Sources            []catalogSourceStatus   `json:"sources"`
+	Discogs            []discogsHit            `json:"discogs,omitempty"`
 	ProductionVerified bool                    `json:"production_verified"`
 	Note               string                  `json:"note"`
 }
@@ -149,6 +151,7 @@ func (a *App) identifyCatalog(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, status, map[string]any{"ok": false, "code": code})
 		return
 	}
+	a.attachDiscogs(&resp, body)
 	writeJSON(w, http.StatusOK, resp)
 }
 

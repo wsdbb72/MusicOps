@@ -118,7 +118,7 @@ func runCLI(args []string) int {
 		return 0
 	case "healthcheck":
 		return runHealthcheck(args[1:])
-	case "status", "jobs", "job", "control", "stop", "migrate":
+	case "status", "jobs", "job", "control", "stop", "migrate", "pause", "resume", "reindex", "gaps", "migration":
 		// Parsed below.
 	default:
 		return printError(fmt.Errorf("未知命令: %s", cmd))
@@ -176,6 +176,53 @@ func runCLI(args []string) int {
 			return printError(err)
 		}
 		return runJob(ctx, client, id, flags)
+	case "pause", "resume":
+		if len(flags.args) != 0 {
+			return printError(fmt.Errorf("%s 不接受位置参数", cmd))
+		}
+		client, err := attachCore(profile, flags.coreBinary)
+		if err != nil {
+			return printError(err)
+		}
+		raw, err := client.do(ctx, http.MethodPost, "/v1/control", map[string]any{"action": cmd})
+		if err != nil {
+			return printError(err)
+		}
+		printRawJSON(raw)
+		return 0
+	case "reindex":
+		client, err := attachCore(profile, flags.coreBinary)
+		if err != nil {
+			return printError(err)
+		}
+		raw, err := client.do(ctx, http.MethodPost, "/v1/library/reindex", map[string]any{})
+		if err != nil {
+			return printError(err)
+		}
+		printRawJSON(raw)
+		return 0
+	case "gaps":
+		client, err := attachCore(profile, flags.coreBinary)
+		if err != nil {
+			return printError(err)
+		}
+		raw, err := client.do(ctx, http.MethodGet, "/v1/library/gaps", nil)
+		if err != nil {
+			return printError(err)
+		}
+		printRawJSON(raw)
+		return 0
+	case "migration":
+		client, err := attachCore(profile, flags.coreBinary)
+		if err != nil {
+			return printError(err)
+		}
+		raw, err := client.do(ctx, http.MethodGet, "/v1/migration", nil)
+		if err != nil {
+			return printError(err)
+		}
+		printRawJSON(raw)
+		return 0
 	case "control":
 		if len(flags.args) != 2 {
 			return printError(errors.New("control 需要任务 ID 与动作 pause|resume|cancel|retry"))

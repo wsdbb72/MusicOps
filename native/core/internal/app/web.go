@@ -99,13 +99,14 @@ const appJS = `(function () {
     if (view === "logs") { renderLogs(); return; }
     var rows = visible();
     if (!rows.length) {
-      list.innerHTML = "";
+      list.innerHTML = (view === "tasks" || view === "queue") ? pipelineBar() : "";
+      if (view === "tasks" || view === "queue") bindPipeline();
       setStatus("", view === "review" ? "没有待核对的任务。" : (view === "queue" ? "没有正在进行的任务。" : "还没有任务。"));
       return;
     }
     setStatus("", "");
     var html = "";
-    if (view === "tasks" || view === "queue") html += batchBar();
+    if (view === "tasks" || view === "queue") html += pipelineBar() + batchBar();
     html += '<div class="cards">';
     rows.forEach(function (job) {
       var checked = selectedJobs[job.job_id] ? " checked" : "";
@@ -113,6 +114,16 @@ const appJS = `(function () {
       html += '<article>' + box + '<button type="button" data-job="' + escapeText(job.job_id) + '"><h2>' + escapeText(job.label || "未命名") + '</h2><p class="meta">' + pill(job) + '</p><p>' + escapeText(job.headline || "") + "</p></button></article>";
     });
     list.innerHTML = html + "</div>";
+    if (view === "tasks" || view === "queue") bindPipeline();
+  }
+  function pipelineBar() {
+    return '<p><button type="button" id="pipeline-pause">暂停全部后台</button> <button type="button" id="pipeline-resume">继续后台</button></p>';
+  }
+  function bindPipeline() {
+    var pause = document.getElementById("pipeline-pause");
+    var resume = document.getElementById("pipeline-resume");
+    if (pause) pause.addEventListener("click", function () { postSetting("/v1/control", {action: "pause"}).then(function () { setStatus("ok", "后台已暂停。正在跑的检索会停在下一步，不会新扣令牌。"); }); });
+    if (resume) resume.addEventListener("click", function () { postSetting("/v1/control", {action: "resume"}).then(function () { setStatus("ok", "后台已继续。"); }); });
   }
   function selectedCount() {
     var count = 0;
@@ -335,7 +346,7 @@ const appJS = `(function () {
       '<label>密码（' + escapeText(savedMark(qbtSettings.login_saved, qbtSettings.login_revision)) + '，留空保留）<input type="password" id="qbt-password" autocomplete="off"></label>' +
       '<label>分类<input type="text" id="qbt-category" value="' + escapeText(qbtSettings.category || "") + '"></label>' +
       '<label>标签<input type="text" id="qbt-tags" value="' + escapeText(qbtSettings.tags || "") + '"></label>' +
-      '<p><button type="button" id="save-qbt" class="primary">保存</button> <button type="button" id="test-qbt">测试连接</button></p><p id="qbt-test-result" class="meta"></p></article>';
+      '<p><button type="button" id="save-qbt" class="primary">保存</button> <button type="button" id="test-qbt">测试连接</button> <button type="button" id="unify-qbt-tags">统一旧标签</button></p><p id="qbt-test-result" class="meta"></p></article>';
   }
   function solverCard() {
     if (!solverSettings) return "";
@@ -361,7 +372,7 @@ const appJS = `(function () {
   }
   function discogsCard() {
     if (!discogsSettings) return "";
-    return '<article><h2>Discogs</h2><p class="meta">在线专辑识别用的 Token，只存 Vault。Token 已保存也不代表目录核对会用 Discogs——目前核对仍只用 MusicBrainz。</p>' +
+    return '<article><h2>Discogs</h2><p class="meta">在线专辑识别用的 Token，只存 Vault。保存后，目录识别会向 Discogs 查询候选；候选不能单独确认发行身份。</p>' +
       '<label>Token（' + escapeText(savedMark(discogsSettings.token_saved, discogsSettings.token_revision)) + '，留空保留）<input type="password" id="discogs-token" autocomplete="off"></label>' +
       '<p><button type="button" id="save-discogs" class="primary">保存</button> <button type="button" id="test-discogs">测试连接</button></p><p id="discogs-test-result" class="meta"></p></article>';
   }
@@ -388,7 +399,8 @@ const appJS = `(function () {
       '<label>地址<input type="text" id="navidrome-url" value="' + escapeText(navidrome.url || "") + '"></label>' +
       '<label>用户名<input type="text" id="navidrome-username" value="' + escapeText(navidrome.username || "") + '" autocomplete="off"></label>' +
       '<label>密码（' + escapeText(savedMark(navidrome.password_saved, navidrome.password_revision)) + '，留空保留）<input type="password" id="navidrome-password" autocomplete="off"></label>' +
-      '<p><button type="button" id="save-navidrome" class="primary">保存 Navidrome</button> <button type="button" id="test-navidrome">测试连接</button></p><p id="navidrome-test-result" class="meta"></p></article>';
+      '<p><button type="button" id="save-navidrome" class="primary">保存 Navidrome</button> <button type="button" id="test-navidrome">测试连接</button></p><p id="navidrome-test-result" class="meta"></p>' +
+      '<h2>Roon</h2><p class="meta">只检查端口是否可连接，不注册、不扫描。</p><label>主机<input type="text" id="roon-host" value="127.0.0.1"></label><label>端口<input type="number" id="roon-port" value="9330"></label><p><button type="button" id="test-roon">检查 Roon</button></p><p id="roon-result" class="meta"></p></article>';
   }
   function playlistsCard() {
     var rows = playlistRows.map(function (row) {
@@ -400,10 +412,10 @@ const appJS = `(function () {
         ' <button type="button" data-sub-pause="' + escapeText(row.playlist_id) + '" data-paused="' + (row.paused ? "1" : "0") + '">' + (row.paused ? "恢复" : "暂停") + '</button>' +
         ' <button type="button" data-sub-delete="' + escapeText(row.playlist_id) + '">删除</button></p>';
     }).join("");
-    return '<article><h2>歌单</h2><p class="meta">可导入 .m3u、.m3u8、.json、.csv、.tsv、.txt。只读取歌名、艺人和专辑列，文件里的链接不会被打开。保存后可在搜索时选用。</p>' +
+    return '<article><h2>歌单</h2><p class="meta">可导入 .m3u、.m3u8、.json、.csv、.tsv、.txt、.xlsx。只读取歌名、艺人和专辑列，文件里的链接不会被打开。保存后可在搜索时选用。xlsx 不执行宏。</p>' +
       '<label>歌单名称<input type="text" id="playlist-name" placeholder="留空用文件里的名称"></label>' +
       '<label>文本顺序（仅 TXT）<select id="playlist-order"><option value="artist-title">歌手 - 歌名</option><option value="title-artist">歌名 - 歌手</option></select></label>' +
-      '<label>上传歌单文件<input type="file" id="playlist-file" accept=".m3u,.m3u8,.json,.csv,.tsv,.txt"></label>' +
+      '<label>上传歌单文件<input type="file" id="playlist-file" accept=".m3u,.m3u8,.json,.csv,.tsv,.txt,.xlsx"></label>' +
       '<label>或粘贴歌单内容<textarea id="playlist-content" rows="4" placeholder="歌手 - 歌名，或带表头的 CSV / JSON"></textarea></label>' +
       '<p><button type="button" id="save-playlist" class="primary">保存歌单</button></p>' +
       (rows || '<p class="meta">还没有已存歌单。</p>') +
@@ -483,6 +495,10 @@ const appJS = `(function () {
     if (saveNavidromeButton) saveNavidromeButton.addEventListener("click", saveNavidrome);
     var testNavidromeButton = document.getElementById("test-navidrome");
     if (testNavidromeButton) testNavidromeButton.addEventListener("click", testNavidrome);
+    var unifyQbt = document.getElementById("unify-qbt-tags");
+    if (unifyQbt) unifyQbt.addEventListener("click", unifyQbtTags);
+    var testRoonButton = document.getElementById("test-roon");
+    if (testRoonButton) testRoonButton.addEventListener("click", testRoon);
     var savePlaylistButton = document.getElementById("save-playlist");
     if (savePlaylistButton) savePlaylistButton.addEventListener("click", savePlaylist);
     var locatePlaylistButton = document.getElementById("locate-playlist");
@@ -569,6 +585,31 @@ const appJS = `(function () {
       setStatus("fail", "测试失败。" + (err && err.message ? "（" + err.message + "）" : ""));
     } finally {
       setBusy(false);
+    }
+  }
+  async function unifyQbtTags() {
+    var result = document.getElementById("qbt-test-result");
+    try {
+      var body = await postSetting("/v1/settings/qbittorrent/tags", {
+        base_url: document.getElementById("qbt-base-url").value.trim(),
+        username: document.getElementById("qbt-username").value.trim(),
+        password: document.getElementById("qbt-password").value
+      });
+      if (result) result.textContent = body.note || "已统一旧标签。";
+    } catch (err) {
+      if (result) result.textContent = err.message;
+    }
+  }
+  async function testRoon() {
+    var result = document.getElementById("roon-result");
+    try {
+      var body = await postSetting("/v1/settings/servers/roon/test", {
+        host: document.getElementById("roon-host").value.trim(),
+        port: parseInt(document.getElementById("roon-port").value, 10) || 9330
+      });
+      if (result) result.textContent = body.note || "";
+    } catch (err) {
+      if (result) result.textContent = err.message;
     }
   }
   async function saveQBT() {
@@ -970,7 +1011,16 @@ const appJS = `(function () {
     } else {
       duplicateHtml = '<p class="meta">尚未扫描，或没有可合并的重复项。</p>';
     }
-    var html = '<div class="cards"><article><h2>重复歌曲</h2><p class="meta">同名不等于重复。内容一致且可以确定保留哪一份时才能合并，其余进入核对。合并后的旧文件进隔离区，可以恢复。</p>' +
+    var html = '<div class="cards"><article><h2>本地资料库</h2><p class="meta">重新索引只补充新文件，不删除磁盘上的音乐。缺口是曲目编号不连续，补缺、升级和单曲扩专只创建任务，不会在这一步下载。</p>' +
+      '<p><button type="button" id="reindex-library" class="primary">重新索引</button> <button type="button" id="list-gaps">列出缺失曲目</button></p>' +
+      '<p><button type="button" id="fill-gaps">补缺任务</button> <button type="button" id="upgrade-album">升级任务</button> <button type="button" id="expand-album">单曲升级整专</button></p>' +
+      '<p id="library-ops-result" class="meta"></p></article>' +
+      '<article><h2>合辑</h2><p class="meta">预览不会移动文件。合并只把名称里带“合辑”或 Various Artists 的文件夹移进音乐库的 Compilations。</p>' +
+      '<p><button type="button" id="preview-compilations">预览合辑</button> <button type="button" id="merge-compilations">合并合辑</button></p><p id="compilation-result" class="meta"></p></article>' +
+      '<article><h2>艺人目录与 NCM</h2><p class="meta">艺人目录把专辑文件夹整理成“艺人/专辑”。NCM 解密不改源文件。</p>' +
+      '<p><button type="button" id="plan-artist-folders">查看艺人目录</button> <button type="button" id="apply-artist-folders">整理艺人目录</button></p>' +
+      '<label>NCM 路径<input type="text" id="ncm-source" placeholder="库内 .ncm 路径"></label><p><button type="button" id="decrypt-ncm">解密 NCM</button></p><p id="library-tools-result" class="meta"></p></article>' +
+      '<article><h2>重复歌曲</h2><p class="meta">同名不等于重复。内容一致且可以确定保留哪一份时才能合并，其余进入核对。合并后的旧文件进隔离区，可以恢复。</p>' +
       '<p><button type="button" id="scan-duplicates" class="primary">扫描重复</button></p>' + duplicateHtml +
       '<label>恢复编号<input type="text" id="restore-merge-id" placeholder="合并后返回的编号"></label><p><button type="button" id="restore-duplicates">恢复这次合并</button></p></article>' +
       '<article><form id="transcode-form"><h2>转码为 FLAC</h2>' +
@@ -999,6 +1049,26 @@ const appJS = `(function () {
   function bindLibrary() {
     var form = document.getElementById("transcode-form");
     if (form) form.addEventListener("submit", submitTranscode);
+    var reindex = document.getElementById("reindex-library");
+    if (reindex) reindex.addEventListener("click", function () { libraryAction("/v1/library/reindex", {}, "library-ops-result"); });
+    var gaps = document.getElementById("list-gaps");
+    if (gaps) gaps.addEventListener("click", function () { libraryAction("/v1/library/gaps", null, "library-ops-result"); });
+    var fill = document.getElementById("fill-gaps");
+    if (fill) fill.addEventListener("click", function () { libraryAction("/v1/library/workflow", {scene: "fill", label: "补缺"}, "library-ops-result"); });
+    var upgrade = document.getElementById("upgrade-album");
+    if (upgrade) upgrade.addEventListener("click", function () { libraryAction("/v1/library/workflow", {scene: "upgrade", label: "音质升级"}, "library-ops-result"); });
+    var expand = document.getElementById("expand-album");
+    if (expand) expand.addEventListener("click", function () { libraryAction("/v1/library/workflow", {scene: "expand", label: "单曲升级整专"}, "library-ops-result"); });
+    var previewCompilations = document.getElementById("preview-compilations");
+    if (previewCompilations) previewCompilations.addEventListener("click", function () { libraryAction("/v1/library/compilations", null, "compilation-result"); });
+    var mergeCompilations = document.getElementById("merge-compilations");
+    if (mergeCompilations) mergeCompilations.addEventListener("click", function () { libraryAction("/v1/library/compilations/merge", {}, "compilation-result"); });
+    var planArtists = document.getElementById("plan-artist-folders");
+    if (planArtists) planArtists.addEventListener("click", function () { libraryAction("/v1/library/artist-folders", null, "library-tools-result"); });
+    var applyArtists = document.getElementById("apply-artist-folders");
+    if (applyArtists) applyArtists.addEventListener("click", function () { libraryAction("/v1/library/artist-folders", {}, "library-tools-result"); });
+    var decrypt = document.getElementById("decrypt-ncm");
+    if (decrypt) decrypt.addEventListener("click", function () { libraryAction("/v1/library/ncm/decrypt", {source: document.getElementById("ncm-source").value.trim()}, "library-tools-result"); });
     var scan = document.getElementById("scan-duplicates");
     if (scan) scan.addEventListener("click", scanDuplicates);
     var restore = document.getElementById("restore-duplicates");
@@ -1006,6 +1076,18 @@ const appJS = `(function () {
     document.querySelectorAll("[data-merge]").forEach(function (button) {
       button.addEventListener("click", function () { mergeDuplicates(button.getAttribute("data-merge")); });
     });
+  }
+  async function libraryAction(path, body, targetID) {
+    var target = document.getElementById(targetID);
+    try {
+      var response = await fetch(path, {method: body === null ? "GET" : "POST", headers: {"Content-Type": "application/json", Accept: "application/json"}, body: body === null ? undefined : JSON.stringify(body)});
+      var decoded = await response.json();
+      if (!response.ok || decoded.ok === false) throw new Error(decoded.error || decoded.code || "没有完成");
+      if (target) target.textContent = decoded.note || decoded.error || "已完成。";
+      load(true);
+    } catch (err) {
+      if (target) target.textContent = err.message;
+    }
   }
   async function scanDuplicates() {
     if (loading) return;

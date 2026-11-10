@@ -1,6 +1,7 @@
 package configmigrate
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"database/sql"
 	"encoding/hex"
@@ -350,5 +351,114 @@ func TestMaybeMigrateCopiesServiceSettingsWithoutSecrets(t *testing.T) {
 	encoded, err := json.Marshal([]any{qbt, ai, library, report})
 	if err != nil || strings.Contains(string(encoded), "must-not-copy") || strings.Contains(string(encoded), "vault://") {
 		t.Fatal(string(encoded), err)
+	}
+}
+
+func TestMaybeMigrateCopiesRemainingSectionsAndRerunsOldReceipts(t *testing.T) {
+	profile := t.TempDir()
+	state := filepath.Join(profile, "state")
+	if err := os.MkdirAll(state, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	db, err := sql.Open("sqlite", filepath.Join(state, "musicops.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload := `{
+		"version": 2,
+		"values": {
+			"updates": {"enabled": false},
+			"paths": {"library": "/library/music"},
+			"lyrics": {"primary": {"base_url": "https://lyrics.example.com", "lyrics_path": "/lyrics", "candidates_path": "/jsonapi", "cover_path": "/cover", "auth_header": "Authorization", "auth_secret_ref": "vault://lyrics/default/authorization"}},
+			"browser_solver": {"managed": true, "enabled": true, "base_url": "http://127.0.0.1:8191", "timeout": 30},
+			"music_servers": {"plex": {"enabled": true, "url": "http://127.0.0.1:32400", "section_id": "1", "auth_secret_ref": "vault://user/plex/secret"}, "navidrome": {"enabled": true, "url": "http://127.0.0.1:4533", "username": "ada", "password_ref": "vault://user/nav/secret"}, "roon": {"enabled": true, "host": "127.0.0.1", "port": 9330, "library": "/library/music"}},
+			"playlist_sources": {"qqmusic": {"credential_ref": "vault://user/qqmusic/cookie", "timeout": 15}},
+			"catalog": {"discogs": {"credential_ref": "vault://catalog/discogs/token", "token": "must-not-copy"}}
+		}
+	}`
+	if _, err = db.Exec(`CREATE TABLE config_versions (id TEXT PRIMARY KEY, payload TEXT NOT NULL, updated_at TEXT NOT NULL)`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = db.Exec(`INSERT INTO config_versions(id, payload, updated_at) VALUES('2', ?, '2026-01-01T00:00:00Z')`, payload); err != nil {
+		t.Fatal(err)
+	}
+	if err = db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	report, err := MaybeMigrate(profile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, key := range []string{"app/settings/lyrics", "app/settings/solver", "app/settings/servers", "app/settings/roon", "app/settings/playlist-sources", "app/settings/updates"} {
+		found := false
+		for _, mapped := range report.Mapped {
+			if mapped == key {
+				found = true
+			}
+		}
+		if !found {
+			t.Fatal(report.Mapped)
+		}
+	}
+	if report.MapperGeneration != 2 {
+		t.Fatal(report.MapperGeneration)
+	}
+	lyrics := readNative(t, profile, "app/settings/lyrics")
+	if lyrics["base_url"] != "https://lyrics.example.com" {
+		t.Fatal(lyrics)
+	}
+	servers := readNative(t, profile, "app/settings/servers")
+	encoded, err := json.Marshal([]any{lyrics, servers, report})
+	if err != nil || strings.Contains(string(encoded), "must-not-copy") || strings.Contains(string(encoded), "vault://") {
+		t.Fatal(string(encoded), err)
+	}
+	sources := readNative(t, profile, "app/settings/playlist-sources")
+	qq, _ := sources["qqmusic"].(map[string]any)
+	if qq["credential_ref"] != "vault://user/qqmusic/cookie" {
+		t.Fatal(sources)
+	}
+	raw, err := os.ReadFile(filepath.Join(state, "migration-report.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw = bytes.Replace(raw, []byte(`"mapper_generation": 2`), []byte(`"mapper_generation": 0`), 1)
+	if err = os.WriteFile(filepath.Join(state, "migration-report.json"), raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	engine, err := dataengine.Open(filepath.Join(state, "native"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var current []byte
+	var present bool
+	if err = engine.View(func(v *dataengine.View) error {
+		var err error
+		current, present, err = v.Get([]byte("app/settings/updates"))
+		return err
+	}); err != nil || !present {
+		t.Fatal(err, present)
+	}
+	ok, err := engine.CompareAndSwap(
+		[]dataengine.Condition{{Key: []byte("app/settings/updates"), Value: current}},
+		[]dataengine.Mutation{{Key: []byte("app/settings/updates"), Delete: true}},
+	)
+	if err != nil || !ok {
+		t.Fatal(ok, err)
+	}
+	if err = engine.Close(); err != nil {
+		t.Fatal(err)
+	}
+	again, err := MaybeMigrate(profile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	foundUpdates := false
+	for _, mapped := range again.Mapped {
+		if mapped == "app/settings/updates" {
+			foundUpdates = true
+		}
+	}
+	if !foundUpdates || again.MapperGeneration != 2 {
+		t.Fatal(again.Mapped, again.MapperGeneration)
 	}
 }

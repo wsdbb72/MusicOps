@@ -8,6 +8,7 @@ import (
 	"github.com/wsdbb72/MusicOps/native/core/internal/audiorelease"
 	"github.com/wsdbb72/MusicOps/native/core/internal/dataengine"
 	"github.com/wsdbb72/MusicOps/native/core/internal/downloadpolicy"
+	"github.com/wsdbb72/MusicOps/native/core/internal/livemigrate"
 	"github.com/wsdbb72/MusicOps/native/core/internal/taskrepo"
 	"github.com/wsdbb72/MusicOps/native/core/internal/trackersearch"
 )
@@ -301,5 +302,13 @@ func (a *App) logs(w http.ResponseWriter, r *http.Request) {
 	if tasks == nil {
 		tasks = []taskrepo.Task{}
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "tasks": tasks, "count": len(tasks)})
+	events, err := livemigrate.Events(a.engine)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "code": "LOGS_UNAVAILABLE"})
+		return
+	}
+	if events == nil {
+		events = []map[string]string{}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "tasks": tasks, "events": events, "count": len(tasks)})
 }

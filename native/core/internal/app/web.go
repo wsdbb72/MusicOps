@@ -38,6 +38,8 @@ const appJS = `(function () {
   var lyricsSettings = null;
   var discogsSettings = null;
   var librarySettings = null;
+  var migrationReport = null;
+  var logEvents = [];
   var serverSettings = null;
   var playlistRows = [];
   var subscriptionRows = [];
@@ -415,6 +417,14 @@ const appJS = `(function () {
       '<p><button type="button" id="save-subscription" class="primary">订阅</button></p>' +
       (subs || '<p class="meta">还没有订阅。</p>') + '</article>';
   }
+  function migrationCard() {
+    var report = migrationReport || {};
+    var counts = report.report || {};
+    var summary = report.found ? ("已迁入曲目 " + (counts.library || 0) + "，待核对任务 " + (counts.jobs || 0) + "，令牌记录 " + (counts.tokens || 0) + "。") : "还没有旧版活动数据回执。";
+    return '<article><h2>从旧版迁入</h2><p class="meta">' + escapeText(report.note || "启动时会读取旧版数据库。音乐文件不移动。") + "</p><p>" + escapeText(summary) + "</p>" +
+      '<p class="meta">冷归档' + (report.cold_archive ? "仍在" : "还没有") + "。自动安装更新：" + (report.auto_install ? "会" : "不会") + "。</p>" +
+      '<p><button type="button" id="rollback-migration">回退迁入的索引</button></p><p id="migration-result" class="meta"></p></article>';
+  }
   function renderSettings() {
     if (!downloadSettings && !cookieSettings.length && !aiSettings && !qbtSettings && !solverSettings && !lyricsSettings && !discogsSettings && !librarySettings && !serverSettings) {
       setStatus("", "设置没有读到。");
@@ -422,7 +432,7 @@ const appJS = `(function () {
       return;
     }
     setStatus("", "");
-    var html = '<div class="cards">' + downloadCard() + cookieCard() + aiCard() + qbtCard() + solverCard() + lyricsCard() + discogsCard() + libraryCard() + serversCard() + playlistsCard() +
+    var html = '<div class="cards">' + migrationCard() + downloadCard() + cookieCard() + aiCard() + qbtCard() + solverCard() + lyricsCard() + discogsCard() + libraryCard() + serversCard() + playlistsCard() +
       '<article><h2>站点登录检查</h2><p class="meta">只读检查：只验证登录与余额，不下载、不花 token。Cookie 留空用已保存的，填了则只用于这次检查，不保存。</p>' +
       '<label>站点<select id="preflight-site">' + siteRows.map(function (site) { return '<option value="' + escapeText(site.name) + '">' + escapeText(site.name) + "</option>"; }).join("") + '</select></label>' +
       '<label>Cookie<input type="password" id="preflight-cookie" autocomplete="off"></label>' +
@@ -463,6 +473,8 @@ const appJS = `(function () {
     if (testDiscogsButton) testDiscogsButton.addEventListener("click", testDiscogs);
     var saveLibraryButton = document.getElementById("save-library");
     if (saveLibraryButton) saveLibraryButton.addEventListener("click", saveLibrary);
+    var rollbackMigrationButton = document.getElementById("rollback-migration");
+    if (rollbackMigrationButton) rollbackMigrationButton.addEventListener("click", rollbackMigration);
     var savePlexButton = document.getElementById("save-plex");
     if (savePlexButton) savePlexButton.addEventListener("click", savePlex);
     var testPlexButton = document.getElementById("test-plex");
@@ -1068,17 +1080,31 @@ const appJS = `(function () {
     load(true);
   }
   function renderLogs() {
-    if (!logRows.length) {
+    if (!logRows.length && !logEvents.length) {
       list.innerHTML = "";
       setStatus("", "还没有运行记录。");
       return;
     }
     setStatus("", "");
     var html = '<div class="cards">';
+    logEvents.forEach(function (event) {
+      html += '<article><h2>' + escapeText(event.phase || "旧事件") + '</h2><p class="meta"><span class="pill">' + escapeText(event.at || "") + "</span><span class=\"pill\">" + escapeText(event.task_id || "") + "</span></p><p>" + escapeText(event.message || "") + "</p></article>";
+    });
     logRows.forEach(function (task) {
       html += '<article><h2>' + escapeText(task.task_id || "") + '</h2><p class="meta"><span class="pill">' + escapeText(task.state || "") + '</span><span class="pill">' + escapeText(task.command || "") + "</span></p><p>" + escapeText(task.message || "") + "</p></article>";
     });
     list.innerHTML = html + "</div>";
+  }
+  async function rollbackMigration() {
+    var target = document.getElementById("migration-result");
+    if (!window.confirm("只撤掉迁入的曲目索引、待核对任务和令牌记录。音乐文件和冷归档会保留。")) return;
+    try {
+      var body = await postSetting("/v1/migration/rollback", {});
+      if (target) target.textContent = body.audio_unchanged ? "已回退索引，音乐文件未改动。" : "已回退。";
+      load(true);
+    } catch (err) {
+      if (target) target.textContent = err.message;
+    }
   }
   function field(name, value) {
     var row = document.createElement("div");
@@ -1298,6 +1324,9 @@ const appJS = `(function () {
         var subscriptionResponse = await fetch("/v1/subscriptions", {headers: {Accept: "application/json"}});
         var subscriptionBody = await subscriptionResponse.json();
         subscriptionRows = subscriptionBody && Array.isArray(subscriptionBody.subscriptions) ? subscriptionBody.subscriptions : [];
+        var migrationResponse = await fetch("/v1/migration", {headers: {Accept: "application/json"}});
+        var migrationBody = await migrationResponse.json();
+        migrationReport = migrationBody && migrationBody.ok ? migrationBody : null;
       } else if (view === "library") {
         var libraryResponse = await fetch("/v1/library", {headers: {Accept: "application/json"}});
         var libraryBody = await libraryResponse.json();
@@ -1309,6 +1338,7 @@ const appJS = `(function () {
         var logResponse = await fetch("/v1/logs", {headers: {Accept: "application/json"}});
         var logBody = await logResponse.json();
         logRows = logBody && Array.isArray(logBody.tasks) ? logBody.tasks : [];
+        logEvents = logBody && Array.isArray(logBody.events) ? logBody.events : [];
       } else {
         var response = await fetch("/v1/jobs", {headers: {Accept: "application/json"}});
         var body = await response.json();

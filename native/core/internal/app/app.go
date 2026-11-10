@@ -6,11 +6,14 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"os"
 	"path/filepath"
 	"sync"
 	"time"
 
+	"github.com/wsdbb72/MusicOps/native/core/internal/configmigrate"
 	"github.com/wsdbb72/MusicOps/native/core/internal/dataengine"
+	"github.com/wsdbb72/MusicOps/native/core/internal/livemigrate"
 	"github.com/wsdbb72/MusicOps/native/core/internal/reviewai"
 	"github.com/wsdbb72/MusicOps/native/core/internal/scheduler"
 	"github.com/wsdbb72/MusicOps/native/core/internal/taskrepo"
@@ -58,20 +61,24 @@ func Open(dir, backup, password string) (*App, error) {
 	if len(password) < 16 || dir == "" || backup == "" {
 		return nil, errors.New("state directory, backup directory and a password of at least 16 characters are required")
 	}
+	absDir, err := filepath.Abs(dir)
+	if err != nil {
+		return nil, err
+	}
+	profile := filepath.Dir(filepath.Dir(absDir))
+	legacyDB := filepath.Join(profile, "state", "musicops.sqlite")
+	if _, statErr := os.Stat(legacyDB); statErr == nil {
+		// Config migration opens the native store itself, so it has to
+		// finish before this process keeps the store open.
+		if _, err = configmigrate.MaybeMigrate(profile); err != nil {
+			return nil, err
+		}
+	}
 	engine, err := dataengine.Open(dir)
 	if err != nil {
 		return nil, err
 	}
 	app := &App{Dir: dir, Backup: backup, password: password, engine: engine, tasks: taskrepo.New(engine), searcher: &trackersearch.Client{}, now: time.Now, secrets: map[string]string{}}
-	// The vault base is the profile directory, two levels above the state
-	// directory (<profile>/state/native). Open only computes the store
-	// path; the platform key is only needed when a credential is actually
-	// read or written, so a profile without a key file still opens.
-	absDir, err := filepath.Abs(dir)
-	if err != nil {
-		engine.Close()
-		return nil, err
-	}
 	app.vault, err = vault.Open(filepath.Dir(filepath.Dir(absDir)))
 	if err != nil {
 		engine.Close()
@@ -89,6 +96,12 @@ func Open(dir, backup, password string) (*App, error) {
 	// search executor keeps its local-only classification.
 	app.refreshReviewModel()
 	app.flows = workflow.New(engine, app.tasks)
+	if _, statErr := os.Stat(legacyDB); statErr == nil {
+		if _, err = livemigrate.Activate(engine, profile, app.flows, app.ledger, app.now()); err != nil {
+			engine.Close()
+			return nil, err
+		}
+	}
 	runner, err := scheduler.New(app.tasks, app.handlers(), scheduler.DefaultConfig())
 	if err != nil {
 		engine.Close()

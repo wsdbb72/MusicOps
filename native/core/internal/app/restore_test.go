@@ -157,19 +157,18 @@ func TestRoonPreflightDoesNotWrite(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer listener.Close()
-	wrote := false
+	got := make(chan []byte, 1)
 	go func() {
 		conn, err := listener.Accept()
 		if err != nil {
+			got <- nil
 			return
 		}
 		defer conn.Close()
-		buf := make([]byte, 8)
-		_ = conn.SetReadDeadline(time.Now().Add(200 * time.Millisecond))
+		buf := make([]byte, 512)
+		_ = conn.SetReadDeadline(time.Now().Add(500 * time.Millisecond))
 		n, _ := conn.Read(buf)
-		if n > 0 {
-			wrote = true
-		}
+		got <- append([]byte(nil), buf[:n]...)
 	}()
 	application := newApp(t)
 	_, portText, _ := net.SplitHostPort(listener.Addr().String())
@@ -178,8 +177,9 @@ func TestRoonPreflightDoesNotWrite(t *testing.T) {
 		t.Fatal(err)
 	}
 	body := post(t, application, "/v1/settings/servers/roon/test", map[string]any{"host": "127.0.0.1", "port": port})
-	if body["reachable"] != true || body["registered"] != false || wrote {
-		t.Fatal(body, wrote)
+	seen := <-got
+	if body["reachable"] != true || body["registered"] != false || !bytes.HasPrefix(seen, []byte("GET /api")) || bytes.Contains(seen, []byte("register\n")) {
+		t.Fatal(body, string(seen))
 	}
 	closed := post(t, application, "/v1/settings/servers/roon/test", map[string]any{"host": "127.0.0.1", "port": 1})
 	if closed["reachable"] != false || closed["registered"] != false {

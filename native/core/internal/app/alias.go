@@ -52,12 +52,25 @@ func (a *App) researchAlias(ctx context.Context, job workflow.Job, plan SearchPl
 		return "", false
 	}
 	var decoded struct {
-		Query string `json:"query"`
+		Query   string   `json:"query"`
+		Aliases []string `json:"aliases"`
+		Artist  string   `json:"artist"`
 	}
 	if json.NewDecoder(io.LimitReader(response.Body, 1<<20)).Decode(&decoded) != nil {
 		return "", false
 	}
 	query := strings.TrimSpace(decoded.Query)
+	if query == "" {
+		for _, alias := range decoded.Aliases {
+			if strings.TrimSpace(alias) != "" {
+				query = strings.TrimSpace(alias)
+				break
+			}
+		}
+	}
+	if query == "" && strings.TrimSpace(decoded.Artist) != "" {
+		query = strings.TrimSpace(decoded.Artist + " " + plan.ExpectedTitle)
+	}
 	if query == "" || query == strings.TrimSpace(plan.Query) || len([]rune(query)) > 300 {
 		return "", false
 	}

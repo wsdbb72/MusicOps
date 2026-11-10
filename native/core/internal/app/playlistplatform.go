@@ -6,7 +6,6 @@ import (
 	"errors"
 	"io"
 	"net/http"
-	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -86,8 +85,8 @@ func (a *App) fetchPlaylist(w http.ResponseWriter, r *http.Request) {
 
 func (a *App) fetchRemotePlaylist(ctx context.Context, platform, id, base string) (remotePlaylist, error) {
 	spec, ok := remotePlatforms[platform]
-	if !ok || !remotePlaylistID.MatchString(id) {
-		return remotePlaylist{}, errors.New("只支持公开的 QQ 音乐或酷我数字歌单 ID")
+	if !ok || !remoteIDOK(platform, id) {
+		return remotePlaylist{}, errors.New("歌单平台或 ID 不符合旧版只读接口")
 	}
 	origin := spec.Origin
 	if strings.TrimSpace(base) == "" {
@@ -99,15 +98,18 @@ func (a *App) fetchRemotePlaylist(ctx context.Context, platform, id, base string
 		}
 		origin = strings.TrimRight(base, "/")
 	}
-	header, err := a.playlistCookie(platform, spec.Host)
+	header, bearer, err := a.playlistAuth(platform, spec.Host)
 	if err != nil {
 		return remotePlaylist{}, err
+	}
+	if platform == "youtube" && header == "" && bearer == "" && !loopbackURL(origin) {
+		return remotePlaylist{}, errors.New("YouTube 需要用户自己的 API Key，不会改去读取网页")
 	}
 	var tracks []playlistTrack
 	name := spec.Name
 	truncated := false
 	for page := 0; page < 3; page++ {
-		payload, err := a.readPlaylistPage(ctx, spec, origin, id, page, header)
+		payload, err := a.readPlaylistPage(ctx, spec, origin, id, page, header, bearer)
 		if err != nil {
 			return remotePlaylist{}, err
 		}
@@ -138,6 +140,32 @@ func (a *App) playlistBase(platform string) string {
 	return a.playlistBases[platform]
 }
 
+func (a *App) playlistAuth(platform, host string) (string, string, error) {
+	cookie, err := a.playlistCookie(platform, host)
+	if err == nil || !strings.Contains(err.Error(), "无法读取") {
+		return cookie, "", err
+	}
+	if platform != "spotify" && platform != "applemusic" && platform != "youtube" {
+		return "", "", err
+	}
+	var saved map[string]struct {
+		CredentialRef string `json:"credential_ref"`
+	}
+	found, loadErr := a.loadJSONSetting([]byte("app/settings/playlist-sources"), &saved)
+	if loadErr != nil || !found || a.vault == nil {
+		return "", "", err
+	}
+	raw, ok, getErr := a.vault.Get(strings.TrimSpace(saved[platform].CredentialRef), host)
+	if getErr != nil || !ok {
+		return "", "", err
+	}
+	token := strings.TrimSpace(raw)
+	if token == "" || strings.ContainsAny(token, "\r\n {}=") {
+		return "", "", err
+	}
+	return "", token, nil
+}
+
 func (a *App) playlistCookie(platform, host string) (string, error) {
 	var saved map[string]struct {
 		CredentialRef string `json:"credential_ref"`
@@ -165,37 +193,29 @@ func (a *App) playlistCookie(platform, host string) (string, error) {
 	return header, nil
 }
 
-func (a *App) readPlaylistPage(ctx context.Context, spec remotePlatform, origin, id string, page int, cookie string) ([]byte, error) {
-	endpoint, err := url.Parse(origin + spec.Path)
-	if err != nil {
-		return nil, errors.New("歌单地址无效")
+func remoteIDOK(platform, id string) bool {
+	pattern := remoteIDPatterns[platform]
+	if pattern == nil {
+		pattern = remotePlaylistID
 	}
-	values := endpoint.Query()
-	switch spec.Host {
-	case "c.y.qq.com":
-		values.Set("disstid", id)
-		values.Set("type", "1")
-		values.Set("json", "1")
-		values.Set("utf8", "1")
-		values.Set("onlysong", "0")
-		values.Set("new_format", "1")
-		values.Set("format", "json")
-		values.Set("song_begin", strconv.Itoa(page*1000))
-		values.Set("song_num", "1000")
-	default:
-		values.Set("pid", id)
-		values.Set("pn", strconv.Itoa(page+1))
-		values.Set("rn", "100")
-	}
-	endpoint.RawQuery = values.Encode()
-	request, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint.String(), nil)
+	return pattern.MatchString(id)
+}
+
+func (a *App) readPlaylistPage(ctx context.Context, spec remotePlatform, origin, id string, page int, cookie, bearer string) ([]byte, error) {
+	request, err := playlistPageRequest(ctx, spec, origin, id, page)
 	if err != nil {
 		return nil, errors.New("歌单地址无效")
 	}
 	request.Header.Set("Accept", "application/json")
 	request.Header.Set("User-Agent", "MusicOps")
+	if request.Method == http.MethodPost && request.Header.Get("Content-Type") == "" {
+		request.Header.Set("Content-Type", "application/json")
+	}
 	if cookie != "" {
 		request.Header.Set("Cookie", cookie)
+	}
+	if bearer != "" {
+		request.Header.Set("Authorization", "Bearer "+bearer)
 	}
 	client := &http.Client{Timeout: 15 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error {
 		return http.ErrUseLastResponse
@@ -219,6 +239,9 @@ func decodePlaylistPage(platform, id string, payload []byte) ([]playlistTrack, s
 	var decoded map[string]any
 	if json.Unmarshal(payload, &decoded) != nil {
 		return nil, "", 0, errors.New("歌单响应不是 JSON")
+	}
+	if extra, name, total, ok, err := decodeExtraPlaylist(platform, id, decoded); ok || err != nil {
+		return extra, name, total, err
 	}
 	if platform == "qqmusic" {
 		if code, _ := decoded["code"].(float64); code != 0 {

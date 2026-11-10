@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"strings"
 
 	"github.com/wsdbb72/MusicOps/native/core/internal/audiorelease"
 	"github.com/wsdbb72/MusicOps/native/core/internal/dataengine"
@@ -156,6 +157,7 @@ var downloadSettingsKey = []byte("app/settings/download")
 type downloadSettings struct {
 	StreamingEnabled bool     `json:"streaming_enabled"`
 	StreamingOrder   []string `json:"streaming_order,omitempty"`
+	EngineURL        string   `json:"engine_url,omitempty"`
 	UpdatedNS        int64    `json:"updated_ns"`
 }
 
@@ -237,7 +239,7 @@ func (a *App) downloadSettings(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "code": "SETTINGS_UNAVAILABLE"})
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "streaming_enabled": settings.StreamingEnabled, "streaming_order": settings.StreamingOrder, "streaming_sources": steps, "streaming_source_status": a.streamingSourceStatus(), "streaming_fallback_wired": true})
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "streaming_enabled": settings.StreamingEnabled, "streaming_order": settings.StreamingOrder, "engine_url": settings.EngineURL, "streaming_sources": steps, "streaming_source_status": a.streamingSourceStatus(), "streaming_fallback_wired": true})
 }
 
 // saveDownload replaces the saved streaming default and/or the saved
@@ -247,8 +249,9 @@ func (a *App) saveDownload(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		StreamingEnabled *bool    `json:"streaming_enabled"`
 		StreamingOrder   []string `json:"streaming_order"`
+		EngineURL        *string  `json:"engine_url"`
 	}
-	if err := decode(r, &body); err != nil || (body.StreamingEnabled == nil && body.StreamingOrder == nil) {
+	if err := decode(r, &body); err != nil || (body.StreamingEnabled == nil && body.StreamingOrder == nil && body.EngineURL == nil) {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "code": "INVALID_REQUEST"})
 		return
 	}
@@ -270,12 +273,19 @@ func (a *App) saveDownload(w http.ResponseWriter, r *http.Request) {
 	if body.StreamingOrder != nil {
 		next.StreamingOrder = body.StreamingOrder
 	}
+	if body.EngineURL != nil {
+		if _, ok := allowedEngineURL(*body.EngineURL); !ok && strings.TrimSpace(*body.EngineURL) != "" {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "code": "INVALID_REQUEST", "error": "流媒体引擎地址只能是本机 HTTP 或 HTTPS"})
+			return
+		}
+		next.EngineURL = strings.TrimSpace(*body.EngineURL)
+	}
 	saved, err := a.saveDownloadSettings(next)
 	if err != nil {
 		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"ok": false, "code": "SETTINGS_UNAVAILABLE"})
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "streaming_enabled": saved.StreamingEnabled, "streaming_order": saved.StreamingOrder})
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "streaming_enabled": saved.StreamingEnabled, "streaming_order": saved.StreamingOrder, "engine_url": saved.EngineURL})
 }
 
 // library lists every verified library record. A record whose file is gone

@@ -118,7 +118,7 @@ func runCLI(args []string) int {
 		return 0
 	case "healthcheck":
 		return runHealthcheck(args[1:])
-	case "status", "jobs", "job", "control", "stop", "migrate", "pause", "resume", "reindex", "gaps", "migration":
+	case "status", "jobs", "job", "control", "stop", "migrate", "pause", "resume", "reindex", "gaps", "migration", "fetch", "metadata", "workflow":
 		// Parsed below.
 	default:
 		return printError(fmt.Errorf("未知命令: %s", cmd))
@@ -218,6 +218,39 @@ func runCLI(args []string) int {
 			return printError(err)
 		}
 		raw, err := client.do(ctx, http.MethodGet, "/v1/migration", nil)
+		if err != nil {
+			return printError(err)
+		}
+		printRawJSON(raw)
+		return 0
+	case "fetch":
+		client, err := attachCore(profile, flags.coreBinary)
+		if err != nil {
+			return printError(err)
+		}
+		raw, err := client.do(ctx, http.MethodPost, "/v1/playlists/fetch", flags.payload)
+		if err != nil {
+			return printError(err)
+		}
+		printRawJSON(raw)
+		return 0
+	case "metadata":
+		client, err := attachCore(profile, flags.coreBinary)
+		if err != nil {
+			return printError(err)
+		}
+		raw, err := client.do(ctx, http.MethodPost, "/v1/library/metadata", flags.payload)
+		if err != nil {
+			return printError(err)
+		}
+		printRawJSON(raw)
+		return 0
+	case "workflow":
+		client, err := attachCore(profile, flags.coreBinary)
+		if err != nil {
+			return printError(err)
+		}
+		raw, err := client.do(ctx, http.MethodPost, "/v1/library/workflow", flags.payload)
 		if err != nil {
 			return printError(err)
 		}

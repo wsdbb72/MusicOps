@@ -101,8 +101,8 @@ func (a *App) saveSubscription(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "code": "INVALID_REQUEST", "error": err.Error()})
 		return
 	}
-	if body.Platform != "" && (remotePlatforms[body.Platform].Host == "" || !remotePlaylistID.MatchString(body.RemoteID)) {
-		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "code": "INVALID_REQUEST", "error": "只订阅公开的 QQ 音乐或酷我歌单"})
+	if body.Platform != "" && (remotePlatforms[body.Platform].Host == "" || !remoteIDOK(body.Platform, body.RemoteID)) {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "code": "INVALID_REQUEST", "error": "只订阅已接入的公开歌单"})
 		return
 	}
 	a.mu.Lock()

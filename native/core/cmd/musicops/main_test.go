@@ -564,13 +564,16 @@ func TestWorkerCommandsCallTheCore(t *testing.T) {
 		{http.MethodPost, "/v1/library/reindex", map[string]any{}},
 		{http.MethodGet, "/v1/library/gaps", nil},
 		{http.MethodGet, "/v1/migration", nil},
+		{http.MethodPost, "/v1/playlists/fetch", map[string]any{"platform": "netease", "playlist_id": "1"}},
+		{http.MethodPost, "/v1/library/metadata", map[string]any{"path": "album.flac"}},
+		{http.MethodPost, "/v1/library/workflow", map[string]any{"scene": "upgrade"}},
 	}
 	for _, call := range calls {
 		if _, err := client.do(context.Background(), call.method, call.path, call.body); err != nil {
 			t.Fatal(call.path, err)
 		}
 	}
-	if len(seen) != 4 {
+	if len(seen) != len(calls) {
 		t.Fatal(seen)
 	}
 }

@@ -132,6 +132,15 @@ func (a *App) streamingSourceStatus() []streamSourceStatus {
 			status.Reason = "歌单文件导入已接入（仅元数据，不下载音频）"
 		case "qobuz", "deezer":
 			status.Reason = "未启用"
+		case "tidal", "applemusic", "qqmusic", "netease":
+			if settings, err := a.loadDownloadSettings(); err == nil {
+				if _, ok := allowedEngineURL(settings.EngineURL); ok {
+					status.Configured = true
+					status.Reason = "已配置用户本机的 go-music-dl 接口。该项目是 AGPL-3.0，不会打进这个 MIT 程序。音频须通过校验才算下载。"
+					break
+				}
+			}
+			status.Reason = "无凭证与引擎，未接入"
 		default:
 			status.Reason = "无凭证与引擎，未接入"
 		}
@@ -173,6 +182,7 @@ func (a *App) acquireFallback(ctx context.Context, execution *scheduler.Executio
 	notes := make([]string, 0, len(steps))
 	var imported []playlistTrack
 	var importedName string
+	validated := ""
 	for _, step := range steps {
 		if ctx.Err() != nil {
 			return scheduler.Outcome{}, ctx.Err()
@@ -201,10 +211,18 @@ func (a *App) acquireFallback(ctx context.Context, execution *scheduler.Executio
 			outcomes = append(outcomes, downloadpolicy.Outcome{Source: "playlist", Class: downloadpolicy.ClassImport})
 			notes = append(notes, fmt.Sprintf("playlist 已读取 %d 首歌单曲目", len(rows)))
 		default:
-			// No credentials or engine for the platform sources: the
-			// attempt is recorded as no result, never as a download.
-			outcomes = append(outcomes, downloadpolicy.Outcome{Source: step.Name, Class: downloadpolicy.ClassNoResult})
-			notes = append(notes, step.Name+" 未接入（无凭证与引擎）")
+			// Without a configured engine the note stays "未接入". A saved
+			// file is a download only after the FLAC check inside
+			// tryConfiguredStream.
+			path, note, class := a.tryConfiguredStream(ctx, step.Name, plan)
+			outcomes = append(outcomes, downloadpolicy.Outcome{Source: step.Name, Class: class})
+			notes = append(notes, note)
+			if path != "" {
+				validated = path
+			}
+		}
+		if validated != "" {
+			break
 		}
 	}
 	walk, err := downloadpolicy.Apply(steps, outcomes, 0)
@@ -213,7 +231,7 @@ func (a *App) acquireFallback(ctx context.Context, execution *scheduler.Executio
 	}
 	complete := workflow.Complete{
 		Edge: workflow.EdgeTerminal, NextStage: "needs_review", ReviewKind: "candidate", TaskState: "blocked",
-		Message: "流媒体回退已走完：" + strings.Join(notes, "、") + "；尚未下载、尚未入库", NowNS: a.now().UnixNano(),
+		Message: streamWalkMessage(notes, validated), NowNS: a.now().UnixNano(),
 	}
 	if walk.ReviewRequired && len(imported) > 0 {
 		complete.Message = fmt.Sprintf("歌单已读取 %d 首曲目%s，待核对；尚未下载、尚未入库", len(imported), playlistSuffix(importedName))
@@ -243,6 +261,14 @@ func (a *App) acquireFallback(ctx context.Context, execution *scheduler.Executio
 		return scheduler.Outcome{}, err
 	}
 	return scheduler.Outcome{State: "blocked", Message: complete.Message}, nil
+}
+
+func streamWalkMessage(notes []string, validated string) string {
+	message := "流媒体回退已走完：" + strings.Join(notes, "、")
+	if validated == "" {
+		return message + "；尚未下载、尚未入库"
+	}
+	return message + "；音频已通过校验并保存（" + validated + "），算作下载，尚未入库"
 }
 
 func playlistSuffix(name string) string {

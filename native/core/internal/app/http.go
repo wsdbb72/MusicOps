@@ -95,6 +95,7 @@ func (a *App) Handler() http.Handler {
 	mux.HandleFunc("GET /v1/library/gaps", a.libraryGaps)
 	mux.HandleFunc("POST /v1/library/workflow", a.libraryWorkflow)
 	mux.HandleFunc("POST /v1/library/metadata", a.completeMetadata)
+	mux.HandleFunc("GET /v1/library/files", a.libraryFiles)
 	mux.HandleFunc("GET /v1/library/compilations", a.compilationPreview)
 	mux.HandleFunc("POST /v1/library/compilations/merge", a.compilationMerge)
 	mux.HandleFunc("POST /v1/settings/qbittorrent/tags", a.unifyQBittorrentTags)

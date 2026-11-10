@@ -314,9 +314,10 @@ const appJS = `(function () {
     }).join("");
     return '<article><h2>下载默认</h2><p class="meta">搜索时不指定流媒体回退，就用这里的选择。</p>' +
       '<label><input type="checkbox" id="download-streaming"' + (downloadSettings.streaming_enabled ? " checked" : "") + '> 流媒体回退（四站无精确匹配时走流媒体）</label>' +
+      '<label>本机 go-music-dl 地址<input type="text" id="download-engine" value="' + escapeText(downloadSettings.engine_url || "") + '" placeholder="留空则未接入。只接受本机 HTTP 或 HTTPS"></label>' +
       '<p><button type="button" id="save-download" class="primary">保存</button></p>' +
       '<p class="meta">流媒体回退顺序（可上下调整）：</p>' + orderHtml +
-      '<p class="meta">回退顺序默认先 Tidal、Apple Music，再 QQ 音乐、网易云，最后是已导入的歌单文件。这些平台目前不会直接下载音频；歌单文件只记下曲目，不算入库。</p></article>';
+      '<p class="meta">回退顺序默认先 Tidal、Apple Music，再 QQ 音乐、网易云，最后是已导入的歌单文件。go-music-dl 是 AGPL-3.0，不会打进这个程序；只有用户本机服务返回并通过音频校验的文件才算下载，而且仍未入库。</p></article>';
   }
   function cookieCard() {
     var rows = cookieSettings.map(function (site) {
@@ -422,9 +423,10 @@ const appJS = `(function () {
       '<h2>识别歌单链接</h2><p class="meta">只从链接里读出平台和歌单 ID，不访问平台，也不拉取曲目。</p>' +
       '<label>分享链接或歌单 ID<input type="text" id="playlist-link" placeholder="https://music.163.com/playlist?id=123"></label>' +
       '<p><button type="button" id="locate-playlist">识别链接</button></p><p id="playlist-locate-result" class="meta"></p>' +
-      '<h2>拉取公开歌单</h2><p class="meta">只读取 QQ 音乐或酷我的公开曲目名单。不下载音频。非公开歌单会如实失败，不会当成已导入。</p>' +
-      '<label>平台<select id="remote-platform"><option value="qqmusic">QQ 音乐</option><option value="kuwo">酷我</option></select></label>' +
-      '<label>歌单数字 ID<input type="text" id="remote-playlist-id" placeholder="例如 123456"></label>' +
+      '<h2>拉取公开歌单</h2><p class="meta">按旧版只读接口读取网易云、酷狗、汽水、咪咕、Apple Music、Spotify、YouTube、QQ 音乐或酷我的曲目名单。不下载音频。YouTube 必须用用户自己的 API Key，不会改去读网页。本机测试地址只接受回环。</p>' +
+      '<label>平台<select id="remote-platform"><option value="netease">网易云音乐</option><option value="kugou">酷狗</option><option value="qishui">汽水</option><option value="migu">咪咕</option><option value="applemusic">Apple Music</option><option value="spotify">Spotify</option><option value="youtube">YouTube</option><option value="qqmusic">QQ 音乐</option><option value="kuwo">酷我</option></select></label>' +
+      '<label>歌单 ID<input type="text" id="remote-playlist-id" placeholder="数字 ID，或 Spotify / Apple / YouTube 的歌单 ID"></label>' +
+      '<label>本机测试地址<input type="text" id="remote-base" placeholder="留空则访问各平台公开接口"></label>' +
       '<p><button type="button" id="fetch-playlist">拉取并订阅</button></p><p id="playlist-fetch-result" class="meta"></p>' +
       '<h2>订阅已存歌单</h2><p class="meta">未绑定平台时只重新读取本机歌单。绑定了公开歌单后，检查会向该平台读取新增曲目。首次默认只记下现有曲目。删除的曲目不会从音乐库移除。</p>' +
       '<label>歌单<select id="subscription-playlist"><option value="">选择已存歌单</option>' + playlistRows.map(function (row) { return '<option value="' + escapeText(row.id) + '">' + escapeText(row.name || row.id) + "</option>"; }).join("") + '</select></label>' +
@@ -528,8 +530,10 @@ const appJS = `(function () {
     setBusy(true);
     setStatus("info", "正在保存");
     try {
-      var body = await postSetting("/v1/settings/download", {streaming_enabled: document.getElementById("download-streaming").checked, streaming_order: streamingOrder});
+      var engine = document.getElementById("download-engine");
+      var body = await postSetting("/v1/settings/download", {streaming_enabled: document.getElementById("download-streaming").checked, streaming_order: streamingOrder, engine_url: engine ? engine.value.trim() : ""});
       downloadSettings.streaming_enabled = body.streaming_enabled;
+      downloadSettings.engine_url = body.engine_url || "";
       if (body.streaming_order && body.streaming_order.length) streamingOrder = body.streaming_order.slice();
       setStatus("ok", "已保存。");
     } catch (err) {
@@ -927,11 +931,14 @@ const appJS = `(function () {
   async function fetchRemotePlaylist() {
     if (loading) return;
     var id = document.getElementById("remote-playlist-id").value.trim();
-    if (!id) { setStatus("fail", "先填写歌单数字 ID。"); return; }
+    if (!id) { setStatus("fail", "先填写歌单 ID。"); return; }
     setBusy(true);
     setStatus("info", "正在读取公开歌单");
     try {
-      var body = await postSetting("/v1/playlists/fetch", {platform: document.getElementById("remote-platform").value, playlist_id: id, save: true, subscribe: true});
+      var payload = {platform: document.getElementById("remote-platform").value, playlist_id: id, save: true, subscribe: true};
+      var base = document.getElementById("remote-base");
+      if (base && base.value.trim()) payload.base_url = base.value.trim();
+      var body = await postSetting("/v1/playlists/fetch", payload);
       var result = document.getElementById("playlist-fetch-result");
       if (result) result.textContent = body.note || "";
       setStatus("ok", body.note || "已读取曲目名单。");
@@ -1035,10 +1042,18 @@ const appJS = `(function () {
     } else {
       duplicateHtml = '<p class="meta">尚未扫描，或没有可合并的重复项。</p>';
     }
-    var html = '<div class="cards"><article><h2>本地资料库</h2><p class="meta">重新索引只补充新文件，不删除磁盘上的音乐。缺口是曲目编号不连续，补缺、升级和单曲扩专只创建任务，不会在这一步下载。</p>' +
+    var html = '<div class="cards"><article><h2>本地资料库</h2><p class="meta">重新索引只补充新文件，不删除磁盘上的音乐。先选出一个库内文件，再补缺、升级或把单曲扩成整专。任务会进入检索；下载仍受令牌规则约束，这一步不会扣费，也不会入库。</p>' +
       '<p><button type="button" id="reindex-library" class="primary">重新索引</button> <button type="button" id="list-gaps">列出缺失曲目</button></p>' +
-      '<p><button type="button" id="fill-gaps">补缺任务</button> <button type="button" id="upgrade-album">升级任务</button> <button type="button" id="expand-album">单曲升级整专</button></p>' +
+      '<label>本地文件<select id="library-file"><option value="">先列出库内文件</option></select></label>' +
+      '<p><button type="button" id="fill-gaps">按缺口进入下载</button> <button type="button" id="upgrade-album">升级所选文件</button> <button type="button" id="expand-album">把所选单曲扩成整专</button></p>' +
       '<p id="library-ops-result" class="meta"></p></article>' +
+      '<article><h2>标签、封面和歌词</h2><p class="meta">目录确认后，标签、歌词和封面同一次写入。写之前会备份，任何一步失败都恢复原文件。目录、歌词和封面地址只接受本机。</p>' +
+      '<label>文件路径<input type="text" id="meta-path" placeholder="库内 .flac"></label>' +
+      '<label>艺人<input type="text" id="meta-artist"></label><label>专辑<input type="text" id="meta-album"></label><label>曲名<input type="text" id="meta-title"></label>' +
+      '<label>目录地址<input type="text" id="meta-catalog" placeholder="本机 MusicBrainz"></label>' +
+      '<label>歌词地址<input type="text" id="meta-lyrics" placeholder="留空则不写歌词"></label>' +
+      '<label>封面地址<input type="text" id="meta-cover" placeholder="留空则不写封面"></label>' +
+      '<p><button type="button" id="complete-metadata">补齐标签封面歌词</button></p><p id="metadata-result" class="meta"></p></article>' +
       '<article><h2>合辑</h2><p class="meta">预览不会移动文件。合并只把名称里带“合辑”或 Various Artists 的文件夹移进音乐库的 Compilations。</p>' +
       '<p><button type="button" id="preview-compilations">预览合辑</button> <button type="button" id="merge-compilations">合并合辑</button></p><p id="compilation-result" class="meta"></p></article>' +
       '<article><h2>艺人目录与 NCM</h2><p class="meta">艺人目录把专辑文件夹整理成“艺人/专辑”。NCM 解密不改源文件。</p>' +
@@ -1078,11 +1093,14 @@ const appJS = `(function () {
     var gaps = document.getElementById("list-gaps");
     if (gaps) gaps.addEventListener("click", function () { libraryAction("/v1/library/gaps", null, "library-ops-result"); });
     var fill = document.getElementById("fill-gaps");
-    if (fill) fill.addEventListener("click", function () { libraryAction("/v1/library/workflow", {scene: "fill", label: "补缺"}, "library-ops-result"); });
+    if (fill) fill.addEventListener("click", function () { libraryAction("/v1/library/workflow", workflowBody("fill", "补缺"), "library-ops-result"); });
     var upgrade = document.getElementById("upgrade-album");
-    if (upgrade) upgrade.addEventListener("click", function () { libraryAction("/v1/library/workflow", {scene: "upgrade", label: "音质升级"}, "library-ops-result"); });
+    if (upgrade) upgrade.addEventListener("click", function () { libraryAction("/v1/library/workflow", workflowBody("upgrade", "音质升级"), "library-ops-result"); });
     var expand = document.getElementById("expand-album");
-    if (expand) expand.addEventListener("click", function () { libraryAction("/v1/library/workflow", {scene: "expand", label: "单曲升级整专"}, "library-ops-result"); });
+    if (expand) expand.addEventListener("click", function () { libraryAction("/v1/library/workflow", workflowBody("expand", "单曲升级整专"), "library-ops-result"); });
+    var metadata = document.getElementById("complete-metadata");
+    if (metadata) metadata.addEventListener("click", completeMetadata);
+    loadLibraryFiles();
     var previewCompilations = document.getElementById("preview-compilations");
     if (previewCompilations) previewCompilations.addEventListener("click", function () { libraryAction("/v1/library/compilations", null, "compilation-result"); });
     var mergeCompilations = document.getElementById("merge-compilations");
@@ -1100,6 +1118,38 @@ const appJS = `(function () {
     document.querySelectorAll("[data-merge]").forEach(function (button) {
       button.addEventListener("click", function () { mergeDuplicates(button.getAttribute("data-merge")); });
     });
+  }
+  function workflowBody(scene, label) {
+    var field = document.getElementById("library-file");
+    return {scene: scene, label: label, path: field ? field.value.trim() : ""};
+  }
+  async function loadLibraryFiles() {
+    var select = document.getElementById("library-file");
+    if (!select) return;
+    try {
+      var response = await fetch("/v1/library/files", {headers: {Accept: "application/json"}});
+      var body = await response.json();
+      var current = select.value;
+      var options = '<option value="">选择库内文件</option>';
+      (body.files || []).forEach(function (file) {
+        options += '<option value="' + escapeText(file) + '">' + escapeText(file) + "</option>";
+      });
+      select.innerHTML = options;
+      if (current) select.value = current;
+    } catch (err) {
+      select.innerHTML = '<option value="">没有读到库内文件</option>';
+    }
+  }
+  async function completeMetadata() {
+    libraryAction("/v1/library/metadata", {
+      path: document.getElementById("meta-path").value.trim(),
+      artist: document.getElementById("meta-artist").value.trim(),
+      album: document.getElementById("meta-album").value.trim(),
+      title: document.getElementById("meta-title").value.trim(),
+      catalog_base_url: document.getElementById("meta-catalog").value.trim(),
+      lyrics_base_url: document.getElementById("meta-lyrics").value.trim(),
+      cover_base_url: document.getElementById("meta-cover").value.trim()
+    }, "metadata-result");
   }
   async function libraryAction(path, body, targetID) {
     var target = document.getElementById(targetID);

@@ -5,6 +5,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -12,6 +13,7 @@ import (
 type discogsHit struct {
 	Title             string `json:"title"`
 	ID                int    `json:"id"`
+	TrackCount        int    `json:"track_count,omitempty"`
 	IdentityConfirmed bool   `json:"identity_confirmed"`
 }
 
@@ -85,10 +87,54 @@ func (a *App) discogsSearch(base, artist, album string) ([]discogsHit, string, b
 		if strings.TrimSpace(result.Title) == "" {
 			continue
 		}
-		hits = append(hits, discogsHit{Title: result.Title, ID: result.ID, IdentityConfirmed: false})
+		hit := discogsHit{Title: result.Title, ID: result.ID, IdentityConfirmed: false}
+		if loopbackURL(base) {
+			hit.TrackCount = a.discogsTrackCount(base, result.ID, token)
+		}
+		hits = append(hits, hit)
 		if len(hits) == 8 {
 			break
 		}
 	}
 	return hits, "Discogs 候选不能单独确认发行身份", true
+}
+
+func (a *App) discogsTrackCount(base string, id int, token string) int {
+	if id <= 0 || !loopbackURL(base) {
+		return 0
+	}
+	endpoint := strings.TrimRight(base, "/") + "/releases/" + strconv.Itoa(id)
+	request, err := http.NewRequest(http.MethodGet, endpoint, nil)
+	if err != nil {
+		return 0
+	}
+	request.Header.Set("Authorization", "Discogs token="+token)
+	request.Header.Set("Accept", "application/json")
+	request.Header.Set("User-Agent", "MusicOps/catalog")
+	client := &http.Client{Timeout: 8 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error {
+		return http.ErrUseLastResponse
+	}}
+	response, err := client.Do(request)
+	if err != nil {
+		return 0
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		return 0
+	}
+	var decoded struct {
+		Tracklist []struct {
+			Title string `json:"title"`
+		} `json:"tracklist"`
+	}
+	if json.NewDecoder(io.LimitReader(response.Body, 1<<20)).Decode(&decoded) != nil {
+		return 0
+	}
+	count := 0
+	for _, track := range decoded.Tracklist {
+		if strings.TrimSpace(track.Title) != "" {
+			count++
+		}
+	}
+	return count
 }

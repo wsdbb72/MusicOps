@@ -4,8 +4,11 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
+	"io"
 	"io/fs"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"sort"
@@ -143,9 +146,26 @@ func (a *App) libraryWorkflow(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "code": "INVALID_REQUEST"})
 		return
 	}
+	chosen := ""
+	if strings.TrimSpace(body.Path) != "" {
+		resolved, err := a.resolveLibraryPath(body.Path)
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "code": "INVALID_REQUEST", "error": "请选择音乐库里的文件"})
+			return
+		}
+		info, statErr := os.Stat(resolved)
+		if statErr != nil || info.IsDir() {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "code": "INVALID_REQUEST", "error": "本地文件不存在"})
+			return
+		}
+		chosen = resolved
+	}
 	label := strings.TrimSpace(body.Label)
 	if label == "" {
-		label = body.Scene + " " + firstNonEmpty(body.Root, body.Path, "本地专辑")
+		label = body.Scene + " " + firstNonEmpty(body.Root, chosen, "本地专辑")
+	}
+	if chosen != "" && !strings.Contains(label, chosen) {
+		label = label + " " + chosen
 	}
 	if len(label) > 500 {
 		label = label[:500]
@@ -158,7 +178,10 @@ func (a *App) libraryWorkflow(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "code": "INVALID_REQUEST", "error": "没有创建任务，也没有下载"})
 		return
 	}
-	writeJSON(w, http.StatusAccepted, map[string]any{"ok": true, "job_id": id, "scene": body.Scene, "downloaded": false, "note": "已创建任务。尚未下载，尚未入库。"})
+	writeJSON(w, http.StatusAccepted, map[string]any{
+		"ok": true, "job_id": id, "scene": body.Scene, "path": chosen, "downloaded": false,
+		"note": "已进入检索。下载仍受令牌规则约束，这一步尚未下载、尚未入库。",
+	})
 }
 
 func (a *App) completeMetadata(w http.ResponseWriter, r *http.Request) {
@@ -168,6 +191,8 @@ func (a *App) completeMetadata(w http.ResponseWriter, r *http.Request) {
 		Album          string `json:"album"`
 		Title          string `json:"title"`
 		CatalogBaseURL string `json:"catalog_base_url"`
+		LyricsBaseURL  string `json:"lyrics_base_url"`
+		CoverBaseURL   string `json:"cover_base_url"`
 	}
 	if err := decode(r, &body); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "code": "INVALID_REQUEST"})
@@ -211,13 +236,46 @@ func (a *App) completeMetadata(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "written": false, "note": "目录没有确认这首曲目，标签和文件都没有改。"})
 		return
 	}
-	updates := map[string][]string{"ARTIST": {body.Artist}, "ALBUM": {body.Album}, "TITLE": {body.Title}}
-	if err = writeFLACTags(path, updates); err != nil {
-		_ = os.WriteFile(path, before, 0o600)
-		writeJSON(w, http.StatusUnprocessableEntity, map[string]any{"ok": false, "code": "TAG_WRITE_FAILED", "written": false})
+	lyrics, cover, err := a.fetchArtwork(body.LyricsBaseURL, body.CoverBaseURL, body.Artist, body.Album, body.Title)
+	if err != nil {
+		writeJSON(w, http.StatusBadGateway, map[string]any{"ok": false, "code": "ARTWORK_UNAVAILABLE", "written": false, "note": "歌词或封面没有读到，文件没有改。"})
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "written": true, "path": path, "note": "已按确认到的曲目写入标签。这不是下载。"})
+	updates := map[string][]string{"ARTIST": {body.Artist}, "ALBUM": {body.Album}, "TITLE": {body.Title}}
+	if lyrics != "" {
+		updates["LYRICS"] = []string{lyrics}
+	}
+	backup, err := backupFile(path)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "code": "TAG_UNAVAILABLE", "written": false})
+		return
+	}
+	if err = writeFLACTags(path, updates); err != nil {
+		_ = os.WriteFile(path, before, 0o600)
+		_ = os.Remove(backup)
+		writeJSON(w, http.StatusUnprocessableEntity, map[string]any{"ok": false, "code": "TAG_WRITE_FAILED", "written": false, "restored": true})
+		return
+	}
+	sidecar := strings.TrimSuffix(path, filepath.Ext(path)) + ".jpg"
+	if cover != nil {
+		if err = os.WriteFile(sidecar, cover, 0o600); err != nil {
+			restoreBackup(path, backup)
+			_ = os.Remove(sidecar)
+			_ = os.Remove(backup)
+			writeJSON(w, http.StatusUnprocessableEntity, map[string]any{"ok": false, "code": "COVER_WRITE_FAILED", "written": false, "restored": true})
+			return
+		}
+	}
+	_ = os.Remove(backup)
+	note := "已一次写入标签"
+	if lyrics != "" {
+		note += "、歌词"
+	}
+	if cover != nil {
+		note += "、封面"
+	}
+	note += "。写之前有备份，失败会恢复原文件。这不是下载。"
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "written": true, "path": path, "lyrics": lyrics != "", "cover": cover != nil, "note": note})
 }
 
 func (a *App) compilationPreview(w http.ResponseWriter, _ *http.Request) {
@@ -332,6 +390,114 @@ func firstNonEmpty(values ...string) string {
 		}
 	}
 	return ""
+}
+
+func (a *App) libraryFiles(w http.ResponseWriter, _ *http.Request) {
+	root := a.libraryDir()
+	files := []string{}
+	_ = filepath.WalkDir(root, func(path string, entry fs.DirEntry, walkErr error) error {
+		if walkErr != nil || entry.IsDir() {
+			return nil
+		}
+		ext := strings.TrimPrefix(strings.ToLower(filepath.Ext(path)), ".")
+		if !audioExtensions[ext] {
+			return nil
+		}
+		files = append(files, path)
+		if len(files) >= 500 {
+			return fs.SkipAll
+		}
+		return nil
+	})
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "files": files})
+}
+
+func (a *App) fetchArtwork(lyricsBase, coverBase, artist, album, title string) (string, []byte, error) {
+	lyricsBase = strings.TrimSpace(lyricsBase)
+	coverBase = strings.TrimSpace(coverBase)
+	if lyricsBase != "" && !loopbackURL(lyricsBase) {
+		return "", nil, errors.New("lyrics host")
+	}
+	if coverBase != "" && !loopbackURL(coverBase) {
+		return "", nil, errors.New("cover host")
+	}
+	var lyrics string
+	if lyricsBase != "" {
+		endpoint, err := url.Parse(strings.TrimRight(lyricsBase, "/") + "/lyrics")
+		if err != nil {
+			return "", nil, err
+		}
+		values := endpoint.Query()
+		values.Set("artist", artist)
+		values.Set("title", title)
+		endpoint.RawQuery = values.Encode()
+		body, err := loopbackGET(endpoint.String())
+		if err != nil {
+			return "", nil, err
+		}
+		var decoded struct {
+			Lyrics string `json:"lyrics"`
+		}
+		if json.Unmarshal(body, &decoded) == nil && strings.TrimSpace(decoded.Lyrics) != "" {
+			lyrics = decoded.Lyrics
+		} else {
+			lyrics = strings.TrimSpace(string(body))
+		}
+		if lyrics == "" {
+			return "", nil, errors.New("empty lyrics")
+		}
+	}
+	var cover []byte
+	if coverBase != "" {
+		endpoint, err := url.Parse(strings.TrimRight(coverBase, "/") + "/cover")
+		if err != nil {
+			return "", nil, err
+		}
+		values := endpoint.Query()
+		values.Set("album", album)
+		endpoint.RawQuery = values.Encode()
+		body, err := loopbackGET(endpoint.String())
+		if err != nil {
+			return "", nil, err
+		}
+		if !imageBytes(body) {
+			return "", nil, errors.New("cover is not an image")
+		}
+		cover = body
+	}
+	return lyrics, cover, nil
+}
+
+func loopbackGET(endpoint string) ([]byte, error) {
+	if !loopbackURL(endpoint) {
+		return nil, errors.New("not loopback")
+	}
+	request, err := http.NewRequest(http.MethodGet, endpoint, nil)
+	if err != nil {
+		return nil, err
+	}
+	client := &http.Client{Timeout: 8 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error {
+		return http.ErrUseLastResponse
+	}}
+	response, err := client.Do(request)
+	if err != nil {
+		return nil, err
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		return nil, errors.New("status")
+	}
+	return io.ReadAll(io.LimitReader(response.Body, 2<<20))
+}
+
+func imageBytes(body []byte) bool {
+	if len(body) < 32 {
+		return false
+	}
+	if body[0] == 0xff && body[1] == 0xd8 {
+		return true
+	}
+	return len(body) >= 8 && string(body[:8]) == "\x89PNG\r\n\x1a\n"
 }
 
 func loopbackURL(raw string) bool {

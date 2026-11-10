@@ -72,6 +72,10 @@ func TestStreamEngineAcceptsOnlyValidatedAudio(t *testing.T) {
 	if rejected.Code != http.StatusBadRequest {
 		t.Fatal(rejected.Code, rejected.Body.String())
 	}
+	metadata := postCode(t, application, "/v1/settings/download", map[string]any{"streaming_enabled": true, "engine_url": "https://169.254.169.254/"})
+	if metadata.Code != http.StatusBadRequest {
+		t.Fatal(metadata.Code, metadata.Body.String())
+	}
 }
 
 func TestStreamEngineSkipsAudioThatFailsValidation(t *testing.T) {

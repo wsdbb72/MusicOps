@@ -136,7 +136,7 @@ func (a *App) streamingSourceStatus() []streamSourceStatus {
 			if settings, err := a.loadDownloadSettings(); err == nil {
 				if _, ok := allowedEngineURL(settings.EngineURL); ok {
 					status.Configured = true
-					status.Reason = "已配置用户本机的 go-music-dl 接口。该项目是 AGPL-3.0，不会打进这个 MIT 程序。音频须通过校验才算下载。"
+					status.Reason = "已配置本机流媒体引擎。音频须通过校验才算下载。"
 					break
 				}
 			}

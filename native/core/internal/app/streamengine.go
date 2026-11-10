@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io"
 	"math"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -37,7 +38,26 @@ func allowedEngineURL(raw string) (string, bool) {
 	default:
 		return "", false
 	}
+	if metadataHost(parsed.Hostname()) {
+		return "", false
+	}
 	return strings.TrimRight(parsed.String(), "/"), true
+}
+
+// metadataHost rejects link-local and cloud-metadata targets. A user-configured
+// engine may be a public HTTPS host or a private LAN address; it must not be
+// the cloud metadata address or another link-local target.
+func metadataHost(host string) bool {
+	host = strings.TrimSuffix(strings.ToLower(strings.TrimSpace(host)), ".")
+	switch host {
+	case "metadata.google.internal", "metadata.google.com":
+		return true
+	}
+	ip := net.ParseIP(host)
+	if ip == nil {
+		return false
+	}
+	return ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() || ip.IsUnspecified() || ip.IsMulticast()
 }
 
 func streamServiceName(source string) (string, bool) {

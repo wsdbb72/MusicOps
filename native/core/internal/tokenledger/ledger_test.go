@@ -2,6 +2,7 @@ package tokenledger
 
 import (
 	"encoding/json"
+	"fmt"
 	"path/filepath"
 	"sync"
 	"testing"
@@ -86,6 +87,29 @@ func TestExhaustedBudgetIsRecordedAndDoesNotSpend(t *testing.T) {
 	})
 	if err != nil || kept.FallbackAllowed || kept.Class != ClassTokenBudget || kept.Spent {
 		t.Fatal(kept, err)
+	}
+}
+
+func TestRejectedReservationsDoNotFillTheIndex(t *testing.T) {
+	ledger := openLedger(t)
+	now := time.Unix(1_700_000_100, 0)
+	for i := 0; i < 250; i++ {
+		got, err := ledger.Reserve(now, quote("dicmusic", fmt.Sprintf("resource-%d", i), fmt.Sprintf("request-%d", i), 1, 0, 1, 0))
+		if err != nil || got.Class != ClassTokenBudget || got.Spent {
+			t.Fatal(i, got, err)
+		}
+	}
+	spent, err := ledger.Reserve(now, quote("dicmusic", "resource-ok", "request-ok", 1, 5, 5, 0))
+	if err != nil || spent.State != StateReserved || !spent.Spent {
+		t.Fatal(spent, err)
+	}
+	confirmed, err := ledger.Advance(now.Add(time.Second), "dicmusic", "request-ok", StateConfirmed, "settled")
+	if err != nil || confirmed.State != StateConfirmed {
+		t.Fatal(confirmed, err)
+	}
+	again, err := ledger.Reserve(now.Add(2*time.Second), quote("dicmusic", "resource-ok", "request-again", 1, 5, 5, 0))
+	if err != nil || again.Class != ClassSpent || again.Spent {
+		t.Fatal(again, err)
 	}
 }
 

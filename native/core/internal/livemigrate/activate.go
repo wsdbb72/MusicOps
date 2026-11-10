@@ -87,7 +87,7 @@ func Activate(engine *dataengine.Engine, profile string, flows *workflow.Reposit
 	}
 	defer cleanup()
 	libraryRoot, _ := libraryDir(db)
-	report := Report{SourceSHA256: sum, Notes: []string{"音乐文件保持原路径，没有复制或改写", "冷归档保留在 sqlitemigrate 的域文档里"}}
+	report := Report{SourceSHA256: sum, Notes: []string{"音乐文件保持原路径，没有复制或改写", "旧库归档仍保留，回退时不会删除"}}
 	var files []libraryKey
 	files, report.Library, err = importLibrary(engine, db, libraryRoot)
 	if err != nil {

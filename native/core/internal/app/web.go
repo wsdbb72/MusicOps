@@ -1047,6 +1047,7 @@ const appJS = `(function () {
       '<article><h2>重复歌曲</h2><p class="meta">同名不等于重复。内容一致且可以确定保留哪一份时才能合并，其余进入核对。合并后的旧文件进隔离区，可以恢复。</p>' +
       '<p><button type="button" id="scan-duplicates" class="primary">扫描重复</button></p>' + duplicateHtml +
       '<label>恢复编号<input type="text" id="restore-merge-id" placeholder="合并后返回的编号"></label><p><button type="button" id="restore-duplicates">恢复这次合并</button></p></article>' +
+      guardCard() +
       '<article><form id="transcode-form"><h2>WAV 无损转 FLAC</h2>' +
       '<p class="meta">整数 PCM（16/24/32 位、多声道、可扩展格式）转成 FLAC，样本逐个比对并写入 MD5。浮点和压缩 WAV 会拒绝，不会降级。标签从 LIST/INFO、ID3 和 BWF 迁入，封面写入内嵌图片。没有标签时只按文件名和目录补显示名，不把它当成已确认的发行。</p>' +
       '<label><input type="checkbox" id="wav-auto" checked> 下载进入待入库或重新索引时，先转成 FLAC 再识别入库（默认开启）</label>' +
@@ -1125,6 +1126,104 @@ const appJS = `(function () {
     document.querySelectorAll("[data-merge]").forEach(function (button) {
       button.addEventListener("click", function () { mergeDuplicates(button.getAttribute("data-merge")); });
     });
+    var guardSave = document.getElementById("guard-save");
+    if (guardSave) guardSave.addEventListener("click", function () {
+      var dir = document.getElementById("guard-dir").value.trim();
+      if (!dir) { document.getElementById("guard-result").textContent = "先填专辑目录。"; return; }
+      saveGuard(dir, selectedGuardFields(), document.getElementById("guard-suppress").checked);
+    });
+    var guardClear = document.getElementById("guard-clear");
+    if (guardClear) guardClear.addEventListener("click", function () {
+      var dir = document.getElementById("guard-dir").value.trim();
+      if (!dir) { document.getElementById("guard-result").textContent = "先填专辑目录。"; return; }
+      saveGuard(dir, [], false);
+    });
+    refreshGuards();
+  }
+  // Guards are per album directory: the field list comes from the server so
+  // the page never invents a name the writer would not honour.
+  var guardMeta = {fields: []};
+  var guardRows = [];
+  function guardCard() {
+    return '<article><h2>字段锁与去重抑制</h2><p class="meta">按专辑目录保存。字段锁让自动写入（补齐标签、批量刮削、合并补标签）跳过这些字段，即使勾选覆盖也不改；抑制让这张专辑不参与重复扫描与合并。目录改名或移动后锁不再生效。</p>' +
+      '<label>专辑目录<input type="text" id="guard-dir" placeholder="库内专辑文件夹，如 Artist/Album"></label>' +
+      '<fieldset><legend>锁定的字段</legend><span id="guard-fields"></span></fieldset>' +
+      '<label><input type="checkbox" id="guard-suppress"> 不参与重复扫描与合并</label>' +
+      '<p><button type="button" id="guard-save" class="primary">保存</button> <button type="button" id="guard-clear">清除这张专辑</button></p>' +
+      '<p id="guard-result" class="meta"></p><p id="guard-list" class="meta"></p></article>';
+  }
+  async function refreshGuards() {
+    var target = document.getElementById("guard-list");
+    try {
+      var response = await fetch("/v1/library/guards", {headers: {Accept: "application/json"}});
+      var body = await response.json();
+      if (!body || !body.ok) { if (target) target.textContent = "没有读到字段锁。"; return; }
+      guardMeta.fields = body.fields || [];
+      guardRows = body.albums || [];
+      var fields = document.getElementById("guard-fields");
+      if (fields) {
+        fields.innerHTML = guardMeta.fields.map(function (field) {
+          return '<label><input type="checkbox" data-guard-field="' + escapeText(field) + '"> ' + escapeText(fieldLabel(field)) + "</label>";
+        }).join("");
+      }
+      if (target) {
+        target.innerHTML = guardRows.length
+          ? "已保存：" + guardRows.map(function (row) {
+              var parts = [];
+              if ((row.fields || []).length) parts.push((row.fields || []).join("、"));
+              if (row.suppressed) parts.push("不参与合并");
+              return '<a href="#" data-guard-dir="' + escapeText(row.dir) + '">' + escapeText(row.dir) + "</a>（" + escapeText(parts.join("；")) + "）";
+            }).join("<br>")
+          : "还没有保存的字段锁。";
+        // Clicking a saved album loads its switches into the form, which is
+        // the only way to edit one without retyping the path.
+        target.querySelectorAll("[data-guard-dir]").forEach(function (link) {
+          link.addEventListener("click", function (event) {
+            event.preventDefault();
+            fillGuard(link.getAttribute("data-guard-dir"));
+          });
+        });
+      }
+    } catch (err) {
+      if (target) target.textContent = "没有读到字段锁。";
+    }
+  }
+  function fieldLabel(field) {
+    var names = {title: "曲名", artist: "艺人", album: "专辑", albumartist: "专辑艺人", date: "日期", genre: "分类", tracknumber: "音轨号", discnumber: "碟号", lyrics: "歌词", composer: "作曲"};
+    return names[field] || field;
+  }
+  async function saveGuard(dir, fields, suppressed) {
+    var result = document.getElementById("guard-result");
+    try {
+      var response = await fetch("/v1/library/guards", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({dir: dir, fields: fields, suppressed: suppressed})});
+      var body = await response.json();
+      if (!response.ok || !body || !body.ok) {
+        if (result) result.textContent = (body && (body.error || body.code)) || "没有保存。";
+        return;
+      }
+      if (result) result.textContent = (fields.length || suppressed) ? "已保存：" + body.dir : "已清除：" + body.dir;
+      refreshGuards();
+    } catch (err) {
+      if (result) result.textContent = "保存中断。";
+    }
+  }
+  function fillGuard(dir) {
+    var input = document.getElementById("guard-dir");
+    if (input) input.value = dir;
+    var row = null;
+    guardRows.forEach(function (item) { if (item.dir === dir) row = item; });
+    document.querySelectorAll("[data-guard-field]").forEach(function (box) {
+      box.checked = !!row && (row.fields || []).indexOf(box.getAttribute("data-guard-field")) >= 0;
+    });
+    var suppress = document.getElementById("guard-suppress");
+    if (suppress) suppress.checked = !!row && !!row.suppressed;
+  }
+  function selectedGuardFields() {
+    var out = [];
+    document.querySelectorAll("[data-guard-field]").forEach(function (box) {
+      if (box.checked) out.push(box.getAttribute("data-guard-field"));
+    });
+    return out;
   }
   function confirmTracks(scene, label) {
     var paths = Object.keys(selectedTracks).filter(function (path) { return selectedTracks[path]; });

@@ -93,8 +93,20 @@ func (a *App) duplicateScan(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "code": "LIBRARY_UNAVAILABLE"})
 		return
 	}
+	// Suppressed albums are hidden from the scan but still reachable by id:
+	// a merge attempt answers MERGE_SUPPRESSED instead of a confusing 404.
+	visible := make([]duplicateGroup, 0, len(groups))
+	suppressed := 0
+	for i := range groups {
+		if a.groupSuppressed(&groups[i]) {
+			suppressed++
+			continue
+		}
+		visible = append(visible, groups[i])
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"ok": true, "method": method, "groups": groups, "count": len(groups), "truncated": truncated,
+		"ok": true, "method": method, "groups": visible, "count": len(visible),
+		"suppressed": suppressed, "truncated": truncated,
 		"policy": "同名不等于重复；不同发行/母带/声道保留。执行后旧副本进入可恢复隔离区。",
 	})
 }
@@ -369,6 +381,12 @@ func (a *App) duplicateMerge(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusConflict, map[string]any{"ok": false, "code": "MERGE_NOT_READY", "error": group.Reason})
 		return
 	}
+	// A suppressed album opted out of dedup entirely; merging it would undo
+	// exactly what the flag protects.
+	if a.groupSuppressed(group) {
+		writeJSON(w, http.StatusConflict, map[string]any{"ok": false, "code": "MERGE_SUPPRESSED", "error": "这张专辑已设为不参与合并，先在字段锁里取消抑制"})
+		return
+	}
 	// Moving a file that qBittorrent still holds breaks the torrent: the
 	// client keeps seeding a path that no longer exists. The check is before
 	// any hash work and before any move, and a client that is configured but
@@ -489,7 +507,17 @@ func (a *App) fillMissingTags(group *duplicateGroup) ([]string, error) {
 	}
 	updates := map[string][]string{}
 	filled := []string{}
+	// A locked field is curated by the user: the merge does not fill it even
+	// when it is empty and the duplicates agree on a value.
+	guard := a.guardFor(filepath.Dir(keeperPath))
+	locked := map[string]bool{}
+	for _, field := range guard.Fields {
+		locked[strings.ToUpper(field)] = true
+	}
 	for _, field := range fillableTagFields {
+		if locked[field] {
+			continue
+		}
 		if strings.TrimSpace(firstTagValue(keeper.Raw, field)) != "" {
 			continue
 		}

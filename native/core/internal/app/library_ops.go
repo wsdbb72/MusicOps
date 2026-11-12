@@ -329,12 +329,32 @@ func (a *App) completeMetadata(w http.ResponseWriter, r *http.Request) {
 			completion.Kept = append(completion.Kept, tagConflict{Field: "lyrics", Current: "已有歌词", Catalog: "目录歌词"})
 		}
 	}
+	// A locked field is the user's own decision: it wins over both the
+	// catalog and the overwrite flag, and is reported instead of applied.
+	updates, lockedFields := a.applyFieldLocks(filepath.Dir(path), updates)
+	if len(lockedFields) > 0 {
+		locked := map[string]bool{}
+		for _, field := range lockedFields {
+			locked[field] = true
+		}
+		written := completion.Written[:0]
+		for _, name := range completion.Written {
+			if !locked[name] {
+				written = append(written, name)
+			}
+		}
+		completion.Written = written
+	}
 	// Nothing to write and no cover to add: leave the file byte-identical.
 	if len(updates) == 0 && cover == nil {
+		note := "标签已经和目录一致，没有改动文件。"
+		if len(lockedFields) > 0 {
+			note = "这些字段已锁定，没有改动：" + strings.Join(lockedFields, "、") + "。"
+		}
 		writeJSON(w, http.StatusOK, map[string]any{
 			"ok": true, "written": false, "path": path,
 			"written_fields": []string{}, "kept_fields": completion.Kept, "unchanged_fields": completion.Unchanged,
-			"catalog": catalogTagSummary(view), "note": "标签已经和目录一致，没有改动文件。",
+			"locked_fields": lockedFields, "catalog": catalogTagSummary(view), "note": note,
 		})
 		return
 	}
@@ -401,11 +421,14 @@ func (a *App) completeMetadata(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	note += "。写之前有备份，失败会恢复原文件。这不是下载。"
+	if len(lockedFields) > 0 {
+		note += "。已锁定、没有改动：" + strings.Join(lockedFields, "、")
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"ok": true, "written": true, "path": path, "lyrics": lyrics != "", "cover": cover != nil,
 		"cover_mode": mode, "embedded_cover": cover != nil,
 		"written_fields": completion.Written, "kept_fields": completion.Kept, "unchanged_fields": completion.Unchanged,
-		"catalog": catalogTagSummary(view), "note": note,
+		"locked_fields": lockedFields, "catalog": catalogTagSummary(view), "note": note,
 	})
 }
 

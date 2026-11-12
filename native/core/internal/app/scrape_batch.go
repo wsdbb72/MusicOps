@@ -41,6 +41,7 @@ type scrapeFileResult struct {
 	WrittenFields   []string      `json:"written_fields,omitempty"`
 	KeptFields      []tagConflict `json:"kept_fields,omitempty"`
 	UnchangedFields []string      `json:"unchanged_fields,omitempty"`
+	LockedFields    []string      `json:"locked_fields,omitempty"`
 }
 
 type scrapeEntry struct {
@@ -181,6 +182,22 @@ func (a *App) scrapeLibrary(w http.ResponseWriter, r *http.Request) {
 				continue
 			}
 			updates, completion := planTagWrite(entry.tags, desiredTags(view, track), body.Overwrite)
+			var locked []string
+			updates, locked = a.applyFieldLocks(filepath.Dir(entry.full), updates)
+			result.LockedFields = locked
+			if len(locked) > 0 {
+				isLocked := map[string]bool{}
+				for _, field := range locked {
+					isLocked[field] = true
+				}
+				written := completion.Written[:0]
+				for _, name := range completion.Written {
+					if !isLocked[name] {
+						written = append(written, name)
+					}
+				}
+				completion.Written = written
+			}
 			if body.DryRun {
 				result.Status = "planned"
 				result.WrittenFields = completion.Written

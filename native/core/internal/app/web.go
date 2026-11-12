@@ -1083,6 +1083,8 @@ const appJS = `(function () {
       '<label>封面写入<select id="meta-cover-mode"><option value="sidecar">内嵌并保留同名 jpg</option><option value="embedded">只写入 FLAC 内嵌图片</option></select></label>' +
       '<label><input type="checkbox" id="meta-overwrite"> 覆盖与目录不同的字段（含分类）</label>' +
       '<p><button type="button" id="complete-metadata">补齐标签封面歌词</button></p><p id="metadata-result" class="meta"></p>' +
+      '<p class="meta">目录没有收录这张专辑时，可以从网易云 / QQ / 酷狗 / 酷我查候选，再手动填进上面的艺人、专辑、曲名。</p>' +
+      '<p><button type="button" id="lookup-sources">查其它来源</button></p><div id="sources-result" class="meta"></div>' +
       '<p class="meta">批量刮削按专辑一次查询目录，写标签（含分类）。勾选下面的歌词封面后，会再用设置里的歌词服务为每首取一次歌词和封面（一次最多 30 首）。先勾选曲目，再预演或应用。</p>' +
       '<label><input type="checkbox" id="scrape-artwork"> 同时取歌词与封面（≤30 首，用设置里的歌词服务）</label>' +
       '<p><button type="button" id="scrape-preview">预演批量刮削</button> <button type="button" id="scrape-apply" class="primary">批量刮削所选</button></p></article>' +
@@ -1151,6 +1153,8 @@ const appJS = `(function () {
     if (pageNext) pageNext.addEventListener("click", function () { libraryFileOffset += 20; loadLibraryFiles(); });
     var metadata = document.getElementById("complete-metadata");
     if (metadata) metadata.addEventListener("click", completeMetadata);
+    var lookup = document.getElementById("lookup-sources");
+    if (lookup) lookup.addEventListener("click", lookupSources);
     var scrapePreview = document.getElementById("scrape-preview");
     if (scrapePreview) scrapePreview.addEventListener("click", function () { scrapeSelected(true); });
     var scrapeApply = document.getElementById("scrape-apply");
@@ -1271,6 +1275,41 @@ const appJS = `(function () {
       if (box.checked) out.push(box.getAttribute("data-guard-field"));
     });
     return out;
+  }
+  // lookupSourcesAsks the streaming catalogues for candidates. They are
+  // labelled as candidates: filling the form with them is the user's call, and
+  // the tag writer still goes through the normal completion flow.
+  async function lookupSources() {
+    if (loading) return;
+    var out = document.getElementById("sources-result");
+    var title = document.getElementById("meta-title").value.trim();
+    var artist = document.getElementById("meta-artist").value.trim();
+    if (!title && !artist) { if (out) out.textContent = "先填曲名或艺人。"; return; }
+    if (out) out.textContent = "正在查网易云 / QQ / 酷狗 / 酷我…";
+    setBusy(true);
+    try {
+      var response = await fetch("/v1/sources/lookup", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({title: title, artist: artist, query: (title + " " + artist).trim()})});
+      var body = await response.json();
+      if (!response.ok || !body || !body.ok) { if (out) out.textContent = (body && (body.error || body.code)) || "查询失败。"; return; }
+      var rows = body.candidates || [];
+      if (!rows.length) { if (out) out.textContent = "这些来源也没有找到。" + (body.note ? " " + body.note : ""); return; }
+      out.innerHTML = rows.map(function (row, index) {
+        return '<p>' + escapeText(row.source) + '：' + escapeText(row.title) + " — " + escapeText(row.artist) + (row.album ? " · " + escapeText(row.album) : "") + (row.exact ? "（对得上）" : "（候选）") + ' <button type="button" data-use-source="' + index + '">填进表单</button></p>';
+      }).join("") + '<p class="meta">' + escapeText(body.note || "") + "</p>";
+      out.querySelectorAll("[data-use-source]").forEach(function (button) {
+        button.addEventListener("click", function () {
+          var row = rows[parseInt(button.getAttribute("data-use-source"), 10)];
+          if (!row) return;
+          document.getElementById("meta-title").value = row.title || "";
+          document.getElementById("meta-artist").value = row.artist || "";
+          document.getElementById("meta-album").value = row.album || "";
+        });
+      });
+    } catch (err) {
+      if (out) out.textContent = "查询中断。";
+    } finally {
+      setBusy(false);
+    }
   }
   function confirmTracks(scene, label) {
     var paths = Object.keys(selectedTracks).filter(function (path) { return selectedTracks[path]; });

@@ -9,13 +9,49 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"regexp"
+	"runtime/debug"
+	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/wsdbb72/MusicOps/native/core/internal/taskrepo"
 )
 
 var ErrCancelled = errors.New("cancelled at an execution checkpoint")
+
+// secretShape matches the credential query keys an upstream error string can
+// quote. The task store never holds the secret itself; only the shape.
+var secretShape = regexp.MustCompile(`(?i)(authkey|torrent_pass|cookie|password|usetoken)=[^&\s"']*`)
+
+// panicError keeps a recovered panic together with the stack that produced it.
+type panicError struct {
+	value string
+	stack string
+}
+
+func (p *panicError) Error() string { return "执行器崩溃: " + p.value }
+
+// frame is the first line of the panic stack that names a function, which is
+// enough to locate the executor without storing a whole trace in health.
+func (p *panicError) frame() string {
+	lines := strings.Split(p.stack, "\n")
+	for i, line := range lines {
+		// A Go stack prints the function on one line and "<file>.go:<line>"
+		// on the next. The first file line after the panic belongs to the
+		// executor that panicked.
+		if i == 0 || !strings.Contains(line, ".go:") {
+			continue
+		}
+		name := strings.TrimSpace(lines[i-1])
+		if strings.HasPrefix(name, "panic(") || strings.HasPrefix(name, "runtime.") {
+			continue
+		}
+		return clip(strings.TrimSpace(name), 160) + " @ " + clip(strings.TrimSpace(line), 160)
+	}
+	return ""
+}
 var ErrShutdownPending = errors.New("owned execution has not reached shutdown")
 
 type Outcome struct {
@@ -34,8 +70,14 @@ type Config struct {
 }
 
 func DefaultConfig() Config {
-	return Config{Limits: map[string]int{"identify": 4, "publish": 1, "transcode": 1, "aux": 2}, ProgressInterval: 500 * time.Millisecond}
+	return Config{Limits: map[string]int{"identify": 4, "publish": 1, "transcode": 1, "aux": 2, "download": 3}, ProgressInterval: 500 * time.Millisecond}
 }
+
+// schedulerLanes is the exact set of queue lanes the coordinator runs. The
+// download lane is separate from aux on purpose: a multi-hour torrent download
+// must not consume one of the two aux slots the identify/acquire stages need
+// for short site reads (D6).
+var schedulerLanes = []string{"identify", "publish", "transcode", "aux", "download"}
 
 type Health struct {
 	Owner    string            `json:"owner"`
@@ -73,10 +115,10 @@ func nonce() string {
 	return hex.EncodeToString(value[:])
 }
 func New(repo *taskrepo.Repository, handlers map[string]Handler, config Config) (*Coordinator, error) {
-	if repo == nil || len(config.Limits) != 4 || config.Limits["publish"] != 1 || config.ProgressInterval <= 0 {
+	if repo == nil || len(config.Limits) != len(schedulerLanes) || config.Limits["publish"] != 1 || config.ProgressInterval <= 0 {
 		return nil, errors.New("invalid bounded scheduler configuration")
 	}
-	for _, lane := range []string{"identify", "publish", "transcode", "aux"} {
+	for _, lane := range schedulerLanes {
 		if config.Limits[lane] < 1 || config.Limits[lane] > 8 {
 			return nil, errors.New("invalid lane capacity")
 		}
@@ -159,8 +201,42 @@ func (c *Coordinator) failure(lane string, err error) {
 	if err == nil {
 		delete(c.failures, lane)
 	} else {
-		c.failures[lane] = fmt.Sprintf("%T", err)
+		c.failures[lane] = failureDetail(err)
 	}
+}
+
+// failureDetail is what the health view keeps for one lane. Storing only the
+// error type ("%T") told an operator that something failed but never what,
+// which made "执行已退出" unactionable (P1-3). The text is scrubbed and
+// bounded, and a panic keeps the first frame of its stack.
+func failureDetail(err error) string {
+	if err == nil {
+		return ""
+	}
+	var panicked *panicError
+	if errors.As(err, &panicked) {
+		return clip(detailText(panicked.value)+" "+panicked.frame(), 400)
+	}
+	return clip(detailText(err.Error()), 400)
+}
+
+// detailText removes the credential shapes an executor error may quote and
+// collapses whitespace so a message stays one line in the task list.
+func detailText(value string) string {
+	value = secretShape.ReplaceAllString(value, "$1=redacted")
+	value = strings.Join(strings.Fields(value), " ")
+	return value
+}
+
+func clip(value string, limit int) string {
+	if len(value) <= limit {
+		return value
+	}
+	cut := limit
+	for cut > 0 && !utf8.RuneStart(value[cut]) {
+		cut--
+	}
+	return value[:cut] + "…"
 }
 func wait(ctx context.Context, duration time.Duration) bool {
 	timer := time.NewTimer(duration)
@@ -275,7 +351,24 @@ func (c *Coordinator) execute(ctx context.Context, claimed taskrepo.Task) {
 	execution := &Execution{repo: c.repo, token: token, interval: c.config.ProgressInterval}
 	outcome, err := c.invoke(ctx, execution, claimed)
 	if ctx.Err() != nil || (err != nil && !errors.Is(err, ErrCancelled)) {
-		if persist := c.interrupt(hooks, token, "执行已退出，等待自动核对外部操作记录"); persist != nil {
+		reason := "执行已退出，等待自动核对外部操作记录"
+		if err != nil && !errors.Is(err, ErrCancelled) {
+			// Keep an ordinary executor error with the task: the reason is
+			// the only place an operator sees why the run stopped. A panic
+			// value stays out of the task message (it can quote a secret);
+			// it is recorded in health with its frame instead.
+			var panicked *panicError
+			if errors.As(err, &panicked) {
+				// The panic value stays out of the task message because it
+				// can quote a secret; its first stack frame is safe and is
+				// what locates the failing executor.
+				reason = "执行器崩溃，等待核对外部影响：" + panicked.frame()
+			} else {
+				reason = "执行器返回错误，等待核对外部影响：" + detailText(err.Error())
+			}
+			c.failure(claimed.Lane, err)
+		}
+		if persist := c.interrupt(hooks, token, reason); persist != nil {
 			c.failure(claimed.Lane, persist)
 		}
 		return
@@ -325,8 +418,8 @@ func (c *Coordinator) interrupt(hooks WorkflowHooks, token taskrepo.Token, reaso
 
 func (c *Coordinator) invoke(ctx context.Context, e *Execution, task taskrepo.Task) (out Outcome, err error) {
 	defer func() {
-		if recover() != nil {
-			err = errors.New("executor panic; reconcile effects")
+		if recovered := recover(); recovered != nil {
+			err = &panicError{value: fmt.Sprint(recovered), stack: string(debug.Stack())}
 		}
 	}()
 	if err = e.Checkpoint(ctx, "before_execute", 0, ""); err != nil {

@@ -155,7 +155,7 @@ func (r *Repository) StartDownload(requestID, jobID string, in DownloadInput, no
 	if !receipt {
 		return Result{}, ErrStale
 	}
-	followup := taskrepo.NewTask{Spec: taskrepo.Spec{ID: downloadID, Command: cmdDownload, Lane: "aux", Priority: 1, CreatedNS: nowNS}, Payload: in.Plan}
+	followup := taskrepo.NewTask{Spec: taskrepo.Spec{ID: downloadID, Command: cmdDownload, Lane: "download", Priority: 1, CreatedNS: nowNS}, Payload: in.Plan}
 	end := taskrepo.Completion{State: "completed", NowNS: nowNS, Message: "已确认下载，等待 qBittorrent"}
 	extra, _ := json.Marshal(struct{ JobID, Action string }{jobID, "start-download"})
 	result, err := r.tasks.ResolveOwned(requestID, task.ID, end, []taskrepo.NewTask{followup}, map[string]string{downloadID: jobID}, extra, func(v *dataengine.View, _, after *taskrepo.Task, children []taskrepo.Task) ([]dataengine.Condition, []dataengine.Mutation, json.RawMessage, error) {

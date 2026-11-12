@@ -210,7 +210,7 @@ const appJS = `(function () {
       '<label>检索关键词<input type="text" id="search-query" required></label>' +
       '<label>期望标题<input type="text" id="search-title" required></label>' +
       '<label>期望艺人<input type="text" id="search-artist"></label>' +
-      '<label>场景<select id="search-scene"><option value="playlist">歌单</option><option value="complete">补全</option><option value="upgrade">音质升级</option><option value="fill">补缺</option><option value="expand">扩展</option></select></label>' +
+      '<label>场景<select id="search-scene"><option value="playlist">歌单</option><option value="upgrade">音质升级</option><option value="fill">补缺</option><option value="expand">扩展</option></select></label>' +
       '<label>来源曲目 ID（歌单场景，逗号分隔）<input type="text" id="search-tracks"></label>' +
       '<label>已存歌单（歌单场景：回退时读该歌单文件）<select id="search-playlist"><option value="">不使用已存歌单</option>' + playlistRows.map(function (row) { return '<option value="' + escapeText(row.id) + '">' + escapeText((row.name || row.id) + "（" + row.track_count + " 首）") + "</option>"; }).join("") + '</select></label>' +
       '<label>流媒体回退<select id="search-streaming"><option value="">跟随设置</option><option value="true">开</option><option value="false">关</option></select></label>' +

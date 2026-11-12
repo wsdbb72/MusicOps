@@ -66,7 +66,13 @@ func (a *App) acquire(ctx context.Context, execution *scheduler.Execution, paylo
 	if err != nil {
 		return a.finishAcquire(held, *job, "candidate", "站点详情读取失败，未发下载或令牌请求；尚未下载、尚未入库", "detail", nil)
 	}
-	if decision.Personal || (site != "dicmusic" && site != "orpheus" && decision.Global) {
+	// Personal free is free everywhere. Global free (a site-wide freeleech
+	// event, proven for this exact torrent row) costs no token on any of the
+	// three token sites either: charging a token for a global-free torrent is
+	// a real loss with no benefit. sitefree only reports Global when the
+	// response was about this resource id, so a stray flag cannot route an
+	// unrelated torrent here.
+	if decision.Personal || decision.Global {
 		receipt, err := a.fetchTorrent(ctx, execution, plan, site, resource, false)
 		if err != nil {
 			return a.finishAcquire(held, *job, "candidate", "种子响应不是有效元信息；尚未下载、尚未入库", "PARSE_ERROR", nil)

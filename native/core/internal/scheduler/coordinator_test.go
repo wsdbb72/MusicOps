@@ -228,3 +228,85 @@ func TestRegisteredStageCanAtomicallyScheduleItsSuccessor(t *testing.T) {
 		t.Fatal("stage lineage lost")
 	}
 }
+
+// A torrent download occupies its worker for hours. It must not take one of
+// the two aux slots the acquire stage uses for short site reads: with both aux
+// workers blocked, a download-lane task still has to run (D6, P1-8).
+func TestDownloadLaneRunsWhileAuxIsSaturated(t *testing.T) {
+	blocked := make(chan struct{})
+	started := make(chan struct{}, 2)
+	handler := func(ctx context.Context, e *Execution, args []byte) (Outcome, error) {
+		if string(args) == "hold" {
+			started <- struct{}{}
+			select {
+			case <-blocked:
+			case <-ctx.Done():
+				return Outcome{}, ctx.Err()
+			}
+		}
+		return Outcome{}, nil
+	}
+	config := DefaultConfig()
+	config.Limits["aux"] = 2
+	config.Limits["download"] = 3
+	repo, c := setup(t, map[string]Handler{"controlled": handler}, config)
+	add(t, repo, "aux-1", "aux", "controlled", 1, "hold")
+	add(t, repo, "aux-2", "aux", "controlled", 1, "hold")
+	add(t, repo, "download-1", "download", "controlled", 1, "quick")
+	c.Start(context.Background())
+	for i := 0; i < 2; i++ {
+		select {
+		case <-started:
+		case <-time.After(10 * time.Second):
+			t.Fatal("aux lanes did not start")
+		}
+	}
+	until(t, func() bool { return hasState(repo, "download-1", "completed") })
+	if !hasState(repo, "aux-1", "running") || !hasState(repo, "aux-2", "running") {
+		t.Fatal("aux tasks should still be held")
+	}
+	close(blocked)
+}
+
+// An executor that fails must leave its reason with the task: "执行已退出"
+// alone told nobody which stage broke or why (P1-3). Credential shapes in the
+// text are redacted before they are stored.
+func TestExecutorErrorIsRecordedAndScrubbed(t *testing.T) {
+	handler := func(context.Context, *Execution, []byte) (Outcome, error) {
+		return Outcome{}, errors.New("站点响应解析失败 cookie=session-secret authkey=abc123")
+	}
+	repo, c := setup(t, map[string]Handler{"broken": handler}, DefaultConfig())
+	add(t, repo, "a", "aux", "broken", 1, "")
+	c.Start(context.Background())
+	until(t, func() bool { return hasState(repo, "a", "recovery_required") })
+	task, err := repo.Get("a")
+	if err != nil || task == nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(task.Message, "站点响应解析失败") || strings.Contains(task.Message, "执行已退出") {
+		t.Fatal(task.Message)
+	}
+	if strings.Contains(task.Message, "session-secret") || strings.Contains(task.Message, "abc123") {
+		t.Fatal("credential leaked into the task message:", task.Message)
+	}
+	if detail := failureDetail(errors.New("站点响应解析失败 cookie=session-secret")); strings.Contains(detail, "session-secret") || !strings.Contains(detail, "站点响应解析失败") {
+		t.Fatal(detail)
+	}
+}
+
+// A panic keeps its value and first frame in the operator health view. The
+// task message stays generic, because a panic value can quote a secret.
+func TestPanicKeepsTheFrameInHealth(t *testing.T) {
+	handler := func(context.Context, *Execution, []byte) (Outcome, error) { panic("nil map at site read") }
+	repo, c := setup(t, map[string]Handler{"broken": handler}, DefaultConfig())
+	add(t, repo, "a", "identify", "broken", 1, "")
+	c.Start(context.Background())
+	until(t, func() bool { return hasState(repo, "a", "recovery_required") })
+	task, _ := repo.Get("a")
+	if !strings.Contains(task.Message, "执行器崩溃") || !strings.Contains(task.Message, ".go:") {
+		t.Fatal(task.Message)
+	}
+	if strings.Contains(task.Message, "nil map") {
+		t.Fatal(task.Message)
+	}
+}

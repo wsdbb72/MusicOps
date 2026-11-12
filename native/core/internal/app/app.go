@@ -57,6 +57,10 @@ type App struct {
 	mu           sync.Mutex
 	secrets      map[string]string
 	stopSubs     chan struct{}
+	// migrationFailure is the reason a legacy profile was not imported at
+	// startup. It is set once, before the scheduler serves, and reported by
+	// GET /v1/migration. An empty value means nothing failed.
+	migrationFailure string
 }
 
 // Open creates the native store and starts the scheduler. Torrent bytes are
@@ -71,11 +75,17 @@ func Open(dir, backup, password string) (*App, error) {
 	}
 	profile := filepath.Dir(filepath.Dir(absDir))
 	legacyDB := filepath.Join(profile, "state", "musicops.sqlite")
+	// A broken legacy profile is input to the new build, not a reason to
+	// refuse to start: the old SQLite file is only ever read, and a failure
+	// here used to leave a desktop install unstartable with no way in
+	// (P0-4). The failure is reported on GET /v1/migration and the next
+	// start retries; nothing is deleted or overwritten.
+	var migrationFailure string
 	if _, statErr := os.Stat(legacyDB); statErr == nil {
 		// Config migration opens the native store itself, so it has to
 		// finish before this process keeps the store open.
 		if _, err = configmigrate.MaybeMigrate(profile); err != nil {
-			return nil, err
+			migrationFailure = "旧版配置迁移失败：" + scrub(err.Error())
 		}
 	}
 	engine, err := dataengine.Open(dir)
@@ -102,11 +112,13 @@ func Open(dir, backup, password string) (*App, error) {
 	app.flows = workflow.New(engine, app.tasks)
 	app.loadPipelinePause()
 	if _, statErr := os.Stat(legacyDB); statErr == nil {
-		if _, err = livemigrate.Activate(engine, profile, app.flows, app.ledger, app.now()); err != nil {
-			engine.Close()
-			return nil, err
+		if backupErr := app.backupBeforeLiveMigration(); backupErr != nil {
+			migrationFailure = "迁移前备份失败，旧库未导入：" + scrub(backupErr.Error())
+		} else if _, err = livemigrate.Activate(engine, profile, app.flows, app.ledger, app.now()); err != nil {
+			migrationFailure = "旧库导入失败，旧库与音乐文件未改动：" + scrub(err.Error())
 		}
 	}
+	app.migrationFailure = migrationFailure
 	runner, err := scheduler.New(app.tasks, app.handlers(), scheduler.DefaultConfig())
 	if err != nil {
 		engine.Close()
@@ -133,6 +145,22 @@ func Open(dir, backup, password string) (*App, error) {
 	app.stopSubs = make(chan struct{})
 	go app.runSubscriptions(app.stopSubs)
 	return app, nil
+}
+
+// backupBeforeLiveMigration copies the current store into the backup
+// directory before a legacy import writes into it. A first successful import
+// already leaves both the receipt and this backup, so later starts skip the
+// copy: the legacy database is never removed, and copying the whole store on
+// every start would be a real cost.
+func (a *App) backupBeforeLiveMigration() error {
+	if _, found, err := livemigrate.Read(a.engine); err != nil || found {
+		return err
+	}
+	if err := os.MkdirAll(a.Backup, 0o700); err != nil {
+		return err
+	}
+	destination := filepath.Join(a.Backup, "pre-migration-"+a.now().UTC().Format("20060102-150405.000000000"))
+	return a.engine.Checkpoint(destination)
 }
 
 // handlers are the executors this process runs. publish_album only

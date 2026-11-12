@@ -72,7 +72,11 @@ type ReviewAction struct {
 	Reason  string `json:"reason,omitempty"`
 }
 
-var reviewSkipKinds = map[string]bool{"search": true, "candidate": true, "token": true, "error": true}
+// reviewSkipKinds lists the checkpoints a user may abandon. "metadata" is the
+// unconfirmed-identity checkpoint: the machine cannot confirm the release, so
+// the only human decision available there is to drop the job. Confirming the
+// identity re-runs identification instead of skipping (a later batch).
+var reviewSkipKinds = map[string]bool{"search": true, "candidate": true, "token": true, "error": true, "metadata": true}
 var reviewRetryKinds = map[string]bool{"search": true, "candidate": true, "token": true}
 
 func (r *Repository) reviewTarget(jobID string) (*Job, *taskrepo.Task, error) {

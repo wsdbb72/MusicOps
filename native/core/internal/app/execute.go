@@ -57,6 +57,27 @@ func (a *App) identify(ctx context.Context, execution *scheduler.Execution, payl
 	}
 	token := execution.Token()
 	evidence := plan.evidence()
+	// A bare album name is the normal entry point of the search page and it
+	// carries no confirmed catalogue identity. Asking the workflow for the
+	// search edge in that state is rejected (the edge requires confirmed
+	// evidence), the scheduler then treats the rejection as an unknown
+	// external effect and interrupts the task, and the job lands in
+	// recovery_required with "执行已退出". Identity is therefore an explicit
+	// human checkpoint: unconfirmed evidence parks the job in
+	// needs_review/metadata before any site is read. Automatic catalogue
+	// identification is a later batch and will take this same checkpoint.
+	if !plan.Identity.IdentityConfirmed {
+		complete := workflow.Complete{
+			Edge: workflow.EdgeTerminal, NextStage: "needs_review", ReviewKind: "metadata",
+			TaskState: "blocked", ErrorClass: "IDENTITY_UNCONFIRMED",
+			Evidence: []workflow.EvidenceInput{evidence}, Result: payload,
+			Message: "身份证据未确认，已转入核对；未检索、未下载、未入库", NowNS: a.now().UnixNano(),
+		}
+		if _, err = a.flows.Complete(intentID("identify", token.ID, token.Fence), token, complete); err != nil {
+			return scheduler.Outcome{}, err
+		}
+		return scheduler.Outcome{State: "blocked", Message: complete.Message}, nil
+	}
 	_, err = a.flows.Complete(intentID("identify", token.ID, token.Fence), token, workflow.Complete{
 		Edge: workflow.EdgeQueueSearch, TaskState: "completed", Evidence: []workflow.EvidenceInput{evidence},
 		Result: payload, Message: "身份证据已接收，等待四站只读检索；尚未下载", NowNS: a.now().UnixNano(),

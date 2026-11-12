@@ -60,7 +60,7 @@ func TestStartDownloadQueuesDownloadTask(t *testing.T) {
 		t.Fatalf("%+v %v", old, err)
 	}
 	download, err := tasks.Get("download:process:search:album1")
-	if err != nil || download == nil || download.State != "queued" || download.Command != cmdDownload || download.Lane != "aux" || download.WorkflowJobID != "process:search:album1" {
+	if err != nil || download == nil || download.State != "queued" || download.Command != cmdDownload || download.Lane != "download" || download.WorkflowJobID != "process:search:album1" {
 		t.Fatalf("%+v %v", download, err)
 	}
 	payload, found, err := tasks.Data(download.ID, "arguments", 0)
@@ -193,7 +193,7 @@ func TestDownloadFailedJobRetriesToDownloading(t *testing.T) {
 	if _, err := repo.StartDownload("start-download", "process:search:album1", downloadInput(), 7000); err != nil {
 		t.Fatal(err)
 	}
-	token := begin(t, tasks, "download:process:search:album1", "aux")
+	token := begin(t, tasks, "download:process:search:album1", "download")
 	if _, err := repo.Complete("download-fail", token, Complete{
 		JobID: "process:search:album1", Edge: edgeTerminal, NextStage: "failed",
 		TaskState: "failed", Message: "qBittorrent 不可用", ErrorClass: "QBITTORENT_UNAVAILABLE", NowNS: 8000,

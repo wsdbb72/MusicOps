@@ -26,7 +26,7 @@ const maxPayload = 64 << 20
 const PayloadLimit = maxPayload
 
 var namePattern = regexp.MustCompile(`^[a-zA-Z][a-zA-Z0-9_]{0,79}$`)
-var lanes = []string{"identify", "publish", "transcode", "aux"}
+var lanes = []string{"identify", "publish", "transcode", "aux", "download"}
 var states = []string{"queued", "running", "paused", "completed", "failed", "cancelled", "blocked", "recovery_required"}
 
 type Spec struct {

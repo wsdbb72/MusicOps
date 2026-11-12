@@ -1,6 +1,8 @@
 package app
 
 import (
+	"bytes"
+	"compress/gzip"
 	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/base64"
@@ -62,8 +64,8 @@ func (a *App) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", a.health)
 	mux.HandleFunc("GET /{$}", a.home)
-	mux.HandleFunc("GET /app.css", a.asset("text/css; charset=utf-8", appCSS))
-	mux.HandleFunc("GET /app.js", a.asset("text/javascript; charset=utf-8", appJS))
+	mux.HandleFunc("GET /app.css", cssAsset.serve)
+	mux.HandleFunc("GET /app.js", jsAsset.serve)
 	mux.HandleFunc("GET /v1/jobs", a.jobs)
 	mux.HandleFunc("POST /v1/archive/import", a.importArchive)
 	mux.HandleFunc("POST /v1/archive/project", a.projectArchive)
@@ -192,12 +194,87 @@ func (a *App) home(w http.ResponseWriter, _ *http.Request) {
 	_, _ = io.WriteString(w, page)
 }
 
-func (a *App) asset(contentType, body string) http.HandlerFunc {
-	return func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("Content-Type", contentType)
-		w.WriteHeader(http.StatusOK)
-		_, _ = io.WriteString(w, body)
+// staticAsset is one immutable, in-binary asset. The validator and the gzip
+// body are computed once: the CSS and JS only change when the binary changes,
+// so a client can revalidate with a 304 instead of downloading them again on
+// every navigation (P2-1). The blanket "no-store" in the middleware stays for
+// JSON and HTML; these handlers overwrite it.
+type staticAsset struct {
+	contentType string
+	etag        string
+	body        []byte
+	gzipped     []byte
+}
+
+var (
+	cssAsset = newStaticAsset("text/css; charset=utf-8", appCSS)
+	jsAsset  = newStaticAsset("text/javascript; charset=utf-8", appJS)
+)
+
+func newStaticAsset(contentType, body string) *staticAsset {
+	sum := sha256.Sum256([]byte(body))
+	fingerprint := hex.EncodeToString(sum[:8])
+	var compressed bytes.Buffer
+	writer := gzip.NewWriter(&compressed)
+	_, _ = writer.Write([]byte(body))
+	_ = writer.Close()
+	return &staticAsset{contentType: contentType, etag: `"` + fingerprint + `"`, body: []byte(body), gzipped: compressed.Bytes()}
+}
+
+func (asset *staticAsset) serve(w http.ResponseWriter, r *http.Request) {
+	header := w.Header()
+	header.Set("ETag", asset.etag)
+	header.Set("Cache-Control", "private, max-age=0, must-revalidate")
+	header.Set("Vary", "Accept-Encoding")
+	if etagMatches(r.Header.Get("If-None-Match"), asset.etag) {
+		w.WriteHeader(http.StatusNotModified)
+		return
 	}
+	header.Set("Content-Type", asset.contentType)
+	body := asset.body
+	if len(asset.gzipped) < len(asset.body) && acceptsGzip(r.Header.Get("Accept-Encoding")) {
+		header.Set("Content-Encoding", "gzip")
+		body = asset.gzipped
+	}
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(body)
+}
+
+// etagMatches implements the If-None-Match comparison for a strong validator:
+// a comma-separated list, each entry optionally weak-prefixed.
+func etagMatches(header, etag string) bool {
+	for _, candidate := range strings.Split(header, ",") {
+		candidate = strings.TrimSpace(candidate)
+		if candidate == "*" || candidate == etag || strings.TrimPrefix(candidate, "W/") == etag {
+			return true
+		}
+	}
+	return false
+}
+
+// acceptsGzip honours an explicit q=0 refusal; a bare "gzip" or wildcard
+// counts as acceptance.
+func acceptsGzip(header string) bool {
+	for _, part := range strings.Split(header, ",") {
+		fields := strings.Split(strings.TrimSpace(part), ";")
+		name := strings.ToLower(strings.TrimSpace(fields[0]))
+		if name != "gzip" && name != "*" {
+			continue
+		}
+		quality := 1.0
+		for _, param := range fields[1:] {
+			param = strings.ToLower(strings.TrimSpace(param))
+			if strings.HasPrefix(param, "q=") {
+				if value, err := strconv.ParseFloat(strings.TrimPrefix(param, "q="), 64); err == nil {
+					quality = value
+				}
+			}
+		}
+		if quality > 0 {
+			return true
+		}
+	}
+	return false
 }
 
 func (a *App) jobs(w http.ResponseWriter, r *http.Request) {
@@ -331,6 +408,15 @@ func (a *App) startSearch(w http.ResponseWriter, r *http.Request) {
 	}
 	if body.Identity.IdentityConfirmed && (body.Identity.Kind == "ai" || body.Identity.Kind == "synthetic_fixture" || !body.Identity.TracklistVerified) {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "code": "IDENTITY_EVIDENCE_REJECTED"})
+		return
+	}
+	// The search page used to offer "补全" while the entrance always started at
+	// "identifying", which planStart refuses for scene complete. The repair
+	// executor is not registered either, so the honest answer is a refusal
+	// with a reason instead of a generic 409 or a job that can never move
+	// (P1-1).
+	if body.Scene == "complete" {
+		writeJSON(w, http.StatusUnprocessableEntity, map[string]any{"ok": false, "code": "SCENE_UNSUPPORTED", "error": "补全场景的修复执行器尚未接入，本次没有创建任务"})
 		return
 	}
 	// Caller flags are accepted so an older client is not rejected.

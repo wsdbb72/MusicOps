@@ -274,7 +274,9 @@ func (a *App) writeReviewResult(w http.ResponseWriter, result workflow.Result, e
 	// fetch the torrent, and the download authenticators with it. A retry
 	// keeps the cookie for the same reason. Secrets that are never reviewed
 	// stay in memory until the process restarts; they are never persisted.
-	if job.TaskType == "search" && action == "skip" {
+	// An identification job holds the same session secrets and a skip ends
+	// it just as finally.
+	if action == "skip" && (job.TaskType == "search" || job.TaskType == "identification") {
 		a.forget(job.RootID)
 	}
 	children := []jobView{}

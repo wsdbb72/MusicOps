@@ -472,7 +472,7 @@ func TestPageButtonChoosesTheTokenCost(t *testing.T) {
 		values := r.URL.Query()
 		switch {
 		case values.Get("action") == "torrent":
-			io.WriteString(w, `{"status":"success","response":{"group":{"id":10},"torrent":{"id":"11","isPersonalFreeleech":false,"isFreeleech":true}}}`)
+			io.WriteString(w, `{"status":"success","response":{"group":{"id":10},"torrent":{"id":"11","isPersonalFreeleech":false,"isFreeleech":false}}}`)
 		case values.Get("torrentid") == "11":
 			io.WriteString(w, `<a href="torrents.php?action=download&amp;id=11&amp;usetoken=1" title="Use 3 tokens">FL (3)</a>`)
 		case values.Get("action") == "index":
@@ -535,35 +535,55 @@ func TestPersonalRowDoesNotSpendACallerToken(t *testing.T) {
 	}
 }
 
-func TestGlobalFlagAndCallerFreeDoNotSpendOrDownload(t *testing.T) {
-	var downloads atomic.Int32
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		values := r.URL.Query()
-		switch {
-		case values.Get("action") == "torrent":
-			io.WriteString(w, `{"status":"success","response":{"group":{"id":10},"torrent":{"id":"11","isFreeleech":true,"isPersonalFreeleech":false}}}`)
-		case values.Get("torrentid") == "11":
-			io.WriteString(w, `<div>普通下载</div>`)
-		case values.Get("action") == "download" || strings.HasPrefix(r.URL.Path, "/download.php"):
-			downloads.Add(1)
-		default:
-			if r.URL.Path == "/details.php" {
-				io.WriteString(w, `<div>没有免费标记</div>`)
-				return
+// A global freeleech event means the torrent costs no token on any site.
+// Before the fix the two token sites still went through the token path, so the
+// user paid a token for a torrent the site was already giving away (P0-2).
+// A caller-supplied free flag remains worthless: the evidence is the site's
+// own answer about this torrent id.
+func TestGlobalFreeDownloadsWithoutATokenOnBothTokenSites(t *testing.T) {
+	for _, site := range []string{"dicmusic", "orpheus"} {
+		t.Run(site, func(t *testing.T) {
+			var downloads, indexReads, tokenUses atomic.Int32
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				values := r.URL.Query()
+				switch {
+				case values.Get("action") == "torrent":
+					io.WriteString(w, `{"status":"success","response":{"group":{"id":10},"torrent":{"id":"11","isFreeleech":true,"isPersonalFreeleech":false}}}`)
+				case values.Get("torrentid") == "11":
+					io.WriteString(w, `<div>普通下载</div>`)
+				case values.Get("action") == "index":
+					indexReads.Add(1)
+					io.WriteString(w, `{"status":"success","response":{"personal":{"freeleechTokens":100}}}`)
+				case values.Get("action") == "download" || strings.HasPrefix(r.URL.Path, "/download.php"):
+					downloads.Add(1)
+					if values.Get("usetoken") != "" {
+						tokenUses.Add(1)
+					}
+					io.WriteString(w, sampleTorrent)
+				default:
+					if r.URL.Path == "/details.php" {
+						io.WriteString(w, `<div>没有个人免费标记</div>`)
+						return
+					}
+					io.WriteString(w, gazelleHit("11"))
+				}
+			}))
+			defer server.Close()
+			application := newApp(t)
+			body := tokenBody("album-global-"+site, server.URL, []string{site})
+			body["token_cost"] = 1
+			body["free_confirmed"] = true
+			body["dicmusic_authkey"] = "sentinel-dic-auth"
+			body["orpheus_torrent_pass"] = "sentinel-orp-pass"
+			post(t, application, "/v1/search", body)
+			job := waitJob(t, application, "process:search:album-global-"+site, "needs_review")
+			if downloads.Load() != 1 || tokenUses.Load() != 0 || indexReads.Load() != 0 {
+				t.Fatal(downloads.Load(), tokenUses.Load(), indexReads.Load(), job.Message)
 			}
-			io.WriteString(w, gazelleHit("11"))
-		}
-	}))
-	defer server.Close()
-	application := newApp(t)
-	body := tokenBody("album-global", server.URL, []string{"dicmusic"})
-	body["token_cost"] = 1
-	body["free_confirmed"] = true
-	body["dicmusic_authkey"] = "sentinel-dic-auth"
-	post(t, application, "/v1/search", body)
-	job := waitJob(t, application, "process:search:album-global", "needs_review")
-	if downloads.Load() != 0 || job.ErrorClass != "evidence" {
-		t.Fatal(downloads.Load(), job.ErrorClass, job.Message)
+			if job.ReviewKind != "candidate" || job.ErrorClass != "" || !strings.Contains(job.Message, "尚未下载") {
+				t.Fatal(job.ReviewKind, job.ErrorClass, job.Message)
+			}
+		})
 	}
 }
 
@@ -789,7 +809,7 @@ func TestTokenHTTPRejectionDoesNotBanTheSiteOrRetry(t *testing.T) {
 		values := r.URL.Query()
 		switch {
 		case values.Get("action") == "torrent":
-			io.WriteString(w, `{"status":"success","response":{"group":{"id":10},"torrent":{"id":"`+values.Get("id")+`","isPersonalFreeleech":false,"isFreeleech":true}}}`)
+			io.WriteString(w, `{"status":"success","response":{"group":{"id":10},"torrent":{"id":"`+values.Get("id")+`","isPersonalFreeleech":false,"isFreeleech":false}}}`)
 		case values.Get("torrentid") != "":
 			io.WriteString(w, `<a href="torrents.php?action=download&amp;id=`+values.Get("torrentid")+`&amp;usetoken=1">FL</a>`)
 		case values.Get("action") == "index":

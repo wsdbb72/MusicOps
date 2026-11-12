@@ -107,3 +107,20 @@ func TestFreeCandidateStillStartsDownload(t *testing.T) {
 		t.Fatal(body)
 	}
 }
+
+// After the reconciliation deadline the row is EXPIRED: still unresolved, but
+// no longer a reason to refuse the download whose bytes are already saved.
+func TestExpiredTokenJobCanStartDownload(t *testing.T) {
+	application := newApp(t)
+	id := provisionalTokenJob(t, application, "album-token-expired")
+	if _, err := application.ledger.Advance(application.now(), "dicmusic", id, tokenledger.StateExpired, "test-expire"); err != nil {
+		t.Fatal(err)
+	}
+	recorder := postDownload(t, application, id, downloadBody("http://127.0.0.1:1", "secret-pass"))
+	if recorder.Code != http.StatusAccepted {
+		t.Fatal(recorder.Code, recorder.Body.String())
+	}
+	if body := decodeBody(t, recorder); body["stage"] != "downloading" {
+		t.Fatal(body)
+	}
+}

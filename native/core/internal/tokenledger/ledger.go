@@ -21,6 +21,12 @@ const (
 	StateConfirmed      = "CONFIRMED"
 	StateReleased       = "RELEASED"
 	StateRejected       = "REJECTED"
+	// StateExpired is a request that never got an answer before the
+	// reconciliation deadline. It is not in flight any more (so the site is
+	// not held), it still counts as possibly spent, and it still blocks a
+	// second usetoken for the same resource because no proof says the first
+	// one was free.
+	StateExpired = "EXPIRED"
 
 	ClassReserved    = "reserved"
 	ClassTokenBudget = "token_budget"
@@ -476,11 +482,11 @@ func allow(from, to string) bool {
 	case StateReserved:
 		return oneOf(to, StateRequesting, StateUnknown, StateRequestUnknown, StateConsumed, StateConfirmed, StateReleased, StateRejected)
 	case StateRequesting:
-		return oneOf(to, StateUnknown, StateRequestUnknown, StateConsumed, StateConfirmed, StateReleased, StateRejected)
+		return oneOf(to, StateUnknown, StateRequestUnknown, StateConsumed, StateConfirmed, StateReleased, StateRejected, StateExpired)
 	case StateUnknown:
-		return oneOf(to, StateRequestUnknown, StateConsumed, StateConfirmed, StateReleased, StateRejected)
+		return oneOf(to, StateRequestUnknown, StateConsumed, StateConfirmed, StateReleased, StateRejected, StateExpired)
 	case StateRequestUnknown:
-		return oneOf(to, StateUnknown, StateConsumed, StateConfirmed, StateReleased, StateRejected)
+		return oneOf(to, StateUnknown, StateConsumed, StateConfirmed, StateReleased, StateRejected, StateExpired)
 	case StateConsumed:
 		return to == StateConfirmed
 	default:
@@ -518,7 +524,7 @@ func fallbackScene(scene string) bool { return scene == "playlist" || scene == "
 
 func legalState(state string) bool {
 	switch state {
-	case StateReserved, StateRequesting, StateUnknown, StateRequestUnknown, StateConsumed, StateConfirmed, StateReleased, StateRejected:
+	case StateReserved, StateRequesting, StateUnknown, StateRequestUnknown, StateConsumed, StateConfirmed, StateReleased, StateRejected, StateExpired:
 		return true
 	default:
 		return false

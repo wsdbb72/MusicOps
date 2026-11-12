@@ -115,6 +115,12 @@ func (a *App) acquireWithToken(ctx context.Context, execution *scheduler.Executi
 	if site != "dicmusic" && site != "orpheus" {
 		return a.finishAcquire(held, job, "token", "该站不使用这条令牌账本；尚未下载、尚未入库", "", nil)
 	}
+	// One unanswered request used to hold the whole site forever: every later
+	// token request was refused as ACCOUNT_HOLD. Release the ones that passed
+	// the reconciliation deadline before looking at this site again (P1-6).
+	// The sweep is lazy on purpose until a background reconciler exists; this
+	// is the point where a held site would block a user.
+	_, _ = a.ledger.SweepExpired(a.now(), tokenledger.UnknownExpire)
 	observation, _, err := a.observeBalance(ctx, site, a.cookieFor(plan.RootJobID, site), plan.Synthetic, plan.BaseURL)
 	if err != nil {
 		return a.finishAcquire(held, job, "token", "余额读取失败，未发令牌请求；尚未下载、尚未入库", observation.ErrorClass, nil)

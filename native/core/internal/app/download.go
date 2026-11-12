@@ -484,11 +484,13 @@ func (a *App) buildDownloadPlan(job workflow.Job, savePath, category, tags strin
 		switch result.State {
 		case tokenledger.StateConfirmed, tokenledger.StateConsumed:
 			freeMethod = "token"
-		case tokenledger.StateRequestUnknown:
+		case tokenledger.StateRequestUnknown, tokenledger.StateExpired:
 			// D3 balanced: the request was sent once and the bytes are in
 			// hand. Downloading cannot spend a second token, so it proceeds
-			// while the background reconciliation decides CONFIRMED or
-			// RELEASED_NOT_CONSUMED.
+			// while reconciliation decides CONFIRMED or RELEASED_NOT_CONSUMED.
+			// EXPIRED is the same permission after the deadline passed: the
+			// spend is unresolved, but refusing the download would not undo
+			// it.
 			freeMethod = "token-provisional"
 		default:
 			return downloadPlan{}, errTokenNotSettled

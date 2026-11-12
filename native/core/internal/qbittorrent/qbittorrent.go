@@ -786,6 +786,47 @@ func (c *Client) Start(ctx context.Context, hash string) error {
 	return c.postForm(ctx, endpoint, url.Values{"hashes": {hash}})
 }
 
+// Pause stops one torrent without deleting it. qBittorrent 5.0 renamed the
+// endpoint from torrents/pause to torrents/stop, so the version decides which
+// one is called; the same probe Start uses.
+func (c *Client) Pause(ctx context.Context, hash string) error {
+	if hash == "" {
+		return ErrInvalidRequest
+	}
+	caps, err := c.Capabilities(ctx)
+	if err != nil {
+		return err
+	}
+	endpoint := "torrents/pause"
+	if caps.InitialStopParameter == "stopped" {
+		endpoint = "torrents/stop"
+	}
+	return c.postForm(ctx, endpoint, url.Values{"hashes": {hash}})
+}
+
+// Delete removes the torrent from the client. deleteFiles is explicit: the
+// library copy is never involved, and the download executor keeps its own
+// receipts, so a deleted torrent can still be added again from the saved
+// metainfo. Callers pass false to keep partial files for inspection.
+func (c *Client) Delete(ctx context.Context, hash string, deleteFiles bool) error {
+	if hash == "" {
+		return ErrInvalidRequest
+	}
+	files := "false"
+	if deleteFiles {
+		files = "true"
+	}
+	return c.postForm(ctx, "torrents/delete", url.Values{"hashes": {hash}, "deleteFiles": {files}})
+}
+
+// Recheck asks the client to re-verify the torrent data.
+func (c *Client) Recheck(ctx context.Context, hash string) error {
+	if hash == "" {
+		return ErrInvalidRequest
+	}
+	return c.postForm(ctx, "torrents/recheck", url.Values{"hashes": {hash}})
+}
+
 // SetLocation moves a torrent with POST /api/v2/torrents/setLocation.
 func (c *Client) SetLocation(ctx context.Context, hash, location string) error {
 	if hash == "" || location == "" {

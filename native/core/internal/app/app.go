@@ -133,6 +133,15 @@ func Open(dir, backup, password string) (*App, error) {
 			_, err := app.flows.Interrupt(requestID, token, nowNS, reason)
 			return err
 		},
+		Cancel: func(requestID string, token taskrepo.Token, nowNS int64) error {
+			// A cancel that lands before the executor started: commit it as
+			// the job's own terminal state instead of leaving the job behind.
+			_, err := app.flows.Complete(requestID, token, workflow.Complete{
+				Edge: workflow.EdgeTerminal, NextStage: "cancelled", TaskState: "cancelled",
+				Message: "已取消；未开始的阶段不会继续", NowNS: nowNS,
+			})
+			return err
+		},
 	}); err != nil {
 		engine.Close()
 		return nil, err

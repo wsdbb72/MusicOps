@@ -1488,13 +1488,20 @@ const appJS = `(function () {
     setBusy(true);
     setStatus("info", "正在处理");
     try {
-      var response = await fetch("/v1/jobs/" + encodeURIComponent(currentJob.job_id) + "/control", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({action: action})});
+      // A downloading job is controlled on both sides: the workflow task and
+      // the qBittorrent torrent. Cancel means "remove the torrent, keep the
+      // files" there; pausing the task alone would leave the torrent running.
+      var downloading = currentJob.stage === "downloading";
+      var path = "/v1/jobs/" + encodeURIComponent(currentJob.job_id) + (downloading ? "/download/control" : "/control");
+      var payload = downloading ? {action: action === "cancel" ? "delete" : action} : {action: action};
+      var response = await fetch(path, {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(payload)});
       var body = await response.json();
       if (!response.ok || !body || !body.ok) {
-        setStatus("fail", "操作失败。" + (body && body.code ? "（" + body.code + "）" : ""));
+        setStatus("fail", (body && (body.error || body.code)) || "操作失败。");
         return;
       }
-      setStatus("ok", action === "pause" ? "已暂停。" : (action === "resume" ? "已继续。" : "已取消。"));
+      var done = {pause: "已暂停。", resume: "已继续。", cancel: "已取消。", delete: "已取消，并从 qBittorrent 移除该种子（已下载的文件保留）。"};
+      setStatus("ok", done[payload.action] || "已完成。");
     } catch (err) {
       setStatus("fail", "操作失败。");
     } finally {

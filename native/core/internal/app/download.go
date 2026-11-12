@@ -255,6 +255,167 @@ func (a *App) readTorrentBytes(receipt torrentfetch.Receipt) ([]byte, error) {
 	return io.ReadAll(io.LimitReader(file, 8<<20+1))
 }
 
+
+// downloadControlRequest is one POST /v1/jobs/{id}/download/control body. The
+// login is optional: without it the saved qBittorrent settings are used, the
+// same way the download start resolves them.
+type downloadControlRequest struct {
+	Action   string `json:"action"`
+	BaseURL  string `json:"base_url"`
+	Username string `json:"username"`
+	Password string `json:"password"`
+}
+
+// controlDownload acts on the qBittorrent side of one download and keeps the
+// workflow job in step:
+//
+//	pause   the job pauses (its executor blocks at the next checkpoint) and the
+//	        torrent is paused in the client.
+//	resume  the torrent starts again and the job resumes.
+//	delete  the job is cancelled (when it is still running) and the torrent is
+//	        removed from the client. Files are kept: the partial download stays
+//	        for inspection, and the library copy is never touched here.
+//	recheck re-verifies the torrent data; the job is not moved.
+//
+// Each action touches the workflow first where a race could otherwise turn a
+// paused/removed torrent into a failed job, and the executor tolerates both
+// cases (see pollDownload).
+func (a *App) controlDownload(w http.ResponseWriter, r *http.Request) {
+	var body downloadControlRequest
+	if err := decode(r, &body); err != nil || strings.ContainsAny(body.BaseURL+body.Username+body.Password, "\r\n") {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "code": "INVALID_REQUEST"})
+		return
+	}
+	switch body.Action {
+	case "pause", "resume", "delete", "recheck":
+	default:
+		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "code": "INVALID_REQUEST", "error": "动作只能是 pause、resume、delete、recheck"})
+		return
+	}
+	id := r.PathValue("id")
+	job, err := a.flows.Job(id)
+	if err != nil || job == nil {
+		writeJSON(w, http.StatusNotFound, map[string]any{"ok": false, "code": "NOT_FOUND"})
+		return
+	}
+	removable := body.Action == "delete" && job.Stage == "failed"
+	if job.Stage != "downloading" && !removable {
+		writeJSON(w, http.StatusConflict, map[string]any{"ok": false, "code": "WORKFLOW_REJECTED", "error": "只有下载中的任务可以" + body.Action})
+		return
+	}
+	plan, err := a.downloadPlanFor(job)
+	if err != nil {
+		writeJSON(w, http.StatusConflict, map[string]any{"ok": false, "code": "WORKFLOW_REJECTED", "error": "这条任务没有下载计划"})
+		return
+	}
+	effective, resolved := a.effectiveDownloadRequest(downloadRequest{BaseURL: body.BaseURL, Username: body.Username, Password: body.Password})
+	if !resolved {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "code": "INVALID_REQUEST", "error": "没有可用的 qBittorrent 登录"})
+		return
+	}
+	origin, creds, _, _, ok := a.validDownloadSettings(effective)
+	if !ok {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "code": "INVALID_REQUEST", "error": "qBittorrent 登录不完整"})
+		return
+	}
+	client, err := qbittorrent.NewClient(qbittorrent.Config{BaseURL: origin, Username: creds.Username, Password: creds.Password})
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "code": "INVALID_REQUEST"})
+		return
+	}
+	if err := client.Login(r.Context()); err != nil {
+		class := "QBITTORENT_UNAVAILABLE"
+		if errors.Is(err, qbittorrent.ErrAuthFailed) {
+			class = "AUTH_FAILED"
+		}
+		writeJSON(w, http.StatusBadGateway, map[string]any{"ok": false, "code": class, "error": "qBittorrent 登录失败"})
+		return
+	}
+	nowNS := time.Now().UnixNano()
+	control := func(action string) error {
+		_, err := a.flows.Control("download-control-"+id+"-"+action+"-"+strconv.FormatInt(nowNS, 10), id, action, nowNS)
+		if err != nil {
+			if errors.Is(err, workflow.ErrStale) {
+				return nil // the job already moved on; the client action still applies
+			}
+			return err
+		}
+		return nil
+	}
+	applied := map[string]any{"ok": true, "job_id": id, "action": body.Action}
+	switch body.Action {
+	case "pause":
+		// Pause the job before the torrent: after this returns, the executor
+		// blocks at its next checkpoint instead of reading a stopped torrent
+		// as a failure.
+		if err := control("pause"); err != nil {
+			writeJSON(w, http.StatusConflict, map[string]any{"ok": false, "code": "WORKFLOW_REJECTED", "error": err.Error()})
+			return
+		}
+		if err := client.Pause(r.Context(), plan.InfoHash); err != nil {
+			writeJSON(w, http.StatusBadGateway, map[string]any{"ok": false, "code": "QB_CONTROL_FAILED", "error": "任务已暂停，但 qBittorrent 没有暂停该种子", "job_paused": true})
+			return
+		}
+		applied["torrent"] = "paused"
+	case "resume":
+		if err := client.Start(r.Context(), plan.InfoHash); err != nil {
+			writeJSON(w, http.StatusBadGateway, map[string]any{"ok": false, "code": "QB_CONTROL_FAILED", "error": "qBittorrent 没有开始该种子，任务仍未恢复"})
+			return
+		}
+		if err := control("resume"); err != nil {
+			writeJSON(w, http.StatusConflict, map[string]any{"ok": false, "code": "WORKFLOW_REJECTED", "error": err.Error(), "torrent": "started"})
+			return
+		}
+		applied["torrent"] = "started"
+	case "delete":
+		if job.Stage == "downloading" {
+			if err := control("cancel"); err != nil {
+				writeJSON(w, http.StatusConflict, map[string]any{"ok": false, "code": "WORKFLOW_REJECTED", "error": err.Error()})
+				return
+			}
+		}
+		if err := client.Delete(r.Context(), plan.InfoHash, false); err != nil {
+			writeJSON(w, http.StatusBadGateway, map[string]any{"ok": false, "code": "QB_CONTROL_FAILED", "error": "任务已取消，但 qBittorrent 没有移除该种子", "job_cancelled": job.Stage == "downloading"})
+			return
+		}
+		applied["torrent"] = "removed"
+		applied["files_kept"] = true
+	case "recheck":
+		if err := client.Recheck(r.Context(), plan.InfoHash); err != nil {
+			writeJSON(w, http.StatusBadGateway, map[string]any{"ok": false, "code": "QB_CONTROL_FAILED", "error": "qBittorrent 没有接受校验请求"})
+			return
+		}
+		applied["torrent"] = "rechecking"
+	}
+	job, err = a.flows.Job(id)
+	if err == nil && job != nil {
+		applied["stage"] = job.Stage
+		applied["paused"] = job.Paused
+	}
+	writeJSON(w, http.StatusOK, applied)
+}
+
+// downloadPlanFor reads the durable download plan of one job from its active
+// download task. A job whose active task is not a download has no plan.
+func (a *App) downloadPlanFor(job *workflow.Job) (downloadPlan, error) {
+	if job == nil || job.ActiveTaskID == "" {
+		return downloadPlan{}, errors.New("job has no active task")
+	}
+	task, err := a.tasks.Get(job.ActiveTaskID)
+	if err != nil || task == nil || task.Command != workflow.CommandDownload {
+		return downloadPlan{}, errors.New("job is not running a download task")
+	}
+	raw, found, err := a.tasks.Data(task.ID, "arguments", 0)
+	if err != nil || !found {
+		return downloadPlan{}, errors.New("download plan is missing")
+	}
+	var plan downloadPlan
+	if err := json.Unmarshal(raw, &plan); err != nil || plan.InfoHash == "" {
+		return downloadPlan{}, errors.New("download plan is invalid")
+	}
+	return plan, nil
+}
+
 // downloadJob starts a qBittorrent download for one blocked acquire job.
 //
 // The request body carries the qBittorrent login (base_url, username,
@@ -533,8 +694,28 @@ func (a *App) failDownloadStep(execution *scheduler.Execution, class, message st
 // the audio, and hand the job to publishing. It fails the task (through
 // failDownload) instead of inventing a result whenever the client, the
 // receipt or the archive disagrees with the plan.
-func (a *App) download(ctx context.Context, execution *scheduler.Execution, payload []byte) (scheduler.Outcome, error) {
-	if err := a.cancelled(ctx, execution); err != nil {
+func (a *App) download(ctx context.Context, execution *scheduler.Execution, payload []byte) (outcome scheduler.Outcome, err error) {
+	// A cancelled download must commit its own terminal state: the
+	// coordinator finishes ordinary tasks, but a workflow-owned task refuses
+	// that write (ErrWorkflowOwned), so returning ErrCancelled alone left the
+	// task running and the job stuck in downloading (P1-9).
+	defer func() {
+		// A cancel can also surface as ErrStale (the control wrote the task
+		// while the executor held an older fence) or as a storage error. When
+		// a cancel was requested, every such error is a cancellation, not an
+		// unknown effect that needs review.
+		if err != nil && (errors.Is(err, scheduler.ErrCancelled) || a.downloadCancelRequested(execution)) {
+			outcome, err = a.cancelDownload(execution)
+		}
+	}()
+	// A cancel that landed before this attempt started must commit the
+	// download's own terminal state (cancelled, torrent removed), not go
+	// through the generic stop(): that one interrupts the job for review with
+	// a search message, which is what a pause-then-delete used to produce.
+	if err := execution.Checkpoint(ctx, "download_start", 0, "准备下载"); err != nil {
+		if errors.Is(err, scheduler.ErrCancelled) || a.downloadCancelRequested(execution) {
+			return a.cancelDownload(execution)
+		}
 		return scheduler.Outcome{}, err
 	}
 	var plan downloadPlan
@@ -634,7 +815,7 @@ func (a *App) download(ctx context.Context, execution *scheduler.Execution, payl
 	} else if done {
 		return outcome, nil
 	}
-	if outcome, done, err := a.pollDownload(ctx, execution, client, &rec, evidence); err != nil {
+	if outcome, done, err := a.pollDownload(ctx, execution, client, &rec, evidence, plan.JobID); err != nil {
 		return scheduler.Outcome{}, err
 	} else if done {
 		return outcome, nil
@@ -655,6 +836,41 @@ func (a *App) download(ctx context.Context, execution *scheduler.Execution, payl
 		return a.failDownload(execution, "INGEST_FAILED", "入库失败")
 	}
 	return a.finishDownload(execution, held, plan, receipts, archived)
+}
+
+// downloadCancelRequested reports whether a cancel was requested for this
+// execution's task or its job.
+func (a *App) downloadCancelRequested(execution *scheduler.Execution) bool {
+	token := execution.Token()
+	task, err := a.tasks.Get(token.ID)
+	if err != nil || task == nil {
+		return false
+	}
+	if task.CancelRequested {
+		return true
+	}
+	if task.WorkflowJobID == "" {
+		return false
+	}
+	job, err := a.flows.Job(task.WorkflowJobID)
+	return err == nil && job != nil && job.CancelRequested
+}
+
+// cancelDownload finishes a download task the operator cancelled: the task
+// moves to cancelled and the job to the cancelled stage in one commit. A task
+// that was already cancelled (for example when it had not started yet) is
+// reported as cancelled instead of erroring.
+func (a *App) cancelDownload(execution *scheduler.Execution) (scheduler.Outcome, error) {
+	token := execution.Token()
+	message := "已取消下载；种子已从 qBittorrent 移除（文件保留），尚未入库"
+	_, err := a.flows.Complete(intentID("download", token.ID, token.Fence), token, workflow.Complete{
+		Edge: workflow.EdgeTerminal, NextStage: "cancelled", TaskState: "cancelled",
+		Message: message, NowNS: a.now().UnixNano(),
+	})
+	if err != nil && !errors.Is(err, workflow.ErrStale) {
+		return scheduler.Outcome{}, err
+	}
+	return scheduler.Outcome{State: "cancelled", Message: message}, nil
 }
 
 // ensureTorrent makes sure the torrent exists in the client, stopped or
@@ -727,9 +943,17 @@ func (a *App) startIfStopped(ctx context.Context, execution *scheduler.Execution
 // blocked torrent fails with DOWNLOAD_BLOCKED. A poll timeout fails with
 // DOWNLOAD_TIMEOUT and leaves the torrent in the client as it is, for a
 // retry to resume.
-func (a *App) pollDownload(ctx context.Context, execution *scheduler.Execution, client *qbittorrent.Client, rec *qbittorrent.Record, evidence qbittorrent.FreeEvidence) (scheduler.Outcome, bool, error) {
+func (a *App) pollDownload(ctx context.Context, execution *scheduler.Execution, client *qbittorrent.Client, rec *qbittorrent.Record, evidence qbittorrent.FreeEvidence, jobID string) (scheduler.Outcome, bool, error) {
 	deadline := time.Now().Add(downloadPollTimeout)
 	for {
+		// A cancel is checked here as well as at the checkpoint: the control
+		// that cancels the job also removes the torrent, so a poll that read
+		// the row just before the removal can otherwise spend a whole
+		// interval without noticing.
+		if a.downloadCancelRequested(execution) {
+			outcome, err := a.cancelDownload(execution)
+			return outcome, true, err
+		}
 		if time.Now().After(deadline) {
 			return a.failDownloadStep(execution, "DOWNLOAD_TIMEOUT", "下载轮询超时，种子仍在 qBittorrent 中，可重试续传")
 		}
@@ -746,6 +970,11 @@ func (a *App) pollDownload(ctx context.Context, execution *scheduler.Execution, 
 		}
 		result, err := client.Poll(ctx, rec, nil)
 		if err != nil {
+			// The operator cancelled the job and the torrent was removed from
+			// the client right after: that is a cancellation, not a failure.
+			if job, jobErr := a.flows.Job(jobID); jobErr == nil && job != nil && job.CancelRequested {
+				return scheduler.Outcome{}, false, scheduler.ErrCancelled
+			}
 			var ownErr *qbittorrent.OwnershipError
 			if errors.As(err, &ownErr) {
 				return a.failDownloadStep(execution, "OWNERSHIP_FAILED", "qBittorrent 归属校验未通过："+ownErr.Reason)
@@ -756,6 +985,15 @@ func (a *App) pollDownload(ctx context.Context, execution *scheduler.Execution, 
 		case qbittorrent.OutcomeComplete:
 			return scheduler.Outcome{}, false, nil
 		case qbittorrent.OutcomeStopped:
+			// A paused job pauses its torrent; the race where the torrent
+			// stops before the job's pause lands must not be reported as a
+			// failure. Wait for the resume instead.
+			if job, jobErr := a.flows.Job(jobID); jobErr == nil && job != nil && job.Paused {
+				if err := a.wait(ctx, downloadPollInterval); err != nil {
+					return scheduler.Outcome{}, false, err
+				}
+				continue
+			}
 			return a.failDownloadStep(execution, "DOWNLOAD_STOPPED", "qBittorrent 已停止该任务，请重试继续")
 		case qbittorrent.OutcomeBlocked:
 			return a.failDownloadStep(execution, "DOWNLOAD_BLOCKED", "qBittorrent 报告错误或文件缺失")

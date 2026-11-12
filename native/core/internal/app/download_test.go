@@ -83,6 +83,7 @@ type fakeQBTorrent struct {
 	category     string
 	tags         string
 	started      bool
+	paused       bool
 }
 
 // fakeQBT is an in-process qBittorrent Web API that really stores the
@@ -102,6 +103,10 @@ type fakeQBT struct {
 	infoCalls     int
 	completeAfter int
 	rejectLogin   bool
+	pausedCalls   int
+	deleteCalls   int
+	recheckCalls  int
+	deleteFiles   bool
 }
 
 func newFakeQBT(t *testing.T, files map[string][]byte, completeAfter int) *fakeQBT {
@@ -155,7 +160,25 @@ func (f *fakeQBT) serve(w http.ResponseWriter, r *http.Request) {
 		f.mu.Lock()
 		if f.row != nil {
 			f.row.started = true
+			f.row.paused = false
 		}
+		f.mu.Unlock()
+	case r.URL.Path == "/api/v2/torrents/stop" || r.URL.Path == "/api/v2/torrents/pause":
+		f.mu.Lock()
+		f.pausedCalls++
+		if f.row != nil {
+			f.row.paused = true
+		}
+		f.mu.Unlock()
+	case r.URL.Path == "/api/v2/torrents/delete":
+		f.mu.Lock()
+		f.deleteCalls++
+		f.deleteFiles = r.FormValue("deleteFiles") == "true"
+		f.row = nil
+		f.mu.Unlock()
+	case r.URL.Path == "/api/v2/torrents/recheck":
+		f.mu.Lock()
+		f.recheckCalls++
 		f.mu.Unlock()
 	case r.URL.Path == "/api/v2/torrents/setLocation":
 		f.setLocation(w, r)
@@ -235,9 +258,12 @@ func (f *fakeQBT) rowJSON() map[string]any {
 	state, progress := "stoppedDL", 0.0
 	if row.started {
 		f.infoCalls++
-		if f.infoCalls >= f.completeAfter {
+		switch {
+		case row.paused:
+			state, progress = "pausedDL", 0.5
+		case f.infoCalls >= f.completeAfter:
 			state, progress = "uploading", 1.0
-		} else {
+		default:
 			state, progress = "downloading", 0.5
 		}
 	}

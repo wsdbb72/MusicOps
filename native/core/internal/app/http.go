@@ -53,6 +53,12 @@ const page = `<!doctype html>
 <button type="button" id="cancel-job">取消</button>
 <button type="button" id="retry-job">重试</button>
 </p>
+<p id="torrent-actions" hidden>
+<button type="button" id="torrent-pause">暂停下载</button>
+<button type="button" id="torrent-resume">继续下载</button>
+<button type="button" id="torrent-recheck">重新校验</button>
+<button type="button" id="torrent-delete">删除种子（保留文件）</button>
+</p>
 <div id="review-box" class="review-box" hidden></div>
 </section>
 </main>
@@ -119,6 +125,7 @@ func (a *App) Handler() http.Handler {
 	mux.HandleFunc("GET /v1/jobs/{id}/review", a.reviewData)
 	mux.HandleFunc("POST /v1/jobs/{id}/review", a.reviewJob)
 	mux.HandleFunc("POST /v1/jobs/{id}/download", a.downloadJob)
+	mux.HandleFunc("POST /v1/jobs/{id}/download/control", a.controlDownload)
 	mux.HandleFunc("POST /v1/jobs/batch", a.batchJobs)
 	mux.HandleFunc("POST /v1/sites/preflight", a.preflightSite)
 	mux.HandleFunc("GET /v1/settings/download", a.downloadSettings)

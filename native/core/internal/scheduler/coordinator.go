@@ -91,6 +91,12 @@ type Health struct {
 type WorkflowHooks struct {
 	Block     func(requestID string, token taskrepo.Token, nowNS int64) error
 	Interrupt func(requestID string, token taskrepo.Token, nowNS int64, reason string) error
+	// Cancel commits a cancelled workflow-owned task. The generic Finish
+	// refuses workflow tasks (ErrWorkflowOwned), so without this hook a
+	// cancel that lands before the executor runs — at the before_execute
+	// checkpoint — left the job in "downloading" (or whatever stage) with
+	// no live executor and no way out.
+	Cancel func(requestID string, token taskrepo.Token, nowNS int64) error
 }
 
 type Coordinator struct {
@@ -398,6 +404,14 @@ func (c *Coordinator) execute(ctx context.Context, claimed taskrepo.Task) {
 	requestID := "finish-" + nonce()
 	for {
 		_, persist := c.repo.Finish(requestID, token, completion, outcome.Followups)
+		if errors.Is(persist, taskrepo.ErrWorkflowOwned) && outcome.State == "cancelled" && hooks.Cancel != nil {
+			// The task belongs to a workflow job: the cancellation has to be
+			// committed by the workflow layer, which the app hooks in.
+			if cancelErr := hooks.Cancel("workflow-cancel-"+nonce(), token, time.Now().UnixNano()); cancelErr != nil && !errors.Is(cancelErr, taskrepo.ErrStale) {
+				c.failure(claimed.Lane, cancelErr)
+			}
+			return
+		}
 		if persist == nil || errors.Is(persist, taskrepo.ErrStale) || errors.Is(persist, taskrepo.ErrWorkflowOwned) {
 			return
 		}

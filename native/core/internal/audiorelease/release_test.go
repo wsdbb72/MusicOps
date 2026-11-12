@@ -456,3 +456,25 @@ func TestRecordPublished(t *testing.T) {
 		t.Fatal("unorganised path accepted")
 	}
 }
+
+// The job list asks only about the roots it is about to show. Looking each one
+// up by prefix must agree with the full scan and must not report a root that
+// was never published.
+func TestPublishedRootsChecksOnlyTheGivenRoots(t *testing.T) {
+	engine, incoming, library := openRelease(t)
+	writeSource(t, incoming, "song.wav", wav(16))
+	if _, err := Release(context.Background(), engine, sample(incoming, library, "song.wav")); err != nil {
+		t.Fatal(err)
+	}
+	roots, err := PublishedRoots(engine, []string{"root-1", "root-2", "", "root-1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !roots["root-1"] || roots["root-2"] || len(roots) != 1 {
+		t.Fatal(roots)
+	}
+	empty, err := PublishedRoots(engine, nil)
+	if err != nil || len(empty) != 0 {
+		t.Fatal(empty, err)
+	}
+}

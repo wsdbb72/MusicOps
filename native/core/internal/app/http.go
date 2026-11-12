@@ -294,26 +294,59 @@ func (a *App) jobs(w http.ResponseWriter, r *http.Request) {
 		}
 		after = decoded
 	}
-	page, err := a.flows.List(after, 100)
-	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "code": "JOBS_UNAVAILABLE"})
-		return
+	// review=1 returns only the jobs a human has to look at. The page used to
+	// fetch the newest 100 jobs and filter in the browser, so a queue longer
+	// than one page silently hid its older half (P1-22). The scan stops on a
+	// page boundary: the cursor always points at the next page, never at a
+	// job inside the page just returned.
+	reviewOnly := r.URL.Query().Get("review") == "1"
+	collected := make([]workflow.Job, 0, 100)
+	next := ""
+	for scanned := 0; scanned < 2000; {
+		page, err := a.flows.List(after, 100)
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "code": "JOBS_UNAVAILABLE"})
+			return
+		}
+		if len(page.Jobs) == 0 {
+			next = ""
+			break
+		}
+		scanned += len(page.Jobs)
+		for _, job := range page.Jobs {
+			if !reviewOnly || job.Stage == "needs_review" {
+				collected = append(collected, job)
+			}
+		}
+		if len(page.Next) == 0 {
+			next = ""
+			break
+		}
+		after = page.Next
+		next = base64.RawURLEncoding.EncodeToString(page.Next)
+		if !reviewOnly || len(collected) >= 100 {
+			break
+		}
 	}
-	jobs := make([]jobView, 0, len(page.Jobs))
-	for _, job := range page.Jobs {
+	jobs := make([]jobView, 0, len(collected))
+	for _, job := range collected {
 		jobs = append(jobs, publicJob(job))
 	}
 	jobs = presentJobs(jobs)
-	albums, err := audiorelease.Albums(a.engine)
+	roots := make([]string, 0, len(jobs))
+	for _, job := range jobs {
+		root := job.RootID
+		if root == "" {
+			root = job.ID
+		}
+		roots = append(roots, root)
+	}
+	albums, err := audiorelease.PublishedRoots(a.engine, roots)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "code": "JOBS_UNAVAILABLE"})
 		return
 	}
 	jobs = markReleased(jobs, albums)
-	next := ""
-	if len(page.Next) > 0 {
-		next = base64.RawURLEncoding.EncodeToString(page.Next)
-	}
 	downloaded, published := false, false
 	for _, job := range jobs {
 		downloaded = downloaded || job.Downloaded

@@ -285,7 +285,7 @@ func TestRestoredControlsAreInThePage(t *testing.T) {
 		"pipeline-pause", "pipeline-resume", "reindex-library", "list-gaps", "fill-gaps",
 		"upgrade-album", "expand-album", "preview-compilations", "merge-compilations",
 		"plan-artist-folders", "apply-artist-folders", "decrypt-ncm", "unify-qbt-tags", "test-roon", "fetch-playlist",
-		"review-download",
+		"review-download", "review-more",
 	} {
 		if !bytes.Contains([]byte(appJS), []byte(id)) {
 			t.Fatal("missing control", id)
@@ -293,6 +293,9 @@ func TestRestoredControlsAreInThePage(t *testing.T) {
 	}
 	if !bytes.Contains([]byte(appJS), []byte(".xlsx")) {
 		t.Fatal("xlsx is not offered")
+	}
+	if !bytes.Contains([]byte(appJS), []byte("/v1/jobs?review=1")) {
+		t.Fatal("the review view does not ask the server for review work")
 	}
 }
 

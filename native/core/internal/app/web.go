@@ -48,6 +48,9 @@ const appJS = `(function () {
   var duplicateRows = [];
   var libraryFileOffset = 0;
   var selectedTracks = {};
+  // The review view pages on the server: the last cursor is kept so more
+  // pending jobs can be appended instead of replacing the list (P1-22).
+  var jobsNext = "";
   var transcodeRows = [];
   var logRows = [];
   var selectedJobs = {};
@@ -115,6 +118,7 @@ const appJS = `(function () {
       var box = (view === "tasks" || view === "queue") ? '<label><input type="checkbox" data-batch="' + escapeText(job.job_id) + '"' + checked + '> 批量</label>' : "";
       html += '<article>' + box + '<button type="button" data-job="' + escapeText(job.job_id) + '"><h2>' + escapeText(job.label || "未命名") + '</h2><p class="meta">' + pill(job) + '</p><p>' + escapeText(job.headline || "") + "</p></button></article>";
     });
+    if (view === "review" && jobsNext) html += '<p><button type="button" id="review-more">加载更多待核对</button></p>';
     list.innerHTML = html + "</div>";
     if (view === "tasks" || view === "queue") bindPipeline();
   }
@@ -1604,9 +1608,11 @@ const appJS = `(function () {
         logRows = logBody && Array.isArray(logBody.tasks) ? logBody.tasks : [];
         logEvents = logBody && Array.isArray(logBody.events) ? logBody.events : [];
       } else {
-        var response = await fetch("/v1/jobs", {headers: {Accept: "application/json"}});
+        var jobsURL = view === "review" ? "/v1/jobs?review=1" : "/v1/jobs";
+        var response = await fetch(jobsURL, {headers: {Accept: "application/json"}});
         var body = await response.json();
         jobs = body && Array.isArray(body.jobs) ? body.jobs : [];
+        jobsNext = body && body.next ? body.next : "";
       }
       if (detail.hidden) render();
       arm();
@@ -1614,6 +1620,24 @@ const appJS = `(function () {
       if (!quiet) setStatus("fail", "任务列表没有读到。");
     } finally {
       if (!quiet) setBusy(false);
+    }
+  }
+  async function loadMoreReview() {
+    if (!jobsNext || loading) return;
+    setBusy(true);
+    setStatus("info", "正在读取更多待核对");
+    try {
+      var response = await fetch("/v1/jobs?review=1&after=" + encodeURIComponent(jobsNext), {headers: {Accept: "application/json"}});
+      var body = await response.json();
+      if (!response.ok || !body || !body.ok) { setStatus("fail", "没有读到更多任务。"); return; }
+      (body.jobs || []).forEach(function (job) { jobs.push(job); });
+      jobsNext = body.next || "";
+      render();
+      setStatus("ok", "已加载 " + (body.jobs || []).length + " 条。");
+    } catch (err) {
+      setStatus("fail", "读取中断。");
+    } finally {
+      setBusy(false);
     }
   }
   var timer = 0;
@@ -1631,6 +1655,7 @@ const appJS = `(function () {
     load();
   });
   list.addEventListener("click", function (event) {
+    if (event.target.closest("#review-more") && !loading) { loadMoreReview(); return; }
     var batchButton = event.target.closest("button[data-batch-action]");
     if (batchButton && !loading) { batchAction(batchButton.getAttribute("data-batch-action")); return; }
     var button = event.target.closest("button[data-job]");

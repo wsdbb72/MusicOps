@@ -481,6 +481,40 @@ func Verify(engine *dataengine.Engine, requestID string) (Result, error) {
 }
 
 // Albums returns root ids whose verified audio is in the library.
+// PublishedRoots reports which of the given album roots already have at least
+// one published track. It looks each root up by prefix instead of scanning the
+// whole catalogue, so the job list costs O(page) rather than O(library): with
+// 200k tracks the full scan was the dominant cost of every /v1/jobs request
+// (P1-18).
+func PublishedRoots(engine *dataengine.Engine, roots []string) (map[string]bool, error) {
+	if engine == nil {
+		return nil, dataengine.ErrInvalidRequest
+	}
+	out := map[string]bool{}
+	seen := map[string]bool{}
+	for _, root := range roots {
+		if root == "" || seen[root] {
+			continue
+		}
+		seen[root] = true
+		prefix := []byte("library/album-audio/" + root + "/")
+		err := engine.View(func(v *dataengine.View) error {
+			page, err := v.Scan(prefix, nil, 1)
+			if err != nil {
+				return err
+			}
+			if len(page.Items) > 0 {
+				out[root] = true
+			}
+			return nil
+		})
+		if err != nil {
+			return nil, err
+		}
+	}
+	return out, nil
+}
+
 func Albums(engine *dataengine.Engine) (map[string]bool, error) {
 	if engine == nil {
 		return nil, dataengine.ErrInvalidRequest

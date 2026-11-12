@@ -100,6 +100,26 @@ func coreLogPath(profile string) string {
 	return filepath.Join(profile, "state", "core.log")
 }
 
+// coreLogMaxBytes bounds one detached run's log before the next start keeps
+// it as core.previous.log. The core's stderr is redirected into this file and
+// nothing rotates it while the process holds the handle, so the only safe
+// point is startup.
+const coreLogMaxBytes = 8 << 20
+
+// rotateCoreLog keeps the previous run's log when it grew past the bound.
+// Truncating unconditionally would throw away the only copy of whatever made
+// the user restart a detached core.
+func rotateCoreLog(profile string) {
+	path := coreLogPath(profile)
+	info, err := os.Stat(path)
+	if err != nil || info.Size() < coreLogMaxBytes {
+		return
+	}
+	previous := strings.TrimSuffix(path, ".log") + ".previous.log"
+	_ = os.Remove(previous)
+	_ = os.Rename(path, previous)
+}
+
 // rendezvous is the on-disk core.json record.
 type rendezvous struct {
 	URL           string `json:"url"`
@@ -353,6 +373,7 @@ func startCore(profile, coreBinary string, detached bool) (*runningCore, error) 
 	var stdoutR io.ReadCloser
 	var logFile *os.File
 	if detached {
+		rotateCoreLog(profile)
 		logFile, err = os.OpenFile(coreLogPath(profile), os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0600)
 		if err != nil {
 			return nil, err

@@ -67,6 +67,10 @@ type Handler func(context.Context, *Execution, []byte) (Outcome, error)
 type Config struct {
 	Limits           map[string]int
 	ProgressInterval time.Duration
+	// OnPanic receives a recovered panic value and its full stack. The task
+	// message only ever carries the first frame; the stack belongs in a log
+	// the operator can read, not in a task row that is shown in the UI.
+	OnPanic func(value, stack string)
 }
 
 func DefaultConfig() Config {
@@ -433,7 +437,11 @@ func (c *Coordinator) interrupt(hooks WorkflowHooks, token taskrepo.Token, reaso
 func (c *Coordinator) invoke(ctx context.Context, e *Execution, task taskrepo.Task) (out Outcome, err error) {
 	defer func() {
 		if recovered := recover(); recovered != nil {
-			err = &panicError{value: fmt.Sprint(recovered), stack: string(debug.Stack())}
+			stack := string(debug.Stack())
+			err = &panicError{value: fmt.Sprint(recovered), stack: stack}
+			if c.config.OnPanic != nil {
+				c.config.OnPanic(fmt.Sprint(recovered), stack)
+			}
 		}
 	}()
 	if err = e.Checkpoint(ctx, "before_execute", 0, ""); err != nil {

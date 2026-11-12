@@ -132,7 +132,11 @@ func Open(dir, backup, password string) (*App, error) {
 		}
 	}
 	app.migrationFailure = migrationFailure
-	runner, err := scheduler.New(app.tasks, app.handlers(), scheduler.DefaultConfig())
+	runnerConfig := scheduler.DefaultConfig()
+	// A recovered panic keeps its first frame in the task row; the whole
+	// stack goes to panic.log, redacted the same way.
+	runnerConfig.OnPanic = app.recordPanic
+	runner, err := scheduler.New(app.tasks, app.handlers(), runnerConfig)
 	if err != nil {
 		engine.Close()
 		return nil, err

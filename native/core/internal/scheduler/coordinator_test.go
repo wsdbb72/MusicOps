@@ -298,7 +298,13 @@ func TestExecutorErrorIsRecordedAndScrubbed(t *testing.T) {
 // task message stays generic, because a panic value can quote a secret.
 func TestPanicKeepsTheFrameInHealth(t *testing.T) {
 	handler := func(context.Context, *Execution, []byte) (Outcome, error) { panic("nil map at site read") }
-	repo, c := setup(t, map[string]Handler{"broken": handler}, DefaultConfig())
+	config := DefaultConfig()
+	var values, stacks []string
+	config.OnPanic = func(value, stack string) {
+		values = append(values, value)
+		stacks = append(stacks, stack)
+	}
+	repo, c := setup(t, map[string]Handler{"broken": handler}, config)
 	add(t, repo, "a", "identify", "broken", 1, "")
 	c.Start(context.Background())
 	until(t, func() bool { return hasState(repo, "a", "recovery_required") })
@@ -308,5 +314,12 @@ func TestPanicKeepsTheFrameInHealth(t *testing.T) {
 	}
 	if strings.Contains(task.Message, "nil map") {
 		t.Fatal(task.Message)
+	}
+	// The hook is where the full trace goes; the task row keeps the frame.
+	if len(values) != 1 || values[0] != "nil map at site read" {
+		t.Fatal(values)
+	}
+	if len(stacks) != 1 || !strings.Contains(stacks[0], "TestPanicKeepsTheFrameInHealth") {
+		t.Fatal(stacks)
 	}
 }

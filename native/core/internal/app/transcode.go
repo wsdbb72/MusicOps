@@ -256,10 +256,13 @@ func resolveInDir(dir, raw string) (string, error) {
 // insideDir reports whether path is inside root (or is root itself),
 // lexically. Both arguments must already be clean.
 func insideDir(root, path string) bool {
-	// Compare real paths on both sides. A lexical Rel is not enough: the
-	// same directory can be spelled with a symlinked ancestor (macOS /var)
-	// or a Windows 8.3 short name (RUNNER~1), and then a file that is inside
-	// incoming/ looks like it is outside it.
+	// The lexical check answers the ordinary case without touching the disk;
+	// only a path written another way (a symlinked ancestor such as macOS
+	// /var, or a Windows 8.3 short name such as RUNNER~1) needs the resolved
+	// comparison, or a file that is inside incoming/ looks like it is outside.
+	if insideResolved(filepath.Clean(root), filepath.Clean(path)) {
+		return true
+	}
 	return insideResolved(canonicalPath(root), canonicalPath(path))
 }
 
@@ -273,10 +276,26 @@ func insideResolved(root, path string) bool {
 // cannot be resolved) is only cleaned, so callers that validate a future
 // directory still work.
 func canonicalPath(path string) string {
-	if resolved, err := filepath.EvalSymlinks(path); err == nil && resolved != "" {
-		return resolved
+	cleaned := filepath.Clean(path)
+	// A path that does not exist yet (an incoming file, a folder about to be
+	// created) still has to compare equal to its existing parent: resolve the
+	// deepest existing ancestor and put the remaining components back.
+	current := cleaned
+	rest := []string{}
+	for {
+		if resolved, err := filepath.EvalSymlinks(current); err == nil && resolved != "" {
+			for i := len(rest) - 1; i >= 0; i-- {
+				resolved = filepath.Join(resolved, rest[i])
+			}
+			return resolved
+		}
+		parent := filepath.Dir(current)
+		if parent == current {
+			return cleaned
+		}
+		rest = append(rest, filepath.Base(current))
+		current = parent
 	}
-	return filepath.Clean(path)
 }
 
 // checkWAVPCM rejects anything that is not a PCM WAV: the Python

@@ -65,7 +65,7 @@ const openAPIDocument = `{
           "expected_title": { "type": "string" },
           "expected_artist": { "type": "string" },
           "source_track_ids": { "type": "array", "items": { "type": "string" } },
-          "enabled_sites": { "type": "array", "items": { "type": "string" }, "description": "dicmusic / orpheus / redacted / opencd" },
+          "enabled_sites": { "type": "array", "items": { "type": "string" }, "description": "dicmusic / orpheus / redacted / opencd（三个令牌站共用同一套账本）" },
           "identity": {
             "type": "object",
             "description": "调用方自带的身份证据。没有证据时传 identity_confirmed=false，任务会停在待核对（metadata），不会擅自检索。",
@@ -263,7 +263,7 @@ func (a *App) openInfo(w http.ResponseWriter, _ *http.Request) {
 		"data_schema": dataengine.SchemaVersion,
 		"auth":        []string{"basic", "api_key"},
 		"qbittorrent_configured": qbConfigured,
-		"token_sites":            []string{"dicmusic", "orpheus"},
+		"token_sites":            []string{"dicmusic", "orpheus", "redacted"},
 		"endpoints": []string{
 			"GET /v1/open/info",
 			"POST /v1/open/playlists/parse",

@@ -330,7 +330,7 @@ func importTokens(ledger *tokenledger.Ledger, db *sql.DB, now time.Time) ([]stri
 		if err := rows.Scan(&site, &resource, &cost, &state, &id); err != nil {
 			return nil, err
 		}
-		if site != "dicmusic" && site != "orpheus" {
+		if !tokenledger.IsTokenSite(site) {
 			continue
 		}
 		request := fitID(id, 60)

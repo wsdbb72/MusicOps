@@ -47,7 +47,7 @@ var grouped = regexp.MustCompile(`^(?:\d+|\d{1,3}(?:,\d{3})+)$`)
 // A present but unreadable field does not fall through to another number.
 func ParseBalance(site string, body []byte) Observation {
 	obs := Observation{Contract: BalanceContract, Site: site}
-	if site != "dicmusic" && site != "orpheus" || len(body) == 0 {
+	if !tokenSite(site) || len(body) == 0 {
 		obs.ErrorClass = ClassBalanceUnknown
 		return obs
 	}
@@ -223,7 +223,7 @@ func cookieKey(site, cookieID string) []byte {
 // started before the stored generation, does not replace a newer observation.
 // The same cookie fingerprint cannot be recorded as two account ids.
 func (l *Ledger) CommitObservation(obs Observation) (Observation, error) {
-	if l == nil || l.engine == nil || (obs.Site != "dicmusic" && obs.Site != "orpheus") {
+	if l == nil || l.engine == nil || !tokenSite(obs.Site) {
 		return Observation{}, dataengine.ErrInvalidRequest
 	}
 	obs.Contract = BalanceContract

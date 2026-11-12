@@ -148,11 +148,17 @@ func TestStaleObservationAndOtherSitesDoNotSpend(t *testing.T) {
 	if err != nil || got.Class != ClassBalanceStale || got.Spent || got.FallbackAllowed {
 		t.Fatal(got, err)
 	}
-	for _, site := range []string{"open.cd", "redacted", "netease"} {
+	for _, site := range []string{"open.cd", "netease"} {
 		_, err = ledger.Reserve(now, quote(site, "resource-1", "request-2", 1, 3, 3, 1))
 		if err == nil {
 			t.Fatal(site)
 		}
+	}
+	// Redacted shares the Gazelle token architecture, so it reserves from the
+	// same ledger instead of being refused as an unknown site.
+	red, err := ledger.Reserve(now, quote("redacted", "resource-1", "request-3", 1, 3, 3, 1))
+	if err != nil || !red.Spent || red.State != StateReserved {
+		t.Fatal(red, err)
 	}
 }
 

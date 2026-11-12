@@ -26,7 +26,7 @@ func (a *App) recheckToken(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "code": "INVALID_REQUEST"})
 		return
 	}
-	if body.Site != "dicmusic" && body.Site != "orpheus" {
+	if !tokenledger.IsTokenSite(body.Site) {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "code": "INVALID_REQUEST"})
 		return
 	}

@@ -51,7 +51,7 @@ func (c *Client) ReadDetail(ctx context.Context, q Query, path string, values ur
 // ReadAccount fetches the Gazelle account document used for token balance.
 // It rejects download parameters and does not follow redirects.
 func (c *Client) ReadAccount(ctx context.Context, q Query, values url.Values) ([]byte, int, string, error) {
-	if q.Site != "dicmusic" && q.Site != "orpheus" || strings.ContainsAny(q.Cookie, "\r\n") || strings.TrimSpace(q.Cookie) == "" {
+	if !isTokenSite(q.Site) || strings.ContainsAny(q.Cookie, "\r\n") || strings.TrimSpace(q.Cookie) == "" {
 		return nil, 0, "", fmt.Errorf("%w: account", dataengine.ErrInvalidRequest)
 	}
 	if !allowedAccount(values) {
@@ -90,6 +90,18 @@ func (c *Client) ReadAccount(ctx context.Context, q Query, values url.Values) ([
 	return body, response.StatusCode, response.Header.Get("Retry-After"), nil
 }
 
+// isTokenSite lists the sites whose account document carries a token balance.
+// It mirrors tokenledger.IsTokenSite; this package stays a leaf and does not
+// import the ledger.
+func isTokenSite(site string) bool {
+	switch site {
+	case "dicmusic", "orpheus", "redacted":
+		return true
+	default:
+		return false
+	}
+}
+
 func allowedAccount(values url.Values) bool {
 	action := values.Get("action")
 	for key := range values {
@@ -122,6 +134,10 @@ func allowedDetail(site, path string, values url.Values) bool {
 	case site != "open.cd" && path == "/ajax.php" && values.Get("action") == "torrent" && keys["id"] && len(keys) == 2:
 		return true
 	case site != "open.cd" && path == "/torrents.php" && keys["id"] && keys["torrentid"] && len(keys) == 2:
+		return true
+	// The user page is the documented fallback for a token balance: some
+	// sites (Redacted) only render the count there, not in the JSON index.
+	case site != "open.cd" && path == "/user.php" && keys["id"] && len(keys) == 1 && positiveID.MatchString(values.Get("id")):
 		return true
 	default:
 		return false

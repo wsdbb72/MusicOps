@@ -79,7 +79,7 @@ func (a *App) acquire(ctx context.Context, execution *scheduler.Execution, paylo
 		}
 		return a.finishAcquire(held, *job, "candidate", "种子字节已保存，专辑尚未下载、尚未入库", "", &receipt)
 	}
-	if (site == "dicmusic" || site == "orpheus") && decision.TokenCost > 0 {
+	if tokenledger.IsTokenSite(site) && decision.TokenCost > 0 {
 		return a.acquireWithToken(ctx, execution, held, *job, plan, site, resource, decision)
 	}
 	return a.finishAcquire(held, *job, "token", "站点页面没有个人免费，也没有唯一的令牌按钮，未发令牌请求；尚未下载、尚未入库", "evidence", nil)
@@ -112,7 +112,7 @@ func (a *App) readEvidence(ctx context.Context, plan SearchPlan, site, resource 
 }
 
 func (a *App) acquireWithToken(ctx context.Context, execution *scheduler.Execution, held taskrepo.Token, job workflow.Job, plan SearchPlan, site, resource string, decision sitefree.Decision) (scheduler.Outcome, error) {
-	if site != "dicmusic" && site != "orpheus" {
+	if !tokenledger.IsTokenSite(site) {
 		return a.finishAcquire(held, job, "token", "该站不使用这条令牌账本；尚未下载、尚未入库", "", nil)
 	}
 	// One unanswered request used to hold the whole site forever: every later
@@ -344,6 +344,32 @@ func (a *App) observeBalance(ctx context.Context, site, cookie string, synthetic
 		}
 	}
 	obs := tokenledger.ParseBalance(site, body)
+	// Some sites (Redacted among them) return no token count in the index
+	// document; the per-user document is the documented fallback and the same
+	// parser reads it. Only asked when the index answer had an account id and
+	// no balance, so the extra request costs nothing in the normal case.
+	if !obs.Known && obs.AccountID != "" {
+		if page, status, _, readErr := a.searcher.ReadAccount(ctx, query, url.Values{"action": {"user"}, "id": {obs.AccountID}}); readErr == nil && status == http.StatusOK {
+			if fallback := tokenledger.ParseBalance(site, page); fallback.Known {
+				fallback.CookieID = tokenledger.Fingerprint(cookie)
+				fallback.ObservedAtNS = now.UnixNano()
+				obs = fallback
+			}
+		}
+	}
+	// Last resort: the rendered user page. Redacted's JSON documents carry no
+	// token count, but the page prints "Tokens: N", which the same parser
+	// reads. Only this account's own page is requested.
+	if !obs.Known && obs.AccountID != "" {
+		if page, readErr := a.searcher.ReadDetail(ctx, query, "/user.php", url.Values{"id": {obs.AccountID}}); readErr == nil {
+			if fallback := tokenledger.ParseBalance(site, page); fallback.Known {
+				fallback.AccountID = obs.AccountID
+				fallback.CookieID = tokenledger.Fingerprint(cookie)
+				fallback.ObservedAtNS = now.UnixNano()
+				obs = fallback
+			}
+		}
+	}
 	obs.CookieID = tokenledger.Fingerprint(cookie)
 	obs.ObservedAtNS = now.UnixNano()
 	switch {

@@ -50,8 +50,16 @@ func TestGlobalFreeDoesNotSpendDicMusicTokens(t *testing.T) {
 	if err != nil || decision.Mode != "" || !decision.Global || decision.Personal {
 		t.Fatal(decision, err)
 	}
+	// Redacted shares the token architecture: a global free torrent needs no
+	// token, and the acquire path fetches it directly before mode is consulted.
 	decision, err = Read("redacted", "11", [][]byte{body}, time.Unix(10, 0))
-	if err != nil || decision.Mode != "direct" || !decision.Global {
+	if err != nil || decision.Mode != "" || !decision.Global {
+		t.Fatal(decision, err)
+	}
+	// The same page with a token button is a token decision for redacted.
+	priced := []byte(`<a href="torrents.php?action=download&amp;id=11&amp;usetoken=1">Use 1 token</a><span>Tokens: 3</span>`)
+	decision, err = Read("redacted", "11", [][]byte{priced}, time.Unix(10, 0))
+	if err != nil || decision.Mode != "token" || decision.TokenCost != 1 || decision.Balance == nil || *decision.Balance != 3 {
 		t.Fatal(decision, err)
 	}
 }

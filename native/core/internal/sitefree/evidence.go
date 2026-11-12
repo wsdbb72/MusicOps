@@ -70,7 +70,9 @@ func Read(site, resource string, bodies [][]byte, observedAt time.Time) (Decisio
 
 func mode(decision Decision) string {
 	switch decision.Site {
-	case "dicmusic", "orpheus":
+	case "dicmusic", "orpheus", "redacted":
+		// All three are Gazelle sites with the same token button. A personal
+		// freeleech still wins before any token is considered.
 		if decision.Personal {
 			return "direct"
 		}
@@ -78,7 +80,7 @@ func mode(decision Decision) string {
 			return "token"
 		}
 		return ""
-	case "open.cd", "redacted":
+	case "open.cd":
 		if decision.Personal || decision.Global {
 			return "direct"
 		}
@@ -293,22 +295,28 @@ func buttonCost(href, text, resource string) (int, bool) {
 	if parsed.Query().Get("useToken") != "" || token != "1" {
 		return 0, false
 	}
-	match := flCost.FindStringSubmatch(text)
-	if match == nil {
+	// The button is labelled differently per site: "FL (3)" and "FL" on
+	// DicMusic/Orpheus, "Use 1 token" on Redacted. Either wording is accepted;
+	// a button whose text says neither is not a priced link and is refused.
+	fl := flCost.FindStringSubmatch(text)
+	words := tokenWords.FindAllStringSubmatch(text, -1)
+	if fl == nil && len(words) == 0 {
 		return 0, false
 	}
 	amounts := map[int]bool{}
-	for _, group := range match[1:] {
-		if group == "" {
-			continue
+	if fl != nil {
+		for _, group := range fl[1:] {
+			if group == "" {
+				continue
+			}
+			parsedAmount, err := strconv.Atoi(group)
+			if err != nil || parsedAmount < 1 || parsedAmount > 100 {
+				return 0, false
+			}
+			amounts[parsedAmount] = true
 		}
-		parsedAmount, err := strconv.Atoi(group)
-		if err != nil || parsedAmount < 1 || parsedAmount > 100 {
-			return 0, false
-		}
-		amounts[parsedAmount] = true
 	}
-	for _, group := range tokenWords.FindAllStringSubmatch(text, -1) {
+	for _, group := range words {
 		parsedAmount, err := strconv.Atoi(group[1])
 		if err != nil || parsedAmount < 1 || parsedAmount > 100 {
 			return 0, false

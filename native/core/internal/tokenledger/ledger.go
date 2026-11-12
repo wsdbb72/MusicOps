@@ -51,9 +51,21 @@ const (
 	balanceTTL = 300 * time.Second
 )
 
-// TokenSites are the only sites whose personal free-token button is a spend.
-// OpenCD is direct, and RED's search slot is not a token debit here.
-var TokenSites = [2]string{"dicmusic", "orpheus"}
+// TokenSites are the sites whose "use a token" button is a spend. They share
+// one Gazelle-family architecture (JSON index for the balance, an HTML torrent
+// row for the button, torrents.php?...&usetoken=1 for the fetch), so the ledger
+// treats them identically. OpenCD has no token button and stays direct.
+var TokenSites = [3]string{"dicmusic", "orpheus", "redacted"}
+
+// IsTokenSite reports whether a site's downloads can spend a personal token.
+func IsTokenSite(site string) bool {
+	for _, candidate := range TokenSites {
+		if candidate == site {
+			return true
+		}
+	}
+	return false
+}
 
 var ErrReconciliation = errors.New("token reconciliation required")
 
@@ -517,7 +529,7 @@ func active(state string) bool {
 }
 
 func tokenSite(site string) bool {
-	return site == TokenSites[0] || site == TokenSites[1]
+	return IsTokenSite(site)
 }
 
 func fallbackScene(scene string) bool { return scene == "playlist" || scene == "fill" }

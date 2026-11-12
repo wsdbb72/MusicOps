@@ -285,6 +285,7 @@ func TestRestoredControlsAreInThePage(t *testing.T) {
 		"pipeline-pause", "pipeline-resume", "reindex-library", "list-gaps", "fill-gaps",
 		"upgrade-album", "expand-album", "preview-compilations", "merge-compilations",
 		"plan-artist-folders", "apply-artist-folders", "decrypt-ncm", "unify-qbt-tags", "test-roon", "fetch-playlist",
+		"review-download",
 	} {
 		if !bytes.Contains([]byte(appJS), []byte(id)) {
 			t.Fatal("missing control", id)

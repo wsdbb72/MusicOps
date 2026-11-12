@@ -1416,6 +1416,10 @@ const appJS = `(function () {
       else if (allowed.retry) html += '<span class="meta">重试不可用：' + escapeText(allowed.retry.reason || "") + "</span> ";
       if (allowed.skip && allowed.skip.allowed) html += '<button type="button" id="review-skip">跳过</button>';
       else if (allowed.skip) html += '<span class="meta">跳过不可用：' + escapeText(allowed.skip.reason || "") + "</span>";
+      // A saved torrent is the point where the album can go to qBittorrent.
+      // The token checkpoint has the bytes too: downloading spends nothing
+      // more, so it is offered there as well.
+      if (body.review_kind === "candidate" || body.review_kind === "token") html += ' <button type="button" id="review-download" class="primary">继续下载</button>';
       html += "</p>";
       box.innerHTML = html;
       var accept = document.getElementById("review-accept");
@@ -1424,6 +1428,8 @@ const appJS = `(function () {
       if (retry) retry.addEventListener("click", function () { reviewAction("retry"); });
       var skip = document.getElementById("review-skip");
       if (skip) skip.addEventListener("click", function () { reviewAction("skip"); });
+      var download = document.getElementById("review-download");
+      if (download) download.addEventListener("click", function () { reviewDownload(); });
     } catch (err) {
       box.innerHTML = "<p>核对内容读取中断。</p>";
     }
@@ -1452,6 +1458,25 @@ const appJS = `(function () {
       setStatus(action === "skip" ? "review" : "ok", action === "accept" ? "已接受候选，继续处理。" : (action === "retry" ? "已重试。" : "已跳过。"));
     } catch (err) {
       setStatus("fail", "核对操作中断。");
+    } finally {
+      setBusy(false);
+    }
+    openJob(currentJob.job_id);
+  }
+  async function reviewDownload() {
+    if (!currentJob || loading) return;
+    setBusy(true);
+    setStatus("info", "正在交给 qBittorrent");
+    try {
+      var response = await fetch("/v1/jobs/" + encodeURIComponent(currentJob.job_id) + "/download", {method: "POST", headers: {"Content-Type": "application/json"}, body: "{}"});
+      var body = await response.json();
+      if (!response.ok || !body || !body.ok) {
+        setStatus("fail", (body && body.error) || ("没有开始下载。" + (body && body.code ? "（" + body.code + "）" : "")));
+        return;
+      }
+      setStatus("ok", "已交给 qBittorrent。");
+    } catch (err) {
+      setStatus("fail", "下载请求中断。");
     } finally {
       setBusy(false);
     }

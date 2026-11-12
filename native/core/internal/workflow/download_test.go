@@ -69,11 +69,29 @@ func TestStartDownloadQueuesDownloadTask(t *testing.T) {
 	}
 }
 
-func TestStartDownloadRejectsNonCandidateKind(t *testing.T) {
+// A token checkpoint with the torrent bytes already saved is downloadable
+// (D3 balanced): the spend was requested once, the download sends no second
+// usetoken, and reconciliation decides the final state afterwards.
+func TestStartDownloadAllowsTokenReviewWithReceipt(t *testing.T) {
 	repo, tasks := fixture(t)
 	downloadReviewJob(t, repo, tasks, "token", true)
+	result, err := repo.StartDownload("start-download", "process:search:album1", downloadInput(), 7000)
+	if err != nil || result.Job == nil || result.Job.Stage != "downloading" || result.Job.ReviewKind != "" {
+		t.Fatalf("%+v %v", result.Job, err)
+	}
+	download, err := tasks.Get("download:process:search:album1")
+	if err != nil || download == nil || download.State != "queued" || download.Lane != "download" {
+		t.Fatalf("%+v %v", download, err)
+	}
+}
+
+// Without a receipt there is no torrent to add, so the token kind alone is not
+// a permission: the evidence check still refuses it.
+func TestStartDownloadRejectsTokenReviewWithoutReceipt(t *testing.T) {
+	repo, tasks := fixture(t)
+	downloadReviewJob(t, repo, tasks, "token", false)
 	if _, err := repo.StartDownload("start-download", "process:search:album1", downloadInput(), 7000); err == nil {
-		t.Fatal("a token-review job has no confirmed free download to start")
+		t.Fatal("a token-review job without a torrent receipt must not start a download")
 	}
 	job, err := repo.Job("process:search:album1")
 	if err != nil || job == nil || job.Stage != "needs_review" {

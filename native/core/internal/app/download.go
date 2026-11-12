@@ -268,8 +268,11 @@ func (a *App) readTorrentBytes(receipt torrentfetch.Receipt) ([]byte, error) {
 //   - failed download task: a call with fresh credentials re-supplies them
 //     and retries the download task through the review retry path, so a
 //     credential failure is recoverable without a second endpoint.
-//   - anything else: the job must be a needs_review/candidate acquire job
-//     with a saved torrent receipt, or the call is refused with 409.
+//   - anything else: the job must be a needs_review acquire job (candidate
+//     or token) with a saved torrent receipt, or the call is refused with
+//     409. A token job is downloadable while its request is provisional: the
+//     torrent bytes are already in hand and the download never sends
+//     usetoken again (D3 balanced).
 //
 // downloadRequest is one POST /v1/jobs/{id}/download body. The login is
 // memory-only; the rest is stored in the durable download plan.
@@ -302,7 +305,7 @@ func (a *App) downloadJob(w http.ResponseWriter, r *http.Request) {
 		a.downloadRetry(w, id, *job, body)
 		return
 	}
-	if job.Stage != "needs_review" || job.ReviewKind != "candidate" || job.TaskType != "album" {
+	if job.Stage != "needs_review" || (job.ReviewKind != "candidate" && job.ReviewKind != "token") || job.TaskType != "album" {
 		writeJSON(w, http.StatusConflict, map[string]any{"ok": false, "code": "WORKFLOW_REJECTED", "error": "job stage " + job.Stage + " cannot start a download"})
 		return
 	}
@@ -319,7 +322,11 @@ func (a *App) downloadJob(w http.ResponseWriter, r *http.Request) {
 	body = effective
 	plan, err := a.buildDownloadPlan(*job, body.SavePath, category, tags)
 	if err != nil {
-		writeJSON(w, http.StatusConflict, map[string]any{"ok": false, "code": "WORKFLOW_REJECTED", "error": "no saved torrent receipt for this job"})
+		code, message := "NO_TORRENT_RECEIPT", "这条任务还没有已保存的种子"
+		if errors.Is(err, errTokenNotSettled) {
+			code, message = "TOKEN_NOT_SETTLED", "令牌请求还没有结论或已确认未扣费，这次不能开始下载；先在令牌页核对"
+		}
+		writeJSON(w, http.StatusConflict, map[string]any{"ok": false, "code": code, "error": message})
 		return
 	}
 	encoded, err := json.Marshal(plan)
@@ -430,6 +437,10 @@ func (a *App) validDownloadSettings(body downloadRequest) (string, qbittorrentCr
 	return origin, qbittorrentCredentials{BaseURL: origin, Username: body.Username, Password: body.Password}, category, tags, true
 }
 
+// errTokenNotSettled means the token state forbids this download: the request
+// is still in flight, was released unspent, or has no record.
+var errTokenNotSettled = errors.New("token spend is not settled")
+
 // buildDownloadPlan builds the durable, secret-free download plan for one
 // acquire job from the stored search plan and the stored torrent receipt.
 // A no-token receipt was fetched only after the site showed it was free.
@@ -458,21 +469,30 @@ func (a *App) buildDownloadPlan(job workflow.Job, savePath, category, tags strin
 	if _, err := a.readTorrentBytes(receipt); err != nil {
 		return downloadPlan{}, err
 	}
+	// Two honest refusals: there is no torrent to add, or the token state
+	// says this download is not allowed yet. They stay distinct so the HTTP
+	// layer can say which one happened.
 	freeMethod := "site-free"
-	freeConfirmed := true
 	if receipt.UseToken {
-		freeMethod = "token"
-		freeConfirmed = false
 		result, found, err := a.ledger.Get(receipt.Site, job.ID)
 		if err != nil {
 			return downloadPlan{}, err
 		}
-		if found && (result.State == tokenledger.StateConfirmed || result.State == tokenledger.StateConsumed) {
-			freeConfirmed = true
+		if !found {
+			return downloadPlan{}, errTokenNotSettled
 		}
-	}
-	if !freeConfirmed {
-		return downloadPlan{}, errors.New("token spend is not confirmed")
+		switch result.State {
+		case tokenledger.StateConfirmed, tokenledger.StateConsumed:
+			freeMethod = "token"
+		case tokenledger.StateRequestUnknown:
+			// D3 balanced: the request was sent once and the bytes are in
+			// hand. Downloading cannot spend a second token, so it proceeds
+			// while the background reconciliation decides CONFIRMED or
+			// RELEASED_NOT_CONSUMED.
+			freeMethod = "token-provisional"
+		default:
+			return downloadPlan{}, errTokenNotSettled
+		}
 	}
 	return downloadPlan{
 		RootJobID: job.RootID, JobID: job.ID, Site: receipt.Site, ResourceID: receipt.ResourceID,

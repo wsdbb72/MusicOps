@@ -1,13 +1,16 @@
 // StartDownload moves a blocked acquire job into downloading and queues the
 // download_release task that runs the qBittorrent download.
 //
-// Only a process job in needs_review with ReviewKind "candidate" and a
-// blocked task may start: that is the job the acquire executor left behind
-// after saving a torrent receipt, and the receipt must still be stored as
-// evidence for the site/resource the plan names. A streaming-fallback job
-// also ends in needs_review/candidate, but it has no receipt, so the
-// evidence check refuses it instead of letting the executor fail later on
-// a torrent that was never saved.
+// Only a process job in needs_review with ReviewKind "candidate" or "token"
+// and a blocked task may start: that is the job the acquire executor left
+// behind after saving a torrent receipt, and the receipt must still be
+// stored as evidence for the site/resource the plan names. "token" is the
+// job whose token request has no final answer yet (REQUEST_UNKNOWN); its
+// torrent bytes are already saved and downloading spends nothing more, so
+// it may be downloaded while reconciliation finishes (D3 balanced). A
+// streaming-fallback job also ends in needs_review/candidate, but it has no
+// receipt, so the evidence check refuses it instead of letting the executor
+// fail later on a torrent that was never saved.
 //
 // The blocked task completes and the download task queues in one atomic
 // commit through taskrepo.ResolveOwned, exactly like Review. The download
@@ -16,11 +19,13 @@
 // qBittorrent login lives only in the app's in-memory secrets and is handed
 // to the executor through that map, never through this payload.
 //
-// FreeConfirmed must be true: a download task only runs on confirmed free
-// evidence. The app sets it only after sitefree confirmed a no-token fetch,
-// or after a token reservation was confirmed by a spend record or by the
-// site showing that free took effect. A token request that is still
-// uncertain is refused here, before any task is queued.
+// FreeConfirmed must be true: the download task carries the free evidence
+// qBittorrent binds to the infohash. The app sets it after sitefree
+// confirmed a no-token fetch, after a token reservation was confirmed, or
+// for a provisional token whose bytes are already in hand: the download
+// itself never sends usetoken, so it cannot spend twice. A reservation that
+// is still in flight (RESERVED/REQUESTING) or was released unspent is
+// refused here, before any task is queued.
 package workflow
 
 import (
@@ -145,7 +150,10 @@ func (r *Repository) StartDownload(requestID, jobID string, in DownloadInput, no
 		}
 		return Result{}, ErrStale
 	}
-	if job.Stage != "needs_review" || task.State != "blocked" || job.ReviewKind != "candidate" || job.TaskType != "album" || task.Command != cmdProcess {
+	if job.Stage != "needs_review" || task.State != "blocked" || job.TaskType != "album" || task.Command != cmdProcess {
+		return Result{}, ErrStale
+	}
+	if job.ReviewKind != "candidate" && job.ReviewKind != "token" {
 		return Result{}, ErrStale
 	}
 	receipt, err := r.storedReceipt(jobID, in.Site, in.ResourceID)

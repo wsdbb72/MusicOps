@@ -162,7 +162,7 @@ func (a *App) attachSavedPlaylist(jobID, playlistID string) (int, string, error)
 	if err != nil {
 		return 0, "", errors.New("已存歌单无法解析: " + err.Error())
 	}
-	incoming := filepath.Join(a.Dir, "incoming")
+	incoming := a.workPath("incoming")
 	if err := os.MkdirAll(incoming, 0o755); err != nil {
 		return 0, "", err
 	}
@@ -180,7 +180,7 @@ func (a *App) jobPlaylistHandler(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "code": "INVALID_REQUEST"})
 		return
 	}
-	path := filepath.Join(a.Dir, "incoming", playlistFileName(jobID))
+	path := a.workPath("incoming", playlistFileName(jobID))
 	data, err := os.ReadFile(path)
 	if err != nil {
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "playlist": map[string]any{"exists": false, "track_count": 0, "name": ""}})
@@ -225,7 +225,7 @@ func (a *App) saveJobPlaylist(w http.ResponseWriter, r *http.Request) {
 	if name == "" {
 		name = playlistName
 	}
-	incoming := filepath.Join(a.Dir, "incoming")
+	incoming := a.workPath("incoming")
 	if err := os.MkdirAll(incoming, 0o755); err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "code": "PLAYLIST_UNAVAILABLE"})
 		return

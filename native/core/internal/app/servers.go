@@ -56,7 +56,28 @@ var librarySettingsKey = []byte("app/settings/library")
 // LibraryDir means the default (<state>/library-audio).
 type librarySettings struct {
 	LibraryDir string `json:"library_dir"`
-	UpdatedNS  int64  `json:"updated_ns"`
+	// WorkDir is the optional dedicated staging directory (an SSD, usually):
+	// downloads, uploads and their seeding copies land here while the
+	// verified library stays on the library disk. Empty means the state
+	// directory, which is where everything went before this setting.
+	WorkDir   string `json:"work_dir"`
+	UpdatedNS int64  `json:"updated_ns"`
+}
+
+// workDir returns the effective staging directory: the saved one, or the
+// state directory when nothing was saved.
+func (a *App) workDir() string {
+	settings, err := a.loadLibrarySettings()
+	if err != nil || strings.TrimSpace(settings.WorkDir) == "" {
+		return a.Dir
+	}
+	return settings.WorkDir
+}
+
+// workPath joins one staging subdirectory. Every caller that stages audio
+// goes through this, so enabling the setting moves all of them together.
+func (a *App) workPath(elem ...string) string {
+	return filepath.Join(append([]string{a.workDir()}, elem...)...)
 }
 
 // defaultLibraryDir is the library location before any custom directory is
@@ -198,6 +219,7 @@ func (a *App) librarySettingsHandler(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "library": map[string]any{
 		"library_dir": settings.LibraryDir, "default_library_dir": a.defaultLibraryDir(),
 		"effective_library_dir": a.libraryDir(),
+		"work_dir":              settings.WorkDir, "effective_work_dir": a.workDir(),
 	}})
 }
 
@@ -207,12 +229,14 @@ func (a *App) librarySettingsHandler(w http.ResponseWriter, r *http.Request) {
 func (a *App) saveLibrary(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		LibraryDir string `json:"library_dir"`
+		WorkDir    string `json:"work_dir"`
 	}
 	if err := decode(r, &body); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "code": "INVALID_REQUEST"})
 		return
 	}
 	dir := strings.TrimSpace(body.LibraryDir)
+	work := strings.TrimSpace(body.WorkDir)
 	next := librarySettings{}
 	if dir != "" {
 		if !filepath.IsAbs(dir) {
@@ -229,6 +253,34 @@ func (a *App) saveLibrary(w http.ResponseWriter, r *http.Request) {
 		}
 		next.LibraryDir = filepath.Clean(dir)
 	}
+	if work != "" {
+		if !filepath.IsAbs(work) {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "code": "INVALID_REQUEST", "error": "临时目录须为绝对路径"})
+			return
+		}
+		cleaned := filepath.Clean(work)
+		if cleaned == filepath.VolumeName(cleaned)+string(filepath.Separator) {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "code": "INVALID_REQUEST", "error": "临时目录不能是磁盘根目录"})
+			return
+		}
+		// Staging inside the library would put half-finished downloads where
+		// the library scan and dedup walk expect finished files.
+		library := a.libraryDir()
+		if dir != "" {
+			library = next.LibraryDir
+		}
+		resolvedWork := resolveExisting(cleaned)
+		resolvedLibrary := resolveExisting(filepath.Clean(library))
+		if resolvedWork == resolvedLibrary || insideDir(resolvedLibrary, resolvedWork) || insideDir(resolvedWork, resolvedLibrary) {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "code": "INVALID_REQUEST", "error": "临时目录不能与音乐库重叠"})
+			return
+		}
+		if err := os.MkdirAll(cleaned, 0o755); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "code": "INVALID_REQUEST", "error": "临时目录无法创建"})
+			return
+		}
+		next.WorkDir = cleaned
+	}
 	saved, err := a.saveLibrarySettings(next)
 	if err != nil {
 		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"ok": false, "code": "SETTINGS_UNAVAILABLE"})
@@ -237,6 +289,7 @@ func (a *App) saveLibrary(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "library": map[string]any{
 		"library_dir": saved.LibraryDir, "default_library_dir": a.defaultLibraryDir(),
 		"effective_library_dir": a.libraryDir(),
+		"work_dir":              saved.WorkDir, "effective_work_dir": a.workDir(),
 	}})
 }
 
@@ -670,5 +723,12 @@ func (a *App) resolveLibraryPath(raw string) (string, error) {
 			return resolved, nil
 		}
 	}
-	return "", errors.New("path is outside the state and library directories")
+	// With a dedicated staging directory, "incoming/x.flac" now lives there
+	// instead of under the state directory.
+	if work := a.workDir(); work != a.Dir {
+		if resolved, err := resolveInDir(work, raw); err == nil {
+			return resolved, nil
+		}
+	}
+	return "", errors.New("path is outside the state, library and work directories")
 }

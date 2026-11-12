@@ -386,6 +386,9 @@ const appJS = `(function () {
     return '<article><h2>音乐库目录</h2><p class="meta">新入库的音频放这里；改目录只影响新入库，已入库的文件不动，各自按入库时的目录解析。目录须为绝对路径，不能是磁盘根目录，不能与状态/备份目录重叠。</p>' +
       '<label>音乐库目录<input type="text" id="library-dir" value="' + escapeText(librarySettings.library_dir || "") + '" placeholder="留空用默认：' + escapeText(librarySettings.default_library_dir || "") + '"></label>' +
       '<p class="meta">当前生效：' + escapeText(librarySettings.effective_library_dir || "") + '</p>' +
+      '<h2>临时下载与处理目录</h2><p class="meta">有独立 SSD 时填这里：下载、上传、整理副本和做种副本落在该目录，验证后的成品才写到音乐库。留空沿用状态目录。只影响之后开始的任务，已在进行的任务沿用原路径；不能与音乐库重叠。</p>' +
+      '<label>临时目录<input type="text" id="library-work-dir" value="' + escapeText(librarySettings.work_dir || "") + '" placeholder="留空用默认：状态目录"></label>' +
+      '<p class="meta">当前生效：' + escapeText(librarySettings.effective_work_dir || "") + '</p>' +
       '<p><button type="button" id="save-library" class="primary">保存</button></p></article>';
   }
   function serversCard() {
@@ -783,7 +786,10 @@ const appJS = `(function () {
     setBusy(true);
     setStatus("info", "正在保存");
     try {
-      var body = await postSetting("/v1/settings/library", {library_dir: document.getElementById("library-dir").value.trim()});
+      var body = await postSetting("/v1/settings/library", {
+        library_dir: document.getElementById("library-dir").value.trim(),
+        work_dir: document.getElementById("library-work-dir").value.trim()
+      });
       librarySettings = body.library;
       setStatus("ok", "已保存。");
       renderSettings();

@@ -60,7 +60,7 @@ func (a *App) uploadIncoming(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusRequestEntityTooLarge, map[string]any{"ok": false, "code": "AUDIO_TOO_LARGE"})
 		return
 	}
-	incoming := filepath.Join(a.Dir, "incoming")
+	incoming := a.workPath("incoming")
 	if err := os.MkdirAll(incoming, 0o700); err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "code": "LIBRARY_UNAVAILABLE"})
 		return

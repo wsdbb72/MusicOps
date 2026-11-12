@@ -560,7 +560,7 @@ func (a *App) startSearch(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		a.forget(body.JobID)
 		if body.PlaylistID != "" {
-			_ = os.Remove(filepath.Join(a.Dir, "incoming", playlistFileName(body.JobID)))
+			_ = os.Remove(a.workPath("incoming", playlistFileName(body.JobID)))
 		}
 		writeJSON(w, http.StatusConflict, map[string]any{"ok": false, "code": "WORKFLOW_REJECTED"})
 		return
@@ -694,7 +694,7 @@ func (a *App) releaseAudio(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusConflict, map[string]any{"ok": false, "code": "WORKFLOW_REJECTED", "error": err.Error(), "stage": rootJob.Stage, "downloaded": false, "library_published": false, "production_verified": false})
 		return
 	}
-	incoming, library := filepath.Join(a.Dir, "incoming"), a.libraryDir()
+	incoming, library := a.workPath("incoming"), a.libraryDir()
 	if err = os.MkdirAll(incoming, 0o700); err != nil || os.MkdirAll(library, 0o700) != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "code": "LIBRARY_UNAVAILABLE", "downloaded": false, "library_published": false, "production_verified": false})
 		return

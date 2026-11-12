@@ -820,7 +820,7 @@ func (a *App) download(ctx context.Context, execution *scheduler.Execution, payl
 	} else if done {
 		return outcome, nil
 	}
-	seedDir := filepath.Join(a.Dir, "seeds", taskID)
+	seedDir := a.workPath("seeds", taskID)
 	archived, err := a.archiveDownload(ctx, client, &rec, meta, seedDir)
 	if err != nil {
 		if df, ok := err.(*downloadFailure); ok {
@@ -1027,7 +1027,7 @@ func (a *App) finishDownload(execution *scheduler.Execution, held taskrepo.Token
 	if err != nil {
 		return scheduler.Outcome{}, err
 	}
-	archiveJSON, err := json.Marshal(archiveReceipt{TaskID: downloadRecordID(plan.JobID), InfoHash: plan.InfoHash, SeedDir: filepath.Join(a.Dir, "seeds", downloadRecordID(plan.JobID)), Files: archived})
+	archiveJSON, err := json.Marshal(archiveReceipt{TaskID: downloadRecordID(plan.JobID), InfoHash: plan.InfoHash, SeedDir: a.workPath("seeds", downloadRecordID(plan.JobID)), Files: archived})
 	if err != nil {
 		return scheduler.Outcome{}, err
 	}
@@ -1274,7 +1274,7 @@ func samePath(a, b string) bool {
 // (the audio itself is verified either way; the fallback is a library
 // convention, not a confirmed identity claim).
 func (a *App) ingestDownload(plan downloadPlan, meta qbittorrent.Metainfo, seedDir string) ([]publishReceipt, error) {
-	incoming, library := filepath.Join(a.Dir, "incoming"), a.libraryDir()
+	incoming, library := a.workPath("incoming"), a.libraryDir()
 	if err := os.MkdirAll(incoming, 0o700); err != nil || os.MkdirAll(library, 0o700) != nil {
 		return nil, downloadError("INGEST_FAILED", "入库目录不可用")
 	}

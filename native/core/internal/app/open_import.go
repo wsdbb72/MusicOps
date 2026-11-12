@@ -52,7 +52,7 @@ func (a *App) openImport(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusNotFound, map[string]any{"ok": false, "code": "NOT_FOUND", "error": "源文件不存在", "written": false})
 		return
 	}
-	incoming := filepath.Join(a.Dir, "incoming")
+	incoming := a.workPath("incoming")
 	// Release reads from incoming/<basename> only; anything else is a
 	// different operation (a move, an organise) and is not this endpoint.
 	if !insideDir(incoming, path) {

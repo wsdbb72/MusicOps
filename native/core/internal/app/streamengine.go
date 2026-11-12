@@ -115,10 +115,10 @@ func (a *App) tryConfiguredStream(ctx context.Context, source string, plan Searc
 	if strings.Contains(name, string(filepath.Separator)) || strings.Contains(name, "..") {
 		return "", source + " 校验通过但没有写入", downloadpolicy.ClassNoResult
 	}
-	if err := os.MkdirAll(filepath.Join(a.Dir, "incoming"), 0o700); err != nil {
+	if err := os.MkdirAll(a.workPath("incoming"), 0o700); err != nil {
 		return "", source + " 校验通过但没有写入", downloadpolicy.ClassNoResult
 	}
-	dir, err := resolveInDir(a.Dir, "incoming")
+	dir, err := resolveInDir(a.workDir(), "incoming")
 	if err != nil {
 		return "", source + " 校验通过但没有写入", downloadpolicy.ClassNoResult
 	}

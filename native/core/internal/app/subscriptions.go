@@ -357,7 +357,7 @@ func (a *App) runSubscriptionCheck(playlistID string, manual bool) (map[string]a
 
 func (a *App) queueSubscriptionAlbum(jobID, playlistID, album string, tracks []playlistTrack) error {
 	encoded := encodeM3U(album, tracks)
-	incoming := filepath.Join(a.Dir, "incoming")
+	incoming := a.workPath("incoming")
 	if err := os.MkdirAll(incoming, 0o755); err != nil {
 		return err
 	}

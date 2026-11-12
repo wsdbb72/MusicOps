@@ -98,7 +98,7 @@ curl -s -H "X-API-Key: $KEY" -H 'Content-Type: application/json' \
   http://127.0.0.1:8080/v1/open/library/import
 ```
 
-`import` 只接受本机状态目录或音乐库内的路径，拒绝符号链接；返回 `request_id`、`path`、`sha256`，之后 `GET /v1/library` 能看到这条记录。
+`import` 只接受本机状态目录、临时目录或音乐库内的路径，拒绝符号链接；返回 `request_id`、`path`、`sha256`，之后 `GET /v1/library` 能看到这条记录。`incoming/` 的位置跟随“临时下载与处理目录”设置：启用独立 SSD 目录后，上传落在那里，验证后的成品写到音乐库。
 
 ### 1.6 读写标签
 

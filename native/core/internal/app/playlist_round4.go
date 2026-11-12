@@ -100,8 +100,12 @@ func wideID(raw any) int {
 }
 
 func (a *App) neteaseSongDetails(ctx context.Context, spec remotePlatform, origin string, ids []int, cookie, bearer string) ([]playlistTrack, bool, error) {
+	// 100 ids per /api/v3/song/detail call is what the endpoint accepts in
+	// practice; 60 batches covers 6000 tracks, which is above the largest
+	// playlist NetEase serves (a detail response only carries the first few
+	// track objects, so the rest must come from here).
 	const batch = 100
-	const maxBatches = 30
+	const maxBatches = 60
 	var tracks []playlistTrack
 	for start, n := 0, 0; start < len(ids) && n < maxBatches; start, n = start+batch, n+1 {
 		end := start + batch

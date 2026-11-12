@@ -345,7 +345,7 @@ const appJS = `(function () {
   }
   function lyricsCard() {
     if (!lyricsSettings) return "";
-    return '<article><h2>歌词与封面服务</h2><p class="meta">主服务须为 HTTPS。鉴权值按原样保存，不会自动加上 Bearer 前缀，并且加密保存在本机。设置可以保存和测试；自动拉取歌词和封面还没有接入，保存后不会自己去下载。</p>' +
+    return '<article><h2>歌词与封面服务</h2><p class="meta">地址与路径对应 LrcApi 项目（lyrics_path 返回 LRC 文本，cover_path 返回图片）。主服务须为 HTTPS，本机回环可用 HTTP。鉴权值按原样保存，不会自动加上 Bearer 前缀，并且加密保存在本机——带凭据时不会跟随跳转，避免把凭据发到别的主机。保存后，补齐标签时会按曲名、艺人、专辑取歌词和封面；服务没有这一首（404）就跳过，网络失败则不写文件。</p>' +
       '<label>服务地址<input type="text" id="lyrics-base-url" value="' + escapeText(lyricsSettings.base_url || "") + '"></label>' +
       '<label>歌词路径<input type="text" id="lyrics-path" value="' + escapeText(lyricsSettings.lyrics_path || "") + '"></label>' +
       '<label>候选路径<input type="text" id="lyrics-candidates-path" value="' + escapeText(lyricsSettings.candidates_path || "") + '"></label>' +
@@ -1028,12 +1028,12 @@ const appJS = `(function () {
       '<div id="library-file"></div>' +
       '<p><button type="button" id="fill-gaps">确认所选并补缺</button> <button type="button" id="upgrade-album">确认所选并升级</button> <button type="button" id="expand-album">确认所选并扩成整专</button></p>' +
       '<p id="library-ops-result" class="meta"></p></article>' +
-      '<article><h2>标签、封面和歌词</h2><p class="meta">目录确认后，曲名、艺人、专辑艺人、专辑、日期、音轨号、碟号和分类（GENRE）按目录补写，歌词和封面同一次写入。文件里已有且与目录不同的值默认保留，勾选覆盖才会改。封面写入 FLAC 内嵌图片；按设置可以同时保留同名 jpg。写之前会备份，任何一步失败都恢复原文件。目录、歌词和封面地址只接受本机。</p>' +
+      '<article><h2>标签、封面和歌词</h2><p class="meta">目录确认后，曲名、艺人、专辑艺人、专辑、日期、音轨号、碟号和分类（GENRE）按目录补写，歌词和封面同一次写入。文件里已有且与目录不同的值默认保留，勾选覆盖才会改。封面写入 FLAC 内嵌图片；按设置可以同时保留同名 jpg。写之前会备份，任何一步失败都恢复原文件。目录地址只接受本机；歌词和封面留空时用设置里的服务（须为 HTTPS）。</p>' +
       '<label>文件路径<input type="text" id="meta-path" placeholder="库内 .flac"></label>' +
       '<label>艺人<input type="text" id="meta-artist"></label><label>专辑<input type="text" id="meta-album"></label><label>曲名<input type="text" id="meta-title"></label>' +
       '<label>目录地址<input type="text" id="meta-catalog" placeholder="本机 MusicBrainz"></label>' +
-      '<label>歌词地址<input type="text" id="meta-lyrics" placeholder="留空则不写歌词"></label>' +
-      '<label>封面地址<input type="text" id="meta-cover" placeholder="留空则不写封面"></label>' +
+      '<label>歌词地址<input type="text" id="meta-lyrics" placeholder="留空用设置里的歌词服务；填了只覆盖这一次"></label>' +
+      '<label>封面地址<input type="text" id="meta-cover" placeholder="留空用设置里的封面服务；填了只覆盖这一次"></label>' +
       '<label>封面写入<select id="meta-cover-mode"><option value="sidecar">内嵌并保留同名 jpg</option><option value="embedded">只写入 FLAC 内嵌图片</option></select></label>' +
       '<label><input type="checkbox" id="meta-overwrite"> 覆盖与目录不同的字段（含分类）</label>' +
       '<p><button type="button" id="complete-metadata">补齐标签封面歌词</button></p><p id="metadata-result" class="meta"></p>' +

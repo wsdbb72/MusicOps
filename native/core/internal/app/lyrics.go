@@ -111,10 +111,28 @@ func validateLyricsPath(path string) error {
 	return nil
 }
 
+// lyricsServiceHost returns the host a saved credential is bound to. It
+// mirrors validateLyricsSettings: HTTPS anywhere, HTTP only on loopback.
+func lyricsServiceHost(base string) string {
+	if cleaned, host, err := cleanURL(base, true); err == nil && cleaned != "" {
+		return host
+	}
+	if loopback, host, err := cleanURL(base, false); err == nil && loopbackURL(loopback) {
+		return host
+	}
+	return ""
+}
+
 func validateLyricsSettings(in lyricsSettings) error {
 	cleaned, _, err := cleanURL(in.BaseURL, true)
 	if err != nil || cleaned == "" {
-		return errors.New("歌词服务地址须为干净的 HTTPS 地址")
+		// A service on this machine may be plain HTTP: the URL never leaves
+		// the host, and that is how an LrcApi container on 127.0.0.1 serves
+		// by default. Anything remote still has to be HTTPS.
+		loopback, _, loopErr := cleanURL(in.BaseURL, false)
+		if loopErr != nil || !loopbackURL(loopback) {
+			return errors.New("歌词服务地址须为干净的 HTTPS 地址（本机回环可用 HTTP）")
+		}
 	}
 	for _, path := range []string{in.LyricsPath, in.CandidatesPath, in.CoverPath} {
 		if err := validateLyricsPath(path); err != nil {
@@ -213,8 +231,8 @@ func (a *App) saveLyrics(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if body.Authorization != "" {
-		_, host, err := cleanURL(next.BaseURL, true)
-		if err != nil || host == "" {
+		host := lyricsServiceHost(next.BaseURL)
+		if host == "" {
 			writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "code": "INVALID_REQUEST", "error": "保存鉴权值需要先填歌词服务地址"})
 			return
 		}
@@ -263,12 +281,25 @@ func normalizeLRCText(text string) string {
 // lyricCandidate is one item of a lyrics candidates response, the shape
 // Python's _parse requires for kind=candidates.
 type lyricCandidate struct {
-	ID      any    `json:"id"`
-	Title   string `json:"title"`
-	Artist  any    `json:"artist"`
+	ID     any    `json:"id"`
+	Title  string `json:"title"`
+	Artist any    `json:"artist"`
+	// The service has used both spellings: "lyrics" in the documented shape
+	// and "lrc" in the replies the public instance actually returns for
+	// /jsonapi. Both are accepted; lyricText picks whichever arrived.
 	Lyrics  string `json:"lyrics"`
+	LRC     string `json:"lrc"`
 	Album   string `json:"album"`
 	Version string `json:"version"`
+}
+
+// lyricText is the one accessor callers use, so a missing "lyrics" field can
+// never hide a document that arrived as "lrc".
+func (c lyricCandidate) lyricText() string {
+	if strings.TrimSpace(c.Lyrics) != "" {
+		return c.Lyrics
+	}
+	return c.LRC
 }
 
 // candidateArtists returns the artist names of a candidate item.
@@ -412,10 +443,11 @@ func (a *App) testLyrics(w http.ResponseWriter, r *http.Request) {
 				id = fmt.Sprintf("%v", num)
 			}
 		}
-		if strings.TrimSpace(id) == "" || item.Title == "" || item.Lyrics == "" {
+		text := item.lyricText()
+		if strings.TrimSpace(id) == "" || item.Title == "" || strings.TrimSpace(text) == "" {
 			continue
 		}
-		if _, err := lrc.Parse(normalizeLRCText(item.Lyrics)); err != nil {
+		if _, err := lrc.Parse(normalizeLRCText(text)); err != nil {
 			continue
 		}
 		if !item.identityMatches("童年", "罗大佑", "之乎者也") {

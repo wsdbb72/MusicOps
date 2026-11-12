@@ -6,7 +6,6 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
-	"io"
 	"io/fs"
 	"net/http"
 	"net/url"
@@ -770,82 +769,40 @@ func (a *App) libraryFilePage(offset, limit int) ([]string, int, int) {
 	return append([]string(nil), files[offset:end]...), len(files), offset
 }
 
+// fetchArtwork reads the lyrics and the cover for one track from the lyrics
+// service. An explicit address in the request overrides the saved service for
+// this call; both go through the same origin rules and send the saved
+// authorization value only when the address comes from the settings.
 func (a *App) fetchArtwork(lyricsBase, coverBase, artist, album, title string) (string, []byte, error) {
-	lyricsBase = strings.TrimSpace(lyricsBase)
-	coverBase = strings.TrimSpace(coverBase)
-	if lyricsBase != "" && !loopbackURL(lyricsBase) {
-		return "", nil, errors.New("lyrics host")
+	lyricsTarget, coverTarget, err := a.artworkTargets(lyricsBase, coverBase)
+	if err != nil {
+		return "", nil, err
 	}
-	if coverBase != "" && !loopbackURL(coverBase) {
-		return "", nil, errors.New("cover host")
-	}
+	query := url.Values{"artist": {artist}, "title": {title}, "album": {album}}
 	var lyrics string
-	if lyricsBase != "" {
-		endpoint, err := url.Parse(strings.TrimRight(lyricsBase, "/") + "/lyrics")
+	if lyricsTarget.configured() {
+		body, found, err := artworkGET(lyricsTarget, query)
 		if err != nil {
 			return "", nil, err
 		}
-		values := endpoint.Query()
-		values.Set("artist", artist)
-		values.Set("title", title)
-		endpoint.RawQuery = values.Encode()
-		body, err := loopbackGET(endpoint.String())
-		if err != nil {
-			return "", nil, err
-		}
-		var decoded struct {
-			Lyrics string `json:"lyrics"`
-		}
-		if json.Unmarshal(body, &decoded) == nil && strings.TrimSpace(decoded.Lyrics) != "" {
-			lyrics = decoded.Lyrics
-		} else {
-			lyrics = strings.TrimSpace(string(body))
-		}
-		if lyrics == "" {
-			return "", nil, errors.New("empty lyrics")
+		if found {
+			lyrics = parseLyricsBody(body)
 		}
 	}
 	var cover []byte
-	if coverBase != "" {
-		endpoint, err := url.Parse(strings.TrimRight(coverBase, "/") + "/cover")
+	if coverTarget.configured() {
+		body, found, err := artworkGET(coverTarget, query)
 		if err != nil {
 			return "", nil, err
 		}
-		values := endpoint.Query()
-		values.Set("album", album)
-		endpoint.RawQuery = values.Encode()
-		body, err := loopbackGET(endpoint.String())
-		if err != nil {
-			return "", nil, err
+		if found {
+			if !imageBytes(body) {
+				return "", nil, errors.New("cover is not an image")
+			}
+			cover = body
 		}
-		if !imageBytes(body) {
-			return "", nil, errors.New("cover is not an image")
-		}
-		cover = body
 	}
 	return lyrics, cover, nil
-}
-
-func loopbackGET(endpoint string) ([]byte, error) {
-	if !loopbackURL(endpoint) {
-		return nil, errors.New("not loopback")
-	}
-	request, err := http.NewRequest(http.MethodGet, endpoint, nil)
-	if err != nil {
-		return nil, err
-	}
-	client := &http.Client{Timeout: 8 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error {
-		return http.ErrUseLastResponse
-	}}
-	response, err := client.Do(request)
-	if err != nil {
-		return nil, err
-	}
-	defer response.Body.Close()
-	if response.StatusCode != http.StatusOK {
-		return nil, errors.New("status")
-	}
-	return io.ReadAll(io.LimitReader(response.Body, 2<<20))
 }
 
 func imageBytes(body []byte) bool {

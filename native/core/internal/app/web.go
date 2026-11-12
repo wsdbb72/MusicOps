@@ -13,6 +13,7 @@ const appJS = `(function () {
   var qbtSettings = null;
   var solverSettings = null;
   var solverRuntime = null;
+  var neteaseStatus = null;
   var lyricsSettings = null;
   var discogsSettings = null;
   var librarySettings = null;
@@ -343,6 +344,31 @@ const appJS = `(function () {
       '<label><input type="checkbox" id="solver-auto-start"' + (solverSettings.auto_start ? " checked" : "") + '> 程序启动时一并启动（Windows，需填可执行程序）</label>' +
       '<p><button type="button" id="save-solver" class="primary">保存</button> <button type="button" id="test-solver">测试连接</button></p><p id="solver-test-result" class="meta"></p></article>';
   }
+  function neteaseCard() {
+    var saved = neteaseStatus && neteaseStatus.saved;
+    return '<article><h2>内置网易云</h2><p class="meta">内置源：不需要外部引擎。保存账号 Cookie 后，流媒体回退会用它在网易云搜索并取音源；只有无损 FLAC 会被保存，账号没有无损权限时服务只返回 320k mp3，这里会如实报告而不把有损文件当无损。同一份 Cookie 也用于读取网易云歌单。</p>' +
+      '<p class="meta">当前：' + (saved ? "已保存账号 Cookie" : "未保存，内置网易云不会启用") + "</p>" +
+      '<label>账号 Cookie（浏览器扩展导出的 JSON，只保存在本机加密库）<textarea id="netease-cookie" rows="3" placeholder="粘贴 Cookie-Editor 导出的 JSON"></textarea></label>' +
+      '<p><button type="button" id="save-netease" class="primary">保存 Cookie</button></p><p id="netease-result" class="meta"></p></article>';
+  }
+  async function saveNetease() {
+    var result = document.getElementById("netease-result");
+    var value = document.getElementById("netease-cookie").value.trim();
+    if (!value) { if (result) result.textContent = "先粘贴 Cookie。"; return; }
+    try {
+      var response = await fetch("/v1/settings/streaming/netease", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({cookie_json: value})});
+      var body = await response.json();
+      if (!response.ok || !body || !body.ok) {
+        if (result) result.textContent = (body && (body.error || body.code)) || "没有保存。";
+        return;
+      }
+      document.getElementById("netease-cookie").value = "";
+      if (result) result.textContent = body.saved ? "已保存。" + (body.playlist_ref === false ? "（歌单引用未写入，歌单读取可能仍需要旧凭据）" : "歌单读取也使用这份 Cookie。") : "没有保存。";
+      load(true);
+    } catch (err) {
+      if (result) result.textContent = "保存中断。";
+    }
+  }
   function lyricsCard() {
     if (!lyricsSettings) return "";
     return '<article><h2>歌词与封面服务</h2><p class="meta">地址与路径对应 LrcApi 项目（lyrics_path 返回 LRC 文本，cover_path 返回图片）。主服务须为 HTTPS，本机回环可用 HTTP。鉴权值按原样保存，不会自动加上 Bearer 前缀，并且加密保存在本机——带凭据时不会跟随跳转，避免把凭据发到别的主机。保存后，补齐标签时会按曲名、艺人、专辑取歌词和封面；服务没有这一首（404）就跳过，网络失败则不写文件。</p>' +
@@ -437,7 +463,7 @@ const appJS = `(function () {
       return;
     }
     setStatus("", "");
-    var html = '<div class="cards">' + migrationCard() + downloadCard() + cookieCard() + aiCard() + qbtCard() + solverCard() + lyricsCard() + discogsCard() + libraryCard() + serversCard() + playlistsCard() +
+    var html = '<div class="cards">' + migrationCard() + downloadCard() + cookieCard() + aiCard() + qbtCard() + solverCard() + neteaseCard() + lyricsCard() + discogsCard() + libraryCard() + serversCard() + playlistsCard() +
       '<article><h2>站点登录检查</h2><p class="meta">只读检查：只验证登录和余额，不下载，也不消耗令牌。Cookie 留空则用已保存的；填写的只用于这次检查，不保存。</p>' +
       '<label>站点<select id="preflight-site">' + siteRows.map(function (site) { return '<option value="' + escapeText(site.name) + '">' + escapeText(site.name) + "</option>"; }).join("") + '</select></label>' +
       '<label>Cookie<input type="password" id="preflight-cookie" autocomplete="off"></label>' +
@@ -462,6 +488,8 @@ const appJS = `(function () {
     if (saveQBTButton) saveQBTButton.addEventListener("click", saveQBT);
     var testQBTButton = document.getElementById("test-qbt");
     if (testQBTButton) testQBTButton.addEventListener("click", testQBT);
+    var saveNeteaseButton = document.getElementById("save-netease");
+    if (saveNeteaseButton) saveNeteaseButton.addEventListener("click", saveNetease);
     var saveSolverButton = document.getElementById("save-solver");
     if (saveSolverButton) saveSolverButton.addEventListener("click", saveSolver);
     var testSolverButton = document.getElementById("test-solver");
@@ -1721,6 +1749,9 @@ const appJS = `(function () {
         var solverBody = await solverResponse.json();
         solverSettings = solverBody && solverBody.ok ? solverBody.solver : null;
         solverRuntime = solverBody && solverBody.ok ? solverBody.runtime : null;
+        var neteaseResponse = await fetch("/v1/settings/streaming/netease", {headers: {Accept: "application/json"}});
+        var neteaseBody = await neteaseResponse.json();
+        neteaseStatus = neteaseBody && neteaseBody.ok ? neteaseBody : null;
         var lyricsResponse = await fetch("/v1/settings/lyrics", {headers: {Accept: "application/json"}});
         var lyricsBody = await lyricsResponse.json();
         lyricsSettings = lyricsBody && lyricsBody.ok ? lyricsBody.lyrics : null;

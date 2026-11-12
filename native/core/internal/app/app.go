@@ -49,6 +49,9 @@ type App struct {
 	// playlistBases replaces a platform origin in tests. Production leaves it nil,
 	// so a fetch uses the public host and never a caller-chosen remote server.
 	playlistBases map[string]string
+	// neteaseBases replaces the NetEase API origin in tests, the same seam as
+	// playlistBases. Production leaves it nil.
+	neteaseBases map[string]string
 	// aiHTTPClient overrides the HTTP client the review model and the AI
 	// connection test use. It is nil in production (aiclient.New then
 	// uses http.DefaultClient); tests set it to a fake server's client

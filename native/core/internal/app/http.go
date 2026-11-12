@@ -164,6 +164,8 @@ func (a *App) Handler() http.Handler {
 	mux.HandleFunc("GET /v1/settings/solver", a.solverSettingsHandler)
 	mux.HandleFunc("POST /v1/settings/solver", a.saveSolver)
 	mux.HandleFunc("POST /v1/settings/solver/test", a.testSolver)
+	mux.HandleFunc("GET /v1/settings/streaming/netease", a.neteaseCookieView)
+	mux.HandleFunc("POST /v1/settings/streaming/netease", a.saveNeteaseCookie)
 	mux.HandleFunc("GET /v1/settings/lyrics", a.lyricsSettingsHandler)
 	mux.HandleFunc("POST /v1/settings/lyrics", a.saveLyrics)
 	mux.HandleFunc("POST /v1/settings/lyrics/test", a.testLyrics)

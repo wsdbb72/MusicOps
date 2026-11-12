@@ -132,7 +132,16 @@ func (a *App) streamingSourceStatus() []streamSourceStatus {
 			status.Reason = "歌单文件导入已接入（仅元数据，不下载音频）"
 		case "qobuz", "deezer":
 			status.Reason = "未启用"
-		case "tidal", "applemusic", "qqmusic", "netease":
+		case "netease":
+			// The netease source is built in: no engine, but it needs an
+			// account cookie before it can resolve a lossless URL.
+			if a.neteaseSaved() {
+				status.Configured = true
+				status.Reason = "内置网易云：已保存账号 Cookie，只取无损 FLAC"
+			} else {
+				status.Reason = "内置网易云需要账号 Cookie（尚未保存）"
+			}
+		case "tidal", "applemusic", "qqmusic":
 			if settings, err := a.loadDownloadSettings(); err == nil {
 				if _, ok := allowedEngineURL(settings.EngineURL); ok {
 					status.Configured = true
@@ -211,6 +220,21 @@ func (a *App) acquireFallback(ctx context.Context, execution *scheduler.Executio
 			outcomes = append(outcomes, downloadpolicy.Outcome{Source: "playlist", Class: downloadpolicy.ClassImport})
 			notes = append(notes, fmt.Sprintf("playlist 已读取 %d 首歌单曲目", len(rows)))
 		default:
+			// NetEase is built in: with a saved cookie the client below does
+			// the search and the lossless download itself, no engine needed.
+			if step.Name == "netease" {
+				if path, note, class, handled := a.tryNeteaseStream(ctx, plan); handled {
+					outcomes = append(outcomes, downloadpolicy.Outcome{Source: step.Name, Class: class})
+					notes = append(notes, note)
+					if path != "" {
+						validated = path
+					}
+					if validated != "" {
+						break
+					}
+					continue
+				}
+			}
 			// Without a configured engine the note stays "未接入". A saved
 			// file is a download only after the FLAC check inside
 			// tryConfiguredStream.

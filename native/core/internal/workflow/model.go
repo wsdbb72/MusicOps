@@ -8,6 +8,7 @@ import (
 	"encoding/hex"
 	"regexp"
 	"sort"
+	"strings"
 
 	"github.com/wsdbb72/MusicOps/native/core/internal/dataengine"
 	"github.com/wsdbb72/MusicOps/native/core/internal/searchdecision"
@@ -203,6 +204,26 @@ type Inspection struct {
 }
 
 func validID(id string) bool { return idPattern.MatchString(id) }
+
+// ValidID reports whether a string is a legal job, batch or evidence id. It
+// exists so the HTTP layer can name the offending field instead of turning a
+// malformed request into a bare 409 from the repository (P1-2).
+func ValidID(id string) bool { return validID(id) }
+
+// ValidateEvidenceInput checks one caller-supplied evidence row without
+// writing it: the id, kind and source must be legal and an identity claim must
+// carry a verified tracklist from a catalogue/api/website source. The
+// repository runs the same check again on commit; this is for the error
+// message, not a substitute for it.
+func ValidateEvidenceInput(in EvidenceInput) error {
+	item := Evidence{
+		ID: in.ID, JobID: "placeholder", Kind: in.Kind, Source: in.Source, SubjectID: in.SubjectID,
+		AliasLanguage: in.AliasLanguage, IdentityConfirmed: in.IdentityConfirmed,
+		TracklistVerified: in.TracklistVerified, ProductionVerified: in.ProductionVerified,
+		PayloadHash: strings.Repeat("0", 64),
+	}
+	return validateEvidence(item)
+}
 
 func digestBytes(value []byte) string {
 	sum := sha256.Sum256(value)

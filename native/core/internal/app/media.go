@@ -249,12 +249,25 @@ func wavTagView(tags wavflac.Tags) map[string]any {
 	}
 }
 
+// tagView is the API view of one file's tags. composer and discnumber have no
+// named field on Tags, so they come from Raw: the completion writes them and
+// the page must be able to show what was written.
 func tagView(tags *flactags.Tags) map[string]any {
 	return map[string]any{
 		"title": tags.Title, "artist": tags.Artists, "album": tags.Album,
 		"albumartist": tags.AlbumArtist, "tracknumber": tags.TrackNumber,
-		"date": tags.Date, "genre": tags.Genre, "lyrics": tags.Lyrics, "raw": tags.Raw,
+		"discnumber": firstTagValue(tags.Raw, "DISCNUMBER"),
+		"date":       tags.Date, "genre": tags.Genre,
+		"composer": firstTagValue(tags.Raw, "COMPOSER"),
+		"lyrics":   tags.Lyrics, "raw": tags.Raw,
 	}
+}
+
+func firstTagValue(raw map[string][]string, key string) string {
+	if values := raw[key]; len(values) > 0 {
+		return values[0]
+	}
+	return ""
 }
 
 func streamInfoView(info flactags.StreamInfo) map[string]any {

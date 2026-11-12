@@ -88,12 +88,30 @@ type catalogSourceStatus struct {
 }
 
 type catalogReleaseView struct {
-	ReleaseID  string   `json:"release_id"`
-	Title      string   `json:"title"`
-	Date       string   `json:"date,omitempty"`
-	Artists    []string `json:"artists"`
-	TrackCount int      `json:"track_count"`
-	Score      int      `json:"score"`
+	ReleaseID   string   `json:"release_id"`
+	Title       string   `json:"title"`
+	Date        string   `json:"date,omitempty"`
+	Artists     []string `json:"artists"`
+	AlbumArtist string   `json:"album_artist,omitempty"`
+	// Genres are the catalogue's own genre tags, most-voted first. Some
+	// releases only tag the release group, so the lookup falls back to it.
+	// An empty list is a real answer: the catalogue has no genre for this
+	// release, and no genre must be invented.
+	Genres     []string              `json:"genres,omitempty"`
+	Tracks     []catalogReleaseTrack `json:"tracks,omitempty"`
+	TrackCount int                   `json:"track_count"`
+	Score      int                   `json:"score"`
+}
+
+// catalogReleaseTrack is the disc/track position and title of one catalogue
+// track. The metadata completion writes these into TRACKNUMBER/DISCNUMBER, so
+// they come from the catalogue row, not from the local file name.
+type catalogReleaseTrack struct {
+	Disc     int      `json:"disc"`
+	Position int      `json:"position"`
+	Title    string   `json:"title"`
+	Artists  []string `json:"artists"`
+	Duration float64  `json:"duration,omitempty"`
 }
 
 type catalogTrackResult struct {
@@ -226,7 +244,18 @@ func identifyCatalogLookup(client *musicbrainz.Client, engine *dataengine.Engine
 		resp.LookupError = lookupErr.Error()
 	}
 	if detail != nil {
-		resp.MusicBrainz = &catalogReleaseView{ReleaseID: "mbid:" + detail.MBID, Title: detail.Title, Date: detail.Date, Artists: detail.Artists, TrackCount: len(detail.Tracks)}
+		view := &catalogReleaseView{
+			ReleaseID: "mbid:" + detail.MBID, Title: detail.Title, Date: detail.Date,
+			Artists: detail.Artists, AlbumArtist: strings.Join(detail.Artists, " / "),
+			Genres: detail.Genres, TrackCount: len(detail.Tracks),
+		}
+		for _, track := range detail.Tracks {
+			view.Tracks = append(view.Tracks, catalogReleaseTrack{
+				Disc: track.Disc, Position: track.Position, Title: track.Title,
+				Artists: track.Artists, Duration: track.DurationSec,
+			})
+		}
+		resp.MusicBrainz = view
 	} else if searchTop != nil {
 		resp.MusicBrainz = &catalogReleaseView{ReleaseID: "mbid:" + searchTop.MBID, Title: searchTop.Title, Date: searchTop.Date, Artists: searchTop.Artists, TrackCount: searchTop.TrackCount, Score: searchTop.Score}
 	}
@@ -290,9 +319,27 @@ func catalogCleanArtists(artists []string) []string {
 // conflict/unresolved reason instead of hiding the lookup. When every
 // detail fetch fails, lookupErr is returned alongside a nil detail and the
 // caller turns it into a failed observation.
+// fetchReleaseWithGenres reads one release and, when the release itself has no
+// genre tags, the genres of its release group. MusicBrainz commonly tags the
+// group only, and a completion that writes no GENRE is the bug this exists to
+// close. The fallback never fails the lookup: an untagged group is reported as
+// an empty list.
+func fetchReleaseWithGenres(client *musicbrainz.Client, mbid string) (musicbrainz.ReleaseDetail, error) {
+	detail, err := client.GetRelease(mbid)
+	if err != nil {
+		return detail, err
+	}
+	if len(detail.Genres) == 0 && detail.ReleaseGroupID != "" {
+		if genres, genreErr := client.GetReleaseGroupGenres(detail.ReleaseGroupID); genreErr == nil && len(genres) > 0 {
+			detail.Genres = genres
+		}
+	}
+	return detail, nil
+}
+
 func catalogLookup(client *musicbrainz.Client, req catalogIdentifyRequest, artist, album string) (detail, fallback *musicbrainz.ReleaseDetail, searchTop *musicbrainz.Release, lookupErr error, err error) {
 	if strings.TrimSpace(req.MBID) != "" {
-		got, fetchErr := client.GetRelease(req.MBID)
+		got, fetchErr := fetchReleaseWithGenres(client, req.MBID)
 		if fetchErr != nil {
 			if errors.Is(fetchErr, musicbrainz.ErrInvalidMBID) {
 				return nil, nil, nil, nil, fetchErr
@@ -314,7 +361,7 @@ func catalogLookup(client *musicbrainz.Client, req catalogIdentifyRequest, artis
 		if i >= catalogMaxCandidates {
 			break
 		}
-		got, fetchErr := client.GetRelease(candidate.MBID)
+		got, fetchErr := fetchReleaseWithGenres(client, candidate.MBID)
 		if fetchErr != nil {
 			lookupErr = fetchErr
 			continue

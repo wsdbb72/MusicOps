@@ -6,6 +6,7 @@ import (
 	"net/url"
 	"sort"
 	"strconv"
+	"strings"
 )
 
 // Release is one row of a MusicBrainz release search (/ws/2/release/).
@@ -47,6 +48,11 @@ type ReleaseDetail struct {
 	Country           string
 	Status            string
 	Artists           []string
+	ReleaseGroupID    string
+	// Genres are the release-level genre names, most-voted first. They are
+	// only what the service returned: an empty list means "not tagged on
+	// MusicBrainz", never a guess.
+	Genres            []string
 	Tracks            []DetailTrack
 	TracklistComplete bool
 }
@@ -144,7 +150,11 @@ type detailResponse struct {
 	Country      string          `json:"country"`
 	Status       string          `json:"status"`
 	ArtistCredit json.RawMessage `json:"artist-credit"`
-	Media        []struct {
+	ReleaseGroup *struct {
+		ID string `json:"id"`
+	} `json:"release-group"`
+	Genres []genreRow `json:"genres"`
+	Media  []struct {
 		Position   int              `json:"position"`
 		TrackCount int              `json:"track-count"`
 		Tracks     []detailTrackRow `json:"tracks"`
@@ -159,7 +169,9 @@ func (c *Client) GetRelease(mbid string) (ReleaseDetail, error) {
 	if err != nil {
 		return ReleaseDetail{}, err
 	}
-	params := url.Values{"inc": {"artists+recordings"}}
+	// genres is part of the same lookup: a separate request would double the
+	// rate-limit cost of every completion for one field.
+	params := url.Values{"inc": {"artists+recordings+genres"}}
 	body, err := c.get("/ws/2/release/"+normalised, params)
 	if err != nil {
 		return ReleaseDetail{}, err
@@ -181,6 +193,10 @@ func (c *Client) GetRelease(mbid string) (ReleaseDetail, error) {
 		Country: payload.Country,
 		Status:  payload.Status,
 		Artists: parseArtistCredit(payload.ArtistCredit),
+		Genres:  genreNames(payload.Genres),
+	}
+	if payload.ReleaseGroup != nil {
+		detail.ReleaseGroupID, _ = normalizeMBID(payload.ReleaseGroup.ID)
 	}
 	complete := true
 	for _, medium := range payload.Media {
@@ -221,4 +237,56 @@ func (c *Client) GetRelease(mbid string) (ReleaseDetail, error) {
 	}
 	detail.TracklistComplete = complete && len(detail.Tracks) > 0
 	return detail, nil
+}
+
+// genreRow is one entry of MusicBrainz' genres array.
+type genreRow struct {
+	Name  string `json:"name"`
+	Count int    `json:"count"`
+}
+
+// genreNames sorts genres by vote count and drops duplicates and blanks. The
+// service may return the same name twice with different counts.
+func genreNames(rows []genreRow) []string {
+	sorted := make([]genreRow, len(rows))
+	copy(sorted, rows)
+	sort.SliceStable(sorted, func(i, j int) bool { return sorted[i].Count > sorted[j].Count })
+	seen := map[string]bool{}
+	names := []string{}
+	for _, row := range sorted {
+		name := strings.TrimSpace(row.Name)
+		key := strings.ToLower(name)
+		if name == "" || seen[key] {
+			continue
+		}
+		seen[key] = true
+		names = append(names, name)
+	}
+	return names
+}
+
+// GetReleaseGroupGenres reads the genre tags of a release group. A release
+// often carries no genres of its own while its release group does, so the
+// caller uses this only as a fallback. A missing group id is an error; an
+// empty list is a valid "not tagged" answer.
+func (c *Client) GetReleaseGroupGenres(mbid string) ([]string, error) {
+	normalised, err := normalizeMBID(mbid)
+	if err != nil {
+		return nil, err
+	}
+	body, err := c.get("/ws/2/release-group/"+normalised, url.Values{"inc": {"genres"}})
+	if err != nil {
+		return nil, err
+	}
+	var payload struct {
+		ID     string     `json:"id"`
+		Genres []genreRow `json:"genres"`
+	}
+	if err := json.Unmarshal(body, &payload); err != nil {
+		return nil, &ParseError{Message: "release-group response is not valid JSON", Err: err}
+	}
+	if id, err := normalizeMBID(payload.ID); err != nil || id != normalised {
+		return nil, &ParseError{Message: "release-group response id does not match the requested MBID"}
+	}
+	return genreNames(payload.Genres), nil
 }

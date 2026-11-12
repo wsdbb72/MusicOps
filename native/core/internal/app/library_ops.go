@@ -229,6 +229,12 @@ func (a *App) completeMetadata(w http.ResponseWriter, r *http.Request) {
 		LyricsBaseURL  string `json:"lyrics_base_url"`
 		CoverBaseURL   string `json:"cover_base_url"`
 		CoverMode      string `json:"cover_mode"`
+		// Overwrite lets the caller replace a field whose current value
+		// differs from the catalogue. Without it a difference is reported as
+		// a conflict and the curated value stays (F10: 冲突默认不覆盖).
+		// Genre follows the same rule, so a file that already says
+		// "Chinese Rock" is not silently rewritten to "Rock".
+		Overwrite bool `json:"overwrite"`
 	}
 	if err := decode(r, &body); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "code": "INVALID_REQUEST"})
@@ -244,6 +250,35 @@ func (a *App) completeMetadata(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "code": "INVALID_REQUEST"})
 		return
 	}
+	// The file supplies what the caller left empty and the real duration the
+	// catalogue comparison needs. A hardcoded duration made the 3-second
+	// match fail for every real track (P1-15).
+	current, err := flactags.ReadFile(path)
+	if err != nil {
+		writeJSON(w, http.StatusUnprocessableEntity, map[string]any{"ok": false, "code": "TAG_READ_FAILED", "written": false, "error": err.Error()})
+		return
+	}
+	duration, ok := flacDuration(current.StreamInfo)
+	if !ok {
+		writeJSON(w, http.StatusUnprocessableEntity, map[string]any{"ok": false, "code": "AUDIO_UNREADABLE", "written": false, "note": "读不到音频时长，无法与目录核对；文件没有改。"})
+		return
+	}
+	artist := strings.TrimSpace(body.Artist)
+	if artist == "" {
+		artist = strings.TrimSpace(firstNonEmpty(current.Artist, strings.Join(current.Artists, "")))
+	}
+	album := strings.TrimSpace(body.Album)
+	if album == "" {
+		album = strings.TrimSpace(current.Album)
+	}
+	title := strings.TrimSpace(body.Title)
+	if title == "" {
+		title = strings.TrimSpace(current.Title)
+	}
+	if artist == "" || album == "" || title == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "code": "INVALID_REQUEST", "written": false, "error": "艺人、专辑、曲名至少要从文件标签或请求里得到一项"})
+		return
+	}
 	client := musicbrainz.NewClient()
 	if strings.TrimSpace(body.CatalogBaseURL) != "" {
 		if !loopbackURL(body.CatalogBaseURL) {
@@ -252,10 +287,9 @@ func (a *App) completeMetadata(w http.ResponseWriter, r *http.Request) {
 		}
 		client.BaseURL = body.CatalogBaseURL
 	}
-	duration := 200.0
 	lookup, err := identifyCatalogLookup(client, a.engine, catalogIdentifyRequest{
-		Artist: body.Artist, Album: body.Album, Title: body.Title,
-		Tracks: []catalogTrackRequest{{Title: body.Title, Artists: []string{body.Artist}, Duration: &duration}},
+		Artist: artist, Album: album, Title: title,
+		Tracks: []catalogTrackRequest{{Title: title, Artists: []string{artist}, Duration: &duration}},
 	}, catalogBudget, catalogTTL)
 	if err != nil {
 		_ = os.WriteFile(path, before, 0o600)
@@ -272,34 +306,61 @@ func (a *App) completeMetadata(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "written": false, "note": "目录没有确认这首曲目，标签和文件都没有改。"})
 		return
 	}
-	lyrics, cover, err := a.fetchArtwork(body.LyricsBaseURL, body.CoverBaseURL, body.Artist, body.Album, body.Title)
+	view := lookup.MusicBrainz
+	if view == nil {
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "written": false, "note": "目录只返回了检索摘要，没有可写的发行详情；标签和文件都没有改。"})
+		return
+	}
+	track, found := matchCatalogTrack(view, title, duration)
+	if !found {
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "written": false, "note": "目录确认了发行，但没有找到对应曲目；标签和文件都没有改。"})
+		return
+	}
+	updates, completion := planTagWrite(current, desiredTags(view, track), body.Overwrite)
+	lyrics, cover, err := a.fetchArtwork(body.LyricsBaseURL, body.CoverBaseURL, artist, album, title)
 	if err != nil {
 		writeJSON(w, http.StatusBadGateway, map[string]any{"ok": false, "code": "ARTWORK_UNAVAILABLE", "written": false, "note": "歌词或封面没有读到，文件没有改。"})
 		return
 	}
-	updates := map[string][]string{"ARTIST": {body.Artist}, "ALBUM": {body.Album}, "TITLE": {body.Title}}
 	if lyrics != "" {
-		updates["LYRICS"] = []string{lyrics}
+		if len(current.Raw["LYRICS"]) == 0 || body.Overwrite {
+			updates["LYRICS"] = []string{lyrics}
+			completion.Written = append(completion.Written, "lyrics")
+		} else {
+			completion.Kept = append(completion.Kept, tagConflict{Field: "lyrics", Current: "已有歌词", Catalog: "目录歌词"})
+		}
+	}
+	// Nothing to write and no cover to add: leave the file byte-identical.
+	if len(updates) == 0 && cover == nil {
+		writeJSON(w, http.StatusOK, map[string]any{
+			"ok": true, "written": false, "path": path,
+			"written_fields": []string{}, "kept_fields": completion.Kept, "unchanged_fields": completion.Unchanged,
+			"catalog": catalogTagSummary(view), "note": "标签已经和目录一致，没有改动文件。",
+		})
+		return
 	}
 	backup, err := backupFile(path)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "code": "TAG_UNAVAILABLE", "written": false})
 		return
 	}
-	if err = writeFLACTags(path, updates); err != nil {
-		_ = os.WriteFile(path, before, 0o600)
-		_ = os.Remove(backup)
-		writeJSON(w, http.StatusUnprocessableEntity, map[string]any{"ok": false, "code": "TAG_WRITE_FAILED", "written": false, "restored": true})
-		return
+	// A cover-only completion must not rewrite the comment block.
+	if len(updates) > 0 {
+		if err = writeFLACTags(path, updates); err != nil {
+			_ = os.WriteFile(path, before, 0o600)
+			_ = os.Remove(backup)
+			writeJSON(w, http.StatusUnprocessableEntity, map[string]any{"ok": false, "code": "TAG_WRITE_FAILED", "written": false, "restored": true})
+			return
+		}
 	}
 	settings, _ := a.loadLyricsSettings()
 	mode := coverWriteMode(body.CoverMode, settings)
 	sidecar := strings.TrimSuffix(path, filepath.Ext(path)) + ".jpg"
 	if cover != nil {
-		current, readErr := os.ReadFile(path)
+		updated, readErr := os.ReadFile(path)
 		var embedded []byte
 		if readErr == nil {
-			embedded, err = flactags.EmbedFrontCover(current, cover)
+			embedded, err = flactags.EmbedFrontCover(updated, cover)
 		}
 		if readErr != nil || err != nil || os.WriteFile(path, embedded, 0o600) != nil || !bytes.Equal(flactags.FrontCover(embedded), cover) {
 			restoreBackup(path, backup)
@@ -321,21 +382,222 @@ func (a *App) completeMetadata(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	_ = os.Remove(backup)
-	note := "已一次写入标签"
-	if lyrics != "" {
-		note += "、歌词"
+	written := []string{}
+	if len(completion.Written) > 0 {
+		written = append(written, "标签 "+strings.Join(completion.Written, "、"))
 	}
 	if cover != nil {
-		note += "、内嵌封面"
+		written = append(written, "内嵌封面")
 		if mode == "sidecar" {
-			note += "和同名 jpg"
+			written = append(written, "同名 jpg")
+		}
+	}
+	note := "已写入 " + strings.Join(written, "、")
+	if len(completion.Kept) > 0 {
+		note += "；有 " + strconv.Itoa(len(completion.Kept)) + " 个字段与目录不同，已保留原值（勾选覆盖后重试）"
+	}
+	for _, kept := range completion.Kept {
+		if kept.Field == "genre" {
+			note += "。分类保留为「" + kept.Current + "」，目录建议「" + kept.Catalog + "」"
 		}
 	}
 	note += "。写之前有备份，失败会恢复原文件。这不是下载。"
 	writeJSON(w, http.StatusOK, map[string]any{
 		"ok": true, "written": true, "path": path, "lyrics": lyrics != "", "cover": cover != nil,
-		"cover_mode": mode, "embedded_cover": cover != nil, "note": note,
+		"cover_mode": mode, "embedded_cover": cover != nil,
+		"written_fields": completion.Written, "kept_fields": completion.Kept, "unchanged_fields": completion.Unchanged,
+		"catalog": catalogTagSummary(view), "note": note,
 	})
+}
+
+// flacDuration derives the exact duration from STREAMINFO. FLAC always carries
+// both fields, so a zero means the file is not a usable FLAC.
+func flacDuration(info flactags.StreamInfo) (float64, bool) {
+	if info.SampleRate == 0 || info.TotalSamples == 0 {
+		return 0, false
+	}
+	return float64(info.TotalSamples) / float64(info.SampleRate), true
+}
+
+// matchCatalogTrack finds the catalogue row the local file was matched to. The
+// identity check already proved a title+duration match exists; this picks the
+// closest duration so a release with two same-titled recordings writes the
+// right track number.
+func matchCatalogTrack(view *catalogReleaseView, title string, duration float64) (catalogReleaseTrack, bool) {
+	want := foldTagText(title)
+	pool := []catalogReleaseTrack{}
+	for _, track := range view.Tracks {
+		if foldTagText(track.Title) == want {
+			pool = append(pool, track)
+		}
+	}
+	if len(pool) == 0 {
+		for _, track := range view.Tracks {
+			if track.Duration > 0 && absFloat(track.Duration-duration) <= 3 {
+				pool = append(pool, track)
+			}
+		}
+	}
+	if len(pool) == 0 {
+		return catalogReleaseTrack{}, false
+	}
+	best := pool[0]
+	for _, track := range pool[1:] {
+		if track.Duration > 0 && absFloat(track.Duration-duration) < absFloat(best.Duration-duration) {
+			best = track
+		}
+	}
+	return best, true
+}
+
+func absFloat(value float64) float64 {
+	if value < 0 {
+		return -value
+	}
+	return value
+}
+
+// desiredTags is the catalogue answer for one file. Only fields the catalogue
+// actually carries are included: an absent value never clears a tag.
+func desiredTags(view *catalogReleaseView, track catalogReleaseTrack) map[string][]string {
+	desired := map[string][]string{}
+	if view.Title != "" {
+		desired["ALBUM"] = []string{view.Title}
+	}
+	if view.AlbumArtist != "" {
+		desired["ALBUMARTIST"] = []string{view.AlbumArtist}
+	}
+	if view.Date != "" {
+		desired["DATE"] = []string{view.Date}
+	}
+	if len(view.Genres) > 0 {
+		// One classification tag: the most-voted genre. The full list is
+		// still reported in the response so a caller can choose another.
+		desired["GENRE"] = []string{view.Genres[0]}
+	}
+	if track.Title != "" {
+		desired["TITLE"] = []string{track.Title}
+	}
+	if len(track.Artists) > 0 {
+		desired["ARTIST"] = append([]string(nil), track.Artists...)
+	}
+	if track.Position > 0 {
+		desired["TRACKNUMBER"] = []string{strconv.Itoa(track.Position)}
+	}
+	if track.Disc > 0 && (track.Disc > 1 || multiDisc(view)) {
+		desired["DISCNUMBER"] = []string{strconv.Itoa(track.Disc)}
+	}
+	return desired
+}
+
+func multiDisc(view *catalogReleaseView) bool {
+	maxDisc := 0
+	for _, track := range view.Tracks {
+		if track.Disc > maxDisc {
+			maxDisc = track.Disc
+		}
+	}
+	return maxDisc > 1
+}
+
+// tagConflict is one field the catalogue disagrees with. It is reported, not
+// silently overwritten.
+type tagConflict struct {
+	Field   string `json:"field"`
+	Current string `json:"current"`
+	Catalog string `json:"catalog"`
+}
+
+type metadataCompletion struct {
+	Written   []string
+	Kept      []tagConflict
+	Unchanged []string
+}
+
+// planTagWrite compares every desired field with the file current value.
+// Missing -> write; equal -> unchanged; different -> kept unless the caller
+// asked to overwrite. A field the catalogue does not carry is absent from
+// desired and stays untouched, so a write never deletes a tag.
+func planTagWrite(current *flactags.Tags, desired map[string][]string, overwrite bool) (map[string][]string, metadataCompletion) {
+	updates := map[string][]string{}
+	result := metadataCompletion{Written: []string{}, Kept: []tagConflict{}, Unchanged: []string{}}
+	keys := make([]string, 0, len(desired))
+	for key := range desired {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	for _, key := range keys {
+		want := desired[key]
+		have := current.Raw[key]
+		switch {
+		case len(have) == 0:
+			updates[key] = want
+			result.Written = append(result.Written, strings.ToLower(key))
+		case sameTagValue(key, have, want):
+			result.Unchanged = append(result.Unchanged, strings.ToLower(key))
+		case overwrite:
+			updates[key] = want
+			result.Written = append(result.Written, strings.ToLower(key))
+		default:
+			result.Kept = append(result.Kept, tagConflict{Field: strings.ToLower(key), Current: strings.Join(have, " / "), Catalog: strings.Join(want, " / ")})
+		}
+	}
+	return updates, result
+}
+
+// sameTagValue compares one field. A track/disc "3/12" equals "3"; text
+// comparison ignores case, fullwidth forms and surrounding spaces.
+func sameTagValue(key string, have, want []string) bool {
+	if key == "TRACKNUMBER" || key == "DISCNUMBER" {
+		if len(have) != 1 || len(want) != 1 {
+			return false
+		}
+		number := leadingNumber(want[0])
+		return number > 0 && leadingNumber(have[0]) == number
+	}
+	if len(have) != len(want) {
+		return false
+	}
+	for i := range have {
+		if foldTagText(have[i]) != foldTagText(want[i]) {
+			return false
+		}
+	}
+	return true
+}
+
+func leadingNumber(value string) int {
+	if i := strings.IndexByte(value, '/'); i >= 0 {
+		value = value[:i]
+	}
+	number, err := strconv.Atoi(strings.TrimSpace(value))
+	if err != nil {
+		return 0
+	}
+	return number
+}
+
+// foldTagText is the comparison form for tag text: fullwidth ASCII folded to
+// ASCII, case folded, whitespace collapsed.
+func foldTagText(value string) string {
+	var b strings.Builder
+	for _, r := range value {
+		if r >= 0xFF01 && r <= 0xFF5E {
+			r -= 0xFEE0
+		}
+		if r == 0x3000 {
+			r = ' '
+		}
+		b.WriteRune(r)
+	}
+	return strings.ToLower(strings.Join(strings.Fields(b.String()), " "))
+}
+
+func catalogTagSummary(view *catalogReleaseView) map[string]any {
+	return map[string]any{
+		"release_id": view.ReleaseID, "title": view.Title, "album_artist": view.AlbumArtist,
+		"date": view.Date, "genres": view.Genres,
+	}
 }
 
 func coverWriteMode(requested string, settings lyricsSettings) string {

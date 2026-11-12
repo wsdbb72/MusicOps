@@ -410,6 +410,29 @@ func (a *App) startSearch(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "code": "IDENTITY_EVIDENCE_REJECTED"})
 		return
 	}
+	// Name the offending field instead of letting the repository turn a
+	// malformed request into a bare 409 (P1-2). The page never sent a batch
+	// id, so it defaulted to empty and every search from the UI was refused;
+	// the job id is a stable grouping for a single search.
+	if strings.TrimSpace(body.BatchID) == "" {
+		body.BatchID = body.JobID
+	}
+	if !workflow.ValidID(body.JobID) {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "code": "INVALID_REQUEST", "field": "job_id", "error": "job_id 缺失或格式不合法"})
+		return
+	}
+	if !workflow.ValidID(body.BatchID) {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "code": "INVALID_REQUEST", "field": "batch_id", "error": "batch_id 格式不合法"})
+		return
+	}
+	if err := workflow.ValidateEvidenceInput(workflow.EvidenceInput{
+		ID: body.Identity.ID, Kind: body.Identity.Kind, Source: body.Identity.Source, SubjectID: body.Identity.SubjectID,
+		TracklistVerified: body.Identity.TracklistVerified, IdentityConfirmed: body.Identity.IdentityConfirmed,
+		Payload: []byte(body.Identity.Payload),
+	}); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "code": "INVALID_REQUEST", "field": "identity", "error": "身份证据不完整：evidence_id、kind、source 必填且格式合法"})
+		return
+	}
 	// The search page used to offer "补全" while the entrance always started at
 	// "identifying", which planStart refuses for scene complete. The repair
 	// executor is not registered either, so the honest answer is a refusal

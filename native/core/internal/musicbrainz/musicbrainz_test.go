@@ -64,6 +64,8 @@ const searchJSON = `{"releases": [
 
 const detailJSON = `{"id": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee", "title": "First Album", "date": "2019-01-02", "country": "JP", "status": "Official",
   "artist-credit": [{"artist": {"name": "Some Artist"}, "name": "Some Artist"}],
+  "release-group": {"id": "bbbbbbbb-cccc-dddd-eeee-ffffffffffff"},
+  "genres": [{"name": "Ambient", "count": 3}, {"name": "Electronic", "count": 1}, {"name": "ambient", "count": 1}],
   "media": [{"position": 1, "track-count": 2, "tracks": [
     {"id": "t1", "title": "Opening", "position": 1, "length": 200000,
      "artist-credit": [{"artist": {"name": "Some Artist"}, "name": "Some Artist"}],
@@ -228,14 +230,20 @@ func TestGetReleaseMapping(t *testing.T) {
 	if gotPath != "/ws/2/release/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee" {
 		t.Errorf("path = %q, want lower-cased MBID path", gotPath)
 	}
-	if gotInc != "artists+recordings" {
-		t.Errorf("inc = %q, want artists+recordings", gotInc)
+	if gotInc != "artists+recordings+genres" {
+		t.Errorf("inc = %q, want artists+recordings+genres", gotInc)
 	}
 	if detail.Title != "First Album" || detail.Date != "2019-01-02" || detail.Country != "JP" {
 		t.Errorf("detail = %+v", detail)
 	}
 	if !detail.TracklistComplete {
 		t.Error("TracklistComplete = false, want true for a full tracklist")
+	}
+	if got := strings.Join(detail.Genres, ","); got != "Ambient,Electronic" {
+		t.Errorf("Genres = %q, want the most-voted names without duplicates", got)
+	}
+	if detail.ReleaseGroupID != "bbbbbbbb-cccc-dddd-eeee-ffffffffffff" {
+		t.Errorf("ReleaseGroupID = %q", detail.ReleaseGroupID)
 	}
 	if len(detail.Tracks) != 2 {
 		t.Fatalf("got %d tracks, want 2", len(detail.Tracks))

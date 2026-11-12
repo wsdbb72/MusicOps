@@ -261,7 +261,7 @@ const appJS = `(function () {
       identity_confirmed: confirmed,
       payload: document.getElementById("search-identity-payload").value.trim()
     };
-    var body = {job_id: jobID, scene: scene, query: query, expected_title: title, expected_artist: document.getElementById("search-artist").value.trim(), source_track_ids: tracks, identity: identity, cookie: document.getElementById("search-cookie").value, synthetic: false};
+    var body = {job_id: jobID, batch_id: jobID, scene: scene, query: query, expected_title: title, expected_artist: document.getElementById("search-artist").value.trim(), source_track_ids: tracks, identity: identity, cookie: document.getElementById("search-cookie").value, synthetic: false};
     var playlistID = document.getElementById("search-playlist").value;
     if (playlistID) body.playlist_id = playlistID;
     if (sites.length) body.enabled_sites = sites;
@@ -1038,13 +1038,14 @@ const appJS = `(function () {
       '<div id="library-file"></div>' +
       '<p><button type="button" id="fill-gaps">确认所选并补缺</button> <button type="button" id="upgrade-album">确认所选并升级</button> <button type="button" id="expand-album">确认所选并扩成整专</button></p>' +
       '<p id="library-ops-result" class="meta"></p></article>' +
-      '<article><h2>标签、封面和歌词</h2><p class="meta">目录确认后，标签、歌词和封面同一次写入。封面写入 FLAC 内嵌图片；按设置可以同时保留同名 jpg。写之前会备份，任何一步失败都恢复原文件。目录、歌词和封面地址只接受本机。</p>' +
+      '<article><h2>标签、封面和歌词</h2><p class="meta">目录确认后，曲名、艺人、专辑艺人、专辑、日期、音轨号、碟号和分类（GENRE）按目录补写，歌词和封面同一次写入。文件里已有且与目录不同的值默认保留，勾选覆盖才会改。封面写入 FLAC 内嵌图片；按设置可以同时保留同名 jpg。写之前会备份，任何一步失败都恢复原文件。目录、歌词和封面地址只接受本机。</p>' +
       '<label>文件路径<input type="text" id="meta-path" placeholder="库内 .flac"></label>' +
       '<label>艺人<input type="text" id="meta-artist"></label><label>专辑<input type="text" id="meta-album"></label><label>曲名<input type="text" id="meta-title"></label>' +
       '<label>目录地址<input type="text" id="meta-catalog" placeholder="本机 MusicBrainz"></label>' +
       '<label>歌词地址<input type="text" id="meta-lyrics" placeholder="留空则不写歌词"></label>' +
       '<label>封面地址<input type="text" id="meta-cover" placeholder="留空则不写封面"></label>' +
       '<label>封面写入<select id="meta-cover-mode"><option value="sidecar">内嵌并保留同名 jpg</option><option value="embedded">只写入 FLAC 内嵌图片</option></select></label>' +
+      '<label><input type="checkbox" id="meta-overwrite"> 覆盖与目录不同的字段（含分类）</label>' +
       '<p><button type="button" id="complete-metadata">补齐标签封面歌词</button></p><p id="metadata-result" class="meta"></p></article>' +
       '<article><h2>合辑</h2><p class="meta">预览不会移动文件。合并只把名称里带“合辑”或 Various Artists 的文件夹移进音乐库的 Compilations。</p>' +
       '<p><button type="button" id="preview-compilations">预览合辑</button> <button type="button" id="merge-compilations">合并合辑</button></p><p id="compilation-result" class="meta"></p></article>' +
@@ -1171,7 +1172,8 @@ const appJS = `(function () {
       catalog_base_url: document.getElementById("meta-catalog").value.trim(),
       lyrics_base_url: document.getElementById("meta-lyrics").value.trim(),
       cover_base_url: document.getElementById("meta-cover").value.trim(),
-      cover_mode: document.getElementById("meta-cover-mode").value
+      cover_mode: document.getElementById("meta-cover-mode").value,
+      overwrite: document.getElementById("meta-overwrite").checked
     }, "metadata-result");
   }
   async function libraryAction(path, body, targetID) {

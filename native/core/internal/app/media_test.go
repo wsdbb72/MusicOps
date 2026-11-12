@@ -119,6 +119,7 @@ func mediaHandler(application *App) http.Handler {
 	mux.HandleFunc("POST /v1/library/tags", application.saveLibraryTags)
 	mux.HandleFunc("GET /v1/library/lyrics", application.libraryLyrics)
 	mux.HandleFunc("POST /v1/library/lyrics", application.saveLibraryLyrics)
+	mux.HandleFunc("POST /v1/library/metadata", application.completeMetadata)
 	mux.HandleFunc("GET /v1/library/duplicates", application.duplicateScan)
 	mux.HandleFunc("POST /v1/library/duplicates/merge", application.duplicateMerge)
 	mux.HandleFunc("POST /v1/library/duplicates/restore", application.duplicateRestore)
@@ -185,7 +186,15 @@ func syntheticFLAC(t *testing.T, withPicture bool) []byte {
 		buf.Write([]byte{header, byte(len(data) >> 16), byte(len(data) >> 8), byte(len(data))})
 		buf.Write(data)
 	}
-	writeBlock(0, make([]byte, 34), false)
+	// A real STREAMINFO: 44100 Hz, 2 channels, 16 bit, exactly 200s. The
+	// metadata completion reads the duration from here, so an all-zero
+	// STREAMINFO would make every completion fail as unreadable.
+	info := make([]byte, 34)
+	binary.BigEndian.PutUint16(info[0:2], 4096)
+	binary.BigEndian.PutUint16(info[2:4], 4096)
+	packed := uint64(44100)<<44 | uint64(1)<<41 | uint64(15)<<36 | uint64(200*44100)
+	binary.BigEndian.PutUint64(info[10:18], packed)
+	writeBlock(0, info, false)
 	if withPicture {
 		writeBlock(6, []byte("PICTURE-MARKER-BYTES"), false)
 	}

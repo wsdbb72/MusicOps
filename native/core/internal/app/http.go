@@ -26,9 +26,13 @@ import (
 
 const page = `<!doctype html>
 <html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
 <title>MusicOps</title><link rel="stylesheet" href="/app.css"></head>
 <body>
-<header><p class="mark">MusicOps</p><h1>任务</h1></header>
+<a class="skip" href="#main">跳到主要内容</a>
+<div class="app">
+<header class="app-bar">
+<p class="mark">MusicOps <span>本地音乐流水线</span></p>
 <nav id="nav" aria-label="功能">
 <button type="button" data-view="tasks" aria-current="page">任务</button>
 <button type="button" data-view="queue">队列</button>
@@ -39,29 +43,32 @@ const page = `<!doctype html>
 <button type="button" data-view="library">库</button>
 <button type="button" data-view="logs">日志</button>
 </nav>
-<main>
-<p id="status" role="status">正在读取</p>
+</header>
+<main id="main" tabindex="-1">
+<div class="view-head"><h1>任务</h1></div>
+<p id="status" role="status" aria-live="polite">正在读取</p>
 <div id="list"></div>
 <section id="note" hidden></section>
-<section id="detail" hidden>
-<button type="button" id="back">返回列表</button>
+<section id="detail" hidden aria-labelledby="detail-title">
+<button type="button" id="back">← 返回列表</button>
 <h2 id="detail-title"></h2>
 <dl id="detail-fields"></dl>
-<p id="detail-actions">
+<div id="detail-actions">
 <button type="button" id="pause-job">暂停</button>
 <button type="button" id="resume-job">继续</button>
-<button type="button" id="cancel-job">取消</button>
+<button type="button" id="cancel-job" class="danger">取消</button>
 <button type="button" id="retry-job">重试</button>
-</p>
-<p id="torrent-actions" hidden>
+</div>
+<div id="torrent-actions" hidden>
 <button type="button" id="torrent-pause">暂停下载</button>
 <button type="button" id="torrent-resume">继续下载</button>
 <button type="button" id="torrent-recheck">重新校验</button>
-<button type="button" id="torrent-delete">删除种子（保留文件）</button>
-</p>
+<button type="button" id="torrent-delete" class="danger">删除种子（保留文件）</button>
+</div>
 <div id="review-box" class="review-box" hidden></div>
 </section>
 </main>
+</div>
 <script src="/app.js"></script>
 </body></html>`
 

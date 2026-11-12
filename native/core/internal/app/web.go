@@ -1,28 +1,5 @@
 package app
 
-const appCSS = `:root{color-scheme:light;--ink:#1c1915;--muted:#5e584f;--line:#e4ddd2;--paper:#f7f4ef;--card:#fff;--accent:#0f6e56;--review:#8a4b08;--queue:#1d4e89}
-*{box-sizing:border-box}body{margin:0;font:16px/1.5 "Segoe UI","PingFang SC","Noto Sans SC",sans-serif;color:var(--ink);background:var(--paper)}
-header,main{padding:1.25rem 1.5rem}header{border-bottom:1px solid var(--line)}
-h1,h2{font-size:1.35rem;font-weight:650;margin:.15rem 0}h2{font-size:1.1rem}.mark{margin:0;color:var(--accent);font-weight:700;letter-spacing:.04em}
-nav{display:flex;flex-wrap:wrap;gap:.75rem 1rem;align-items:center;padding:.75rem 1.5rem;border-bottom:1px solid var(--line);background:#fff;position:sticky;top:0}
-button{font:inherit;border:1px solid var(--line);background:#fff;color:var(--ink);border-radius:999px;padding:.4rem .85rem;cursor:pointer}
-button[aria-current="page"],button.primary{background:var(--accent);border-color:var(--accent);color:#fff}
-button:disabled{opacity:.55;cursor:not-allowed}
-.unavailable{display:inline-flex;align-items:center;gap:.4rem;color:var(--muted);font-size:.875rem}
-#status{color:var(--muted);min-height:1.5rem}#status.ok{color:var(--accent)}#status.fail{color:#a32020}#status.review{color:var(--review)}
-form label{display:block;margin:.6rem 0}form input[type="text"],form input[type="password"],form input[type="url"],form select,form textarea{width:100%;padding:.45rem .6rem;border:1px solid var(--line);border-radius:8px;font:inherit;background:#fff}form input[type="checkbox"]{width:auto}
-.batch{display:flex;flex-wrap:wrap;gap:.5rem;align-items:center;margin-bottom:.75rem}
-.review-box{border:1px solid var(--line);border-radius:14px;padding:1rem;background:#fff;margin-top:1rem}.review-box .candidate{display:block;margin:.4rem 0}.cards{display:grid;gap:.75rem}
-article{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:.9rem 1rem}
-article button{border-radius:10px;padding:0;border:0;background:transparent;text-align:left;width:100%}
-article h2{margin:0}.meta{display:flex;flex-wrap:wrap;gap:.4rem;margin:.45rem 0;color:var(--muted)}
-.pill{border-radius:999px;padding:.05rem .55rem;background:#efeae3;color:var(--ink)}
-.pill.review{background:#f8e7cf;color:var(--review)}.pill.queue{background:#e3eef8;color:var(--queue)}
-dl{display:grid;grid-template-columns:7rem 1fr;gap:.35rem .75rem;margin:1rem 0}dt{color:var(--muted)}dd{margin:0}
-#note{background:#fff;border:1px dashed var(--line);border-radius:14px;padding:1rem;color:var(--muted)}
-@media(max-width:720px){header{display:block}nav{overflow:auto}dl{grid-template-columns:1fr}}
-`
-
 const appJS = `(function () {
   var titles = {tasks: "任务", queue: "队列", review: "核对", search: "搜索", sites: "站点", settings: "设置", library: "库", logs: "日志"};
   var active = {identifying: true, searching: true, requesting: true, downloading: true, fallback: true, validating: true, publishing: true};
@@ -116,7 +93,7 @@ const appJS = `(function () {
     rows.forEach(function (job) {
       var checked = selectedJobs[job.job_id] ? " checked" : "";
       var box = (view === "tasks" || view === "queue") ? '<label><input type="checkbox" data-batch="' + escapeText(job.job_id) + '"' + checked + '> 批量</label>' : "";
-      html += '<article>' + box + '<button type="button" data-job="' + escapeText(job.job_id) + '"><h2>' + escapeText(job.label || "未命名") + '</h2><p class="meta">' + pill(job) + '</p><p>' + escapeText(job.headline || "") + "</p></button></article>";
+      html += '<article>' + box + '<button type="button" class="card-link" data-job="' + escapeText(job.job_id) + '"><h2>' + escapeText(job.label || "未命名") + '</h2><p class="meta">' + pill(job) + '</p><p>' + escapeText(job.headline || "") + "</p></button></article>";
     });
     if (view === "review" && jobsNext) html += '<p><button type="button" id="review-more">加载更多待核对</button></p>';
     list.innerHTML = html + "</div>";
@@ -1428,6 +1405,33 @@ const appJS = `(function () {
     document.getElementById("resume-job").hidden = terminal || needsReview || !job.paused;
     document.getElementById("cancel-job").hidden = terminal || needsReview || !!job.cancel_requested;
     document.getElementById("retry-job").hidden = job.stage !== "failed";
+    // The torrent itself can only be controlled while the job owns one. A
+    // failed download keeps delete: the row is still in the client and the
+    // operator may want it gone.
+    document.getElementById("torrent-actions").hidden = !(job.stage === "downloading" || job.stage === "failed");
+  }
+  // torrentControl talks to the client, not just to the workflow: pausing the
+  // job alone leaves the torrent running, and deleting keeps the files.
+  async function torrentControl(action) {
+    if (!currentJob || loading) return;
+    if (action === "delete" && !window.confirm("从 qBittorrent 移除这个种子吗？已下载的文件会保留。")) return;
+    setBusy(true);
+    setStatus("info", "正在处理种子");
+    try {
+      var response = await fetch("/v1/jobs/" + encodeURIComponent(currentJob.job_id) + "/download/control", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({action: action})});
+      var body = await response.json();
+      if (!response.ok || !body || !body.ok) {
+        setStatus("fail", (body && (body.error || body.code)) || "没有执行。");
+        return;
+      }
+      var done = {pause: "种子已暂停，文件保留。", resume: "种子已继续。", recheck: "已请求重新校验。", delete: "已从 qBittorrent 移除，文件保留。"};
+      setStatus("ok", done[action] || "已完成。");
+    } catch (err) {
+      setStatus("fail", "请求中断。");
+    } finally {
+      setBusy(false);
+    }
+    openJob(currentJob.job_id);
   }
   async function openReview(id) {
     var box = document.getElementById("review-box");
@@ -1718,6 +1722,10 @@ const appJS = `(function () {
   document.getElementById("resume-job").addEventListener("click", function () { controlJob("resume", ""); });
   document.getElementById("cancel-job").addEventListener("click", function () { controlJob("cancel", "取消后未开始的阶段不会继续，确定取消吗？"); });
   document.getElementById("retry-job").addEventListener("click", retryJob);
+  document.getElementById("torrent-pause").addEventListener("click", function () { torrentControl("pause"); });
+  document.getElementById("torrent-resume").addEventListener("click", function () { torrentControl("resume"); });
+  document.getElementById("torrent-recheck").addEventListener("click", function () { torrentControl("recheck"); });
+  document.getElementById("torrent-delete").addEventListener("click", function () { torrentControl("delete"); });
   load();
 })();
 `

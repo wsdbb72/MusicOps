@@ -256,8 +256,27 @@ func resolveInDir(dir, raw string) (string, error) {
 // insideDir reports whether path is inside root (or is root itself),
 // lexically. Both arguments must already be clean.
 func insideDir(root, path string) bool {
+	// Compare real paths on both sides. A lexical Rel is not enough: the
+	// same directory can be spelled with a symlinked ancestor (macOS /var)
+	// or a Windows 8.3 short name (RUNNER~1), and then a file that is inside
+	// incoming/ looks like it is outside it.
+	return insideResolved(canonicalPath(root), canonicalPath(path))
+}
+
+func insideResolved(root, path string) bool {
 	rel, err := filepath.Rel(root, path)
 	return err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
+}
+
+// canonicalPath is the real on-disk spelling of a path: EvalSymlinks resolves
+// symlinked ancestors and Windows short names. A path that does not exist (or
+// cannot be resolved) is only cleaned, so callers that validate a future
+// directory still work.
+func canonicalPath(path string) string {
+	if resolved, err := filepath.EvalSymlinks(path); err == nil && resolved != "" {
+		return resolved
+	}
+	return filepath.Clean(path)
 }
 
 // checkWAVPCM rejects anything that is not a PCM WAV: the Python

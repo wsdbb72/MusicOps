@@ -87,7 +87,7 @@ func TestNeteaseStreamKeepsLosslessAudio(t *testing.T) {
 	if err != nil || !strings.HasPrefix(string(body[:4]), "fLaC") {
 		t.Fatal(err)
 	}
-	if filepath.Dir(path) != filepath.Join(application.Dir, "incoming") {
+	if realPath(t, filepath.Dir(path)) != realPath(t, filepath.Join(application.Dir, "incoming")) {
 		t.Fatal(path)
 	}
 	tags := readTags(t, path)

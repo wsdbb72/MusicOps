@@ -73,7 +73,10 @@ func (a *App) saveGuards(doc guardDocument) error {
 // guardKey folds one album path for map lookups. Windows paths compare
 // case-insensitively, and users type them with whatever case Explorer showed.
 func guardKey(dir string) string {
-	return strings.ToLower(filepath.Clean(strings.TrimSpace(dir)))
+	// The same album can be handed in with a long or a short (8.3) spelling,
+	// from a release record or from the page. Resolve first so a lock saved
+	// one way is still found the other way.
+	return strings.ToLower(canonicalPath(strings.TrimSpace(dir)))
 }
 
 // guardFor returns the saved guard for one album directory.

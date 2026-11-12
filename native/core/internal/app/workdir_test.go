@@ -45,7 +45,7 @@ func TestWorkDirStagesOnTheConfiguredDisk(t *testing.T) {
 		t.Fatal(recorder.Code, recorder.Body.String())
 	}
 	placed, _ := decodeBody(t, recorder)["path"].(string)
-	if !strings.HasPrefix(placed, library) {
+	if !strings.HasPrefix(realPath(t, placed), realPath(t, library)) {
 		t.Fatal("the verified copy did not land in the library:", placed)
 	}
 	if _, err := os.Stat(placed); err != nil {

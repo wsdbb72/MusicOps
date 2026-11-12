@@ -222,6 +222,17 @@ func TestTokenFetchStaysUnreconciled(t *testing.T) {
 	}
 }
 
+// realPath resolves a path the way the handlers report it: Windows temp
+// directories can come back with an 8.3 short name (RUNNER~1), so comparing a
+// constructed path with a returned one needs both sides resolved.
+func realPath(t *testing.T, path string) string {
+	t.Helper()
+	if resolved, err := filepath.EvalSymlinks(path); err == nil && resolved != "" {
+		return resolved
+	}
+	return filepath.Clean(path)
+}
+
 func newApp(t *testing.T) *App {
 	t.Helper()
 	dir := t.TempDir()

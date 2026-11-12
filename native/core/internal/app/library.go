@@ -386,6 +386,15 @@ func (a *App) duplicateMerge(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	// Fill the keeper's empty fields from the duplicates before anything
+	// moves (Python duplicates.py parity): a loser often carries the genre or
+	// the date the keeper lost. A failure here refuses the merge with nothing
+	// moved yet.
+	filled, err := a.fillMissingTags(group)
+	if err != nil {
+		writeJSON(w, http.StatusUnprocessableEntity, map[string]any{"ok": false, "code": "MERGE_TAG_FAILED", "error": "补写标签失败，文件没有移动", "restored": true})
+		return
+	}
 	mergeSum := sha256.Sum256([]byte(body.GroupID + ":" + group.Keep.RequestID))
 	mergeID := "merge-" + hex.EncodeToString(mergeSum[:8])
 	quarantineRoot := filepath.Join(a.Dir, "quarantine", mergeID)
@@ -431,7 +440,80 @@ func (a *App) duplicateMerge(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "replayed": true, "merge_id": existing.MergeID, "group_id": existing.GroupID, "kept": existing.Keep, "quarantined": existing.Moved})
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "merge_id": receipt.MergeID, "group_id": receipt.GroupID, "kept": receipt.Keep, "quarantined": receipt.Moved})
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "merge_id": receipt.MergeID, "group_id": receipt.GroupID, "kept": receipt.Keep, "quarantined": receipt.Moved, "filled_fields": filled})
+}
+
+// fillableTagFields are the fields a duplicate may contribute when the keeper
+// has none. Title/artist/album/track stay out: those decide identity, not
+// metadata.
+var fillableTagFields = []string{"ALBUMARTIST", "DATE", "GENRE", "COMPOSER", "LYRICS"}
+
+// fillMissingTags copies a duplicate's tag into an empty keeper field when the
+// duplicates agree on exactly one value. It never overwrites: a curated value
+// wins, and a conflict is simply not filled. Only FLAC is edited.
+func (a *App) fillMissingTags(group *duplicateGroup) ([]string, error) {
+	if group.Keep == nil {
+		return nil, nil
+	}
+	keeperPath := a.libraryFilePath(group.Keep.LibraryDir, group.Keep.File)
+	if !strings.EqualFold(filepath.Ext(keeperPath), ".flac") {
+		return nil, nil
+	}
+	keeper, err := flactags.ReadFile(keeperPath)
+	if err != nil {
+		return nil, nil
+	}
+	candidates := map[string]map[string]bool{}
+	for _, file := range group.Files {
+		if file.RequestID == group.Keep.RequestID {
+			continue
+		}
+		path := a.libraryFilePath(file.LibraryDir, file.File)
+		if !strings.EqualFold(filepath.Ext(path), ".flac") {
+			continue
+		}
+		tags, err := flactags.ReadFile(path)
+		if err != nil {
+			continue
+		}
+		for _, field := range fillableTagFields {
+			value := strings.TrimSpace(firstTagValue(tags.Raw, field))
+			if value == "" {
+				continue
+			}
+			if candidates[field] == nil {
+				candidates[field] = map[string]bool{}
+			}
+			candidates[field][value] = true
+		}
+	}
+	updates := map[string][]string{}
+	filled := []string{}
+	for _, field := range fillableTagFields {
+		if strings.TrimSpace(firstTagValue(keeper.Raw, field)) != "" {
+			continue
+		}
+		values := candidates[field]
+		if len(values) != 1 {
+			continue
+		}
+		for value := range values {
+			updates[field] = []string{value}
+			filled = append(filled, strings.ToLower(field))
+		}
+	}
+	if len(updates) == 0 {
+		return nil, nil
+	}
+	if err := writeFLACTags(keeperPath, updates); err != nil {
+		return nil, err
+	}
+	// The write changed the bytes: the library record must carry the new
+	// digest or the next duplicate scan reports the file as changed.
+	if _, err := audiorelease.RefreshDigest(a.engine, group.Keep.RequestID); err != nil {
+		return nil, err
+	}
+	return filled, nil
 }
 
 // mergeSeedingGuard refuses a merge whose files qBittorrent still holds. A

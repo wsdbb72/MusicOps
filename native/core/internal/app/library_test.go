@@ -739,3 +739,83 @@ func TestDuplicateMergeRefusesFilesStillInQBittorrent(t *testing.T) {
 		t.Fatal("a refused merge must not move the file:", err)
 	}
 }
+
+// A duplicate often carries the genre or date the keeper lost. Merging fills
+// the keeper's empty fields from the other copy (Python duplicates.py parity),
+// never overwriting a value the keeper already has (P0-3/F9).
+func TestDuplicateMergeFillsMissingTagsFromTheDuplicate(t *testing.T) {
+	application := newApp(t)
+	incoming := filepath.Join(application.Dir, "incoming")
+	first := genTestFLAC(t, incoming, "fill-a.flac")
+	second := genTestFLAC(t, incoming, "fill-b.flac")
+	if err := flactags.Write(first, flactags.Tags{
+		Title: "Song A", Artists: []string{"Artist"}, Album: "Album", AlbumArtist: "Artist", TrackNumber: 1,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := flactags.Write(second, flactags.Tags{
+		Title: "Song B", Artists: []string{"Artist"}, Album: "Album", AlbumArtist: "Artist", TrackNumber: 1,
+		Genre: "Ambient", Date: "2019-01-02",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	keep := releaseLibraryFile(t, application, "fill-a.flac", "fill-1", "Artist", "Album", "Song A", 1)
+	other := releaseLibraryFile(t, application, "fill-b.flac", "fill-2", "Artist", "Album", "Song B", 1)
+
+	// The keeper is the copy without the two fields; the duplicate has them.
+	group := &duplicateGroup{
+		Keep: &duplicateFile{RequestID: keep.RequestID, File: keep.File, LibraryDir: keep.LibraryDir},
+		Files: []duplicateFile{
+			{RequestID: keep.RequestID, File: keep.File, LibraryDir: keep.LibraryDir},
+			{RequestID: other.RequestID, File: other.File, LibraryDir: other.LibraryDir},
+		},
+	}
+	filled, err := application.fillMissingTags(group)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(filled) != 2 || !containsStringValue(filled, "genre") || !containsStringValue(filled, "date") {
+		t.Fatal(filled)
+	}
+	tags := readTags(t, filepath.Join(application.Dir, "library-audio", keep.File))
+	if tags.Genre != "Ambient" || tags.Date != "2019-01-02" {
+		t.Fatal(tags.Genre, tags.Date)
+	}
+	// A second run has nothing left to fill and never rewrites the file.
+	again, err := application.fillMissingTags(group)
+	if err != nil || len(again) != 0 {
+		t.Fatal(again, err)
+	}
+
+	// The end-to-end merge keeps the data whichever copy wins the rank.
+	groups := duplicateGroups(t, application)
+	if len(groups) != 1 || groups[0].State != "ready" {
+		t.Fatal(groups)
+	}
+	code, decoded := mediaPost(t, application, "/v1/library/duplicates/merge", map[string]any{"group_id": groups[0].GroupID})
+	if code != http.StatusOK {
+		t.Fatal(code, decoded)
+	}
+	entries, err := audiorelease.List(application.engine)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, entry := range entries {
+		if !entry.FilePresent {
+			continue
+		}
+		survivor := readTags(t, filepath.Join(application.Dir, "library-audio", entry.File))
+		if survivor.Genre != "Ambient" || survivor.Date != "2019-01-02" {
+			t.Fatal("merge lost the filled tags:", survivor.Genre, survivor.Date)
+		}
+	}
+}
+
+func containsStringValue(values []string, want string) bool {
+	for _, value := range values {
+		if value == want {
+			return true
+		}
+	}
+	return false
+}

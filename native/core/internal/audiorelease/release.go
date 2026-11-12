@@ -421,6 +421,72 @@ func Relocate(engine *dataengine.Engine, requestID, newPath string) error {
 	return nil
 }
 
+// RefreshDigest re-hashes the published file and stores the new digest. It
+// exists because tag writing changes the bytes: without it the library record
+// would keep the old SHA-256 and the next duplicate scan would call the file
+// changed. The audio itself is not re-verified here — the caller only edits
+// metadata — and a file whose path moved is refused.
+func RefreshDigest(engine *dataengine.Engine, requestID string) (Result, error) {
+	if engine == nil || !validID(requestID) {
+		return Result{}, dataengine.ErrInvalidRequest
+	}
+	raw, found, err := readRaw(engine, releaseKey(requestID))
+	if err != nil {
+		return Result{}, err
+	}
+	if !found {
+		return Result{}, ErrMissing
+	}
+	var rec record
+	if json.Unmarshal(raw, &rec) != nil {
+		return Result{}, ErrConflict
+	}
+	if rec.State != "published" || !rec.Verified || !rec.LibraryPublished {
+		return Result{}, ErrConflict
+	}
+	body, err := os.ReadFile(rec.Path)
+	if err != nil {
+		return Result{}, ErrMissing
+	}
+	sum := sha256.Sum256(body)
+	digest := hex.EncodeToString(sum[:])
+	if digest == rec.SHA256 {
+		return resultFrom(rec, true, false), nil
+	}
+	updated := rec
+	updated.SHA256 = digest
+	encoded, err := json.Marshal(updated)
+	if err != nil {
+		return Result{}, err
+	}
+	conditions := []dataengine.Condition{{Key: releaseKey(requestID), Value: raw}}
+	mutations := []dataengine.Mutation{{Key: releaseKey(requestID), Value: encoded}}
+	albumKeys, err := albumKeysFor(engine, rec.RootID)
+	if err != nil {
+		return Result{}, err
+	}
+	for _, key := range albumKeys {
+		keyRaw, ok, err := readRaw(engine, key)
+		if err != nil || !ok {
+			continue
+		}
+		var keyed record
+		if json.Unmarshal(keyRaw, &keyed) != nil || keyed.RequestID != requestID {
+			continue
+		}
+		conditions = append(conditions, dataengine.Condition{Key: key, Value: keyRaw})
+		mutations = append(mutations, dataengine.Mutation{Key: key, Value: encoded})
+	}
+	ok, err := engine.CompareAndSwap(conditions, mutations)
+	if err != nil {
+		return Result{}, err
+	}
+	if !ok {
+		return Result{}, ErrConflict
+	}
+	return resultFrom(updated, true, false), nil
+}
+
 // albumKeysFor returns the album keys (library/album-audio/<root>/<track>)
 // that exist for one album root.
 func albumKeysFor(engine *dataengine.Engine, rootID string) ([][]byte, error) {

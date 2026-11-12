@@ -69,6 +69,19 @@ const page = `<!doctype html>
 func (a *App) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", a.health)
+	mux.HandleFunc("GET /v1/openapi.json", a.openAPI)
+	mux.HandleFunc("GET /v1/open/info", a.openInfo)
+	mux.HandleFunc("POST /v1/open/playlists/parse", a.fetchPlaylist)
+	mux.HandleFunc("POST /v1/open/search", a.startSearch)
+	mux.HandleFunc("GET /v1/open/jobs/{id}", a.job)
+	mux.HandleFunc("GET /v1/open/jobs/{id}/review", a.reviewData)
+	mux.HandleFunc("POST /v1/open/jobs/{id}/review", a.reviewJob)
+	mux.HandleFunc("POST /v1/open/jobs/{id}/download", a.downloadJob)
+	mux.HandleFunc("POST /v1/open/jobs/{id}/download/control", a.controlDownload)
+	mux.HandleFunc("POST /v1/open/catalog/identify", a.identifyCatalog)
+	mux.HandleFunc("POST /v1/open/library/import", a.openImport)
+	mux.HandleFunc("GET /v1/open/library/tags", a.libraryTags)
+	mux.HandleFunc("POST /v1/open/library/tags", a.saveLibraryTags)
 	mux.HandleFunc("GET /{$}", a.home)
 	mux.HandleFunc("GET /app.css", cssAsset.serve)
 	mux.HandleFunc("GET /app.js", jsAsset.serve)
@@ -181,6 +194,14 @@ func (a *App) Handler() http.Handler {
 }
 
 func (a *App) authorized(r *http.Request) bool {
+	// Other software authenticates with a key instead of the UI password.
+	// The key is only honoured when the host sets MUSICOPS_API_KEY and it is
+	// long enough to be worth comparing; unset means the old Basic-only mode.
+	if key := os.Getenv("MUSICOPS_API_KEY"); len(key) >= 16 {
+		if subtle.ConstantTimeCompare([]byte(r.Header.Get("X-API-Key")), []byte(key)) == 1 {
+			return true
+		}
+	}
 	value := r.Header.Get("Authorization")
 	if !strings.HasPrefix(value, "Basic ") {
 		return false

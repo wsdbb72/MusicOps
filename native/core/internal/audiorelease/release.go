@@ -421,6 +421,23 @@ func Relocate(engine *dataengine.Engine, requestID, newPath string) error {
 	return nil
 }
 
+// PathFor returns the published path of one release record. It is a read: no
+// verification, no file access.
+func PathFor(engine *dataengine.Engine, requestID string) (string, bool, error) {
+	if engine == nil || !validID(requestID) {
+		return "", false, dataengine.ErrInvalidRequest
+	}
+	raw, found, err := readRaw(engine, releaseKey(requestID))
+	if err != nil || !found {
+		return "", false, err
+	}
+	var rec record
+	if json.Unmarshal(raw, &rec) != nil || rec.Path == "" {
+		return "", false, ErrConflict
+	}
+	return rec.Path, true, nil
+}
+
 // RefreshDigest re-hashes the published file and stores the new digest. It
 // exists because tag writing changes the bytes: without it the library record
 // would keep the old SHA-256 and the next duplicate scan would call the file

@@ -140,6 +140,26 @@ func parsePage(obs Observation, page string) Observation {
 	return obs
 }
 
+// ParsePageBalance reads the token count from a rendered user page that was
+// fetched with this account's own session. A page alone proves nothing about
+// which account it describes, so the count is only accepted when the same page
+// links to that account id (user.php?id=<id>): the binding comes from the
+// document, not from the caller's assumption.
+func ParsePageBalance(site string, page []byte, accountID string) Observation {
+	obs := ParseBalance(site, page)
+	if obs.Known || obs.Source != "page" || accountID == "" {
+		return obs
+	}
+	if !strings.Contains(string(page), "user.php?id="+accountID) {
+		obs.ErrorClass = "binding"
+		return obs
+	}
+	obs.Known = true
+	obs.AccountID = accountID
+	obs.ErrorClass = ""
+	return obs
+}
+
 func countToken(value any) (int, bool) {
 	switch typed := value.(type) {
 	case int:

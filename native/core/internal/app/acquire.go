@@ -407,7 +407,9 @@ func (a *App) observeBalance(ctx context.Context, site, cookie string, synthetic
 	// unknown exactly as before.
 	if obs.ErrorClass == tokenledger.ClassBalanceUnknown && obs.AccountID != "" && err == nil && status == http.StatusOK {
 		if page, readErr := a.searcher.ReadDetail(ctx, query, "/user.php", url.Values{"id": {obs.AccountID}}); readErr == nil {
-			if parsed := tokenledger.ParseBalance(site, page); parsed.Known && parsed.ErrorClass == "" {
+			// The page must link to this account before its count is used:
+			// a page fetched with a session still has to prove whose it is.
+			if parsed := tokenledger.ParsePageBalance(site, page, obs.AccountID); parsed.Known && parsed.ErrorClass == "" {
 				obs.Known = true
 				obs.Balance = parsed.Balance
 				obs.Source = "page." + parsed.Source

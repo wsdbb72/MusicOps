@@ -158,3 +158,21 @@ func TestObservationSurvivesRestart(t *testing.T) {
 		t.Fatal(again, found, err)
 	}
 }
+
+// A rendered page is only trusted when it links to the account that was asked
+// about: the count belongs to whoever the page describes.
+func TestParsePageBalanceNeedsTheAccountLink(t *testing.T) {
+	page := []byte(`<html><body><a href="user.php?id=9254">me</a><span>Tokens: 126</span></body></html>`)
+	bound := ParsePageBalance("dicmusic", page, "9254")
+	if !bound.Known || bound.Balance != 126 || bound.AccountID != "9254" || bound.ErrorClass != "" {
+		t.Fatalf("%+v", bound)
+	}
+	// The same page for a different account is not that account's balance.
+	if other := ParsePageBalance("dicmusic", page, "1111"); other.Known || other.ErrorClass != "binding" {
+		t.Fatalf("%+v", other)
+	}
+	// Without an id there is nothing to bind to.
+	if none := ParsePageBalance("dicmusic", page, ""); none.Known || none.ErrorClass != "binding" {
+		t.Fatalf("%+v", none)
+	}
+}

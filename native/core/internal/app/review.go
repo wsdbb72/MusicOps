@@ -384,7 +384,12 @@ func (a *App) preflightSite(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "code": "LIVE_SITE_NOT_CALLED"})
 		return
 	}
-	observation, err := a.searcher.Preflight(r.Context(), trackersearch.Query{Site: body.Site, Cookie: cookie, Synthetic: body.Synthetic, BaseURL: body.BaseURL})
+	observation, err := a.searcher.Preflight(r.Context(), trackersearch.Query{
+		Site: body.Site, Cookie: cookie, Synthetic: body.Synthetic, BaseURL: body.BaseURL,
+		// The login check is a read-only GET, so it can use the same browser
+		// fallback as a search when the site answers with a challenge.
+		SolverURL: a.solverURL(),
+	})
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "code": "INVALID_REQUEST", "error": err.Error()})
 		return

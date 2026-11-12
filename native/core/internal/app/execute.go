@@ -193,7 +193,7 @@ func (a *App) observe(ctx context.Context, execution *scheduler.Execution, job w
 		Scene: job.Scene, IdentityConfirmed: plan.Identity.IdentityConfirmed, StreamingEnabled: plan.StreamingEnabled,
 		RetryCount: job.SearchRetryCount, AIResearchCount: job.AIResearchCount, Query: plan.Query, Sites: make([]searchdecision.SiteReport, 0, 4),
 	}
-	solverURL := a.solverURL()
+	solverURL, solverToken := a.solverTarget()
 	evidence := []workflow.EvidenceInput{}
 	var picks []identityPick
 	var pool []reviewai.Candidate
@@ -209,14 +209,14 @@ func (a *App) observe(ctx context.Context, execution *scheduler.Execution, job w
 			return report, nil, "", err
 		}
 		observation, err := a.searcher.Search(ctx, trackersearch.Query{
-			Site: site, Text: plan.Query, Cookie: a.cookieFor(plan.RootJobID, site), Synthetic: plan.Synthetic, BaseURL: plan.BaseURL, SolverURL: solverURL,
+			Site: site, Text: plan.Query, Cookie: a.cookieFor(plan.RootJobID, site), Synthetic: plan.Synthetic, BaseURL: plan.BaseURL, SolverURL: solverURL, SolverToken: solverToken,
 		})
 		if err != nil {
 			return report, nil, "", err
 		}
 		if observation.Status == "OK" && !observation.SearchComplete && observation.Pages != nil && observation.Page > 0 && *observation.Pages > observation.Page {
 			next, nextErr := a.searcher.Search(ctx, trackersearch.Query{
-				Site: site, Text: plan.Query, Page: observation.Page + 1, Cookie: a.cookieFor(plan.RootJobID, site), Synthetic: plan.Synthetic, BaseURL: plan.BaseURL, SolverURL: solverURL,
+				Site: site, Text: plan.Query, Page: observation.Page + 1, Cookie: a.cookieFor(plan.RootJobID, site), Synthetic: plan.Synthetic, BaseURL: plan.BaseURL, SolverURL: solverURL, SolverToken: solverToken,
 			})
 			if nextErr == nil && next.Status == "OK" {
 				observation.Candidates = append(observation.Candidates, next.Candidates...)

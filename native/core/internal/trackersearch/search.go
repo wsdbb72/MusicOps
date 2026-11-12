@@ -53,6 +53,9 @@ type Query struct {
 	// SolverURL is a loopback FlareSolverr. When set, the search page is
 	// read through it. A solver failure falls back to the direct read.
 	SolverURL string
+	// SolverToken is the managed-service token. A bundled FlareSolverr
+	// refuses every request without it; an external service leaves it empty.
+	SolverToken string
 }
 
 // Candidate is a search hit. Eligibility stays unknown and download stays blocked.

@@ -46,7 +46,14 @@ type solverSettings struct {
 
 // defaultSolverSettings is Python's browser_solver default.
 func defaultSolverSettings() solverSettings {
-	return solverSettings{Managed: true, Enabled: false, BaseURL: "http://127.0.0.1:8191", Timeout: 60, Executable: "", AutoStart: false}
+	// A bundle that ships the service should use it without extra steps: the
+	// managed path starts it on demand. A source build without the engine
+	// keeps the historical "off until configured" default.
+	out := solverSettings{Managed: true, Enabled: false, BaseURL: "http://127.0.0.1:8191", Timeout: 60, Executable: "", AutoStart: false}
+	if _, ok := (&App{}).engineBinary(engineSolver); ok {
+		out.Enabled, out.AutoStart = true, true
+	}
+	return out
 }
 
 func (a *App) loadSolverSettings() (solverSettings, error) {
@@ -73,15 +80,27 @@ func (a *App) saveSolverSettings(in solverSettings) (solverSettings, error) {
 	return in, nil
 }
 
-// solverURL is the loopback solver address when the feature is enabled, or
-// "" when it is off. It is read per request so enabling the solver takes
-// effect without a restart.
-func (a *App) solverURL() string {
+// solverTarget is the loopback solver address and the managed-service token.
+// With a bundled FlareSolverr the address is whatever port this app started it
+// on, and every request must carry the token; an external service keeps the
+// saved address and no token.
+func (a *App) solverTarget() (string, string) {
 	settings, err := a.loadSolverSettings()
 	if err != nil || !settings.Enabled {
-		return ""
+		return "", ""
 	}
-	return settings.BaseURL
+	if settings.Managed || strings.TrimSpace(settings.Executable) == "" {
+		if base, token, startErr := a.ensureEngine(engineSolver); startErr == nil {
+			return base, token
+		}
+	}
+	return settings.BaseURL, ""
+}
+
+// solverURL is the address alone, for callers that do not send requests.
+func (a *App) solverURL() string {
+	url, _ := a.solverTarget()
+	return url
 }
 
 // validateSolverURL checks a FlareSolverr base URL the Python way:
@@ -193,13 +212,16 @@ func (a *App) saveSolver(w http.ResponseWriter, r *http.Request) {
 // solverSessions asks a solver which browser sessions it holds. It is the
 // one call both the connection test and the process supervisor use, so a
 // solver reported as ready is one the settings page would also accept.
-func solverSessions(ctx context.Context, baseURL string) (int, string, bool) {
+func solverSessions(ctx context.Context, baseURL, token string) (int, string, bool) {
 	endpoint := strings.TrimSuffix(baseURL, "/") + "/v1"
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader([]byte(`{"cmd":"sessions.list"}`)))
 	if err != nil {
 		return 0, "", false
 	}
 	req.Header.Set("Content-Type", "application/json")
+	if token != "" {
+		req.Header.Set(engineTokenHeader, token)
+	}
 	resp, err := noRedirectClient.Do(req)
 	if err != nil {
 		return 0, "", false
@@ -242,8 +264,14 @@ func (a *App) testSolver(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	baseURL := saved.BaseURL
+	token := ""
 	if body.BaseURL != "" {
 		baseURL = strings.TrimSpace(body.BaseURL)
+	} else if saved.Managed || strings.TrimSpace(saved.Executable) == "" {
+		// Bundled mode: start the shipped service and use the port it picked.
+		if base, managedToken, startErr := a.ensureEngine(engineSolver); startErr == nil {
+			baseURL, token = base, managedToken
+		}
 	}
 	if err := validateSolverURL(baseURL); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "code": "INVALID_REQUEST", "error": err.Error()})
@@ -259,6 +287,9 @@ func (a *App) testSolver(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	req.Header.Set("Content-Type", "application/json")
+	if token != "" {
+		req.Header.Set(engineTokenHeader, token)
+	}
 	resp, err := noRedirectClient.Do(req)
 	if err != nil {
 		writeJSON(w, http.StatusBadGateway, map[string]any{"ok": false, "code": "SOLVER_UNAVAILABLE", "error": err.Error()})

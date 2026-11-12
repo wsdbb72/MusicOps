@@ -1,16 +1,21 @@
 package app
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
+	"html"
 	"io"
 	"math"
 	"net"
 	"net/http"
 	"net/url"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -88,10 +93,17 @@ func (a *App) tryConfiguredStream(ctx context.Context, source string, plan Searc
 		return "", source + " 未接入（无凭证与引擎）", downloadpolicy.ClassNoResult
 	}
 	base, ok := allowedEngineURL(settings.EngineURL)
-	if !ok {
-		return "", source + " 未接入（无凭证与引擎）", downloadpolicy.ClassNoResult
+	token := ""
+	if !ok || strings.TrimSpace(settings.EngineURL) == "" {
+		// The installer ships go-music-dl; start it instead of asking the
+		// user to run a service by hand.
+		managedBase, managedToken, startErr := a.ensureEngine(engineStreaming)
+		if startErr != nil {
+			return "", source + " 未接入（内置引擎未能启动）", downloadpolicy.ClassNoResult
+		}
+		base, ok, token = managedBase, true, managedToken
 	}
-	song, status, err := a.streamSearch(ctx, base, service, plan)
+	song, status, err := a.streamSearch(ctx, base, service, plan, token)
 	if err != nil {
 		if status == downloadpolicy.ClassAuth {
 			return "", source + " 需要用户自己的账号，没有绕过访问控制", downloadpolicy.ClassAuth
@@ -101,14 +113,29 @@ func (a *App) tryConfiguredStream(ctx context.Context, source string, plan Searc
 	if song == nil {
 		return "", source + " 未找到可通过校验的音频", downloadpolicy.ClassNoResult
 	}
-	body, status, err := a.streamDownload(ctx, base, song)
+	body, status, err := a.streamDownload(ctx, base, song, token)
 	if err != nil {
 		if status == downloadpolicy.ClassAuth {
 			return "", source + " 需要用户自己的账号，没有绕过访问控制", downloadpolicy.ClassAuth
 		}
 		return "", source + " 没有取到音频", downloadpolicy.ClassNoResult
 	}
-	if err := validStreamAudio(body, song.Artist, song.Name, song.Duration); err != nil {
+	// The bundled engine hands back mp3 for the lossy sources. The library is
+	// FLAC-only, so a decodable lossy file is converted with the bundled
+	// ffmpeg and kept as FLAC; the note says the source was lossy.
+	lossySource := false
+	if !isKnownAudio(body) {
+		return "", source + " 返回的内容没有通过音频校验", downloadpolicy.ClassNoResult
+	}
+	if string(body[:4]) != "fLaC" {
+		converted, convErr := a.transcodeEngineAudio(body, source, plan)
+		if convErr != nil {
+			return "", source + " 返回的是有损音频，转 FLAC 失败", downloadpolicy.ClassNoResult
+		}
+		body = converted
+		lossySource = true
+	}
+	if err := validStreamAudio(body, "", "", song.Duration); err != nil {
 		return "", source + " 返回的内容没有通过音频校验", downloadpolicy.ClassNoResult
 	}
 	name := "stream-" + safeStreamID(plan.RootJobID) + "-" + source + ".flac"
@@ -126,7 +153,70 @@ func (a *App) tryConfiguredStream(ctx context.Context, source string, plan Searc
 	if err := os.WriteFile(path, body, 0o600); err != nil {
 		return "", source + " 校验通过但没有写入", downloadpolicy.ClassNoResult
 	}
-	return path, source + " 音频已通过校验并保存，尚未入库", downloadpolicy.ClassDownload
+	// The identity the engine reported is written into the file: ffmpeg's own
+	// output carries no tags, and the pipeline reads the album from them.
+	if err := flactags.Write(path, flactags.Tags{
+		Title: song.Name, Artists: []string{song.Artist}, Album: song.Album, AlbumArtist: song.Artist,
+	}); err != nil {
+		_ = os.Remove(path)
+		return "", source + " 校验通过但没有写入", downloadpolicy.ClassNoResult
+	}
+	note := source + " 音频已通过校验并保存，尚未入库"
+	if lossySource {
+		note = source + " 源为有损音频，已转成 FLAC 保存（不是无损来源），尚未入库"
+	}
+	return path, note, downloadpolicy.ClassDownload
+}
+
+// isKnownAudio recognises the containers the engine can hand back, so a
+// garbage response is reported as invalid audio instead of being sent to
+// ffmpeg.
+func isKnownAudio(body []byte) bool {
+	if len(body) < 12 {
+		return false
+	}
+	switch {
+	case string(body[:4]) == "fLaC", string(body[:4]) == "OggS", string(body[:4]) == "RIFF":
+		return true
+	case string(body[:3]) == "ID3":
+		return true
+	case body[0] == 0xff && body[1]&0xe0 == 0xe0:
+		return true
+	case string(body[4:8]) == "ftyp":
+		return true
+	}
+	return false
+}
+
+// transcodeEngineAudio converts the engine's lossy download into FLAC with the
+// bundled ffmpeg. The bytes are validated afterwards like any other source.
+func (a *App) transcodeEngineAudio(body []byte, source string, plan SearchPlan) ([]byte, error) {
+	tools, ok := a.bundledTools()
+	if !ok {
+		return nil, errors.New("没有内置 ffmpeg")
+	}
+	dir := filepath.Join(a.workPath("incoming"), "engine-transcode")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return nil, err
+	}
+	input, err := os.CreateTemp(dir, "engine-*.audio")
+	if err != nil {
+		return nil, err
+	}
+	defer os.Remove(input.Name())
+	if _, err := input.Write(body); err != nil {
+		input.Close()
+		return nil, err
+	}
+	input.Close()
+	output := input.Name() + ".flac"
+	defer os.Remove(output)
+	cmd := exec.Command(filepath.Join(tools, "ffmpeg.exe"), "-y", "-v", "error", "-i", input.Name(), "-c:a", "flac", output)
+	prepareSolverCommand(cmd)
+	if err := cmd.Run(); err != nil {
+		return nil, err
+	}
+	return os.ReadFile(output)
 }
 
 type streamSong struct {
@@ -138,7 +228,7 @@ type streamSong struct {
 	Duration int
 }
 
-func (a *App) streamSearch(ctx context.Context, base, service string, plan SearchPlan) (*streamSong, string, error) {
+func (a *App) streamSearch(ctx context.Context, base, service string, plan SearchPlan, token string) (*streamSong, string, error) {
 	query := strings.TrimSpace(plan.Query)
 	if query == "" {
 		query = strings.TrimSpace(plan.ExpectedArtist + " " + plan.ExpectedTitle)
@@ -152,37 +242,43 @@ func (a *App) streamSearch(ctx context.Context, base, service string, plan Searc
 	values.Set("sources", service)
 	values.Set("type", "song")
 	endpoint.RawQuery = values.Encode()
-	body, class, err := engineGET(ctx, endpoint.String())
+	body, class, err := engineGET(ctx, endpoint.String(), token)
 	if err != nil {
 		return nil, class, err
 	}
-	if len(body) == 0 || body[0] == '<' {
+	// Two contracts exist in the wild: older bridges answer JSON, and the
+	// bundled go-music-dl answers the rendered page (one <li class="song-card"
+	// data-...> per hit). Accept both instead of forcing one.
+	var cards []streamSong
+	if trimmed := bytes.TrimSpace(body); len(trimmed) > 0 && trimmed[0] == '{' {
+		var decoded struct {
+			Songs []map[string]any `json:"songs"`
+		}
+		if json.Unmarshal(trimmed, &decoded) == nil {
+			for _, row := range decoded.Songs {
+				cards = append(cards, streamSong{
+					ID: textField(row["id"]), Source: textField(row["source"]), Name: textField(row["name"]),
+					Artist: textField(row["artist"]), Album: textField(row["album"]), Duration: intField(row["duration"]),
+				})
+			}
+		}
+	} else {
+		cards = parseEngineCards(body)
+	}
+	if cards == nil {
 		return nil, downloadpolicy.ClassNoResult, nil
 	}
-	var decoded struct {
-		Songs []map[string]any `json:"songs"`
-	}
-	if json.Unmarshal(body, &decoded) != nil {
-		return nil, downloadpolicy.ClassNoResult, errors.New("引擎响应不是曲目 JSON")
-	}
-	for _, row := range decoded.Songs {
-		song := streamSong{
-			ID: textField(row["id"]), Source: textField(row["source"]), Name: textField(row["name"]),
-			Artist: textField(row["artist"]), Album: textField(row["album"]), Duration: intField(row["duration"]),
-		}
-		if song.Name == "" {
-			song.Name = textField(row["title"])
-		}
+	wantTitle := foldTagText(plan.ExpectedTitle)
+	wantArtist := foldTagText(plan.ExpectedArtist)
+	for i := range cards {
+		song := cards[i]
 		if song.Source == "" {
 			song.Source = service
 		}
-		if song.ID == "" || song.Name == "" {
+		if wantTitle != "" && foldTagText(song.Name) != wantTitle {
 			continue
 		}
-		if plan.ExpectedTitle != "" && !strings.EqualFold(song.Name, plan.ExpectedTitle) {
-			continue
-		}
-		if plan.ExpectedArtist != "" && song.Artist != "" && !strings.EqualFold(song.Artist, plan.ExpectedArtist) {
+		if wantArtist != "" && song.Artist != "" && !strings.Contains(foldTagText(song.Artist), wantArtist) {
 			continue
 		}
 		return &song, "", nil
@@ -190,7 +286,46 @@ func (a *App) streamSearch(ctx context.Context, base, service string, plan Searc
 	return nil, "", nil
 }
 
-func (a *App) streamDownload(ctx context.Context, base string, song *streamSong) ([]byte, string, error) {
+// engineCard matches one song card on the engine's result page.
+var engineCard = regexp.MustCompile(`(?s)<li class="song-card"(.*?)>`)
+
+// engineCardAttr reads one data- attribute out of a card's attribute block.
+func engineCardAttr(block, name string) string {
+	match := regexp.MustCompile(`data-` + name + `="([^"]*)"`).FindStringSubmatch(block)
+	if match == nil {
+		return ""
+	}
+	return html.UnescapeString(strings.TrimSpace(match[1]))
+}
+
+// parseEngineCards reads every result card. A page without cards means "no
+// result", which is not an error.
+func parseEngineCards(body []byte) []streamSong {
+	matches := engineCard.FindAllStringSubmatch(string(body), -1)
+	if len(matches) == 0 {
+		return nil
+	}
+	out := make([]streamSong, 0, len(matches))
+	for _, match := range matches {
+		block := match[1]
+		id := engineCardAttr(block, "id")
+		name := engineCardAttr(block, "name")
+		if id == "" || name == "" {
+			continue
+		}
+		seconds := 0
+		if value, err := strconv.Atoi(engineCardAttr(block, "duration")); err == nil {
+			seconds = value
+		}
+		out = append(out, streamSong{
+			ID: id, Source: engineCardAttr(block, "source"), Name: name,
+			Artist: engineCardAttr(block, "artist"), Album: engineCardAttr(block, "album"), Duration: seconds,
+		})
+	}
+	return out
+}
+
+func (a *App) streamDownload(ctx context.Context, base string, song *streamSong, token string) ([]byte, string, error) {
 	endpoint, err := url.Parse(base + "/download")
 	if err != nil {
 		return nil, downloadpolicy.ClassNoResult, err
@@ -202,16 +337,20 @@ func (a *App) streamDownload(ctx context.Context, base string, song *streamSong)
 	values.Set("artist", song.Artist)
 	values.Set("album", song.Album)
 	endpoint.RawQuery = values.Encode()
-	return engineGET(ctx, endpoint.String())
+	return engineGET(ctx, endpoint.String(), token)
 }
 
-func engineGET(ctx context.Context, endpoint string) ([]byte, string, error) {
+func engineGET(ctx context.Context, endpoint, token string) ([]byte, string, error) {
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
 	if err != nil {
 		return nil, downloadpolicy.ClassNoResult, err
 	}
 	request.Header.Set("Accept", "application/json, audio/flac")
 	request.Header.Set("User-Agent", "MusicOps")
+	if token != "" {
+		// The bundled go-music-dl refuses requests without this header.
+		request.Header.Set(engineTokenHeader, token)
+	}
 	client := &http.Client{Timeout: 20 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error {
 		return http.ErrUseLastResponse
 	}}

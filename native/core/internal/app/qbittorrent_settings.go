@@ -274,10 +274,16 @@ func (a *App) testQBittorrent(w http.ResponseWriter, r *http.Request) {
 	result, err := qbtPreflight(ctx, client)
 	if err != nil {
 		code := "QBITTORRENT_UNAVAILABLE"
-		if errors.Is(err, qbittorrent.ErrAuthFailed) {
+		message := "连不上 qBittorrent：确认它正在运行，且地址就是它的 WebUI 端口"
+		switch {
+		case errors.Is(err, qbittorrent.ErrAuthFailed):
 			code = "AUTH_FAILED"
+			message = "已经连上 qBittorrent，但用户名或密码不对（qB 默认用户名是 admin）"
+		case errors.Is(err, qbittorrent.ErrBanned):
+			code = "BANNED"
+			message = "qBittorrent 暂时封禁了本机 IP，等封禁时间过去再试（" + err.Error() + "）"
 		}
-		writeJSON(w, http.StatusBadGateway, map[string]any{"ok": false, "code": code, "error": err.Error()})
+		writeJSON(w, http.StatusBadGateway, map[string]any{"ok": false, "code": code, "error": message})
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "qbittorrent": result})

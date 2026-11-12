@@ -73,6 +73,10 @@ type App struct {
 	// real solver binary.
 	solver       solverRuntime
 	launchSolver func(exe string) *exec.Cmd
+	// engines are the bundled services this app started (go-music-dl,
+	// FlareSolverr). engineMu guards the map and the start sequence.
+	engineMu sync.Mutex
+	engines  map[engineName]*engineProcess
 	// migrationFailure is the reason a legacy profile was not imported at
 	// startup. It is set once, before the scheduler serves, and reported by
 	// GET /v1/migration. An empty value means nothing failed.
@@ -232,6 +236,7 @@ func (a *App) Close() error {
 		close(stopReconcile)
 	}
 	a.stopManagedSolver()
+	a.stopEngines()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	err := a.runner.Stop(ctx)

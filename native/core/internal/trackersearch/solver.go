@@ -23,6 +23,9 @@ import (
 // session just produces another interstitial. They are passed in the request
 // body only, never part of a returned observation.
 
+// engineTokenHeader is the header the bundled wrapper requires.
+const engineTokenHeader = "X-MusicOps-Service"
+
 const (
 	// solverMinTimeoutMS and solverMaxTimeoutMS bound one browser solve. The
 	// settings allow 10-120 s, and the solver adds its own page wait.
@@ -167,6 +170,9 @@ func (c *Client) solverGet(ctx context.Context, q Query, pageURL string) ([]byte
 		return nil, false
 	}
 	req.Header.Set("Content-Type", "application/json")
+	if q.SolverToken != "" {
+		req.Header.Set(engineTokenHeader, q.SolverToken)
+	}
 	response, err := c.doer(q.Timeout).Do(req)
 	if err != nil {
 		return nil, false

@@ -157,5 +157,5 @@ func probeSolver(baseURL string, timeout time.Duration) (int, string, bool) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
-	return solverSessions(ctx, baseURL)
+	return solverSessions(ctx, baseURL, "")
 }

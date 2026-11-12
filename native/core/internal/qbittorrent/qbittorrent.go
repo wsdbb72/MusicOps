@@ -51,6 +51,8 @@ var (
 	ErrInvalidRequest = errors.New("qbittorrent: invalid request")
 	// ErrAuthFailed is returned when login is rejected or no SID cookie is issued.
 	ErrAuthFailed = errors.New("qbittorrent: authentication failed")
+	// ErrBanned is the 403 the client returns after repeated login failures.
+	ErrBanned = errors.New("qbittorrent: this IP is temporarily banned")
 	// ErrNotAuthenticated is returned when an API call is made before Login.
 	ErrNotAuthenticated = errors.New("qbittorrent: not logged in")
 	// ErrUnsupportedVersion is returned when the server version is outside
@@ -452,9 +454,17 @@ func (c *Client) Login(ctx context.Context) error {
 		return err
 	}
 	switch {
+	case resp.StatusCode == http.StatusUnauthorized:
+		return ErrAuthFailed
 	case resp.StatusCode == http.StatusOK && strings.TrimSpace(string(body)) == "Ok.":
 	case resp.StatusCode == http.StatusNoContent:
 	case resp.StatusCode == http.StatusForbidden:
+		// qB answers 403 with "Your IP has been banned" after repeated
+		// failures. That is not a wrong password, and telling the user to
+		// check the password would send them in circles.
+		if strings.Contains(strings.ToLower(string(body)), "banned") {
+			return fmt.Errorf("%w: %s", ErrBanned, strings.TrimSpace(string(body)))
+		}
 		return ErrAuthFailed
 	default:
 		return &ResponseError{Method: http.MethodPost, Endpoint: "auth/login", StatusCode: resp.StatusCode}

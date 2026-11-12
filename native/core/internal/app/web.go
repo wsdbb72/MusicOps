@@ -272,8 +272,10 @@ const appJS = `(function () {
     if (!response.ok || !result || !result.ok) throw new Error((result && (result.error || result.code)) || "请求失败");
     return result;
   }
-  function savedMark(saved, revision) {
-    return saved ? "已保存" + (revision ? "（版本 " + revision + "）" : "") : "未保存";
+  function savedMark(saved) {
+    // The revision is the vault's internal write counter; showing "版本 3"
+    // next to a password only makes people think something is wrong.
+    return saved ? "已保存" : "未保存";
   }
   function moveOrder(index, delta) {
     var next = index + delta;

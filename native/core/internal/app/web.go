@@ -1050,7 +1050,9 @@ const appJS = `(function () {
       '<label>封面地址<input type="text" id="meta-cover" placeholder="留空则不写封面"></label>' +
       '<label>封面写入<select id="meta-cover-mode"><option value="sidecar">内嵌并保留同名 jpg</option><option value="embedded">只写入 FLAC 内嵌图片</option></select></label>' +
       '<label><input type="checkbox" id="meta-overwrite"> 覆盖与目录不同的字段（含分类）</label>' +
-      '<p><button type="button" id="complete-metadata">补齐标签封面歌词</button></p><p id="metadata-result" class="meta"></p></article>' +
+      '<p><button type="button" id="complete-metadata">补齐标签封面歌词</button></p><p id="metadata-result" class="meta"></p>' +
+      '<p class="meta">批量刮削按专辑一次查询目录，只写标签（含分类），不取歌词和封面。先勾选曲目，再预演或应用。</p>' +
+      '<p><button type="button" id="scrape-preview">预演批量刮削</button> <button type="button" id="scrape-apply" class="primary">批量刮削所选</button></p></article>' +
       '<article><h2>合辑</h2><p class="meta">预览不会移动文件。合并只把名称里带“合辑”或 Various Artists 的文件夹移进音乐库的 Compilations。</p>' +
       '<p><button type="button" id="preview-compilations">预览合辑</button> <button type="button" id="merge-compilations">合并合辑</button></p><p id="compilation-result" class="meta"></p></article>' +
       '<article><h2>艺人目录与 NCM</h2><p class="meta">艺人目录把专辑文件夹整理成“艺人/专辑”。NCM 解密不改源文件。</p>' +
@@ -1115,6 +1117,10 @@ const appJS = `(function () {
     if (pageNext) pageNext.addEventListener("click", function () { libraryFileOffset += 20; loadLibraryFiles(); });
     var metadata = document.getElementById("complete-metadata");
     if (metadata) metadata.addEventListener("click", completeMetadata);
+    var scrapePreview = document.getElementById("scrape-preview");
+    if (scrapePreview) scrapePreview.addEventListener("click", function () { scrapeSelected(true); });
+    var scrapeApply = document.getElementById("scrape-apply");
+    if (scrapeApply) scrapeApply.addEventListener("click", function () { scrapeSelected(false); });
     loadLibraryFiles();
     var previewCompilations = document.getElementById("preview-compilations");
     if (previewCompilations) previewCompilations.addEventListener("click", function () { libraryAction("/v1/library/compilations", null, "compilation-result"); });
@@ -1179,6 +1185,34 @@ const appJS = `(function () {
       cover_mode: document.getElementById("meta-cover-mode").value,
       overwrite: document.getElementById("meta-overwrite").checked
     }, "metadata-result");
+  }
+  async function scrapeSelected(dryRun) {
+    if (loading) return;
+    var paths = Object.keys(selectedTracks).filter(function (path) { return selectedTracks[path]; });
+    if (!paths.length) { setStatus("fail", "先勾选要刮削的曲目。"); return; }
+    setBusy(true);
+    setStatus("info", dryRun ? "正在预演批量刮削" : "正在批量刮削");
+    try {
+      var response = await fetch("/v1/library/scrape", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({
+        paths: paths,
+        catalog_base_url: document.getElementById("meta-catalog").value.trim(),
+        overwrite: document.getElementById("meta-overwrite").checked,
+        dry_run: dryRun
+      })});
+      var body = await response.json();
+      if (!response.ok || !body || body.ok === false) {
+        setStatus("fail", (body && (body.error || body.code)) || "批量刮削没有完成。");
+        return;
+      }
+      var text = (dryRun ? ("预演：将写入 " + body.planned + " 首") : ("已写入 " + body.written + " 首"))
+        + "；未变化 " + body.unchanged + "；跳过 " + body.skipped + "；失败 " + body.failed;
+      if (body.genre_written) text += "；其中写入分类 " + body.genre_written + " 首";
+      setStatus("ok", text + "。" + (body.note || ""));
+    } catch (err) {
+      setStatus("fail", "批量刮削中断。");
+    } finally {
+      setBusy(false);
+    }
   }
   async function libraryAction(path, body, targetID) {
     var target = document.getElementById(targetID);

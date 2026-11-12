@@ -694,3 +694,48 @@ func TestSlice7EndToEndOverHTTP(t *testing.T) {
 		t.Fatal(code, decoded)
 	}
 }
+
+// Moving a file that qBittorrent still holds breaks the torrent. A configured
+// client that cannot be reached refuses as well: "I could not check" is not
+// "it is safe" (P0-3).
+func TestDuplicateMergeRefusesFilesStillInQBittorrent(t *testing.T) {
+	vaultKey(t)
+	application := newApp(t)
+	incoming := filepath.Join(application.Dir, "incoming")
+	writeToneWAV(t, filepath.Join(incoming, "a.wav"), 440)
+	writeToneWAV(t, filepath.Join(incoming, "b.wav"), 440)
+	releaseLibraryFile(t, application, "a.wav", "seed-1", "Artist", "Album", "Song A", 1)
+	loser := releaseLibraryFile(t, application, "b.wav", "seed-2", "Artist", "Album", "Song B", 1)
+	loserPath := filepath.Join(application.Dir, "library-audio", loser.File)
+
+	fake := newFakeQBT(t, map[string][]byte{}, 0)
+	fake.row = &fakeQBTorrent{
+		hash:        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+		savePath:    filepath.Join(application.Dir, "library-audio", "Artist"),
+		contentPath: filepath.Join(application.Dir, "library-audio", "Artist", "Album"),
+		started:     true,
+	}
+	post(t, application, "/v1/settings/qbittorrent", map[string]any{"base_url": fake.url(), "username": "user", "password": "pass"})
+
+	groups := duplicateGroups(t, application)
+	if len(groups) != 1 || groups[0].State != "ready" {
+		t.Fatal(groups)
+	}
+	code, decoded := mediaPost(t, application, "/v1/library/duplicates/merge", map[string]any{"group_id": groups[0].GroupID})
+	if code != http.StatusConflict || decoded["code"] != "MERGE_SEEDING" {
+		t.Fatal(code, decoded)
+	}
+	if _, err := os.Stat(loserPath); err != nil {
+		t.Fatal("a refused merge must not move the file:", err)
+	}
+
+	// The client is configured but cannot be reached: refuse, never guess.
+	post(t, application, "/v1/settings/qbittorrent", map[string]any{"base_url": "http://127.0.0.1:1", "username": "user", "password": "pass"})
+	code, decoded = mediaPost(t, application, "/v1/library/duplicates/merge", map[string]any{"group_id": groups[0].GroupID})
+	if code != http.StatusConflict || decoded["code"] != "MERGE_QBITTORRENT_UNAVAILABLE" {
+		t.Fatal(code, decoded)
+	}
+	if _, err := os.Stat(loserPath); err != nil {
+		t.Fatal("a refused merge must not move the file:", err)
+	}
+}

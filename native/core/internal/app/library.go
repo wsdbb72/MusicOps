@@ -33,10 +33,12 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/wsdbb72/MusicOps/native/core/internal/audiorelease"
 	"github.com/wsdbb72/MusicOps/native/core/internal/dataengine"
 	"github.com/wsdbb72/MusicOps/native/core/internal/flactags"
+	"github.com/wsdbb72/MusicOps/native/core/internal/qbittorrent"
 	"github.com/wsdbb72/MusicOps/native/core/internal/wavflac"
 )
 
@@ -367,6 +369,14 @@ func (a *App) duplicateMerge(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusConflict, map[string]any{"ok": false, "code": "MERGE_NOT_READY", "error": group.Reason})
 		return
 	}
+	// Moving a file that qBittorrent still holds breaks the torrent: the
+	// client keeps seeding a path that no longer exists. The check is before
+	// any hash work and before any move, and a client that is configured but
+	// unreachable refuses the merge instead of guessing (P0-3).
+	if code, reason := a.mergeSeedingGuard(group); code != "" {
+		writeJSON(w, http.StatusConflict, map[string]any{"ok": false, "code": code, "error": reason})
+		return
+	}
 	// Verify every file is unchanged since the scan before moving any.
 	for _, file := range group.Files {
 		full := a.libraryFilePath(file.LibraryDir, file.File)
@@ -422,6 +432,50 @@ func (a *App) duplicateMerge(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "merge_id": receipt.MergeID, "group_id": receipt.GroupID, "kept": receipt.Keep, "quarantined": receipt.Moved})
+}
+
+// mergeSeedingGuard refuses a merge whose files qBittorrent still holds. A
+// configured client that cannot be reached refuses as well: "I could not
+// check" is not "it is safe". Without saved qBittorrent settings there is
+// nothing to check against, and the merge proceeds as before.
+func (a *App) mergeSeedingGuard(group *duplicateGroup) (string, string) {
+	settings, err := a.loadQBittorrentSettings()
+	if err != nil || strings.TrimSpace(settings.BaseURL) == "" {
+		return "", ""
+	}
+	login, baseURL, ok := a.savedQBittorrentLogin()
+	if !ok {
+		return "MERGE_QBITTORRENT_UNAVAILABLE", "qBittorrent 已配置但读不到登录凭据，无法确认这些文件是否还在做种；这次没有合并"
+	}
+	client, err := qbittorrent.NewClient(qbittorrent.Config{BaseURL: baseURL, Username: login.Username, Password: login.Password})
+	if err != nil {
+		return "MERGE_QBITTORRENT_UNAVAILABLE", "qBittorrent 地址无效，无法确认这些文件是否还在做种；这次没有合并"
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := client.Login(ctx); err != nil {
+		return "MERGE_QBITTORRENT_UNAVAILABLE", "qBittorrent 连不上，无法确认这些文件是否还在做种；这次没有合并"
+	}
+	rows, err := client.InfoByTag(ctx, qbittorrent.ProjectTag)
+	if err != nil {
+		return "MERGE_QBITTORRENT_UNAVAILABLE", "读取 qBittorrent 种子列表失败，无法确认做种状态；这次没有合并"
+	}
+	for _, file := range group.Files {
+		full := a.libraryFilePath(file.LibraryDir, file.File)
+		for _, row := range rows {
+			root := strings.TrimSpace(row.ContentPath)
+			if root == "" {
+				root = strings.TrimSpace(row.SavePath)
+			}
+			if root == "" {
+				continue
+			}
+			if insideDir(root, full) {
+				return "MERGE_SEEDING", "文件仍在 qBittorrent 中（" + row.Name + "）；先在客户端停止并移除该种子，再合并"
+			}
+		}
+	}
+	return "", ""
 }
 
 // quarantineFile moves one library file (and its .lrc sidecar when

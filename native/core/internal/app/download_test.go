@@ -79,6 +79,7 @@ func buildTestTorrent(t *testing.T, files []testTorrentFile) []byte {
 type fakeQBTorrent struct {
 	hash         string
 	savePath     string
+	contentPath  string
 	downloadPath string
 	category     string
 	tags         string
@@ -253,6 +254,15 @@ func (f *fakeQBT) addTorrent(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// contentPath is the client's content_path: the file or directory the torrent
+// owns. It defaults to the synthetic "album" directory the fake adds.
+func contentPath(row *fakeQBTorrent) string {
+	if row.contentPath != "" {
+		return row.contentPath
+	}
+	return filepath.Join(row.savePath, "album")
+}
+
 func (f *fakeQBT) rowJSON() map[string]any {
 	row := f.row
 	state, progress := "stoppedDL", 0.0
@@ -270,7 +280,7 @@ func (f *fakeQBT) rowJSON() map[string]any {
 	return map[string]any{
 		"hash": row.hash, "infohash_v1": row.hash, "infohash_v2": "", "name": "album",
 		"state": state, "progress": progress, "category": row.category, "tags": row.tags,
-		"save_path": row.savePath, "content_path": filepath.Join(row.savePath, "album"),
+		"save_path": row.savePath, "content_path": contentPath(row),
 		"download_path": row.downloadPath, "auto_tmm": false, "size": 0,
 	}
 }

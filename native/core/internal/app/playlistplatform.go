@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/wsdbb72/MusicOps/native/core/internal/cookies"
+	"github.com/wsdbb72/MusicOps/native/core/internal/workflow"
 )
 
 // Public playlist reads follow the 0.4.31 domestic provider for the two
@@ -51,6 +52,10 @@ func (a *App) fetchPlaylist(w http.ResponseWriter, r *http.Request) {
 		BaseURL    string `json:"base_url"`
 		Save       bool   `json:"save"`
 		Subscribe  bool   `json:"subscribe"`
+		// Enqueue creates the playlist job that actually works through the
+		// list. Saving the name list alone never produced a task, which is
+		// why "歌单入库" looked like a no-op.
+		Enqueue bool `json:"enqueue"`
 	}
 	if err := decode(r, &body); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "code": "INVALID_REQUEST"})
@@ -59,6 +64,9 @@ func (a *App) fetchPlaylist(w http.ResponseWriter, r *http.Request) {
 	// The field accepts a share link as well as a bare id: pasting the link
 	// the platform gave the user is the normal case, and asking them to dig
 	// the id out of it by hand is a pointless step.
+	if strings.TrimSpace(body.Platform) == "" {
+		body.Platform = "netease"
+	}
 	if strings.Contains(body.PlaylistID, "://") {
 		found, locateErr := parsePlaylistLocator(body.PlaylistID, "auto")
 		if locateErr != nil || len(found) != 1 || found[0].PlaylistID == "" {
@@ -89,7 +97,25 @@ func (a *App) fetchPlaylist(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	jobID := ""
+	if body.Enqueue {
+		if slug == "" {
+			slug = playlistSlug(body.Platform + "-" + body.PlaylistID)
+			if err = a.writeSavedPlaylist(slug, remote.Name, remote.Tracks); err != nil {
+				writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "code": "PLAYLIST_UNAVAILABLE", "downloaded": false})
+				return
+			}
+		}
+		jobID, err = a.startPlaylistJob(slug, remote)
+		if err != nil {
+			writeJSON(w, http.StatusBadGateway, map[string]any{"ok": false, "code": "PLAYLIST_JOB_UNAVAILABLE", "error": "歌单已读取，但没有创建任务：" + err.Error()})
+			return
+		}
+	}
 	note := "只读取了公开曲目名单。没有下载音频，也没有写入音乐库。"
+	if jobID != "" {
+		note = "已创建歌单入库任务（" + jobID + "），共 " + strconv.Itoa(len(remote.Tracks)) + " 首；任务在识别阶段，不会立刻下载。"
+	}
 	if remote.Preview {
 		note = "只读取了公开嵌入清单，不保证完整。没有下载音频，也没有写入音乐库。"
 	} else if remote.Truncated {
@@ -98,7 +124,7 @@ func (a *App) fetchPlaylist(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{
 		"ok": true, "platform": remote.Platform, "playlist_id": slug, "remote_id": remote.ID,
 		"name": remote.Name, "track_count": len(remote.Tracks), "truncated": remote.Truncated,
-		"preview": remote.Preview, "downloaded": false, "imported": false, "note": note,
+		"preview": remote.Preview, "downloaded": false, "imported": false, "note": note, "job_id": jobID,
 	})
 }
 
@@ -354,6 +380,54 @@ func (a *App) writeSavedPlaylist(slug, name string, tracks []playlistTrack) erro
 		return err
 	}
 	return os.WriteFile(filepath.Join(dir, slug+".m3u"), encodeM3U(name, tracks), 0o644)
+}
+
+// startPlaylistJob turns a fetched playlist into one workflow job. The job
+// walks the list in the fallback stage: it reads incoming/playlist-<job>.m3u,
+// records the tracklist as evidence and stops in needs_review, because the
+// per-track download decisions are not this stage's to make.
+func (a *App) startPlaylistJob(slug string, remote remotePlaylist) (string, error) {
+	jobID := "pl-" + slug + "-" + strconv.FormatInt(a.now().UnixNano(), 36)
+	if err := os.MkdirAll(a.workPath("incoming"), 0o700); err != nil {
+		return "", err
+	}
+	dir, err := resolveInDir(a.workDir(), "incoming")
+	if err != nil {
+		return "", err
+	}
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return "", err
+	}
+	if err := os.WriteFile(filepath.Join(dir, playlistFileName(jobID)), encodeM3U(remote.Name, remote.Tracks), 0o600); err != nil {
+		return "", err
+	}
+	sites := []string{}
+	if settings, loadErr := a.loadSiteSettings(); loadErr == nil {
+		sites = settings.EnabledSites
+	}
+	plan := SearchPlan{
+		RootJobID: jobID, Scene: "playlist", PlaylistImport: true, Query: remote.Name, ExpectedTitle: remote.Name,
+		EnabledSites: sites, StreamingEnabled: true,
+	}
+	raw, err := json.Marshal(plan)
+	if err != nil {
+		return "", err
+	}
+	ids := make([]string, 0, len(remote.Tracks))
+	for i := range remote.Tracks {
+		if len(ids) >= maxPlaylistTracks {
+			break
+		}
+		ids = append(ids, "track-"+strconv.Itoa(i+1))
+	}
+	if _, err := a.flows.Start("start-"+jobID, workflow.Start{
+		JobID: jobID, BatchID: jobID, Scene: "playlist", Stage: "identifying", Label: remote.Name,
+		SourceTrackIDs: ids, MatchedCount: uint64(len(ids)), Payload: raw, NowNS: a.now().UnixNano(),
+	}); err != nil {
+		_ = os.Remove(filepath.Join(dir, playlistFileName(jobID)))
+		return "", err
+	}
+	return jobID, nil
 }
 
 func (a *App) rememberRemoteSubscription(slug string, remote remotePlaylist) error {

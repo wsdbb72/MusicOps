@@ -21,7 +21,13 @@ import (
 
 // SearchPlan is the durable, secret-free description of one tracker read.
 type SearchPlan struct {
-	RootJobID           string   `json:"root_job_id"`
+	RootJobID string `json:"root_job_id"`
+	// Scene is the workflow scene this plan was created for.
+	Scene string `json:"scene,omitempty"`
+	// PlaylistImport marks a job created from a fetched playlist. Scene
+	// alone cannot: "playlist" is also the default scene of the ordinary
+	// search form.
+	PlaylistImport      bool     `json:"playlist_import,omitempty"`
 	Query               string   `json:"query"`
 	ExpectedTitle       string   `json:"expected_title"`
 	ExpectedArtist      string   `json:"expected_artist,omitempty"`
@@ -56,6 +62,13 @@ func (a *App) identify(ctx context.Context, execution *scheduler.Execution, payl
 		return scheduler.Outcome{}, err
 	}
 	token := execution.Token()
+	// A playlist job has no album to identify: read the list it was created
+	// with, record it as evidence and park for review. Running the album
+	// lookup here was what made a freshly created playlist job fail with
+	// "invalid data request".
+	if plan.PlaylistImport {
+		return a.identifyPlaylist(execution, plan, token)
+	}
 	evidence := plan.evidence()
 	// A bare album name is the normal entry point of the search page and it
 	// carries no confirmed catalogue identity. Asking the workflow for the
@@ -97,6 +110,13 @@ func (a *App) search(ctx context.Context, execution *scheduler.Execution, payloa
 		return scheduler.Outcome{}, err
 	}
 	token := execution.Token()
+	// A playlist job has no album to identify: read the list it was created
+	// with, record it as evidence and park for review. Running the album
+	// lookup here was what made a freshly created playlist job fail with
+	// "invalid data request".
+	if plan.PlaylistImport {
+		return a.identifyPlaylist(execution, plan, token)
+	}
 	task, err := a.tasks.Get(token.ID)
 	if err != nil || task == nil {
 		return scheduler.Outcome{}, errors.New("search task disappeared")

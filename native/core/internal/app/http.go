@@ -541,7 +541,7 @@ func (a *App) startSearch(w http.ResponseWriter, r *http.Request) {
 		streaming = settings.StreamingEnabled
 	}
 	plan := SearchPlan{
-		RootJobID: body.JobID, Query: body.Query, ExpectedTitle: body.ExpectedTitle, ExpectedArtist: body.ExpectedArtist, EnabledSites: body.EnabledSites,
+		RootJobID: body.JobID, Scene: body.Scene, Query: body.Query, ExpectedTitle: body.ExpectedTitle, ExpectedArtist: body.ExpectedArtist, EnabledSites: body.EnabledSites,
 		StreamingEnabled: streaming, Synthetic: body.Synthetic, BaseURL: body.BaseURL, Identity: body.Identity,
 		Budget: body.Budget, SafetyMargin: body.SafetyMargin,
 	}

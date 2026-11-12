@@ -83,14 +83,14 @@ const appJS = `(function () {
     if (view === "logs") { renderLogs(); return; }
     var rows = visible();
     if (!rows.length) {
-      list.innerHTML = (view === "tasks" || view === "queue") ? pipelineBar() : "";
-      if (view === "tasks" || view === "queue") bindPipeline();
+      list.innerHTML = (view === "tasks" || view === "queue") ? newTaskCard() + pipelineBar() : "";
+      if (view === "tasks" || view === "queue") { bindPipeline(); bindPlaylists(); }
       setStatus("", view === "review" ? "没有待核对的任务。" : (view === "queue" ? "没有正在进行的任务。" : "还没有任务。"));
       return;
     }
     setStatus("", "");
     var html = "";
-    if (view === "tasks" || view === "queue") html += pipelineBar() + batchBar();
+    if (view === "tasks" || view === "queue") html += newTaskCard() + pipelineBar() + batchBar();
     html += '<div class="cards">';
     rows.forEach(function (job) {
       var checked = selectedJobs[job.job_id] ? " checked" : "";
@@ -99,7 +99,12 @@ const appJS = `(function () {
     });
     if (view === "review" && jobsNext) html += '<p><button type="button" id="review-more">加载更多待核对</button></p>';
     list.innerHTML = html + "</div>";
-    if (view === "tasks" || view === "queue") bindPipeline();
+    if (view === "tasks" || view === "queue") { bindPipeline(); bindPlaylists(); }
+  }
+  // newTaskCard is the "新建任务" entry: the playlist forms used to hide in
+  // the settings page, which is not where anyone looks for a new task.
+  function newTaskCard() {
+    return '<article><h2>新建任务</h2><p class="meta">歌单入库和歌单订阅都在这里：拉取公开歌单后勾选"创建入库任务"，任务会出现在下面的列表里，从识别阶段开始，不会立刻下载。</p></article>' + playlistsCard();
   }
   function pipelineBar() {
     return '<p><button type="button" id="pipeline-pause">暂停全部后台</button> <button type="button" id="pipeline-resume">继续后台</button></p>';
@@ -206,7 +211,7 @@ const appJS = `(function () {
       '<label><input type="checkbox" id="search-identity-tracklist"> 已核对曲目清单</label>' +
       '<label><input type="checkbox" id="search-identity-confirmed"> 确认这是同一发行（须先核对曲目清单）</label></fieldset>' +
       '<label>本次检索的 Cookie（只用于这次检索，不保存；留空用已保存的 Cookie）<input type="password" id="search-cookie" autocomplete="off"></label>' +
-      '<p><button type="submit" class="primary">提交搜索</button></p></form></article></div>';
+      '<p><button type="submit" class="primary">提交搜索</button></p></form></article>' + downloadCard() + cookieCard() + neteaseCard() + '</div>';
     list.innerHTML = html;
     var sitesBox = document.getElementById("search-sites");
     if (sitesBox) {
@@ -440,9 +445,10 @@ const appJS = `(function () {
       '<p><button type="button" id="locate-playlist">识别链接</button></p><p id="playlist-locate-result" class="meta"></p>' +
       '<h2>拉取公开歌单</h2><p class="meta">按旧版只读接口读取网易云、酷狗、汽水、咪咕、Apple Music、Spotify、YouTube、QQ 音乐或酷我的曲目名单。不下载音频。YouTube 必须用用户自己的 API Key，不会改去读网页。本机测试地址只接受回环。</p>' +
       '<label>平台<select id="remote-platform"><option value="netease">网易云音乐</option><option value="kugou">酷狗</option><option value="qishui">汽水</option><option value="migu">咪咕</option><option value="applemusic">Apple Music</option><option value="spotify">Spotify</option><option value="youtube">YouTube</option><option value="qqmusic">QQ 音乐</option><option value="kuwo">酷我</option></select></label>' +
-      '<label>歌单 ID<input type="text" id="remote-playlist-id" placeholder="数字 ID，或 Spotify / Apple / YouTube 的歌单 ID"></label>' +
+      '<label>歌单链接或 ID<input type="text" id="remote-playlist-id" placeholder="粘贴完整分享链接，或直接填歌单 ID"></label>' +
       '<label>本机测试地址<input type="text" id="remote-base" placeholder="留空则访问各平台公开接口"></label>' +
-      '<p><button type="button" id="fetch-playlist">拉取并订阅</button></p><p id="playlist-fetch-result" class="meta"></p>' +
+      '<label><input type="checkbox" id="playlist-enqueue" checked> 拉取后创建入库任务</label>' +
+      '<p><button type="button" id="fetch-playlist">拉取并创建入库任务</button></p><p id="playlist-fetch-result" class="meta"></p>' +
       '<h2>订阅已存歌单</h2><p class="meta">未绑定平台时只重新读取本机歌单。绑定了公开歌单后，检查会向该平台读取新增曲目。首次默认只记下现有曲目。删除的曲目不会从音乐库移除。</p>' +
       '<label>歌单<select id="subscription-playlist"><option value="">选择已存歌单</option>' + playlistRows.map(function (row) { return '<option value="' + escapeText(row.id) + '">' + escapeText(row.name || row.id) + "</option>"; }).join("") + '</select></label>' +
       '<label>间隔（小时）<input type="number" id="subscription-hours" min="1" max="168" value="6"></label>' +
@@ -465,7 +471,7 @@ const appJS = `(function () {
       return;
     }
     setStatus("", "");
-    var html = '<div class="cards">' + migrationCard() + downloadCard() + cookieCard() + aiCard() + qbtCard() + solverCard() + neteaseCard() + lyricsCard() + discogsCard() + libraryCard() + serversCard() + playlistsCard() +
+    var html = '<div class="cards">' + migrationCard() + aiCard() + qbtCard() + solverCard() + lyricsCard() + discogsCard() + libraryCard() + serversCard() +
       '<article><h2>站点登录检查</h2><p class="meta">只读检查：只验证登录和余额，不下载，也不消耗令牌。Cookie 留空则用已保存的；填写的只用于这次检查，不保存。</p>' +
       '<label>站点<select id="preflight-site">' + siteRows.map(function (site) { return '<option value="' + escapeText(site.name) + '">' + escapeText(site.name) + "</option>"; }).join("") + '</select></label>' +
       '<label>Cookie<input type="password" id="preflight-cookie" autocomplete="off"></label>' +
@@ -520,6 +526,12 @@ const appJS = `(function () {
     if (unifyQbt) unifyQbt.addEventListener("click", unifyQbtTags);
     var testRoonButton = document.getElementById("test-roon");
     if (testRoonButton) testRoonButton.addEventListener("click", testRoon);
+    bindPlaylists();
+    var run = document.getElementById("run-preflight");
+    if (run) run.addEventListener("click", preflight);
+  }
+  // bindPlaylists wires the playlist forms wherever they are rendered.
+  function bindPlaylists() {
     var savePlaylistButton = document.getElementById("save-playlist");
     if (savePlaylistButton) savePlaylistButton.addEventListener("click", savePlaylist);
     var locatePlaylistButton = document.getElementById("locate-playlist");
@@ -537,8 +549,11 @@ const appJS = `(function () {
     document.querySelectorAll("[data-sub-delete]").forEach(function (button) {
       button.addEventListener("click", function () { deleteSubscription(button.getAttribute("data-sub-delete")); });
     });
-    var run = document.getElementById("run-preflight");
-    if (run) run.addEventListener("click", preflight);
+    var enqueueHint = document.getElementById("playlist-enqueue");
+    if (enqueueHint) enqueueHint.addEventListener("change", function () {
+      var button = document.getElementById("fetch-playlist");
+      if (button) button.textContent = enqueueHint.checked ? "拉取并创建入库任务" : "只拉取曲目名单";
+    });
   }
   async function saveDownload() {
     if (loading) return;
@@ -953,7 +968,8 @@ const appJS = `(function () {
     setBusy(true);
     setStatus("info", "正在读取公开歌单");
     try {
-      var payload = {platform: document.getElementById("remote-platform").value, playlist_id: id, save: true, subscribe: true};
+      var enqueue = document.getElementById("playlist-enqueue");
+      var payload = {platform: document.getElementById("remote-platform").value, playlist_id: id, save: true, subscribe: true, enqueue: !!(enqueue && enqueue.checked)};
       var base = document.getElementById("remote-base");
       if (base && base.value.trim()) payload.base_url = base.value.trim();
       var body = await postSetting("/v1/playlists/fetch", payload);

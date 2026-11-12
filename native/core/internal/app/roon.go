@@ -1,6 +1,7 @@
 package app
 
 import (
+	"crypto/rand"
 	"crypto/sha1"
 	"encoding/base64"
 	"encoding/binary"
@@ -76,7 +77,13 @@ func loopbackHost(host string) bool {
 
 func probeRoonInfo(conn net.Conn) (string, string, bool) {
 	_ = conn.SetDeadline(time.Now().Add(2 * time.Second))
-	key := base64.StdEncoding.EncodeToString([]byte("musicops-roon-info"))
+	// RFC 6455 requires a 16-byte key. A longer, human-readable literal is
+	// not a valid nonce and Roon answers 404 instead of upgrading.
+	var nonce [16]byte
+	if _, err := rand.Read(nonce[:]); err != nil {
+		return "", "", false
+	}
+	key := base64.StdEncoding.EncodeToString(nonce[:])
 	request := "GET /api HTTP/1.1\r\nHost: 127.0.0.1\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: " + key + "\r\nSec-WebSocket-Version: 13\r\n\r\n"
 	if _, err := io.WriteString(conn, request); err != nil {
 		return "", "", false

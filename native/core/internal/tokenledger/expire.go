@@ -1,6 +1,7 @@
 package tokenledger
 
 import (
+	"encoding/json"
 	"errors"
 	"time"
 
@@ -23,6 +24,11 @@ type Pending struct {
 	State      string
 	Cost       int
 	UpdatedNS  int64
+	// The row's own balance observation at reservation time. A reconciler
+	// compares it with a fresh read to decide whether the spend happened.
+	Balance       int
+	BalanceKnown  bool
+	ObservedAtNS  int64
 }
 
 // Pending lists the unsettled rows of every token site. It reads the per-site
@@ -47,9 +53,25 @@ func (l *Ledger) Pending() ([]Pending, error) {
 			if !inFlight(item.State) {
 				continue
 			}
+			// The row carries the balance that was observed when the token was
+			// reserved; a reconciler compares it with a fresh read. A row that
+			// cannot be read is skipped rather than reported with a zero
+			// balance, which would look like a confirmed spend.
+			var current row
+			readErr := l.engine.View(func(v *dataengine.View) error {
+				raw, ok, err := v.Get(rowKey(item.ID))
+				if err != nil || !ok {
+					return err
+				}
+				return json.Unmarshal(raw, &current)
+			})
+			if readErr != nil {
+				continue
+			}
 			out = append(out, Pending{
 				Site: site, RequestID: item.RequestID, ResourceID: item.ResourceID,
 				State: item.State, Cost: item.Cost, UpdatedNS: item.UpdatedNS,
+				Balance: current.Balance, BalanceKnown: current.BalanceKnown, ObservedAtNS: current.ObservedAtNS,
 			})
 		}
 	}

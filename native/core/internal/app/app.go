@@ -56,7 +56,14 @@ type App struct {
 	aiHTTPClient *http.Client
 	mu           sync.Mutex
 	secrets      map[string]string
-	stopSubs     chan struct{}
+	stopSubs      chan struct{}
+	stopReconcile chan struct{}
+	// lastTokenRead bounds the background balance reads to one per site per
+	// minute. The ledger's read hold only exists for failures; a successful
+	// read leaves no trace there, and a 30-second ticker would otherwise read
+	// every other sweep.
+	reconcileMu   sync.Mutex
+	lastTokenRead map[string]time.Time
 	// migrationFailure is the reason a legacy profile was not imported at
 	// startup. It is set once, before the scheduler serves, and reported by
 	// GET /v1/migration. An empty value means nothing failed.
@@ -153,6 +160,10 @@ func Open(dir, backup, password string) (*App, error) {
 	app.runner = runner
 	app.stopSubs = make(chan struct{})
 	go app.runSubscriptions(app.stopSubs)
+	// Token reconciliation runs with the app: an unanswered spend must stop
+	// blocking its site on evidence, not only on a 30-minute deadline.
+	app.stopReconcile = make(chan struct{})
+	go app.runTokenReconciler(app.stopReconcile)
 	return app, nil
 }
 
@@ -194,10 +205,15 @@ func (a *App) Close() error {
 	}
 	a.mu.Lock()
 	stop := a.stopSubs
+	stopReconcile := a.stopReconcile
 	a.stopSubs = nil
+	a.stopReconcile = nil
 	a.mu.Unlock()
 	if stop != nil {
 		close(stop)
+	}
+	if stopReconcile != nil {
+		close(stopReconcile)
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()

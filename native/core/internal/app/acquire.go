@@ -344,32 +344,6 @@ func (a *App) observeBalance(ctx context.Context, site, cookie string, synthetic
 		}
 	}
 	obs := tokenledger.ParseBalance(site, body)
-	// Some sites (Redacted among them) return no token count in the index
-	// document; the per-user document is the documented fallback and the same
-	// parser reads it. Only asked when the index answer had an account id and
-	// no balance, so the extra request costs nothing in the normal case.
-	if !obs.Known && obs.AccountID != "" {
-		if page, status, _, readErr := a.searcher.ReadAccount(ctx, query, url.Values{"action": {"user"}, "id": {obs.AccountID}}); readErr == nil && status == http.StatusOK {
-			if fallback := tokenledger.ParseBalance(site, page); fallback.Known {
-				fallback.CookieID = tokenledger.Fingerprint(cookie)
-				fallback.ObservedAtNS = now.UnixNano()
-				obs = fallback
-			}
-		}
-	}
-	// Last resort: the rendered user page. Redacted's JSON documents carry no
-	// token count, but the page prints "Tokens: N", which the same parser
-	// reads. Only this account's own page is requested.
-	if !obs.Known && obs.AccountID != "" {
-		if page, readErr := a.searcher.ReadDetail(ctx, query, "/user.php", url.Values{"id": {obs.AccountID}}); readErr == nil {
-			if fallback := tokenledger.ParseBalance(site, page); fallback.Known {
-				fallback.AccountID = obs.AccountID
-				fallback.CookieID = tokenledger.Fingerprint(cookie)
-				fallback.ObservedAtNS = now.UnixNano()
-				obs = fallback
-			}
-		}
-	}
 	obs.CookieID = tokenledger.Fingerprint(cookie)
 	obs.ObservedAtNS = now.UnixNano()
 	switch {
@@ -423,6 +397,20 @@ func (a *App) observeBalance(ctx context.Context, site, cookie string, synthetic
 				obs.Known = true
 				obs.Balance = parsed.Balance
 				obs.Source = "user." + parsed.Source
+				obs.ErrorClass = ""
+			}
+		}
+	}
+	// Last resort: the rendered user page. Some sites (Redacted) print the
+	// token count only there; the same parser reads "Tokens: N" from it. Only
+	// this account's own page is requested, and a failure leaves the balance
+	// unknown exactly as before.
+	if obs.ErrorClass == tokenledger.ClassBalanceUnknown && obs.AccountID != "" && err == nil && status == http.StatusOK {
+		if page, readErr := a.searcher.ReadDetail(ctx, query, "/user.php", url.Values{"id": {obs.AccountID}}); readErr == nil {
+			if parsed := tokenledger.ParseBalance(site, page); parsed.Known && parsed.ErrorClass == "" {
+				obs.Known = true
+				obs.Balance = parsed.Balance
+				obs.Source = "page." + parsed.Source
 				obs.ErrorClass = ""
 			}
 		}

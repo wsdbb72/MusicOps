@@ -1065,7 +1065,8 @@ const appJS = `(function () {
       '<label>封面写入<select id="meta-cover-mode"><option value="sidecar">内嵌并保留同名 jpg</option><option value="embedded">只写入 FLAC 内嵌图片</option></select></label>' +
       '<label><input type="checkbox" id="meta-overwrite"> 覆盖与目录不同的字段（含分类）</label>' +
       '<p><button type="button" id="complete-metadata">补齐标签封面歌词</button></p><p id="metadata-result" class="meta"></p>' +
-      '<p class="meta">批量刮削按专辑一次查询目录，只写标签（含分类），不取歌词和封面。先勾选曲目，再预演或应用。</p>' +
+      '<p class="meta">批量刮削按专辑一次查询目录，写标签（含分类）。勾选下面的歌词封面后，会再用设置里的歌词服务为每首取一次歌词和封面（一次最多 30 首）。先勾选曲目，再预演或应用。</p>' +
+      '<label><input type="checkbox" id="scrape-artwork"> 同时取歌词与封面（≤30 首，用设置里的歌词服务）</label>' +
       '<p><button type="button" id="scrape-preview">预演批量刮削</button> <button type="button" id="scrape-apply" class="primary">批量刮削所选</button></p></article>' +
       '<article><h2>合辑</h2><p class="meta">预览不会移动文件。合并只把名称里带“合辑”或 Various Artists 的文件夹移进音乐库的 Compilations。</p>' +
       '<p><button type="button" id="preview-compilations">预览合辑</button> <button type="button" id="merge-compilations">合并合辑</button></p><p id="compilation-result" class="meta"></p></article>' +
@@ -1306,11 +1307,13 @@ const appJS = `(function () {
     setBusy(true);
     setStatus("info", dryRun ? "正在预演批量刮削" : "正在批量刮削");
     try {
+      var artwork = document.getElementById("scrape-artwork");
       var response = await fetch("/v1/library/scrape", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({
         paths: paths,
         catalog_base_url: document.getElementById("meta-catalog").value.trim(),
         overwrite: document.getElementById("meta-overwrite").checked,
-        dry_run: dryRun
+        dry_run: dryRun,
+        with_artwork: !!(artwork && artwork.checked)
       })});
       var body = await response.json();
       if (!response.ok || !body || body.ok === false) {
@@ -1320,6 +1323,8 @@ const appJS = `(function () {
       var text = (dryRun ? ("预演：将写入 " + body.planned + " 首") : ("已写入 " + body.written + " 首"))
         + "；未变化 " + body.unchanged + "；跳过 " + body.skipped + "；失败 " + body.failed;
       if (body.genre_written) text += "；其中写入分类 " + body.genre_written + " 首";
+      if (body.lyrics_written) text += "；歌词 " + body.lyrics_written + " 首";
+      if (body.cover_written) text += "；封面 " + body.cover_written + " 首";
       setStatus("ok", text + "。" + (body.note || ""));
     } catch (err) {
       setStatus("fail", "批量刮削中断。");

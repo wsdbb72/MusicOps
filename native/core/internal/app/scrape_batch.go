@@ -6,9 +6,13 @@
 package app
 
 import (
+	"bytes"
+	"context"
 	"net/http"
+	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/wsdbb72/MusicOps/native/core/internal/flactags"
 	"github.com/wsdbb72/MusicOps/native/core/internal/musicbrainz"
@@ -22,6 +26,9 @@ const (
 	// scrapeBatchMaxAlbums bounds the lookups independently: 200 files from
 	// 200 albums would take minutes, 200 files from 12 albums takes seconds.
 	scrapeBatchMaxAlbums = 12
+	// scrapeArtworkMaxFiles bounds a batch that also fetches lyrics and
+	// covers: two extra reads per file, each with its own deadline.
+	scrapeArtworkMaxFiles = 30
 )
 
 type scrapeBatchRequest struct {
@@ -29,6 +36,10 @@ type scrapeBatchRequest struct {
 	CatalogBaseURL string   `json:"catalog_base_url"`
 	Overwrite      bool     `json:"overwrite"`
 	DryRun         bool     `json:"dry_run"`
+	// WithArtwork also fetches lyrics and the cover from the saved lyrics
+	// service. It is off by default and capped: each file costs two extra
+	// HTTP reads, so a batch that turns it on is deliberately smaller.
+	WithArtwork bool `json:"with_artwork"`
 }
 
 // scrapeFileResult is one file's outcome. Status is one of written, planned,
@@ -42,6 +53,9 @@ type scrapeFileResult struct {
 	KeptFields      []tagConflict `json:"kept_fields,omitempty"`
 	UnchangedFields []string      `json:"unchanged_fields,omitempty"`
 	LockedFields    []string      `json:"locked_fields,omitempty"`
+	Lyrics          bool          `json:"lyrics,omitempty"`
+	Cover           bool          `json:"cover,omitempty"`
+	ArtworkPlanned  bool          `json:"artwork_planned,omitempty"`
 }
 
 type scrapeEntry struct {
@@ -82,6 +96,10 @@ func (a *App) scrapeLibrary(w http.ResponseWriter, r *http.Request) {
 	}
 	if len(paths) > scrapeBatchMaxFiles {
 		writeJSON(w, http.StatusUnprocessableEntity, map[string]any{"ok": false, "code": "BATCH_TOO_LARGE", "error": "一次最多刮削 200 首，请分批勾选"})
+		return
+	}
+	if body.WithArtwork && len(paths) > scrapeArtworkMaxFiles {
+		writeJSON(w, http.StatusUnprocessableEntity, map[string]any{"ok": false, "code": "ARTWORK_BATCH_TOO_LARGE", "error": "同时取歌词和封面时一次最多 30 首，请分批勾选"})
 		return
 	}
 	client := musicbrainz.NewClient()
@@ -139,6 +157,9 @@ func (a *App) scrapeLibrary(w http.ResponseWriter, r *http.Request) {
 	}
 	summary := []map[string]any{}
 	genreWritten := 0
+	lyricsWritten, coverWritten := 0, 0
+	lyricsSettings, _ := a.loadLyricsSettings()
+	coverMode := coverWriteMode("", lyricsSettings)
 	for _, group := range groups {
 		tracks := make([]catalogTrackRequest, 0, len(group.entries))
 		for _, entry := range group.entries {
@@ -198,6 +219,44 @@ func (a *App) scrapeLibrary(w http.ResponseWriter, r *http.Request) {
 				}
 				completion.Written = written
 			}
+			// Lyrics and cover are per-file reads against the saved service.
+			// A dry run never fetches them: the point of a dry run is to see
+			// the plan without spending requests.
+			var cover []byte
+			if body.WithArtwork {
+				if body.DryRun {
+					result.ArtworkPlanned = true
+				} else {
+					ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+					fetchedLyrics, fetchedCover, artErr := a.fetchArtworkContext(ctx, "", "", entry.artist, entry.album, entry.title)
+					cancel()
+					if artErr != nil {
+						result.Status, result.Code, result.Note = "failed", "ARTWORK_UNAVAILABLE", "歌词或封面没有读到，文件没有改"
+						continue
+					}
+					cover = fetchedCover
+					if fetchedLyrics != "" && (len(entry.tags.Raw["LYRICS"]) == 0 || body.Overwrite) {
+						updates["LYRICS"] = []string{fetchedLyrics}
+						completion.Written = append(completion.Written, "lyrics")
+						// A locked lyrics field wins over the fetch, exactly as
+						// it wins over the catalogue.
+						var extra []string
+						updates, extra = a.applyFieldLocks(filepath.Dir(entry.full), updates)
+						for _, field := range extra {
+							result.LockedFields = append(result.LockedFields, field)
+						}
+						if len(extra) > 0 {
+							written := completion.Written[:0]
+							for _, name := range completion.Written {
+								if name != "lyrics" {
+									written = append(written, name)
+								}
+							}
+							completion.Written = written
+						}
+					}
+				}
+			}
 			if body.DryRun {
 				result.Status = "planned"
 				result.WrittenFields = completion.Written
@@ -208,13 +267,58 @@ func (a *App) scrapeLibrary(w http.ResponseWriter, r *http.Request) {
 				}
 				continue
 			}
-			if len(updates) == 0 {
+			if len(updates) == 0 && cover == nil {
 				result.Status, result.UnchangedFields = "unchanged", completion.Unchanged
 				continue
 			}
-			if err := writeFLACTags(entry.full, updates); err != nil {
-				result.Status, result.Code, result.Note = "failed", "TAG_WRITE_FAILED", "写标签失败，文件已恢复"
-				continue
+			// One backup covers both writes: tags first, then the embedded
+			// cover, so a failed cover leaves the original file in place.
+			backup := ""
+			if cover != nil {
+				if backup, err = backupFile(entry.full); err != nil {
+					result.Status, result.Code, result.Note = "failed", "TAG_UNAVAILABLE", "备份失败，文件没有改"
+					continue
+				}
+			}
+			if len(updates) > 0 {
+				if err := writeFLACTags(entry.full, updates); err != nil {
+					if backup != "" {
+						restoreBackup(entry.full, backup)
+						_ = os.Remove(backup)
+					}
+					result.Status, result.Code, result.Note = "failed", "TAG_WRITE_FAILED", "写标签失败，文件已恢复"
+					continue
+				}
+			}
+			if cover != nil {
+				updated, readErr := os.ReadFile(entry.full)
+				var embedded []byte
+				if readErr == nil {
+					embedded, err = flactags.EmbedFrontCover(updated, cover)
+				}
+				if readErr != nil || err != nil || os.WriteFile(entry.full, embedded, 0o600) != nil || !bytes.Equal(flactags.FrontCover(embedded), cover) {
+					restoreBackup(entry.full, backup)
+					_ = os.Remove(backup)
+					result.Status, result.Code, result.Note = "failed", "COVER_WRITE_FAILED", "封面没有写入，文件已恢复"
+					continue
+				}
+				sidecar := strings.TrimSuffix(entry.full, filepath.Ext(entry.full)) + ".jpg"
+				if coverMode == "sidecar" {
+					if err := os.WriteFile(sidecar, cover, 0o600); err != nil {
+						restoreBackup(entry.full, backup)
+						_ = os.Remove(backup)
+						_ = os.Remove(sidecar)
+						result.Status, result.Code, result.Note = "failed", "COVER_WRITE_FAILED", "封面没有写入，文件已恢复"
+						continue
+					}
+				} else {
+					_ = os.Remove(sidecar)
+				}
+				result.Cover = true
+				coverWritten++
+			}
+			if backup != "" {
+				_ = os.Remove(backup)
 			}
 			result.Status = "written"
 			result.WrittenFields = completion.Written
@@ -222,6 +326,10 @@ func (a *App) scrapeLibrary(w http.ResponseWriter, r *http.Request) {
 			for _, field := range completion.Written {
 				if field == "genre" {
 					genreWritten++
+				}
+				if field == "lyrics" {
+					result.Lyrics = true
+					lyricsWritten++
 				}
 			}
 		}
@@ -234,14 +342,15 @@ func (a *App) scrapeLibrary(w http.ResponseWriter, r *http.Request) {
 		counts[result.Status]++
 		files = append(files, *result)
 	}
-	note := "批量刮削只写标签，不取歌词和封面；单曲补全会同时处理封面和歌词。"
+	note := "批量刮削只写标签；勾选歌词封面后才会从设置里的歌词服务取，一次最多 30 首。"
 	if body.DryRun {
-		note = "预演：只报告会写哪些字段，文件没有改。" + note
+		note = "预演：只报告会写哪些字段，文件没有改，也不取歌词封面。"
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"ok": true, "dry_run": body.DryRun, "files": files, "albums": summary,
 		"written": counts["written"], "planned": counts["planned"], "unchanged": counts["unchanged"],
 		"skipped": counts["skipped"], "failed": counts["failed"], "genre_written": genreWritten,
+		"with_artwork": body.WithArtwork, "lyrics_written": lyricsWritten, "cover_written": coverWritten,
 		"note": note,
 	})
 }

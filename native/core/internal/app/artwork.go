@@ -17,6 +17,7 @@ package app
 //     file with half the metadata.
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"io"
@@ -136,7 +137,7 @@ func (a *App) lyricsAuth(settings lyricsSettings) (string, string) {
 
 // artworkGET performs one read. A 404 is reported as (nil, false, nil): the
 // service answered that it has nothing, which is not a failure of the write.
-func artworkGET(target artworkTarget, query url.Values) ([]byte, bool, error) {
+func artworkGET(ctx context.Context, target artworkTarget, query url.Values) ([]byte, bool, error) {
 	parsed, err := url.Parse(target.URL)
 	if err != nil {
 		return nil, false, errors.New("歌词/封面地址无效")
@@ -150,7 +151,7 @@ func artworkGET(target artworkTarget, query url.Values) ([]byte, bool, error) {
 		}
 	}
 	parsed.RawQuery = merged.Encode()
-	request, err := http.NewRequest(http.MethodGet, parsed.String(), nil)
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, parsed.String(), nil)
 	if err != nil {
 		return nil, false, err
 	}

@@ -2,6 +2,7 @@ package app
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -797,6 +798,12 @@ func (a *App) libraryFilePage(offset, limit int) ([]string, int, int) {
 // this call; both go through the same origin rules and send the saved
 // authorization value only when the address comes from the settings.
 func (a *App) fetchArtwork(lyricsBase, coverBase, artist, album, title string) (string, []byte, error) {
+	return a.fetchArtworkContext(context.Background(), lyricsBase, coverBase, artist, album, title)
+}
+
+// fetchArtworkContext is the same read with a caller-supplied deadline: the
+// batch path bounds each file so one slow service cannot hold the request.
+func (a *App) fetchArtworkContext(ctx context.Context, lyricsBase, coverBase, artist, album, title string) (string, []byte, error) {
 	lyricsTarget, coverTarget, err := a.artworkTargets(lyricsBase, coverBase)
 	if err != nil {
 		return "", nil, err
@@ -804,7 +811,7 @@ func (a *App) fetchArtwork(lyricsBase, coverBase, artist, album, title string) (
 	query := url.Values{"artist": {artist}, "title": {title}, "album": {album}}
 	var lyrics string
 	if lyricsTarget.configured() {
-		body, found, err := artworkGET(lyricsTarget, query)
+		body, found, err := artworkGET(ctx, lyricsTarget, query)
 		if err != nil {
 			return "", nil, err
 		}
@@ -814,7 +821,7 @@ func (a *App) fetchArtwork(lyricsBase, coverBase, artist, album, title string) (
 	}
 	var cover []byte
 	if coverTarget.configured() {
-		body, found, err := artworkGET(coverTarget, query)
+		body, found, err := artworkGET(ctx, coverTarget, query)
 		if err != nil {
 			return "", nil, err
 		}

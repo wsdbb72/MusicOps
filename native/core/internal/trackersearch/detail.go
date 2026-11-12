@@ -42,7 +42,20 @@ func (c *Client) ReadDetail(ctx context.Context, q Query, path string, values ur
 	if err != nil {
 		return nil, err
 	}
-	if response.StatusCode != http.StatusOK || len(body) == 0 || len(body) > maxBody {
+	if len(body) > maxBody {
+		return nil, fmt.Errorf("detail response was not usable")
+	}
+	// A detail page is a read-only GET, so a browser challenge can be retried
+	// once through the solver. An expired session answers 403 without the
+	// challenge markers and is never replayed: a browser would only produce
+	// the login form.
+	if looksChallenged(response.StatusCode, body) {
+		if solved, ok := c.solverGet(ctx, q, endpoint.String()); ok {
+			return solved, nil
+		}
+		return nil, fmt.Errorf("detail page required a browser challenge that was not solved")
+	}
+	if response.StatusCode != http.StatusOK || len(body) == 0 {
 		return nil, fmt.Errorf("detail response was not usable")
 	}
 	return body, nil
@@ -85,6 +98,14 @@ func (c *Client) ReadAccount(ctx context.Context, q Query, values url.Values) ([
 		return nil, response.StatusCode, response.Header.Get("Retry-After"), errorsNewAccount()
 	}
 	if len(body) > maxBody {
+		return nil, response.StatusCode, response.Header.Get("Retry-After"), errorsNewAccount()
+	}
+	if looksChallenged(response.StatusCode, body) {
+		if solved, ok := c.solverGet(ctx, q, endpoint.String()); ok {
+			return solved, http.StatusOK, "", nil
+		}
+		// The balance is unknown; the caller keeps the row unsettled rather
+		// than reading a challenge page as a zero balance.
 		return nil, response.StatusCode, response.Header.Get("Retry-After"), errorsNewAccount()
 	}
 	return body, response.StatusCode, response.Header.Get("Retry-After"), nil

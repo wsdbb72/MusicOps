@@ -86,7 +86,7 @@ func (a *App) acquire(ctx context.Context, execution *scheduler.Execution, paylo
 }
 
 func (a *App) readEvidence(ctx context.Context, plan SearchPlan, site, resource string) (sitefree.Decision, error) {
-	query := trackersearch.Query{Site: site, Cookie: a.cookieFor(plan.RootJobID, site), Synthetic: plan.Synthetic, BaseURL: plan.BaseURL}
+	query := trackersearch.Query{Site: site, Cookie: a.cookieFor(plan.RootJobID, site), Synthetic: plan.Synthetic, BaseURL: plan.BaseURL, SolverURL: a.solverURL()}
 	var bodies [][]byte
 	if site == "open.cd" {
 		body, err := a.searcher.ReadDetail(ctx, query, "/details.php", url.Values{"id": {resource}})
@@ -326,7 +326,7 @@ func (a *App) observeBalance(ctx context.Context, site, cookie string, synthetic
 	if allowed, class, until := a.ledger.ReadAllowed(site, now); !allowed {
 		return tokenledger.Observation{Contract: tokenledger.BalanceContract, Site: site, ErrorClass: class, RecheckAtNS: until}, false, nil
 	}
-	query := trackersearch.Query{Site: site, Cookie: cookie, Synthetic: synthetic, BaseURL: base}
+	query := trackersearch.Query{Site: site, Cookie: cookie, Synthetic: synthetic, BaseURL: base, SolverURL: a.solverURL()}
 	var body []byte
 	var status int
 	var retryHeader string

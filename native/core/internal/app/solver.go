@@ -11,10 +11,11 @@
 //   - executable, when set, must be an absolute .exe path (only used on
 //     Windows, the way Python's start_local requires it).
 //
-// Honest limit: the Go transport has no solver client, so enabling the
-// solver changes no request behaviour yet — the settings are stored and
-// the connection can be tested, and the UI says so. This is recorded in
-// MIGRATION_PLAN.md rather than silently pretending the solver works.
+// The solver is a fallback for read-only GETs: a search page, a torrent
+// detail page or an account page that answers with a Cloudflare interstitial
+// is retried once through the loopback solver, with the site cookie scoped to
+// that host. Direct reads stay the default, and 429, plain auth failures and
+// download links are never replayed through a browser.
 package app
 
 import (
@@ -72,6 +73,17 @@ func (a *App) saveSolverSettings(in solverSettings) (solverSettings, error) {
 	return in, nil
 }
 
+// solverURL is the loopback solver address when the feature is enabled, or
+// "" when it is off. It is read per request so enabling the solver takes
+// effect without a restart.
+func (a *App) solverURL() string {
+	settings, err := a.loadSolverSettings()
+	if err != nil || !settings.Enabled {
+		return ""
+	}
+	return settings.BaseURL
+}
+
 // validateSolverURL checks a FlareSolverr base URL the Python way:
 // a loopback origin with a non-zero port, empty or "/" path, and no
 // credentials, query or fragment.
@@ -124,7 +136,7 @@ func (a *App) solverSettingsHandler(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "code": "SETTINGS_UNAVAILABLE"})
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "solver": settings})
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "solver": settings, "runtime": a.solverRuntimeState()})
 }
 
 // saveSolver stores the FlareSolverr settings. Any field may be omitted
@@ -176,6 +188,39 @@ func (a *App) saveSolver(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "solver": saved})
+}
+
+// solverSessions asks a solver which browser sessions it holds. It is the
+// one call both the connection test and the process supervisor use, so a
+// solver reported as ready is one the settings page would also accept.
+func solverSessions(ctx context.Context, baseURL string) (int, string, bool) {
+	endpoint := strings.TrimSuffix(baseURL, "/") + "/v1"
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader([]byte(`{"cmd":"sessions.list"}`)))
+	if err != nil {
+		return 0, "", false
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := noRedirectClient.Do(req)
+	if err != nil {
+		return 0, "", false
+	}
+	defer resp.Body.Close()
+	var payload struct {
+		Status   string `json:"status"`
+		Sessions []any  `json:"sessions"`
+		Version  string `json:"version"`
+	}
+	if json.NewDecoder(resp.Body).Decode(&payload) != nil {
+		return 0, "", false
+	}
+	if payload.Status != "ok" || payload.Sessions == nil {
+		return 0, "", false
+	}
+	version := payload.Version
+	if len(version) > 80 {
+		version = version[:80]
+	}
+	return len(payload.Sessions), version, true
 }
 
 // testSolver checks a FlareSolverr endpoint, mirroring Python's

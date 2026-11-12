@@ -193,10 +193,7 @@ func (a *App) observe(ctx context.Context, execution *scheduler.Execution, job w
 		Scene: job.Scene, IdentityConfirmed: plan.Identity.IdentityConfirmed, StreamingEnabled: plan.StreamingEnabled,
 		RetryCount: job.SearchRetryCount, AIResearchCount: job.AIResearchCount, Query: plan.Query, Sites: make([]searchdecision.SiteReport, 0, 4),
 	}
-	solverURL := ""
-	if settings, err := a.loadSolverSettings(); err == nil && settings.Enabled {
-		solverURL = settings.BaseURL
-	}
+	solverURL := a.solverURL()
 	evidence := []workflow.EvidenceInput{}
 	var picks []identityPick
 	var pool []reviewai.Candidate

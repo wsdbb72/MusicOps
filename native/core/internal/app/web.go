@@ -12,6 +12,7 @@ const appJS = `(function () {
   var aiSettings = null;
   var qbtSettings = null;
   var solverSettings = null;
+  var solverRuntime = null;
   var lyricsSettings = null;
   var discogsSettings = null;
   var librarySettings = null;
@@ -331,13 +332,15 @@ const appJS = `(function () {
   }
   function solverCard() {
     if (!solverSettings) return "";
-    return '<article><h2>FlareSolverr</h2><p class="meta">浏览器验证服务。地址须为本机回环地址。目前设置可保存、可测试，但请求还不走 solver——启用也不会改变任何请求行为。</p>' +
+    var runtime = solverRuntime && solverRuntime.state ? "当前：" + (solverRuntime.state === "ready" ? "可用" : (solverRuntime.state === "starting" ? "正在启动" : "启动失败")) + (solverRuntime.detail ? "，" + solverRuntime.detail : "") + (solverRuntime.version ? "，版本 " + solverRuntime.version : "") : "当前：未由本程序启动。";
+    return '<article><h2>FlareSolverr</h2><p class="meta">浏览器验证服务，地址须为本机回环地址。只有遇到浏览器挑战的只读请求会交给它重试：直连仍是首选，登录失效、限流和取种子的请求不会被重放。启用后若勾选自动启动并填好可执行程序，程序启动时会自行拉起服务，退出时一并停止。</p>' +
+      '<p class="meta">' + escapeText(runtime) + '</p>' +
       '<label><input type="checkbox" id="solver-managed"' + (solverSettings.managed ? " checked" : "") + '> 由引擎管理（用内置 FlareSolverr）</label>' +
       '<label><input type="checkbox" id="solver-enabled"' + (solverSettings.enabled ? " checked" : "") + '> 启用浏览器验证</label>' +
       '<label>地址<input type="text" id="solver-base-url" value="' + escapeText(solverSettings.base_url || "") + '"></label>' +
       '<label>超时（秒，10–120）<input type="text" id="solver-timeout" value="' + escapeText(solverSettings.timeout) + '"></label>' +
       '<label>可执行程序（仅 Windows，.exe 绝对路径）<input type="text" id="solver-executable" value="' + escapeText(solverSettings.executable || "") + '"></label>' +
-      '<label><input type="checkbox" id="solver-auto-start"' + (solverSettings.auto_start ? " checked" : "") + '> 首次请求时自动启动</label>' +
+      '<label><input type="checkbox" id="solver-auto-start"' + (solverSettings.auto_start ? " checked" : "") + '> 程序启动时一并启动（Windows，需填可执行程序）</label>' +
       '<p><button type="button" id="save-solver" class="primary">保存</button> <button type="button" id="test-solver">测试连接</button></p><p id="solver-test-result" class="meta"></p></article>';
   }
   function lyricsCard() {
@@ -1618,6 +1621,7 @@ const appJS = `(function () {
         var solverResponse = await fetch("/v1/settings/solver", {headers: {Accept: "application/json"}});
         var solverBody = await solverResponse.json();
         solverSettings = solverBody && solverBody.ok ? solverBody.solver : null;
+        solverRuntime = solverBody && solverBody.ok ? solverBody.runtime : null;
         var lyricsResponse = await fetch("/v1/settings/lyrics", {headers: {Accept: "application/json"}});
         var lyricsBody = await lyricsResponse.json();
         lyricsSettings = lyricsBody && lyricsBody.ok ? lyricsBody.lyrics : null;

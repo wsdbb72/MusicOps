@@ -4,7 +4,6 @@
 package trackersearch
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -215,72 +214,83 @@ func (c *Client) roundTrip(ctx context.Context, q Query) (Observation, error) {
 		return Observation{}, err
 	}
 	req.Header.Set("Cookie", q.Cookie)
+	if endpoint.Path == "/ajax.php" {
+		req.Header.Set("Accept", "application/json")
+	} else {
+		req.Header.Set("Accept", "text/html")
+	}
+	if q.Synthetic {
+		req.Header.Set("X-MusicOps-Site", q.Site)
+	}
 	var body []byte
 	solverUsed := false
-	if solved, ok := c.solve(ctx, q, endpoint.String()); ok {
-		body = solved
-		solverUsed = true
-	} else {
-		if endpoint.Path == "/ajax.php" {
-			req.Header.Set("Accept", "application/json")
-		} else {
-			req.Header.Set("Accept", "text/html")
+	// Direct first. A site that answers normally must never pay for a browser
+	// round trip; only a Cloudflare interstitial is retried through the
+	// loopback solver, and only for this read-only GET.
+	response, err := c.doer(q.Timeout).Do(req)
+	if err != nil {
+		out := base
+		out.Status = "NETWORK_ERROR"
+		out.ErrorClass = "NETWORK_ERROR"
+		out.Reason = "连接失败"
+		return out, nil
+	}
+	defer response.Body.Close()
+	body, err = io.ReadAll(io.LimitReader(response.Body, maxBody+1))
+	if err != nil {
+		out := base
+		out.Status = "NETWORK_ERROR"
+		out.ErrorClass = "NETWORK_ERROR"
+		out.Reason = "连接失败"
+		return out, nil
+	}
+	if len(body) > maxBody {
+		out := base
+		out.Status = "PARSE_ERROR"
+		out.ErrorClass = "PARSE_ERROR"
+		out.Reason = "站点响应超过大小限制"
+		return out, nil
+	}
+	status := response.StatusCode
+	if status == http.StatusForbidden || status == http.StatusServiceUnavailable {
+		if looksChallenged(status, body) {
+			if solved, ok := c.solverGet(ctx, q, endpoint.String()); ok {
+				body, solverUsed, status = solved, true, http.StatusOK
+			} else if solverBase(q.SolverURL) != "" {
+				out := base
+				out.Status = "BROWSER_CHALLENGE"
+				out.ErrorClass = "BROWSER_CHALLENGE"
+				out.Reason = "站点要求浏览器验证，本机求解器未能通过"
+				return out, nil
+			}
 		}
-		if q.Synthetic {
-			req.Header.Set("X-MusicOps-Site", q.Site)
-		}
-		timeout := q.Timeout
-		response, err := c.doer(timeout).Do(req)
-		if err != nil {
-			out := base
-			out.Status = "NETWORK_ERROR"
-			out.ErrorClass = "NETWORK_ERROR"
-			out.Reason = "连接失败"
-			return out, nil
-		}
-		defer response.Body.Close()
-		body, err = io.ReadAll(io.LimitReader(response.Body, maxBody+1))
-		if err != nil {
-			out := base
-			out.Status = "NETWORK_ERROR"
-			out.ErrorClass = "NETWORK_ERROR"
-			out.Reason = "连接失败"
-			return out, nil
-		}
-		if len(body) > maxBody {
-			out := base
-			out.Status = "PARSE_ERROR"
-			out.ErrorClass = "PARSE_ERROR"
-			out.Reason = "站点响应超过大小限制"
-			return out, nil
-		}
-		if response.StatusCode == http.StatusTooManyRequests {
-			delay := retryAfter(response.Header.Get("Retry-After"))
-			c.block(q.Site, delay)
-			out := base
-			out.Status = "RATE_LIMITED"
-			out.ErrorClass = "RATE_LIMITED"
-			out.Reason = "站点限流；停止请求"
-			out.RetryAfterSec = delay
-			return out, nil
-		}
-		if response.StatusCode == http.StatusUnauthorized || response.StatusCode == http.StatusForbidden {
-			out := base
-			out.Status = "AUTH_FAILED"
-			out.ErrorClass = "AUTH_FAILED"
-			out.Reason = "站点拒绝鉴权"
-			return out, nil
-		}
-		if response.StatusCode >= 300 && response.StatusCode < 400 {
-			return c.redirect(base, q, response.Header.Get("Location")), nil
-		}
-		if response.StatusCode != http.StatusOK {
-			out := base
-			out.Status = "NETWORK_ERROR"
-			out.ErrorClass = "NETWORK_ERROR"
-			out.Reason = "站点请求失败"
-			return out, nil
-		}
+	}
+	if status == http.StatusTooManyRequests {
+		delay := retryAfter(response.Header.Get("Retry-After"))
+		c.block(q.Site, delay)
+		out := base
+		out.Status = "RATE_LIMITED"
+		out.ErrorClass = "RATE_LIMITED"
+		out.Reason = "站点限流；停止请求"
+		out.RetryAfterSec = delay
+		return out, nil
+	}
+	if status == http.StatusUnauthorized || status == http.StatusForbidden {
+		out := base
+		out.Status = "AUTH_FAILED"
+		out.ErrorClass = "AUTH_FAILED"
+		out.Reason = "站点拒绝鉴权"
+		return out, nil
+	}
+	if status >= 300 && status < 400 {
+		return c.redirect(base, q, response.Header.Get("Location")), nil
+	}
+	if status != http.StatusOK {
+		out := base
+		out.Status = "NETWORK_ERROR"
+		out.ErrorClass = "NETWORK_ERROR"
+		out.Reason = "站点请求失败"
+		return out, nil
 	}
 	var observation Observation
 	if q.Kind == "preflight" {
@@ -292,49 +302,6 @@ func (c *Client) roundTrip(ctx context.Context, q Query) (Observation, error) {
 	}
 	observation.SolverUsed = solverUsed
 	return observation, nil
-}
-
-func (c *Client) solve(ctx context.Context, q Query, pageURL string) ([]byte, bool) {
-	raw := strings.TrimSpace(q.SolverURL)
-	if raw == "" {
-		return nil, false
-	}
-	parsed, err := url.Parse(raw)
-	if err != nil || parsed.Hostname() != "127.0.0.1" && parsed.Hostname() != "localhost" && parsed.Hostname() != "::1" {
-		return nil, false
-	}
-	payload, err := json.Marshal(map[string]any{"cmd": "request.get", "url": pageURL, "maxTimeout": 60000})
-	if err != nil {
-		return nil, false
-	}
-	endpoint := strings.TrimRight(raw, "/") + "/v1"
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(payload))
-	if err != nil {
-		return nil, false
-	}
-	req.Header.Set("Content-Type", "application/json")
-	response, err := c.doer(q.Timeout).Do(req)
-	if err != nil {
-		return nil, false
-	}
-	defer response.Body.Close()
-	if response.StatusCode != http.StatusOK {
-		return nil, false
-	}
-	var decoded struct {
-		Status   string `json:"status"`
-		Solution struct {
-			Status   int    `json:"status"`
-			Response string `json:"response"`
-		} `json:"solution"`
-	}
-	if json.NewDecoder(io.LimitReader(response.Body, maxBody)).Decode(&decoded) != nil {
-		return nil, false
-	}
-	if decoded.Status != "ok" || decoded.Solution.Status != http.StatusOK || decoded.Solution.Response == "" {
-		return nil, false
-	}
-	return []byte(decoded.Solution.Response), true
 }
 
 func (c *Client) base(q Query) Observation {

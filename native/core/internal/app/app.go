@@ -7,6 +7,7 @@ import (
 	"errors"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"sync"
 	"time"
@@ -64,6 +65,11 @@ type App struct {
 	// every other sweep.
 	reconcileMu   sync.Mutex
 	lastTokenRead map[string]time.Time
+	// solver is the managed FlareSolverr process. launchSolver builds the
+	// child command; tests replace it so the supervisor can run without a
+	// real solver binary.
+	solver       solverRuntime
+	launchSolver func(exe string) *exec.Cmd
 	// migrationFailure is the reason a legacy profile was not imported at
 	// startup. It is set once, before the scheduler serves, and reported by
 	// GET /v1/migration. An empty value means nothing failed.
@@ -164,6 +170,9 @@ func Open(dir, backup, password string) (*App, error) {
 	// blocking its site on evidence, not only on a 30-minute deadline.
 	app.stopReconcile = make(chan struct{})
 	go app.runTokenReconciler(app.stopReconcile)
+	// A managed solver is started once, in the background: a slow browser
+	// start must not delay the UI, and the settings page reports the state.
+	go app.autoStartSolver()
 	return app, nil
 }
 
@@ -215,6 +224,7 @@ func (a *App) Close() error {
 	if stopReconcile != nil {
 		close(stopReconcile)
 	}
+	a.stopManagedSolver()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	err := a.runner.Stop(ctx)

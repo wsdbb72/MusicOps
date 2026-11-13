@@ -17,6 +17,7 @@ import (
 	"github.com/wsdbb72/MusicOps/native/core/internal/livemigrate"
 	"github.com/wsdbb72/MusicOps/native/core/internal/reviewai"
 	"github.com/wsdbb72/MusicOps/native/core/internal/scheduler"
+	"github.com/wsdbb72/MusicOps/native/core/internal/roon"
 	"github.com/wsdbb72/MusicOps/native/core/internal/taskrepo"
 	"github.com/wsdbb72/MusicOps/native/core/internal/tokenledger"
 	"github.com/wsdbb72/MusicOps/native/core/internal/trackersearch"
@@ -77,6 +78,15 @@ type App struct {
 	// FlareSolverr). engineMu guards the map and the start sequence.
 	engineMu sync.Mutex
 	engines  map[engineName]*engineProcess
+	// Roon extension state: one socket, the zone snapshot the page shows, and
+	// the token Roon returned so a reconnect does not ask for approval again.
+	roonMu     sync.Mutex
+	roonClient *roon.Client
+	roonState  string
+	roonNote   string
+	roonCore   roon.Info
+	roonZones  []roon.Zone
+	roonToken  string
 	// migrationFailure is the reason a legacy profile was not imported at
 	// startup. It is set once, before the scheduler serves, and reported by
 	// GET /v1/migration. An empty value means nothing failed.

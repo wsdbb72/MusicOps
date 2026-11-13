@@ -1196,6 +1196,8 @@ const appJS = `(function () {
       '<p><button type="button" id="complete-metadata">补齐标签封面歌词</button></p><p id="metadata-result" class="meta"></p>' +
       '<p class="meta">目录没有收录这张专辑时，可以从网易云 / QQ / 酷狗 / 酷我查候选，再手动填进上面的艺人、专辑、曲名。</p>' +
       '<p><button type="button" id="lookup-sources">查其它来源</button></p><div id="sources-result" class="meta"></div>' +
+      '<p><button type="button" id="backfill-lrc">补写同名 lrc</button> <button type="button" id="backfill-lrc-preview">先看会改多少</button></p>' +
+      '<p id="backfill-lrc-result" class="meta">扫描整个音乐库：已有歌词标签但没有 .lrc 的补写，旧命名（xxx.flac.lrc）改成 xxx.lrc，已存在的同名 .lrc 不动。</p>' +
       '<p class="meta">批量刮削按专辑一次查询目录，写标签（含分类）。勾选下面的歌词封面后，会再用设置里的歌词服务为每首取一次歌词和封面（一次最多 30 首）。先勾选曲目，再预演或应用。</p>' +
       '<label><input type="checkbox" id="scrape-artwork"> 同时取歌词与封面（≤30 首，用设置里的歌词服务）</label>' +
       '<p><button type="button" id="scrape-preview">预演批量刮削</button> <button type="button" id="scrape-apply" class="primary">批量刮削所选</button></p></article>' +
@@ -1264,6 +1266,10 @@ const appJS = `(function () {
     if (pageNext) pageNext.addEventListener("click", function () { libraryFileOffset += 20; loadLibraryFiles(); });
     var metadata = document.getElementById("complete-metadata");
     if (metadata) metadata.addEventListener("click", completeMetadata);
+    var backfillLrc = document.getElementById("backfill-lrc");
+    if (backfillLrc) backfillLrc.addEventListener("click", function () { backfillLyricsSidecars(false); });
+    var backfillPreview = document.getElementById("backfill-lrc-preview");
+    if (backfillPreview) backfillPreview.addEventListener("click", function () { backfillLyricsSidecars(true); });
     var lookup = document.getElementById("lookup-sources");
     if (lookup) lookup.addEventListener("click", lookupSources);
     var scrapePreview = document.getElementById("scrape-preview");
@@ -1390,6 +1396,43 @@ const appJS = `(function () {
   // lookupSourcesAsks the streaming catalogues for candidates. They are
   // labelled as candidates: filling the form with them is the user's call, and
   // the tag writer still goes through the normal completion flow.
+  // The walk takes minutes on a real library, so the page starts it and
+  // polls: a request that never answers looks like a hang.
+  function lyricsReportLine(report, running, dryRun) {
+    var parts = [];
+    parts.push((running ? "进行中" : (dryRun ? "预演完成" : "已完成")) + "：扫描 " + (report.scanned || 0) + " 首");
+    if (report.renamed) parts.push("改名 " + report.renamed);
+    if (report.written) parts.push("补写 " + report.written);
+    if (report.kept) parts.push("已有 " + report.kept);
+    if (report.missing) parts.push("无歌词 " + report.missing);
+    if (report.failed && report.failed.length) parts.push("失败 " + report.failed.length);
+    if (report.error) parts.push(report.error);
+    return parts.join("；") + "。";
+  }
+  async function backfillLyricsSidecars(dryRun) {
+    var result = document.getElementById("backfill-lrc-result");
+    try {
+      var response = await fetch("/v1/library/lyrics/backfill", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({dry_run: dryRun})});
+      var body = await response.json();
+      if (!response.ok || !body || !body.ok) {
+        if (result) result.textContent = (body && (body.error || body.code)) || "没有完成。";
+        return;
+      }
+      if (result) result.textContent = lyricsReportLine(body.report || {}, true, dryRun);
+      var poll = setInterval(async function () {
+        try {
+          var status = await (await fetch("/v1/library/lyrics/backfill", {headers: {Accept: "application/json"}})).json();
+          if (result) result.textContent = lyricsReportLine(status.report || {}, status.running, dryRun);
+          if (!status.running) clearInterval(poll);
+        } catch (err) {
+          clearInterval(poll);
+          if (result) result.textContent = err.message;
+        }
+      }, 2000);
+    } catch (err) {
+      if (result) result.textContent = err.message;
+    }
+  }
   async function lookupSources() {
     if (loading) return;
     var out = document.getElementById("sources-result");

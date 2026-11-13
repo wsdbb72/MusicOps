@@ -288,7 +288,7 @@ func TestRestoredControlsAreInThePage(t *testing.T) {
 		"review-download", "review-more", "scrape-preview", "scrape-apply",
 		"guard-save", "guard-clear", "guard-dir", "guard-suppress",
 		"save-netease", "netease-cookie", "scrape-artwork", "playlist-enqueue",
-		"roon-connect", "roon-disconnect", "roon-zones",
+		"roon-connect", "roon-disconnect", "roon-zones", "backfill-lrc", "backfill-lrc-preview",
 		"lookup-sources", "sources-result",
 	} {
 		if !bytes.Contains([]byte(appJS), []byte(id)) {

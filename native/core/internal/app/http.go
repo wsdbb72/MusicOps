@@ -119,6 +119,8 @@ func (a *App) Handler() http.Handler {
 	mux.HandleFunc("GET /v1/library/tags", a.libraryTags)
 	mux.HandleFunc("POST /v1/library/tags", a.saveLibraryTags)
 	mux.HandleFunc("GET /v1/library/lyrics", a.libraryLyrics)
+	mux.HandleFunc("POST /v1/library/lyrics/backfill", a.startLyricsBackfill)
+	mux.HandleFunc("GET /v1/library/lyrics/backfill", a.lyricsBackfillStatus)
 	mux.HandleFunc("POST /v1/library/lyrics", a.saveLibraryLyrics)
 	mux.HandleFunc("GET /v1/library/guards", a.guardsHandler)
 	mux.HandleFunc("POST /v1/library/guards", a.saveGuardsHandler)

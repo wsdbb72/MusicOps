@@ -96,8 +96,10 @@ func (c *Client) Request(service, body string, timeout time.Duration) (Message, 
 		c.pendingMu.Unlock()
 	}()
 	payload := "MOO/1 REQUEST " + service + "\nRequest-Id: " + strconv.Itoa(id) + "\n\n" + body
+	// Roon accepts binary frames only: a text frame is silently ignored and
+	// the first request times out, which is what hid this for a while.
 	c.writeMu.Lock()
-	err := c.conn.WriteMessage(websocket.TextMessage, []byte(payload))
+	err := c.conn.WriteMessage(websocket.BinaryMessage, []byte(payload))
 	c.writeMu.Unlock()
 	if err != nil {
 		return Message{}, err

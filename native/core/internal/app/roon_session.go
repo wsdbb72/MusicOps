@@ -7,6 +7,7 @@ package app
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"strconv"
 	"strings"
@@ -76,7 +77,17 @@ func (a *App) connectRoon(ctx context.Context, host string, port int) error {
 		OptionalServices: []string{"com.roonlabs.browse:1"},
 		Website:          "https://github.com/wsdbb72/MusicOps",
 		Token:            savedToken,
-	}, 120*time.Second)
+	}, 25*time.Second)
+	if errors.Is(err, roon.ErrPendingApproval) {
+		// Roon is waiting for a person to enable the extension. Keep the
+		// socket: the register request is still open on Roon's side, and a
+		// second connect after approval succeeds without asking again.
+		a.setRoonState("pending", "已请求注册：请在 Roon 的「设置 → 扩展」里启用 MusicOps，然后重新连接")
+		a.roonMu.Lock()
+		a.roonClient = client
+		a.roonMu.Unlock()
+		return nil
+	}
 	if err != nil {
 		client.Close()
 		a.setRoonState("failed", err.Error())

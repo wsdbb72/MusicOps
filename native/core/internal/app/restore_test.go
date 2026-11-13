@@ -284,10 +284,11 @@ func TestRestoredControlsAreInThePage(t *testing.T) {
 	for _, id := range []string{
 		"pipeline-pause", "pipeline-resume", "reindex-library", "list-gaps", "fill-gaps",
 		"upgrade-album", "expand-album", "preview-compilations", "merge-compilations",
-		"plan-artist-folders", "apply-artist-folders", "decrypt-ncm", "unify-qbt-tags", "test-roon", "fetch-playlist",
+		"plan-artist-folders", "apply-artist-folders", "decrypt-ncm", "unify-qbt-tags", "fetch-playlist",
 		"review-download", "review-more", "scrape-preview", "scrape-apply",
 		"guard-save", "guard-clear", "guard-dir", "guard-suppress",
 		"save-netease", "netease-cookie", "scrape-artwork", "playlist-enqueue",
+		"roon-connect", "roon-disconnect", "roon-zones",
 		"lookup-sources", "sources-result",
 	} {
 		if !bytes.Contains([]byte(appJS), []byte(id)) {

@@ -4,15 +4,16 @@
 // com.roonlabs.registry:1/info, registers as an extension, and from then on
 // exchanges MOO/1 messages over the same socket. Registration is approved by a
 // person in Roon's Settings → Extensions, so a client keeps the socket open and
-// waits for the core to answer Success.
+// waits for the core to answer Registered.
 //
-// The transport is gorilla/websocket. A hand-rolled frame reader was tried
-// first and Roon never answered the first request — exactly the bug a
-// maintained implementation does not have. What stays custom here is the MOO
-// envelope and the Request-Id routing.
+// Two details cost real time and are guarded here:
+//   - Roon ignores WebSocket text frames; every message must be binary.
+//   - Roon sends com.roonlabs.ping:1/ping requests to the extension and drops a
+//     connection whose pings go unanswered. Every REQUEST must be answered.
 package roon
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strconv"
@@ -24,8 +25,8 @@ import (
 	"github.com/gorilla/websocket"
 )
 
-// ErrPendingApproval means the core answered Unauthorized: a person has to
-// enable the extension in Roon before the request can succeed.
+// ErrPendingApproval means the core is waiting for a person to enable the
+// extension in Roon.
 var ErrPendingApproval = errors.New("roon: 等待在 Roon 的「设置 → 扩展」里启用 MusicOps")
 
 // ErrClosed is returned once the socket is gone.
@@ -50,6 +51,14 @@ type Client struct {
 	pendingMu sync.Mutex
 	pending   map[int]chan Message
 
+	// PairedCoreID is what this extension reports to Roon's pairing service.
+	// It is set right after info is read.
+	PairedCoreID atomic.Value
+
+	// transport is the transport service the core granted (see
+	// TransportService).
+	transport atomic.Value
+
 	// OnMessage receives every COMPLETE/CONTINUE that is not a direct
 	// response (subscription pushes).
 	OnMessage func(Message)
@@ -65,6 +74,7 @@ func Dial(address string, timeout time.Duration) (*Client, error) {
 		return nil, err
 	}
 	client := &Client{conn: conn, pending: map[int]chan Message{}}
+	client.PairedCoreID.Store("")
 	go client.readLoop()
 	return client, nil
 }
@@ -77,16 +87,27 @@ func (c *Client) Close() error {
 	return c.conn.Close()
 }
 
-// Request sends one MOO request and waits for its response. A CONTINUE frame
-// belongs to the same request and is skipped; Unauthorized surfaces as
-// ErrPendingApproval so callers can show "waiting for approval" instead of a
-// generic failure.
+// Request sends one MOO request and waits for a COMPLETE Success. A CONTINUE
+// frame belongs to the same request and is skipped.
 func (c *Client) Request(service, body string, timeout time.Duration) (Message, error) {
+	return c.await(service, body, timeout, func(message Message) bool {
+		return message.Kind != "CONTINUE"
+	})
+}
+
+// RequestFirst returns the first reply that is not an error. Registration
+// answers CONTINUE Registered and subscriptions answer CONTINUE Subscribed;
+// neither ever sends COMPLETE, so waiting for one always times out.
+func (c *Client) RequestFirst(service, body string, timeout time.Duration) (Message, error) {
+	return c.await(service, body, timeout, func(Message) bool { return true })
+}
+
+func (c *Client) await(service, body string, timeout time.Duration, accept func(Message) bool) (Message, error) {
 	if c == nil || c.closed.Load() {
 		return Message{}, ErrClosed
 	}
 	id := int(c.nextID.Add(1))
-	channel := make(chan Message, 8)
+	channel := make(chan Message, 16)
 	c.pendingMu.Lock()
 	c.pending[id] = channel
 	c.pendingMu.Unlock()
@@ -95,13 +116,7 @@ func (c *Client) Request(service, body string, timeout time.Duration) (Message, 
 		delete(c.pending, id)
 		c.pendingMu.Unlock()
 	}()
-	payload := "MOO/1 REQUEST " + service + "\nRequest-Id: " + strconv.Itoa(id) + "\n\n" + body
-	// Roon accepts binary frames only: a text frame is silently ignored and
-	// the first request times out, which is what hid this for a while.
-	c.writeMu.Lock()
-	err := c.conn.WriteMessage(websocket.BinaryMessage, []byte(payload))
-	c.writeMu.Unlock()
-	if err != nil {
+	if err := c.send(id, service, body); err != nil {
 		return Message{}, err
 	}
 	deadline := time.After(timeout)
@@ -111,14 +126,11 @@ func (c *Client) Request(service, body string, timeout time.Duration) (Message, 
 			if !open {
 				return Message{}, ErrClosed
 			}
-			if message.Status == "Unauthorized" || message.Status == "NotAuthorized" {
-				return message, ErrPendingApproval
+			if failure(message) {
+				return message, statusError(service, message)
 			}
-			if message.Kind == "CONTINUE" {
+			if !accept(message) {
 				continue
-			}
-			if message.Status != "Success" {
-				return message, fmt.Errorf("roon: %s 返回 %s", service, message.Status)
 			}
 			return message, nil
 		case <-deadline:
@@ -127,49 +139,55 @@ func (c *Client) Request(service, body string, timeout time.Duration) (Message, 
 	}
 }
 
-// RequestFirst returns the first COMPLETE or CONTINUE message for a request.
-// Registration answers CONTINUE Registered (with the token) and never sends a
-// COMPLETE, so a call that waits for COMPLETE times out on a successful
-// registration.
-func (c *Client) RequestFirst(service, body string, timeout time.Duration) (Message, error) {
-	if c == nil || c.closed.Load() {
-		return Message{}, ErrClosed
+// failure reports a reply that ends the request without a result.
+func failure(message Message) bool {
+	switch message.Status {
+	case "InvalidRequest", "Unauthorized", "NotAuthorized", "Error", "NetworkError":
+		return true
 	}
-	id := int(c.nextID.Add(1))
-	channel := make(chan Message, 8)
-	c.pendingMu.Lock()
-	c.pending[id] = channel
-	c.pendingMu.Unlock()
-	defer func() {
-		c.pendingMu.Lock()
-		delete(c.pending, id)
-		c.pendingMu.Unlock()
-	}()
+	return false
+}
+
+func statusError(service string, message Message) error {
+	if message.Status == "Unauthorized" || message.Status == "NotAuthorized" {
+		return ErrPendingApproval
+	}
+	detail := ""
+	if message.Body != "" {
+		var decoded struct {
+			Error string `json:"error"`
+		}
+		if json.Unmarshal([]byte(message.Body), &decoded) == nil {
+			detail = decoded.Error
+		}
+	}
+	if detail != "" {
+		return fmt.Errorf("roon: %s 返回 %s（%s）", service, message.Status, detail)
+	}
+	return fmt.Errorf("roon: %s 返回 %s", service, message.Status)
+}
+
+// send writes one request frame. Headers follow the order the reference
+// implementation uses: Content-Length before Content-Type.
+func (c *Client) send(id int, service, body string) error {
 	header := "MOO/1 REQUEST " + service + "\nRequest-Id: " + strconv.Itoa(id) + "\n"
 	if body != "" {
-		header += "Content-Type: application/json\nContent-Length: " + strconv.Itoa(len(body)) + "\n"
+		header += "Content-Length: " + strconv.Itoa(len(body)) + "\nContent-Type: application/json\n"
 	}
 	c.writeMu.Lock()
-	err := c.conn.WriteMessage(websocket.BinaryMessage, []byte(header+"\n"+body))
-	c.writeMu.Unlock()
-	if err != nil {
-		return Message{}, err
+	defer c.writeMu.Unlock()
+	return c.conn.WriteMessage(websocket.BinaryMessage, []byte(header+"\n"+body))
+}
+
+// reply answers a REQUEST the core sent to this extension.
+func (c *Client) reply(requestID int, status, body string) error {
+	header := "MOO/1 COMPLETE " + status + "\nRequest-Id: " + strconv.Itoa(requestID) + "\n"
+	if body != "" {
+		header += "Content-Length: " + strconv.Itoa(len(body)) + "\nContent-Type: application/json\n"
 	}
-	select {
-	case message, open := <-channel:
-		if !open {
-			return Message{}, ErrClosed
-		}
-		if message.Status == "Unauthorized" || message.Status == "NotAuthorized" {
-			return message, ErrPendingApproval
-		}
-		if message.Status != "Success" && message.Status != "Registered" {
-			return message, fmt.Errorf("roon: %s 返回 %s", service, message.Status)
-		}
-		return message, nil
-	case <-time.After(timeout):
-		return Message{}, fmt.Errorf("roon: %s 超时", service)
-	}
+	c.writeMu.Lock()
+	defer c.writeMu.Unlock()
+	return c.conn.WriteMessage(websocket.BinaryMessage, []byte(header+"\n"+body))
 }
 
 func (c *Client) readLoop() {
@@ -182,6 +200,10 @@ func (c *Client) readLoop() {
 		}
 		message, err := ParseMessage(string(data))
 		if err != nil {
+			continue
+		}
+		if message.Kind == "REQUEST" {
+			c.answerRequest(message)
 			continue
 		}
 		if message.RequestID > 0 {
@@ -199,6 +221,27 @@ func (c *Client) readLoop() {
 		if c.OnMessage != nil {
 			c.OnMessage(message)
 		}
+	}
+}
+
+// answerRequest keeps the extension well-behaved: Roon pings it, asks it to
+// pair, and expects an answer to anything else it sends. A dropped ping is
+// enough for the core to remove the client, which looks like "registration
+// succeeded but nothing works".
+func (c *Client) answerRequest(request Message) {
+	switch request.Service {
+	case "com.roonlabs.ping:1/ping":
+		_ = c.reply(request.RequestID, "Success", "")
+	case "com.roonlabs.pairing:1/get_pairing":
+		paired, _ := c.PairedCoreID.Load().(string)
+		body, _ := json.Marshal(map[string]string{"paired_core_id": paired})
+		_ = c.reply(request.RequestID, "Success", string(body))
+	case "com.roonlabs.pairing:1/pair":
+		// The core is pairing this connection; the reference implementation
+		// sends no reply to pair, so neither do we.
+	default:
+		_ = c.reply(request.RequestID, "InvalidRequest",
+			`{"error":"unknown service: `+request.Service+`"}`)
 	}
 }
 

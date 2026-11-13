@@ -87,6 +87,14 @@ type App struct {
 	roonCore   roon.Info
 	roonZones  []roon.Zone
 	roonToken  string
+	// roonService is the transport service the subscription used
+	// (transport:2 on Roon 2.x, transport:1 on older cores).
+	roonService string
+	// roonGeneration discards a registration that finished after a newer
+	// connect or a disconnect.
+	roonGeneration int
+	// roonReady closes when the current registration attempt settles.
+	roonReady chan struct{}
 	// migrationFailure is the reason a legacy profile was not imported at
 	// startup. It is set once, before the scheduler serves, and reported by
 	// GET /v1/migration. An empty value means nothing failed.
@@ -247,6 +255,7 @@ func (a *App) Close() error {
 	}
 	a.stopManagedSolver()
 	a.stopEngines()
+	a.closeRoon()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	err := a.runner.Stop(ctx)

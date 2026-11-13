@@ -421,7 +421,10 @@ const appJS = `(function () {
       '<label>用户名<input type="text" id="navidrome-username" value="' + escapeText(navidrome.username || "") + '" autocomplete="off"></label>' +
       '<label>密码（' + escapeText(savedMark(navidrome.password_saved, navidrome.password_revision)) + '，留空保留）<input type="password" id="navidrome-password" autocomplete="off"></label>' +
       '<p><button type="button" id="save-navidrome" class="primary">保存 Navidrome</button> <button type="button" id="test-navidrome">测试连接</button></p><p id="navidrome-test-result" class="meta"></p>' +
-      '<h2>Roon</h2><p class="meta">只检查端口是否可连接，不注册、不扫描。</p><label>主机<input type="text" id="roon-host" value="127.0.0.1"></label><label>端口<input type="number" id="roon-port" value="9330"></label><p><button type="button" id="test-roon">检查 Roon</button></p><p id="roon-result" class="meta"></p></article>';
+      '<h2>Roon</h2><p class="meta">内嵌扩展：连接后在 Roon 的「设置 → 扩展」里把 MusicOps 打开一次，之后会记住。可以列播放区、播放/暂停/切歌、调音量。</p>' +
+      '<label>主机<input type="text" id="roon-host" value="127.0.0.1"></label><label>端口<input type="number" id="roon-port" value="9330"></label>' +
+      '<p><button type="button" id="roon-connect" class="primary">连接 Roon</button> <button type="button" id="roon-disconnect">断开</button></p>' +
+      '<p id="roon-result" class="meta"></p><div id="roon-zones"></div></article>';
   }
   function playlistsCard() {
     var rows = playlistRows.map(function (row) {
@@ -524,8 +527,14 @@ const appJS = `(function () {
     if (testNavidromeButton) testNavidromeButton.addEventListener("click", testNavidrome);
     var unifyQbt = document.getElementById("unify-qbt-tags");
     if (unifyQbt) unifyQbt.addEventListener("click", unifyQbtTags);
-    var testRoonButton = document.getElementById("test-roon");
-    if (testRoonButton) testRoonButton.addEventListener("click", testRoon);
+    var roonConnect = document.getElementById("roon-connect");
+    if (roonConnect) roonConnect.addEventListener("click", connectRoon);
+    var roonDisconnect = document.getElementById("roon-disconnect");
+    if (roonDisconnect) roonDisconnect.addEventListener("click", disconnectRoon);
+    if (document.getElementById("roon-zones")) {
+      refreshRoon();
+      startRoonPolling();
+    }
     bindPlaylists();
     var run = document.getElementById("run-preflight");
     if (run) run.addEventListener("click", preflight);
@@ -640,14 +649,116 @@ const appJS = `(function () {
       if (result) result.textContent = err.message;
     }
   }
-  async function testRoon() {
-    var result = document.getElementById("roon-result");
+  // Roon: the app is itself the extension. Registering can wait for a person
+  // to click Enable inside Roon, so the page polls the status instead of
+  // holding a request open.
+  var roonTimer = null;
+  var roonZones = [];
+  function startRoonPolling() {
+    stopRoonPolling();
+    roonTimer = setInterval(function () {
+      if (!document.getElementById("roon-zones")) { stopRoonPolling(); return; }
+      refreshRoon();
+    }, 3000);
+  }
+  function stopRoonPolling() {
+    if (roonTimer) { clearInterval(roonTimer); roonTimer = null; }
+  }
+  async function refreshRoon() {
     try {
-      var body = await postSetting("/v1/settings/servers/roon/test", {
+      var response = await fetch("/v1/roon/status", {headers: {Accept: "application/json"}});
+      var body = await response.json();
+      if (body) renderRoon(body);
+    } catch (err) { /* the poll retries */ }
+  }
+  function roonStateLabel(state) {
+    var names = {connected: "已连接", pending: "等待启用", connecting: "连接中", failed: "连接失败", disconnected: "未连接"};
+    return names[state] || state || "未连接";
+  }
+  function renderRoon(status) {
+    var state = document.getElementById("roon-result");
+    if (state) {
+      var parts = [roonStateLabel(status.state)];
+      if (status.core_name) parts.push(status.core_name);
+      if (status.note) parts.push(status.note);
+      state.textContent = parts.join(" · ");
+    }
+    roonZones = status.zones || [];
+    var host = document.getElementById("roon-zones");
+    if (!host) return;
+    if (!roonZones.length) {
+      host.innerHTML = status.state === "connected" ? '<p class="meta">Roon 里没有可用的播放区。</p>' : "";
+      return;
+    }
+    host.innerHTML = roonZones.map(function (zone) {
+      var playing = zone.now_playing || {};
+      var line1 = (playing.three_line && playing.three_line.line1) || (playing.two_line && playing.two_line.line1) || "";
+      var line2 = (playing.two_line && playing.two_line.line2) || "";
+      var line3 = (playing.three_line && playing.three_line.line3) || "";
+      var volume = null, outputID = "";
+      (zone.outputs || []).forEach(function (output) {
+        if (!volume && output.volume && output.volume.max > 0) { volume = output.volume; outputID = output.output_id; }
+      });
+      var volumeHTML = "";
+      if (volume) {
+        var percent = Math.round((volume.value - volume.min) * 100 / Math.max(1, volume.max - volume.min));
+        volumeHTML = '<label class="meta">音量 ' + escapeText(String(percent)) + '%<input type="range" min="0" max="100" value="' + percent + '" data-roon-volume="' + escapeText(zone.zone_id) + '" data-roon-output="' + escapeText(outputID) + '"></label>';
+      }
+      return '<div class="roon-zone"><p><strong>' + escapeText(zone.display_name) + '</strong> <span class="meta">' + escapeText(zone.state || "") + '</span></p>' +
+        '<p class="meta">' + escapeText([line1, line2, line3].filter(Boolean).join(" · ")) + '</p>' +
+        '<p><button type="button" data-roon-control="previous" data-roon-zone="' + escapeText(zone.zone_id) + '">上一首</button> ' +
+        '<button type="button" data-roon-control="playpause" data-roon-zone="' + escapeText(zone.zone_id) + '">播放/暂停</button> ' +
+        '<button type="button" data-roon-control="next" data-roon-zone="' + escapeText(zone.zone_id) + '">下一首</button></p>' +
+        volumeHTML + '</div>';
+    }).join("");
+    host.querySelectorAll("[data-roon-control]").forEach(function (button) {
+      button.addEventListener("click", function () {
+        roonControl(button.getAttribute("data-roon-zone"), button.getAttribute("data-roon-control"), 0, "");
+      });
+    });
+    host.querySelectorAll("[data-roon-volume]").forEach(function (slider) {
+      slider.addEventListener("change", function () {
+        roonControl(slider.getAttribute("data-roon-volume"), "volume", parseInt(slider.value, 10) || 0, slider.getAttribute("data-roon-output"));
+      });
+    });
+  }
+  async function connectRoon() {
+    var result = document.getElementById("roon-result");
+    if (result) result.textContent = "正在连接 Roon…";
+    try {
+      var response = await fetch("/v1/roon/connect", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({
         host: document.getElementById("roon-host").value.trim(),
         port: parseInt(document.getElementById("roon-port").value, 10) || 9330
-      });
-      if (result) result.textContent = body.note || "";
+      })});
+      var body = await response.json();
+      renderRoon(body);
+      startRoonPolling();
+    } catch (err) {
+      if (result) result.textContent = err.message;
+    }
+  }
+  async function disconnectRoon() {
+    try {
+      var response = await fetch("/v1/roon/disconnect", {method: "POST", headers: {"Content-Type": "application/json"}, body: "{}"});
+      var body = await response.json();
+      renderRoon(body);
+      stopRoonPolling();
+    } catch (err) { /* nothing to undo */ }
+  }
+  async function roonControl(zoneID, control, value, outputID) {
+    var result = document.getElementById("roon-result");
+    try {
+      var response = await fetch("/v1/roon/control", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({
+        zone_id: zoneID, output_id: outputID, control: control, value: value
+      })});
+      var body = await response.json();
+      if (!response.ok || !body || !body.ok) {
+        if (result) result.textContent = (body && (body.error || body.code)) || "控制没有生效";
+        return;
+      }
+      // The zone state arrives as a subscription push; refresh as well so the
+      // line under the buttons is right immediately.
+      setTimeout(refreshRoon, 400);
     } catch (err) {
       if (result) result.textContent = err.message;
     }

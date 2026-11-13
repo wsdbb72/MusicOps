@@ -21,6 +21,7 @@ import (
 	"github.com/wsdbb72/MusicOps/native/core/internal/audiorelease"
 	"github.com/wsdbb72/MusicOps/native/core/internal/dataengine"
 	"github.com/wsdbb72/MusicOps/native/core/internal/sqlitemigrate"
+	"github.com/wsdbb72/MusicOps/native/core/internal/version"
 	"github.com/wsdbb72/MusicOps/native/core/internal/workflow"
 )
 
@@ -32,7 +33,7 @@ const page = `<!doctype html>
 <a class="skip" href="#main">跳到主要内容</a>
 <div class="app">
 <header class="app-bar">
-<p class="mark">MusicOps <span>本地音乐流水线</span></p>
+<p class="mark">MusicOps <span>本地音乐流水线</span> <span class="app-version">{{version}}</span></p>
 <nav id="nav" aria-label="功能">
 <button type="button" data-view="tasks" aria-current="page">任务</button>
 <button type="button" data-view="queue">队列</button>
@@ -243,7 +244,9 @@ func (a *App) health(w http.ResponseWriter, _ *http.Request) {
 func (a *App) home(w http.ResponseWriter, _ *http.Request) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.WriteHeader(http.StatusOK)
-	_, _ = io.WriteString(w, page)
+	// The version is baked in at serve time: the page is a const, and the
+	// build stamp only exists in the binary.
+	_, _ = io.WriteString(w, strings.Replace(page, "{{version}}", "v"+version.Version, 1))
 }
 
 // staticAsset is one immutable, in-binary asset. The validator and the gzip

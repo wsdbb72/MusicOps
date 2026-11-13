@@ -66,14 +66,22 @@ hr{border:0;border-top:1px solid var(--line);margin:var(--s-4) 0}
 .skip:focus{transform:none}
 .app{display:grid;grid-template-rows:auto minmax(0,1fr);min-height:100dvh}
 .app-bar{display:flex;flex-direction:column;gap:var(--s-3);padding:var(--s-4) var(--s-5);border-bottom:1px solid var(--line);background:var(--surface);position:sticky;top:0;z-index:30}
-.mark{margin:0;display:flex;align-items:baseline;gap:var(--s-2);color:var(--accent);font-weight:700;font-size:var(--t-md);letter-spacing:.06em}
-.mark span{color:var(--fg-subtle);font-weight:500;font-size:var(--t-xs);letter-spacing:.02em}
+.mark{margin:0;display:flex;align-items:center;gap:var(--s-2);color:var(--accent);font-weight:700;font-size:var(--t-md);letter-spacing:.06em;white-space:nowrap;min-width:0;overflow:hidden}
+.mark span{flex:0 0 auto;white-space:nowrap}
+.mark .brand-name{color:var(--accent);font-weight:700;font-size:var(--t-md);letter-spacing:.06em}
+.mark .brand-sub{color:var(--fg-subtle);font-weight:500;font-size:var(--t-xs);letter-spacing:.02em}
 .brand-icon {
+  flex: 0 0 auto;
   width: 24px;
   height: 24px;
-  vertical-align: -5px;
-  margin-right: 8px;
+  margin-right: 2px;
   border-radius: 6px;
+}
+
+/* On a narrow window the subtitle is the first thing to go; the product
+   name and the version stay. */
+@media (max-width: 640px) {
+  .mark .brand-sub { display: none; }
 }
 .mark .app-version{color:var(--accent);background:var(--accent-soft);border-radius:var(--r-pill);padding:.08rem .5rem;font-family:var(--font-mono,ui-monospace,SFMono-Regular,Menlo,monospace);font-weight:650;font-size:var(--t-xs);letter-spacing:.02em}
 

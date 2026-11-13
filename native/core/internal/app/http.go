@@ -196,6 +196,8 @@ func (a *App) Handler() http.Handler {
 	mux.HandleFunc("POST /v1/playlists", a.savePlaylist)
 	mux.HandleFunc("POST /v1/playlists/locate", a.locatePlaylist)
 	mux.HandleFunc("POST /v1/playlists/fetch", a.fetchPlaylist)
+	mux.HandleFunc("GET /v1/playlists/tracks", a.playlistTracksView)
+	mux.HandleFunc("POST /v1/playlists/enqueue", a.enqueuePlaylist)
 	mux.HandleFunc("GET /v1/subscriptions", a.listSubscriptions)
 	mux.HandleFunc("POST /v1/subscriptions", a.saveSubscription)
 	mux.HandleFunc("POST /v1/subscriptions/check", a.checkSubscription)

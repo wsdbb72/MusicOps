@@ -6,6 +6,7 @@ package app
 // the fallback stage's decision and is not taken here.
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -52,7 +53,34 @@ func (a *App) identifyPlaylist(execution *scheduler.Execution, plan SearchPlan, 
 		ID: evidenceID(token.ID, token.Fence, "playlist"), Kind: "catalog", Source: "playlist",
 		SubjectID: plan.RootJobID, Payload: payload,
 	}}
-	complete.Message = fmt.Sprintf("歌单已读取 %d 首%s，待核对；尚未下载、尚未入库", len(rows), playlistSuffix(name))
+	if plan.PlaylistMode == "all" {
+		count := len(rows)
+		if count > maxPlaylistTracks {
+			count = maxPlaylistTracks
+		}
+		indices := make([]int, count)
+		for i := range indices {
+			indices[i] = i
+		}
+		report, enqueueErr := a.enqueuePlaylistTracks(context.Background(), plan.RootJobID, rows, indices, playlistEnqueueOptions{AlbumCompletion: true})
+		if enqueueErr != nil {
+			complete.Message = "歌单已读取 " + fmt.Sprint(len(rows)) + " 首，但任务没有创建：" + enqueueErr.Error()
+			if _, err := a.flows.Complete(intentID("playlist", token.ID, token.Fence), token, complete); err != nil {
+				return scheduler.Outcome{}, err
+			}
+			return scheduler.Outcome{State: "blocked", Message: complete.Message}, nil
+		}
+		complete.NextStage = "completed"
+		complete.ReviewKind = ""
+		complete.TaskState = "completed"
+		complete.Message = fmt.Sprintf("歌单%s共 %d 首：已跳过库里已有的 %d 首，按专辑建了 %d 个任务（%d 首）。任务会自己识别 → 检索 → 下载 → 校验 → 刮削 → 入库；目录确认不了的才会停在核对。",
+			playlistSuffix(name), len(rows), len(report.Skipped), len(report.Created), report.Tracks)
+		if _, err := a.flows.Complete(intentID("playlist", token.ID, token.Fence), token, complete); err != nil {
+			return scheduler.Outcome{}, err
+		}
+		return scheduler.Outcome{State: "completed", Message: complete.Message}, nil
+	}
+	complete.Message = fmt.Sprintf("歌单已读取 %d 首%s，请选择要入库的曲目；尚未下载、尚未入库", len(rows), playlistSuffix(name))
 	if _, err := a.flows.Complete(intentID("playlist", token.ID, token.Fence), token, complete); err != nil {
 		return scheduler.Outcome{}, err
 	}

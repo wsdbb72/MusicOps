@@ -55,7 +55,8 @@ func (a *App) fetchPlaylist(w http.ResponseWriter, r *http.Request) {
 		// Enqueue creates the playlist job that actually works through the
 		// list. Saving the name list alone never produced a task, which is
 		// why "歌单入库" looked like a no-op.
-		Enqueue bool `json:"enqueue"`
+		Enqueue bool   `json:"enqueue"`
+		Mode    string `json:"mode"`
 	}
 	if err := decode(r, &body); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "code": "INVALID_REQUEST"})
@@ -106,7 +107,7 @@ func (a *App) fetchPlaylist(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 		}
-		jobID, err = a.startPlaylistJob(slug, remote)
+		jobID, err = a.startPlaylistJob(slug, remote, body.Mode)
 		if err != nil {
 			writeJSON(w, http.StatusBadGateway, map[string]any{"ok": false, "code": "PLAYLIST_JOB_UNAVAILABLE", "error": "歌单已读取，但没有创建任务：" + err.Error()})
 			return
@@ -386,7 +387,7 @@ func (a *App) writeSavedPlaylist(slug, name string, tracks []playlistTrack) erro
 // walks the list in the fallback stage: it reads incoming/playlist-<job>.m3u,
 // records the tracklist as evidence and stops in needs_review, because the
 // per-track download decisions are not this stage's to make.
-func (a *App) startPlaylistJob(slug string, remote remotePlaylist) (string, error) {
+func (a *App) startPlaylistJob(slug string, remote remotePlaylist, mode string) (string, error) {
 	jobID := "pl-" + slug + "-" + strconv.FormatInt(a.now().UnixNano(), 36)
 	if err := os.MkdirAll(a.workPath("incoming"), 0o700); err != nil {
 		return "", err
@@ -406,7 +407,8 @@ func (a *App) startPlaylistJob(slug string, remote remotePlaylist) (string, erro
 		sites = settings.EnabledSites
 	}
 	plan := SearchPlan{
-		RootJobID: jobID, Scene: "playlist", PlaylistImport: true, Query: remote.Name, ExpectedTitle: remote.Name,
+		RootJobID: jobID, Scene: "playlist", PlaylistImport: true, PlaylistMode: mode,
+		Query: remote.Name, ExpectedTitle: remote.Name,
 		EnabledSites: sites, StreamingEnabled: true,
 	}
 	raw, err := json.Marshal(plan)

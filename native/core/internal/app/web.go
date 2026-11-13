@@ -495,6 +495,8 @@ const appJS = `(function () {
       '<label>歌单链接或 ID<input type="text" id="remote-playlist-id" placeholder="粘贴完整分享链接，或直接填歌单 ID"></label>' +
       '<label>本机测试地址<input type="text" id="remote-base" placeholder="留空则访问各平台公开接口"></label>' +
       '<label><input type="checkbox" id="playlist-enqueue" checked> 拉取后创建入库任务</label>' +
+      '<label>入库范围<select id="playlist-mode"><option value="all">全部入库（自动跑完）</option><option value="pick">选择部分曲目</option></select></label>' +
+      '<label><input type="checkbox" id="playlist-album" checked> 按专辑补全（库里缺这张专辑的其他歌会一起下）</label>' +
       '<p><button type="button" id="fetch-playlist">拉取并创建入库任务</button></p><p id="playlist-fetch-result" class="meta"></p><div id="playlist-pick"></div>' +
       '<h2>订阅已存歌单</h2><p class="meta">未绑定平台时只重新读取本机歌单。绑定了公开歌单后，检查会向该平台读取新增曲目。首次默认只记下现有曲目。删除的曲目不会从音乐库移除。</p>' +
       '<label>歌单<select id="subscription-playlist"><option value="">选择已存歌单</option>' + playlistRows.map(function (row) { return '<option value="' + escapeText(row.id) + '">' + escapeText(row.name || row.id) + "</option>"; }).join("") + '</select></label>' +
@@ -1126,7 +1128,9 @@ const appJS = `(function () {
     }, 1000);
     try {
       var enqueue = document.getElementById("playlist-enqueue");
-      var payload = {platform: document.getElementById("remote-platform").value, playlist_id: id, save: true, subscribe: true, enqueue: !!(enqueue && enqueue.checked)};
+      var modeBox = document.getElementById("playlist-mode");
+      var mode = modeBox ? modeBox.value : "all";
+      var payload = {platform: document.getElementById("remote-platform").value, playlist_id: id, save: true, subscribe: true, enqueue: !!(enqueue && enqueue.checked), mode: mode};
       var base = document.getElementById("remote-base");
       if (base && base.value.trim()) payload.base_url = base.value.trim();
       var body = await postSetting("/v1/playlists/fetch", payload);
@@ -1134,6 +1138,11 @@ const appJS = `(function () {
       if (result) result.textContent = body.note || "";
       // A job that is created parks in 待核对, which the queue view does not
       // list; switching to tasks is what makes the result visible.
+      if (body.job_id && mode === "pick") {
+        await showPlaylistTracks(body.job_id);
+        await reloadThen("ok", (body.note || "") + " 下面是曲目，勾选后点「入库选中」；库里已有的会标出来。");
+        return;
+      }
       if (body.job_id) view = "tasks";
       await reloadThen("ok", body.note || "已读取曲目名单。");
     } catch (err) {
@@ -1142,6 +1151,58 @@ const appJS = `(function () {
       clearInterval(ticker);
       setBusy(false);
     }
+  }
+  // A playlist is a list; the album is the unit the pipeline works in, so the
+  // server groups the selection by album and skips what the library has.
+  async function showPlaylistTracks(jobID) {
+    var box = document.getElementById("playlist-pick");
+    if (!box) return;
+    var response = await fetch("/v1/playlists/tracks?job=" + encodeURIComponent(jobID), {headers: {Accept: "application/json"}});
+    var body = await response.json();
+    if (!response.ok || !body || !body.ok) {
+      box.innerHTML = '<p class="meta">读不到曲目名单：' + escapeText((body && (body.error || body.code)) || "") + "</p>";
+      return;
+    }
+    var rows = body.tracks || [];
+    var present = rows.filter(function (row) { return row.present; }).length;
+    var html = '<p class="meta">' + escapeText(body.name || "") + "：共 " + rows.length + " 首，库里已有 " + present + " 首（标「已有」的不会重复下载）。" +
+      (rows.length > 500 ? " 列表只列出前 500 首，整张入库请用「全部入库」。" : "") + "</p>" +
+      '<p><button type="button" id="pick-all">全选</button> <button type="button" id="pick-none">全不选</button> <button type="button" id="pick-apply" class="primary">入库选中</button></p>' +
+      '<div class="pick-list">';
+    rows.slice(0, 500).forEach(function (row) {
+      html += '<label class="pick-row"><input type="checkbox" data-pick="' + row.index + '"' + (row.present ? "" : " checked") + "> " +
+        escapeText(row.artist || "") + " - " + escapeText(row.title || "") +
+        (row.album ? ' <span class="meta">' + escapeText(row.album) + "</span>" : "") +
+        (row.present ? ' <span class="meta">已有</span>' : "") + "</label>";
+    });
+    box.innerHTML = html + "</div>";
+    var setAll = function (checked) { box.querySelectorAll("input[data-pick]").forEach(function (input) { input.checked = checked; }); };
+    var all = document.getElementById("pick-all");
+    if (all) all.addEventListener("click", function () { setAll(true); });
+    var none = document.getElementById("pick-none");
+    if (none) none.addEventListener("click", function () { setAll(false); });
+    var apply = document.getElementById("pick-apply");
+    if (apply) apply.addEventListener("click", async function () {
+      var indices = [];
+      box.querySelectorAll("input[data-pick]:checked").forEach(function (input) { indices.push(parseInt(input.getAttribute("data-pick"), 10)); });
+      if (!indices.length) { setStatus("fail", "先勾选要入库的曲目。"); return; }
+      var albumBox = document.getElementById("playlist-album");
+      apply.disabled = true;
+      try {
+        var response = await fetch("/v1/playlists/enqueue", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({job_id: jobID, indices: indices, album_completion: !!(albumBox && albumBox.checked)})});
+        var result = await response.json();
+        if (!response.ok || !result || !result.ok) {
+          setStatus("fail", "入库没有开始。" + ((result && (result.error || result.code)) || ""));
+          apply.disabled = false;
+          return;
+        }
+        box.innerHTML = "";
+        await reloadThen("tasks", result.note || "已开始入库。");
+      } catch (err) {
+        setStatus("fail", err.message);
+        apply.disabled = false;
+      }
+    });
   }
   async function saveSubscription() {
     if (loading) return;

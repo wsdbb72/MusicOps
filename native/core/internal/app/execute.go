@@ -28,6 +28,9 @@ type SearchPlan struct {
 	// alone cannot: "playlist" is also the default scene of the ordinary
 	// search form.
 	PlaylistImport      bool     `json:"playlist_import,omitempty"`
+	// PlaylistMode: "all" starts every track right after the list is read;
+	// empty parks the list so the page can show it and send a selection.
+	PlaylistMode string `json:"playlist_mode,omitempty"`
 	Query               string   `json:"query"`
 	ExpectedTitle       string   `json:"expected_title"`
 	ExpectedArtist      string   `json:"expected_artist,omitempty"`
@@ -70,6 +73,14 @@ func (a *App) identify(ctx context.Context, execution *scheduler.Execution, payl
 		return a.identifyPlaylist(execution, plan, token)
 	}
 	evidence := plan.evidence()
+	// A playlist track job has no catalogue identity to attach; its row
+	// evidence was written when the job started, so passing the empty one
+	// would make the complete call fail validation (empty evidence id) and
+	// the job would die with "invalid data request" instead of parking.
+	evidenceInputs := []workflow.EvidenceInput{}
+	if evidence.ID != "" {
+		evidenceInputs = append(evidenceInputs, evidence)
+	}
 	// A bare album name is the normal entry point of the search page and it
 	// carries no confirmed catalogue identity. Asking the workflow for the
 	// search edge in that state is rejected (the edge requires confirmed
@@ -83,7 +94,7 @@ func (a *App) identify(ctx context.Context, execution *scheduler.Execution, payl
 		complete := workflow.Complete{
 			Edge: workflow.EdgeTerminal, NextStage: "needs_review", ReviewKind: "metadata",
 			TaskState: "blocked", ErrorClass: "IDENTITY_UNCONFIRMED",
-			Evidence: []workflow.EvidenceInput{evidence}, Result: payload,
+			Evidence: evidenceInputs, Result: payload,
 			Message: "身份证据未确认，已转入核对；未检索、未下载、未入库", NowNS: a.now().UnixNano(),
 		}
 		if _, err = a.flows.Complete(intentID("identify", token.ID, token.Fence), token, complete); err != nil {
@@ -92,7 +103,7 @@ func (a *App) identify(ctx context.Context, execution *scheduler.Execution, payl
 		return scheduler.Outcome{State: "blocked", Message: complete.Message}, nil
 	}
 	_, err = a.flows.Complete(intentID("identify", token.ID, token.Fence), token, workflow.Complete{
-		Edge: workflow.EdgeQueueSearch, TaskState: "completed", Evidence: []workflow.EvidenceInput{evidence},
+		Edge: workflow.EdgeQueueSearch, TaskState: "completed", Evidence: evidenceInputs,
 		Result: payload, Message: "身份证据已接收，等待四站只读检索；尚未下载", NowNS: a.now().UnixNano(),
 	})
 	if err != nil {

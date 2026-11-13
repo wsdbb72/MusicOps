@@ -41,7 +41,11 @@ type solverSettings struct {
 	Timeout    int    `json:"timeout"`
 	Executable string `json:"executable"`
 	AutoStart  bool   `json:"auto_start"`
-	UpdatedNS  int64  `json:"updated_ns"`
+	// Explicit records that a person saved this block. Without it a profile
+	// written before the bundled service existed would keep Enabled=false and
+	// the settings page would say "未由本程序启动" forever.
+	Explicit  bool  `json:"explicit,omitempty"`
+	UpdatedNS int64 `json:"updated_ns"`
 }
 
 // defaultSolverSettings is Python's browser_solver default.
@@ -64,6 +68,14 @@ func (a *App) loadSolverSettings() (solverSettings, error) {
 	}
 	if !found {
 		return defaultSolverSettings(), nil
+	}
+	// A bundle that ships FlareSolverr should use it even if the saved block
+	// predates that bundle: enable it once, and honour any later explicit
+	// choice (a save marks Explicit).
+	if !out.Explicit && out.Managed {
+		if _, ok := (&App{}).engineBinary(engineSolver); ok {
+			out.Enabled, out.AutoStart = true, true
+		}
 	}
 	return out, nil
 }
@@ -179,6 +191,7 @@ func (a *App) saveSolver(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	next := previous
+	next.Explicit = true
 	if body.Managed != nil {
 		next.Managed = *body.Managed
 	}

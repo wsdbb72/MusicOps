@@ -145,6 +145,25 @@ func (a *App) autoStartSolver() {
 	if err != nil || !settings.Enabled || !settings.AutoStart {
 		return
 	}
+	if settings.Managed {
+		// The bundled service is started through the engine supervisor: it
+		// picks a free loopback port and hands out the service token every
+		// request must carry. The legacy path below only knows a fixed
+		// address and an explicit executable, which a bundle does not have.
+		a.setSolverState(solverProcessStarting, "正在启动内置 FlareSolverr")
+		base, _, startErr := a.ensureEngine(engineSolver)
+		if startErr != nil {
+			a.setSolverState(solverProcessFailed, "内置 FlareSolverr 启动失败："+startErr.Error())
+			return
+		}
+		a.setSolverState(solverProcessReady, "内置 FlareSolverr 已由本程序启动")
+		if _, version, ok := probeSolver(base, 10*time.Second); ok {
+			a.solver.mu.Lock()
+			a.solver.version = version
+			a.solver.mu.Unlock()
+		}
+		return
+	}
 	_, _ = a.startManagedSolver(settings)
 }
 

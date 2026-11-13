@@ -1232,3 +1232,53 @@ func TestParseVersion(t *testing.T) {
 		t.Errorf("Supported range broken")
 	}
 }
+
+// qBittorrent 5 answers a successful login with 204 and names the session
+// cookie "QBT_SID_<port>". Requiring 200 "Ok." plus a cookie called "SID" made
+// a correct password look wrong on every 5.x build.
+func TestLoginAcceptsQBittorrent5Session(t *testing.T) {
+	var sawCookie string
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/v2/auth/login", func(w http.ResponseWriter, r *http.Request) {
+		http.SetCookie(w, &http.Cookie{Name: "QBT_SID_8085", Value: "sid-five", Path: "/"})
+		w.WriteHeader(http.StatusNoContent)
+	})
+	checkAuth := func(w http.ResponseWriter, r *http.Request) bool {
+		cookie, err := r.Cookie("QBT_SID_8085")
+		if err != nil || cookie.Value != "sid-five" {
+			http.Error(w, "Forbidden", http.StatusForbidden)
+			return false
+		}
+		sawCookie = cookie.Value
+		return true
+	}
+	mux.HandleFunc("/api/v2/app/version", func(w http.ResponseWriter, r *http.Request) {
+		if !checkAuth(w, r) {
+			return
+		}
+		_, _ = w.Write([]byte("v5.2.2"))
+	})
+	mux.HandleFunc("/api/v2/app/webapiVersion", func(w http.ResponseWriter, r *http.Request) {
+		if !checkAuth(w, r) {
+			return
+		}
+		_, _ = w.Write([]byte("2.15.1"))
+	})
+	server := httptest.NewServer(mux)
+	defer server.Close()
+
+	client, err := NewClient(Config{BaseURL: server.URL, Username: "admin", Password: "right-pass"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := client.Login(context.Background()); err != nil {
+		t.Fatalf("Login: %v", err)
+	}
+	version, _, err := client.Version(context.Background())
+	if err != nil {
+		t.Fatalf("Version after 204 login: %v", err)
+	}
+	if version.Major != 5 || sawCookie != "sid-five" {
+		t.Fatalf("version=%v cookie=%q", version, sawCookie)
+	}
+}

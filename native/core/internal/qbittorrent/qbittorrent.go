@@ -294,7 +294,9 @@ type Client struct {
 	http     *http.Client
 
 	mu            sync.Mutex
-	sid           string
+	// cookie is the whole session cookie ("SID=..." on 4.x,
+	// "QBT_SID_8085=..." on 5.x), sent back verbatim.
+	cookie        string
 	version       Version
 	webAPIVersion string
 	versionLoaded bool
@@ -329,7 +331,7 @@ func (c *Client) BaseURL() string { return c.baseURL }
 func (c *Client) requireLogin() error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if c.sid == "" {
+	if c.cookie == "" {
 		return ErrNotAuthenticated
 	}
 	return nil
@@ -347,10 +349,10 @@ func (c *Client) newRequest(ctx context.Context, method, endpoint string, body i
 		return nil, err
 	}
 	c.mu.Lock()
-	sid := c.sid
+	cookie := c.cookie
 	c.mu.Unlock()
-	if sid != "" {
-		req.Header.Set("Cookie", "SID="+sid)
+	if cookie != "" {
+		req.Header.Set("Cookie", cookie)
 	}
 	if contentType != "" {
 		req.Header.Set("Content-Type", contentType)
@@ -453,11 +455,13 @@ func (c *Client) Login(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	// A successful login is 200 "Ok." on qB 4.x and 204 No Content on 5.x;
+	// treating only "200 Ok." as success made a correct password look wrong
+	// on every newer build. Any 2xx with a SID cookie is a success.
 	switch {
 	case resp.StatusCode == http.StatusUnauthorized:
 		return ErrAuthFailed
-	case resp.StatusCode == http.StatusOK && strings.TrimSpace(string(body)) == "Ok.":
-	case resp.StatusCode == http.StatusNoContent:
+	case resp.StatusCode >= 200 && resp.StatusCode < 300:
 	case resp.StatusCode == http.StatusForbidden:
 		// qB answers 403 with "Your IP has been banned" after repeated
 		// failures. That is not a wrong password, and telling the user to
@@ -469,17 +473,19 @@ func (c *Client) Login(ctx context.Context) error {
 	default:
 		return &ResponseError{Method: http.MethodPost, Endpoint: "auth/login", StatusCode: resp.StatusCode}
 	}
-	sid := ""
+	// qBittorrent 4.x names the session cookie "SID"; 5.x uses
+	// "QBT_SID_<port>" so several instances can coexist on one host.
+	session := ""
 	for _, cookie := range resp.Cookies() {
-		if cookie.Name == "SID" {
-			sid = cookie.Value
+		if cookie.Name == "SID" || strings.HasPrefix(cookie.Name, "QBT_SID_") {
+			session = cookie.Name + "=" + cookie.Value
 		}
 	}
-	if sid == "" {
+	if session == "" {
 		return ErrAuthFailed
 	}
 	c.mu.Lock()
-	c.sid = sid
+	c.cookie = session
 	c.mu.Unlock()
 	return nil
 }

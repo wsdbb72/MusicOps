@@ -58,9 +58,23 @@ const appJS = `(function () {
     });
   }
   function roots() { return jobs.filter(function (job) { return !job.parent_job_id; }); }
+  function stageLabel(stage) {
+    var names = {identifying: "识别", searching: "检索", requesting: "请求", downloading: "下载", fallback: "回退", validating: "校验", publishing: "入库", needs_review: "待核对", done: "完成", failed: "失败"};
+    return names[stage] || stage || "";
+  }
+  function queueRows() { return jobs.filter(function (job) { return active[job.stage]; }); }
+  function taskCounts() {
+    var running = 0, review = 0, finished = 0;
+    roots().forEach(function (job) {
+      if (active[job.stage]) running++;
+      else if (job.stage === "needs_review") review++;
+      else finished++;
+    });
+    return {running: running, review: review, finished: finished};
+  }
   function visible() {
     if (view === "tasks") return roots();
-    if (view === "queue") return jobs.filter(function (job) { return active[job.stage]; });
+    if (view === "queue") return queueRows();
     if (view === "review") return jobs.filter(function (job) { return job.stage === "needs_review"; });
     return [];
   }
@@ -82,24 +96,54 @@ const appJS = `(function () {
     if (view === "library") { renderLibrary(); return; }
     if (view === "logs") { renderLogs(); return; }
     var rows = visible();
+    var counts = taskCounts();
     if (!rows.length) {
-      list.innerHTML = (view === "tasks" || view === "queue") ? newTaskCard() + pipelineBar() : "";
-      if (view === "tasks" || view === "queue") { bindPipeline(); bindPlaylists(); }
-      setStatus("", view === "review" ? "没有待核对的任务。" : (view === "queue" ? "没有正在进行的任务。" : "还没有任务。"));
+      if (view === "tasks") {
+        list.innerHTML = newTaskCard() + pipelineBar();
+        bindPipeline();
+        bindPlaylists();
+        setStatus("", "还没有任务。");
+      } else if (view === "queue") {
+        list.innerHTML = "";
+        setStatus("", "队列为空：没有正在排队或执行的任务。待核对和已完成的任务在「任务」里。");
+        scheduleQueueRefresh();
+      } else {
+        list.innerHTML = "";
+        setStatus("", "没有待核对的任务。");
+      }
       return;
     }
     setStatus("", "");
     var html = "";
-    if (view === "tasks" || view === "queue") html += newTaskCard() + pipelineBar() + batchBar();
+    if (view === "tasks") {
+      html += '<p class="meta">共 ' + (counts.running + counts.review + counts.finished) + ' 个任务：进行中 ' + counts.running + ' · 待核对 ' + counts.review + ' · 已完成 ' + counts.finished + '。点任务查看详情。</p>';
+      html += newTaskCard() + pipelineBar() + batchBar();
+    } else if (view === "queue") {
+      html += '<p class="meta">队列只显示正在识别、检索、下载、校验或入库的任务，每 3 秒刷新。待核对的任务在「任务」里处理。</p>';
+    }
     html += '<div class="cards">';
     rows.forEach(function (job) {
       var checked = selectedJobs[job.job_id] ? " checked" : "";
       var box = (view === "tasks" || view === "queue") ? '<label><input type="checkbox" data-batch="' + escapeText(job.job_id) + '"' + checked + '> 批量</label>' : "";
-      html += '<article>' + box + '<button type="button" class="card-link" data-job="' + escapeText(job.job_id) + '"><h2>' + escapeText(job.label || "未命名") + '</h2><p class="meta">' + pill(job) + '</p><p>' + escapeText(job.headline || "") + "</p></button></article>";
+      var stage = view === "queue" ? ' · ' + escapeText(stageLabel(job.stage)) : "";
+      html += '<article>' + box + '<button type="button" class="card-link" data-job="' + escapeText(job.job_id) + '"><h2>' + escapeText(job.label || "未命名") + '</h2><p class="meta">' + pill(job) + stage + '</p><p>' + escapeText(job.headline || "") + "</p></button></article>";
     });
     if (view === "review" && jobsNext) html += '<p><button type="button" id="review-more">加载更多待核对</button></p>';
     list.innerHTML = html + "</div>";
-    if (view === "tasks" || view === "queue") { bindPipeline(); bindPlaylists(); }
+    if (view === "tasks") { bindPipeline(); bindPlaylists(); }
+    scheduleQueueRefresh();
+  }
+  // The queue is a live view: without a timer it would show a snapshot and
+  // look frozen. Tasks does not poll, so reading a long list is not disturbed.
+  var queueTimer = null;
+  function scheduleQueueRefresh() {
+    if (queueTimer) { clearTimeout(queueTimer); queueTimer = null; }
+    if (view !== "queue") return;
+    queueTimer = setTimeout(async function () {
+      if (view !== "queue") return;
+      await load(true);
+      scheduleQueueRefresh();
+    }, 3000);
   }
   // newTaskCard is the "新建任务" entry: the playlist forms used to hide in
   // the settings page, which is not where anyone looks for a new task.
@@ -1077,7 +1121,11 @@ const appJS = `(function () {
     var id = document.getElementById("remote-playlist-id").value.trim();
     if (!id) { setStatus("fail", "先填写歌单 ID。"); return; }
     setBusy(true);
-    setStatus("info", "正在读取公开歌单");
+    var startedAt = Date.now();
+    setStatus("info", "正在读取公开歌单…");
+    var ticker = setInterval(function () {
+      setStatus("info", "正在读取公开歌单，已 " + Math.round((Date.now() - startedAt) / 1000) + " 秒（四千首的名单通常要 10–20 秒）…");
+    }, 1000);
     try {
       var enqueue = document.getElementById("playlist-enqueue");
       var payload = {platform: document.getElementById("remote-platform").value, playlist_id: id, save: true, subscribe: true, enqueue: !!(enqueue && enqueue.checked)};
@@ -1086,10 +1134,14 @@ const appJS = `(function () {
       var body = await postSetting("/v1/playlists/fetch", payload);
       var result = document.getElementById("playlist-fetch-result");
       if (result) result.textContent = body.note || "";
+      // A job that is created parks in 待核对, which the queue view does not
+      // list; switching to tasks is what makes the result visible.
+      if (body.job_id) view = "tasks";
       await reloadThen("ok", body.note || "已读取曲目名单。");
     } catch (err) {
       setStatus("fail", "没有读到歌单。" + (err && err.message ? "（" + err.message + "）" : ""));
     } finally {
+      clearInterval(ticker);
       setBusy(false);
     }
   }

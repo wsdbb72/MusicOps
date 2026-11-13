@@ -68,6 +68,13 @@ hr{border:0;border-top:1px solid var(--line);margin:var(--s-4) 0}
 .app-bar{display:flex;flex-direction:column;gap:var(--s-3);padding:var(--s-4) var(--s-5);border-bottom:1px solid var(--line);background:var(--surface);position:sticky;top:0;z-index:30}
 .mark{margin:0;display:flex;align-items:baseline;gap:var(--s-2);color:var(--accent);font-weight:700;font-size:var(--t-md);letter-spacing:.06em}
 .mark span{color:var(--fg-subtle);font-weight:500;font-size:var(--t-xs);letter-spacing:.02em}
+.brand-icon {
+  width: 24px;
+  height: 24px;
+  vertical-align: -5px;
+  margin-right: 8px;
+  border-radius: 6px;
+}
 .mark .app-version{color:var(--accent);background:var(--accent-soft);border-radius:var(--r-pill);padding:.08rem .5rem;font-family:var(--font-mono,ui-monospace,SFMono-Regular,Menlo,monospace);font-weight:650;font-size:var(--t-xs);letter-spacing:.02em}
 
 /* ---------- navigation ---------- */

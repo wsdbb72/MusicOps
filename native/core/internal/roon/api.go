@@ -54,7 +54,8 @@ func (c *Client) Register(options RegisterOptions, wait time.Duration) (string, 
 	if err != nil {
 		return "", err
 	}
-	message, err := c.Request("com.roonlabs.registry:1/register", string(body), wait)
+	// Registration answers CONTINUE Registered, not COMPLETE.
+	message, err := c.RequestFirst("com.roonlabs.registry:1/register", string(body), wait)
 	if err != nil {
 		return "", err
 	}
@@ -113,7 +114,13 @@ type ZonesPayload struct {
 // SubscribeZones starts the transport subscription. The first payload carries
 // every zone; later pushes use zones_changed / zones_removed.
 func (c *Client) SubscribeZones() (ZonesPayload, error) {
-	message, err := c.Request("com.roonlabs.transport:1/subscribe_zones", `{"subscription_key":"musicops"}`, 10*time.Second)
+	// A body made Roon answer InvalidRequest; the subscription works with no
+	// parameters at all, so try that first and keep the key only as a
+	// fallback for cores that demand one.
+	message, err := c.Request("com.roonlabs.transport:1/subscribe_zones", "", 10*time.Second)
+	if err != nil {
+		message, err = c.Request("com.roonlabs.transport:1/subscribe_zones", `{"subscription_key":"musicops"}`, 10*time.Second)
+	}
 	if err != nil {
 		return ZonesPayload{}, err
 	}

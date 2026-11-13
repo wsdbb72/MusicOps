@@ -127,6 +127,51 @@ func (c *Client) Request(service, body string, timeout time.Duration) (Message, 
 	}
 }
 
+// RequestFirst returns the first COMPLETE or CONTINUE message for a request.
+// Registration answers CONTINUE Registered (with the token) and never sends a
+// COMPLETE, so a call that waits for COMPLETE times out on a successful
+// registration.
+func (c *Client) RequestFirst(service, body string, timeout time.Duration) (Message, error) {
+	if c == nil || c.closed.Load() {
+		return Message{}, ErrClosed
+	}
+	id := int(c.nextID.Add(1))
+	channel := make(chan Message, 8)
+	c.pendingMu.Lock()
+	c.pending[id] = channel
+	c.pendingMu.Unlock()
+	defer func() {
+		c.pendingMu.Lock()
+		delete(c.pending, id)
+		c.pendingMu.Unlock()
+	}()
+	header := "MOO/1 REQUEST " + service + "\nRequest-Id: " + strconv.Itoa(id) + "\n"
+	if body != "" {
+		header += "Content-Type: application/json\nContent-Length: " + strconv.Itoa(len(body)) + "\n"
+	}
+	c.writeMu.Lock()
+	err := c.conn.WriteMessage(websocket.BinaryMessage, []byte(header+"\n"+body))
+	c.writeMu.Unlock()
+	if err != nil {
+		return Message{}, err
+	}
+	select {
+	case message, open := <-channel:
+		if !open {
+			return Message{}, ErrClosed
+		}
+		if message.Status == "Unauthorized" || message.Status == "NotAuthorized" {
+			return message, ErrPendingApproval
+		}
+		if message.Status != "Success" && message.Status != "Registered" {
+			return message, fmt.Errorf("roon: %s 返回 %s", service, message.Status)
+		}
+		return message, nil
+	case <-time.After(timeout):
+		return Message{}, fmt.Errorf("roon: %s 超时", service)
+	}
+}
+
 func (c *Client) readLoop() {
 	for {
 		_, data, err := c.conn.ReadMessage()

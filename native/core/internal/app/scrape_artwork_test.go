@@ -50,6 +50,16 @@ func TestScrapeBatchFetchesLyricsAndCover(t *testing.T) {
 	if err != nil || !bytes.Equal(sidecar, cover) {
 		t.Fatal("the sidecar was not written", err)
 	}
+	// Roon, Plex and Navidrome read "<track>.lrc", not the tag.
+	lyricsFile, err := os.ReadFile(strings.TrimSuffix(full, filepath.Ext(full)) + ".lrc")
+	if err != nil || !strings.Contains(string(lyricsFile), "[00:01.00]hello") {
+		t.Fatal("the lrc sidecar was not written", err, string(lyricsFile))
+	}
+	if legacy := full + ".lrc"; legacy != "" {
+		if _, err := os.Stat(legacy); err == nil {
+			t.Fatal("an audio-extension lrc was written as well")
+		}
+	}
 }
 
 // A failing artwork service refuses the file and leaves it byte-identical:

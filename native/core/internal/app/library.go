@@ -38,6 +38,7 @@ import (
 	"github.com/wsdbb72/MusicOps/native/core/internal/audiorelease"
 	"github.com/wsdbb72/MusicOps/native/core/internal/dataengine"
 	"github.com/wsdbb72/MusicOps/native/core/internal/flactags"
+	"github.com/wsdbb72/MusicOps/native/core/internal/lrc"
 	"github.com/wsdbb72/MusicOps/native/core/internal/qbittorrent"
 	"github.com/wsdbb72/MusicOps/native/core/internal/wavflac"
 )
@@ -604,16 +605,38 @@ func (a *App) quarantineFile(receipt *mergeReceipt, file duplicateFile, quaranti
 	}
 	receipt.Moved = append(receipt.Moved, mergeMove{RequestID: file.RequestID, From: from, Quarantine: dest, SHA256: file.SHA256})
 	// The sidecar travels with its audio file; a missing sidecar is fine.
-	sidecarFrom := from + ".lrc"
-	if data, err := os.ReadFile(sidecarFrom); err == nil {
+	// Both spellings are moved: the standard "<track>.lrc" this build writes
+	// and the older "<track>.flac.lrc" an earlier build left behind.
+	for _, sidecarFrom := range sidecarCandidates(from) {
+		data, err := os.ReadFile(sidecarFrom)
+		if err != nil {
+			continue
+		}
 		sum := sha256.Sum256(data)
-		sidecarDest := dest + ".lrc"
+		sidecarDest := lrc.SidecarPath(dest)
+		if sidecarFrom == from+".lrc" {
+			// Keep the older spelling inside the quarantine so a restore puts
+			// the file back under the name it had.
+			sidecarDest = dest + ".lrc"
+		}
 		if err := os.Rename(sidecarFrom, sidecarDest); err != nil {
 			return err
 		}
 		receipt.Moved = append(receipt.Moved, mergeMove{RequestID: file.RequestID, From: sidecarFrom, Quarantine: sidecarDest, SHA256: hex.EncodeToString(sum[:]), Sidecar: true})
 	}
 	return nil
+}
+
+// sidecarCandidates lists the lyric sidecar names that may sit next to an
+// audio file: the standard "<track>.lrc" first, then the older
+// "<track>.flac.lrc" spelling an earlier build wrote.
+func sidecarCandidates(audioPath string) []string {
+	standard := lrc.SidecarPath(audioPath)
+	legacy := audioPath + ".lrc"
+	if legacy == standard {
+		return []string{standard}
+	}
+	return []string{standard, legacy}
 }
 
 func (a *App) readMergeReceipt(id string) (mergeReceipt, bool, error) {
@@ -1079,13 +1102,15 @@ func (a *App) relocateOne(plan artistFolderPlan) (string, string) {
 	return filepath.Join(plan.To, filepath.Base(plan.File)), ""
 }
 
-// moveSidecar moves "<audio>.lrc" next to a relocated audio file when
-// present. A missing sidecar is fine; a failed move is reported by the
+// moveSidecar moves the lyric sidecar next to a relocated audio file when
+// present. Both spellings are moved; the destination is always the standard
+// "<track>.lrc". A missing sidecar is fine; a failed move is reported by the
 // caller only through the returned error.
 func moveSidecar(from, to string) {
-	sidecarFrom := from + ".lrc"
-	if _, err := os.Lstat(sidecarFrom); err != nil {
-		return
+	for _, sidecarFrom := range sidecarCandidates(from) {
+		if _, err := os.Lstat(sidecarFrom); err != nil {
+			continue
+		}
+		_ = os.Rename(sidecarFrom, lrc.SidecarPath(to))
 	}
-	_ = os.Rename(sidecarFrom, to+".lrc")
 }

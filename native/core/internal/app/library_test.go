@@ -488,7 +488,7 @@ func TestArtistFolderLooseFileMovesWithSidecar(t *testing.T) {
 	if _, err := os.Stat(moved); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := os.Stat(moved + ".lrc"); err != nil {
+	if _, err := os.Stat(strings.TrimSuffix(moved, filepath.Ext(moved)) + ".lrc"); err != nil {
 		t.Fatal("sidecar did not travel with the loose file", err)
 	}
 	if _, err := os.Stat(looseFile); !os.IsNotExist(err) {

@@ -95,6 +95,8 @@ type App struct {
 	roonGeneration int
 	// roonReady closes when the current registration attempt settles.
 	roonReady chan struct{}
+	// roonStop ends the reconnect loop on Close.
+	roonStop chan struct{}
 	// migrationFailure is the reason a legacy profile was not imported at
 	// startup. It is set once, before the scheduler serves, and reported by
 	// GET /v1/migration. An empty value means nothing failed.
@@ -202,6 +204,9 @@ func Open(dir, backup, password string) (*App, error) {
 	// A managed solver is started once, in the background: a slow browser
 	// start must not delay the UI, and the settings page reports the state.
 	go app.autoStartSolver()
+	// MusicOps is a Roon extension: with a stored token it rejoins on its own,
+	// which is also what keeps it visible in Roon's Extensions list.
+	app.startRoonSupervisor()
 	return app, nil
 }
 

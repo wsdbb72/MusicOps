@@ -322,8 +322,11 @@ func (a *App) completeMetadata(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadGateway, map[string]any{"ok": false, "code": "ARTWORK_UNAVAILABLE", "written": false, "note": "歌词或封面没有读到，文件没有改。"})
 		return
 	}
+	// An existing .lrc counts as existing lyrics: Roon, Plex and Navidrome read
+	// the sidecar, so replacing it while the overwrite flag is off would
+	// silently swap out the user's own file.
 	if lyrics != "" {
-		if len(current.Raw["LYRICS"]) == 0 || body.Overwrite {
+		if (len(current.Raw["LYRICS"]) == 0 && !hasLyricsSidecar(path)) || body.Overwrite {
 			updates["LYRICS"] = []string{lyrics}
 			completion.Written = append(completion.Written, "lyrics")
 		} else {
@@ -346,16 +349,26 @@ func (a *App) completeMetadata(w http.ResponseWriter, r *http.Request) {
 		}
 		completion.Written = written
 	}
-	// Nothing to write and no cover to add: leave the file byte-identical.
+	// Nothing to write and no cover to add: leave the audio byte-identical.
+	// A track that already carries lyrics in its tag but has no sidecar still
+	// gets the .lrc, because Roon/Plex/Navidrome read the file, not the tag.
 	if len(updates) == 0 && cover == nil {
 		note := "标签已经和目录一致，没有改动文件。"
+		sidecarWritten := false
+		if existing := firstTagValue(current.Raw, "LYRICS"); strings.TrimSpace(existing) != "" && !hasLyricsSidecar(path) {
+			if writeLyricsSidecar(path, existing) == nil {
+				sidecarWritten = true
+				note += "已按标签内容补写同名 lrc（Roon / Plex / Navidrome 读文件）。"
+			}
+		}
 		if len(lockedFields) > 0 {
 			note = "这些字段已锁定，没有改动：" + strings.Join(lockedFields, "、") + "。"
 		}
 		writeJSON(w, http.StatusOK, map[string]any{
-			"ok": true, "written": false, "path": path,
+			"ok": true, "written": sidecarWritten, "path": path,
 			"written_fields": []string{}, "kept_fields": completion.Kept, "unchanged_fields": completion.Unchanged,
-			"locked_fields": lockedFields, "catalog": catalogTagSummary(view), "note": note,
+			"locked_fields": lockedFields, "lyrics_sidecar": sidecarWritten,
+			"catalog": catalogTagSummary(view), "note": note,
 		})
 		return
 	}
@@ -401,10 +414,30 @@ func (a *App) completeMetadata(w http.ResponseWriter, r *http.Request) {
 			_ = os.Remove(sidecar)
 		}
 	}
+	lyricsWritten := false
+	for _, name := range completion.Written {
+		if name == "lyrics" {
+			lyricsWritten = true
+		}
+	}
+	// Both copies are written: the tag and the .lrc beside the file.
+	if lyricsWritten {
+		if err := writeLyricsSidecar(path, lyrics); err != nil {
+			restoreBackup(path, backup)
+			_ = os.Remove(lyricsSidecarPath(path))
+			_ = os.Remove(sidecar)
+			_ = os.Remove(backup)
+			writeJSON(w, http.StatusUnprocessableEntity, map[string]any{"ok": false, "code": "LYRICS_WRITE_FAILED", "written": false, "restored": true})
+			return
+		}
+	}
 	_ = os.Remove(backup)
 	written := []string{}
 	if len(completion.Written) > 0 {
 		written = append(written, "标签 "+strings.Join(completion.Written, "、"))
+	}
+	if lyricsWritten {
+		written = append(written, "同名 lrc")
 	}
 	if cover != nil {
 		written = append(written, "内嵌封面")
@@ -426,7 +459,7 @@ func (a *App) completeMetadata(w http.ResponseWriter, r *http.Request) {
 		note += "。已锁定、没有改动：" + strings.Join(lockedFields, "、")
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"ok": true, "written": true, "path": path, "lyrics": lyrics != "", "cover": cover != nil,
+		"ok": true, "written": true, "path": path, "lyrics": lyrics != "", "lyrics_sidecar": lyricsWritten, "cover": cover != nil,
 		"cover_mode": mode, "embedded_cover": cover != nil,
 		"written_fields": completion.Written, "kept_fields": completion.Kept, "unchanged_fields": completion.Unchanged,
 		"locked_fields": lockedFields, "catalog": catalogTagSummary(view), "note": note,

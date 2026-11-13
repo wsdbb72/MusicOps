@@ -175,8 +175,10 @@ func TestSidecarWriteRead(t *testing.T) {
 	if err := WriteSidecar(audio, lines); err != nil {
 		t.Fatalf("WriteSidecar: %v", err)
 	}
-	if got := SidecarPath(audio); got != audio+".lrc" {
-		t.Errorf("SidecarPath = %q", got)
+	// Roon, Plex and Navidrome look for "<track>.lrc", not "<track>.flac.lrc".
+	want := filepath.Join(dir, "song.lrc")
+	if got := SidecarPath(audio); got != want {
+		t.Errorf("SidecarPath = %q, want %q", got, want)
 	}
 	lyr, err := ReadSidecar(audio)
 	if err != nil {

@@ -281,8 +281,24 @@ func (l *Lyrics) ShiftedLines() []Line {
 	return out
 }
 
-// SidecarPath returns the sidecar path for an audio file: "<audio>.lrc".
+// SidecarPath returns the sidecar path for an audio file: the audio file's
+// name without its extension, plus ".lrc" (e.g. "01 Song.flac" ->
+// "01 Song.lrc").
+//
+// The audio extension is stripped because that is what Roon, Plex and
+// Navidrome look for; "<audio>.flac.lrc" is read by none of them.
 func SidecarPath(audioPath string) string {
+	base := strings.TrimSuffix(audioPath, filepath.Ext(audioPath))
+	if base == "" {
+		base = audioPath
+	}
+	return base + ".lrc"
+}
+
+// legacySidecarPath is the older "<audio>.flac.lrc" spelling this program
+// used. Reading falls back to it so lyrics written by an earlier build are
+// not lost; writing always uses SidecarPath.
+func legacySidecarPath(audioPath string) string {
 	return audioPath + ".lrc"
 }
 
@@ -336,11 +352,19 @@ func writeSidecarFile(path, content string) error {
 	return nil
 }
 
-// ReadSidecar reads "<audio>.lrc" next to audioPath and parses it. It
-// returns an error wrapping os.ErrNotExist when no sidecar is present.
+// ReadSidecar reads "<audio>.lrc" next to audioPath and parses it. An older
+// "<audio>.flac.lrc" is accepted when the standard name is absent. It returns
+// an error wrapping os.ErrNotExist when no sidecar is present.
 func ReadSidecar(audioPath string) (*Lyrics, error) {
 	path := SidecarPath(audioPath)
 	data, err := os.ReadFile(path)
+	if err != nil && errors.Is(err, os.ErrNotExist) {
+		if legacy := legacySidecarPath(audioPath); legacy != path {
+			if raw, legacyErr := os.ReadFile(legacy); legacyErr == nil {
+				path, data, err = legacy, raw, nil
+			}
+		}
+	}
 	if err != nil {
 		return nil, fmt.Errorf("lrc: read sidecar %s: %w", path, err)
 	}

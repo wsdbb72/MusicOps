@@ -124,12 +124,10 @@ func (a *App) runRoonRegistration(client *roon.Client, info roon.Info, token str
 		}
 	}
 	defer finish()
-	// The service list is deliberately the one Roon approved for this
-	// extension: changing required/provided services invalidates the stored
-	// token and forces the user to enable MusicOps again. Roon 2.70 still
-	// serves transport:1 (zones, control, volume all work), and it grants it
-	// for this list, so no click is needed. If a future core stops serving
-	// transport:1 the subscribe step fails and the note says so.
+	// The service list is the one Roon approved for this extension; changing
+	// required/provided services invalidates the stored token and forces the
+	// user to enable MusicOps again. Roon 2.70 still serves transport:1, and
+	// its zones/control/volume are all this app needs.
 	registration, err := client.Register(roon.RegisterOptions{
 		ExtensionID: roonExtensionID, DisplayName: roonDisplayName,
 		DisplayVersion: a.version(), Publisher: "MusicOps", Email: "musicops@localhost",
@@ -138,18 +136,23 @@ func (a *App) runRoonRegistration(client *roon.Client, info roon.Info, token str
 		ProvidedServices: []string{},
 		Website:          "https://github.com/wsdbb72/MusicOps",
 		Token:            token,
-	}, 10*time.Minute)
+		// Roon answers only after a person enables the extension. The request
+		// has to stay open until then, and the open request is also what keeps
+		// MusicOps visible in Roon's Extensions list.
+	}, 24*time.Hour)
 	if !a.roonGenerationMatches(generation) {
 		return
 	}
 	if err != nil {
-		// A timeout means nobody clicked Enable. Keep the socket and say so;
-		// the request is still pending on Roon's side.
-		if strings.Contains(err.Error(), "超时") {
-			a.setRoonState("pending", "仍在等待启用：打开 Roon 的「设置 → 扩展」，把 MusicOps 打开")
-			return
-		}
+		// Never a timeout in practice (the wait is a day). A real error means
+		// the core refused the registration; drop the socket so the supervisor
+		// retries with a clean connection.
 		_ = client.Close()
+		a.roonMu.Lock()
+		if a.roonClient == client {
+			a.roonClient = nil
+		}
+		a.roonMu.Unlock()
 		a.setRoonState("failed", "注册失败："+err.Error())
 		return
 	}
@@ -229,6 +232,64 @@ func (a *App) upsertRoonZone(zone roon.Zone) {
 		}
 	}
 	a.roonZones = append(a.roonZones, zone)
+}
+
+// startRoonSupervisor connects on startup when a token is stored, and keeps
+// retrying while the core is unreachable. Roon lists an extension only while
+// it is connected, so requiring a click after every launch made MusicOps
+// disappear from Roon's Extensions page whenever the app started first.
+func (a *App) startRoonSupervisor() {
+	if a.vault == nil {
+		return
+	}
+	if _, ok, _ := a.vault.Get(roonTokenRef, "roon"); !ok {
+		return
+	}
+	a.roonMu.Lock()
+	stop := make(chan struct{})
+	a.roonStop = stop
+	a.roonMu.Unlock()
+	go func() {
+		// The HTTP listener is up before this fires; a core that is starting
+		// with Windows simply gets another attempt a minute later.
+		timer := time.NewTimer(2 * time.Second)
+		defer timer.Stop()
+		for {
+			select {
+			case <-stop:
+				return
+			case <-timer.C:
+			}
+			a.roonMu.Lock()
+			state, client := a.roonState, a.roonClient
+			a.roonMu.Unlock()
+			if client != nil && !client.Alive() {
+				a.roonMu.Lock()
+				if a.roonClient == client {
+					a.roonClient = nil
+					a.roonState, a.roonNote = "disconnected", "Roon 连接已断开，稍后重试"
+				}
+				a.roonMu.Unlock()
+				state = "disconnected"
+			}
+			if state == "connected" || state == "pending" || state == "connecting" {
+				timer.Reset(30 * time.Second)
+				continue
+			}
+			_, _ = a.connectRoon("127.0.0.1", 9330)
+			timer.Reset(60 * time.Second)
+		}
+	}()
+}
+
+// stopRoonSupervisor ends the retry loop; Close calls it.
+func (a *App) stopRoonSupervisor() {
+	a.roonMu.Lock()
+	if a.roonStop != nil {
+		close(a.roonStop)
+		a.roonStop = nil
+	}
+	a.roonMu.Unlock()
 }
 
 // roonStatus is GET /v1/roon/status.
@@ -367,6 +428,7 @@ func (a *App) roonDisconnect(w http.ResponseWriter, r *http.Request) {
 
 // closeRoon is called from App.Close so the socket does not outlive the app.
 func (a *App) closeRoon() {
+	a.stopRoonSupervisor()
 	a.roonMu.Lock()
 	defer a.roonMu.Unlock()
 	a.roonGeneration++

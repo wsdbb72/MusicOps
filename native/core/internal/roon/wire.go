@@ -79,6 +79,12 @@ func Dial(address string, timeout time.Duration) (*Client, error) {
 	return client, nil
 }
 
+// Alive reports whether the socket is still open. A core that restarts drops
+// the connection silently, so the caller has to notice.
+func (c *Client) Alive() bool {
+	return c != nil && !c.closed.Load()
+}
+
 // Close shuts the socket down.
 func (c *Client) Close() error {
 	if c == nil || c.closed.Swap(true) {

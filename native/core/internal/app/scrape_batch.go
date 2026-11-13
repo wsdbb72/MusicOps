@@ -54,6 +54,7 @@ type scrapeFileResult struct {
 	UnchangedFields []string      `json:"unchanged_fields,omitempty"`
 	LockedFields    []string      `json:"locked_fields,omitempty"`
 	Lyrics          bool          `json:"lyrics,omitempty"`
+	LyricsSidecar   bool          `json:"lyrics_sidecar,omitempty"`
 	Cover           bool          `json:"cover,omitempty"`
 	ArtworkPlanned  bool          `json:"artwork_planned,omitempty"`
 }
@@ -223,6 +224,9 @@ func (a *App) scrapeLibrary(w http.ResponseWriter, r *http.Request) {
 			// A dry run never fetches them: the point of a dry run is to see
 			// the plan without spending requests.
 			var cover []byte
+			// lyricsText is the text that actually goes into the file; it is
+			// written both as the LYRICS tag and as "<track>.lrc".
+			lyricsText := ""
 			if body.WithArtwork {
 				if body.DryRun {
 					result.ArtworkPlanned = true
@@ -235,8 +239,9 @@ func (a *App) scrapeLibrary(w http.ResponseWriter, r *http.Request) {
 						continue
 					}
 					cover = fetchedCover
-					if fetchedLyrics != "" && (len(entry.tags.Raw["LYRICS"]) == 0 || body.Overwrite) {
+					if fetchedLyrics != "" && ((len(entry.tags.Raw["LYRICS"]) == 0 && !hasLyricsSidecar(entry.full)) || body.Overwrite) {
 						updates["LYRICS"] = []string{fetchedLyrics}
+						lyricsText = fetchedLyrics
 						completion.Written = append(completion.Written, "lyrics")
 						// A locked lyrics field wins over the fetch, exactly as
 						// it wins over the catalogue.
@@ -274,7 +279,7 @@ func (a *App) scrapeLibrary(w http.ResponseWriter, r *http.Request) {
 			// One backup covers both writes: tags first, then the embedded
 			// cover, so a failed cover leaves the original file in place.
 			backup := ""
-			if cover != nil {
+			if cover != nil || lyricsText != "" {
 				if backup, err = backupFile(entry.full); err != nil {
 					result.Status, result.Code, result.Note = "failed", "TAG_UNAVAILABLE", "备份失败，文件没有改"
 					continue
@@ -317,6 +322,15 @@ func (a *App) scrapeLibrary(w http.ResponseWriter, r *http.Request) {
 				result.Cover = true
 				coverWritten++
 			}
+			if lyricsText != "" {
+				if err := writeLyricsSidecar(entry.full, lyricsText); err != nil {
+					restoreBackup(entry.full, backup)
+					_ = os.Remove(lyricsSidecarPath(entry.full))
+					_ = os.Remove(backup)
+					result.Status, result.Code, result.Note = "failed", "LYRICS_WRITE_FAILED", "歌词文件没有写入，文件已恢复"
+					continue
+				}
+			}
 			if backup != "" {
 				_ = os.Remove(backup)
 			}
@@ -329,6 +343,7 @@ func (a *App) scrapeLibrary(w http.ResponseWriter, r *http.Request) {
 				}
 				if field == "lyrics" {
 					result.Lyrics = true
+					result.LyricsSidecar = true
 					lyricsWritten++
 				}
 			}
@@ -342,7 +357,7 @@ func (a *App) scrapeLibrary(w http.ResponseWriter, r *http.Request) {
 		counts[result.Status]++
 		files = append(files, *result)
 	}
-	note := "批量刮削只写标签；勾选歌词封面后才会从设置里的歌词服务取，一次最多 30 首。"
+	note := "批量刮削只写标签；勾选歌词封面后才会从设置里的歌词服务取，一次最多 30 首，歌词同时写成同名 lrc（Roon / Plex / Navidrome 读文件）。"
 	if body.DryRun {
 		note = "预演：只报告会写哪些字段，文件没有改，也不取歌词封面。"
 	}

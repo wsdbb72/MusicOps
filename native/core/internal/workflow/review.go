@@ -212,25 +212,32 @@ func (r *Repository) reviewAccept(requestID string, job Job, task *taskrepo.Task
 	if job.Paused {
 		return Result{}, ErrStale
 	}
-	if job.Stage != "needs_review" || task.State != "blocked" || job.ReviewKind != "candidate" || job.TaskType != "search" {
+	if job.Stage != "needs_review" || task.State != "blocked" {
 		return Result{}, ErrStale
 	}
-	if in.Site == "" || in.CandidateID == "" || in.Search == nil || len(in.Plan) == 0 {
-		return Result{}, dataengine.ErrInvalidRequest
+	if job.ReviewKind != "candidate" || job.TaskType != "search" {
+		return Result{}, ErrStale
 	}
-	if in.Search.Scene != job.Scene || job.IdentificationJobID == "" {
-		return Result{}, dataengine.ErrInvalidRequest
-	}
-	decision, err := searchdecision.Decide(*in.Search)
-	if err != nil {
-		return Result{}, dataengine.ErrInvalidRequest
-	}
-	// The decision carries the selected site; the candidate id lives on the
-	// report. Both must match the user's selection: the report is rebuilt
-	// from stored evidence, so a selection that is not in the evidence
-	// cannot classify as an exact match.
-	if decision.Action != searchdecision.ActionQueueRequest || decision.SelectedSite != in.Site || in.Search.SelectedSite != in.Site || in.Search.SelectedCandidateID != in.CandidateID {
-		return Result{}, dataengine.ErrInvalidRequest
+	decision := searchdecision.Decision{Action: searchdecision.ActionQueueRequest}
+	{
+		if in.Site == "" || in.CandidateID == "" || in.Search == nil || len(in.Plan) == 0 {
+			return Result{}, dataengine.ErrInvalidRequest
+		}
+		if in.Search.Scene != job.Scene || job.IdentificationJobID == "" {
+			return Result{}, dataengine.ErrInvalidRequest
+		}
+		decided, err := searchdecision.Decide(*in.Search)
+		if err != nil {
+			return Result{}, dataengine.ErrInvalidRequest
+		}
+		decision = decided
+		// The decision carries the selected site; the candidate id lives on the
+		// report. Both must match the user's selection: the report is rebuilt
+		// from stored evidence, so a selection that is not in the evidence
+		// cannot classify as an exact match.
+		if decision.Action != searchdecision.ActionQueueRequest || decision.SelectedSite != in.Site || in.Search.SelectedSite != in.Site || in.Search.SelectedCandidateID != in.CandidateID {
+			return Result{}, dataengine.ErrInvalidRequest
+		}
 	}
 	childID := processJobID(job.ID)
 	child := job

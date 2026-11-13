@@ -85,11 +85,16 @@ func (a *App) acquire(ctx context.Context, execution *scheduler.Execution, paylo
 		// budget must not quietly download without one — that changes what
 		// the account is charged for, so it stops here for a human to decide.
 		if plan.Budget <= 0 {
-			return a.finishAcquire(held, *job, "token", "没有配置令牌预算：该站几乎只有 FL 令牌下载，普通下载需要你确认；尚未下载、尚未入库", "NO_TOKEN_BUDGET", nil)
+			// A normal download would add real download volume to the account.
+			// That is never done silently: without a token budget this torrent
+			// is skipped instead.
+			return a.finishSkipAcquire(held, *job, "没有配置令牌预算：为避免产生普通下载量，已跳过；尚未下载、尚未入库")
 		}
 		return a.acquireWithToken(ctx, execution, held, *job, plan, site, resource, decision)
 	}
-	return a.finishAcquire(held, *job, "token", "站点页面没有个人免费，也没有唯一的令牌按钮，未发令牌请求；尚未下载、尚未入库", "evidence", nil)
+	// No personal free and no token button: the only way left would be a
+	// normal download, which spends ratio. Skipping is the honest outcome.
+	return a.finishSkipAcquire(held, *job, "该种子没有 FL 免费标记，也没有令牌按钮：为避免产生普通下载量，已跳过；尚未下载、尚未入库")
 }
 
 func (a *App) readEvidence(ctx context.Context, plan SearchPlan, site, resource string) (sitefree.Decision, error) {
@@ -494,6 +499,21 @@ func (a *App) fetchTorrent(ctx context.Context, execution *scheduler.Execution, 
 		request.TorrentPass = a.trackerKey(ctx, plan.RootJobID, site, request.Cookie, resource)
 	}
 	return torrentfetch.Fetch(ctx, request)
+}
+
+// finishSkipAcquire ends the acquire task without downloading anything. It is
+// the outcome for a torrent that is neither free nor token-purchasable: a
+// normal download would add real volume to the account, which is never done
+// without a person asking for it.
+func (a *App) finishSkipAcquire(held taskrepo.Token, job workflow.Job, message string) (scheduler.Outcome, error) {
+	complete := workflow.Complete{
+		Edge: workflow.EdgeTerminal, NextStage: "skipped", TaskState: "completed",
+		Message: message, NowNS: a.now().UnixNano(),
+	}
+	if _, err := a.flows.Complete(intentID("acquire", held.ID, held.Fence), held, complete); err != nil {
+		return scheduler.Outcome{}, err
+	}
+	return scheduler.Outcome{State: "completed", Message: message}, nil
 }
 
 func (a *App) finishAcquire(held taskrepo.Token, job workflow.Job, review, message, class string, receipt *torrentfetch.Receipt) (scheduler.Outcome, error) {

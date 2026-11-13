@@ -67,7 +67,10 @@ func (a *App) lookupSources(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if want("qq") || want("kugou") || want("kuwo") || want("migu") {
-		base, token, startErr := a.ensureEngine(engineStreaming)
+		base, token, startErr := streamingEngineOverride(), "", error(nil)
+		if base == "" {
+			base, token, startErr = a.ensureEngine(engineStreaming)
+		}
 		if startErr != nil {
 			notes = append(notes, "内置引擎不可用："+startErr.Error())
 		} else {

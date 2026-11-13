@@ -206,7 +206,7 @@ func (a *App) search(ctx context.Context, execution *scheduler.Execution, payloa
 
 func (a *App) observe(ctx context.Context, execution *scheduler.Execution, job workflow.Job, plan SearchPlan, token taskrepo.Token) (searchdecision.Report, []workflow.EvidenceInput, string, error) {
 	enabled := map[string]bool{}
-	for _, site := range plan.EnabledSites {
+	for _, site := range a.effectiveEnabledSites(plan) {
 		enabled[site] = true
 	}
 	report := searchdecision.Report{

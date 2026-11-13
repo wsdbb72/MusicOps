@@ -58,7 +58,8 @@ func TestStreamEngineAcceptsOnlyValidatedAudio(t *testing.T) {
 	tracker := emptyResultsServer(t)
 	defer tracker.Close()
 	application := newApp(t)
-	post(t, application, "/v1/settings/download", map[string]any{"streaming_enabled": true, "engine_url": server.URL})
+	t.Setenv("MUSICOPS_ENGINE_URL", server.URL)
+	post(t, application, "/v1/settings/download", map[string]any{"streaming_enabled": true})
 	post(t, application, "/v1/search", searchBody("album-engine", tracker.URL, []string{"dicmusic", "orpheus"}, true))
 	job := waitJob(t, application, "process:search:album-engine", "needs_review")
 	if !strings.Contains(job.Message, "tidal 音频已通过校验并保存") || !strings.Contains(job.Message, "算作下载") || !strings.Contains(job.Message, "尚未入库") || strings.Contains(job.Message, "已入库") {
@@ -68,13 +69,11 @@ func TestStreamEngineAcceptsOnlyValidatedAudio(t *testing.T) {
 	if _, err := os.Stat(saved); err != nil || tidalCalls == 0 || appleCalls != 0 {
 		t.Fatal(err, tidalCalls, appleCalls)
 	}
-	rejected := postCode(t, application, "/v1/settings/download", map[string]any{"streaming_enabled": true, "engine_url": "http://example.com"})
-	if rejected.Code != http.StatusBadRequest {
-		t.Fatal(rejected.Code, rejected.Body.String())
-	}
-	metadata := postCode(t, application, "/v1/settings/download", map[string]any{"streaming_enabled": true, "engine_url": "https://169.254.169.254/"})
-	if metadata.Code != http.StatusBadRequest {
-		t.Fatal(metadata.Code, metadata.Body.String())
+	// The address field is retired: whatever the page sends is dropped and the
+	// embedded engine is used, so an old (or hostile) URL cannot be stored.
+	dropped := post(t, application, "/v1/settings/download", map[string]any{"streaming_enabled": true, "engine_url": "https://169.254.169.254/"})
+	if dropped["engine_url"] != "" {
+		t.Fatal(dropped)
 	}
 }
 
@@ -94,7 +93,8 @@ func TestStreamEngineSkipsAudioThatFailsValidation(t *testing.T) {
 	tracker := emptyResultsServer(t)
 	defer tracker.Close()
 	application := newApp(t)
-	post(t, application, "/v1/settings/download", map[string]any{"streaming_enabled": true, "engine_url": server.URL})
+	t.Setenv("MUSICOPS_ENGINE_URL", server.URL)
+	post(t, application, "/v1/settings/download", map[string]any{"streaming_enabled": true})
 	post(t, application, "/v1/search", searchBody("album-bad-audio", tracker.URL, []string{"dicmusic", "orpheus"}, true))
 	job := waitJob(t, application, "process:search:album-bad-audio", "needs_review")
 	if !strings.Contains(job.Message, "没有通过音频校验") || !strings.Contains(job.Message, "尚未下载") {
@@ -128,7 +128,8 @@ func TestStreamEngineContinuesAfterTidalMisses(t *testing.T) {
 	tracker := emptyResultsServer(t)
 	defer tracker.Close()
 	application := newApp(t)
-	post(t, application, "/v1/settings/download", map[string]any{"streaming_enabled": true, "engine_url": server.URL})
+	t.Setenv("MUSICOPS_ENGINE_URL", server.URL)
+	post(t, application, "/v1/settings/download", map[string]any{"streaming_enabled": true})
 	post(t, application, "/v1/search", searchBody("album-apple", tracker.URL, []string{"dicmusic", "orpheus"}, true))
 	job := waitJob(t, application, "process:search:album-apple", "needs_review")
 	if !strings.Contains(job.Message, "applemusic 音频已通过校验并保存") || strings.Contains(job.Message, "tidal 音频已通过校验") {

@@ -85,6 +85,10 @@ hr{border:0;border-top:1px solid var(--line);margin:var(--s-4) 0}
 }
 .mark .app-version{color:var(--accent);background:var(--accent-soft);border-radius:var(--r-pill);padding:.08rem .5rem;font-family:var(--font-mono,ui-monospace,SFMono-Regular,Menlo,monospace);font-weight:650;font-size:var(--t-xs);letter-spacing:.02em}
 
+.pick-list{display:grid;gap:2px;max-height:22rem;overflow:auto;border:1px solid var(--line);border-radius:var(--r-md);padding:.4rem .6rem;margin:.4rem 0}
+.pick-row{display:flex;align-items:center;gap:.4rem;font-size:var(--t-sm);padding:.18rem 0}
+.pick-row input{flex:0 0 auto}
+
 /* ---------- navigation ---------- */
 nav{display:flex;gap:var(--s-1);overflow-x:auto;scrollbar-width:none;margin:0 calc(var(--s-5) * -1);padding:0 var(--s-5)}
 nav::-webkit-scrollbar{display:none}

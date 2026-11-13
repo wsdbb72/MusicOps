@@ -92,16 +92,17 @@ func (a *App) tryConfiguredStream(ctx context.Context, source string, plan Searc
 	if err != nil {
 		return "", source + " 未接入（无凭证与引擎）", downloadpolicy.ClassNoResult
 	}
-	base, ok := allowedEngineURL(settings.EngineURL)
+	_ = settings // the address field is retired; see streamingEngineOverride
+	base := streamingEngineOverride()
 	token := ""
-	if !ok || strings.TrimSpace(settings.EngineURL) == "" {
+	if base == "" {
 		// The installer ships go-music-dl; start it instead of asking the
 		// user to run a service by hand.
 		managedBase, managedToken, startErr := a.ensureEngine(engineStreaming)
 		if startErr != nil {
 			return "", source + " 未接入（内置引擎未能启动）", downloadpolicy.ClassNoResult
 		}
-		base, ok, token = managedBase, true, managedToken
+		base, token = managedBase, managedToken
 	}
 	song, status, err := a.streamSearch(ctx, base, service, plan, token)
 	if err != nil {

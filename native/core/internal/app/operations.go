@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
-	"strings"
 
 	"github.com/wsdbb72/MusicOps/native/core/internal/audiorelease"
 	"github.com/wsdbb72/MusicOps/native/core/internal/dataengine"
@@ -57,6 +56,22 @@ func (a *App) loadSiteSettings() (siteSettings, error) {
 	}
 	out.EnabledSites = kept
 	return out, nil
+}
+
+// effectiveEnabledSites resolves the sites a job may search. The plan carries
+// a snapshot taken when the job was created; an empty snapshot means "use the
+// site page's default selection", which is also what the search form says. A
+// job created before any site was enabled therefore starts searching the
+// sites enabled now instead of reporting every one as DISABLED forever.
+func (a *App) effectiveEnabledSites(plan SearchPlan) []string {
+	if len(plan.EnabledSites) > 0 {
+		return plan.EnabledSites
+	}
+	settings, err := a.loadSiteSettings()
+	if err != nil {
+		return nil
+	}
+	return settings.EnabledSites
 }
 
 func (a *App) saveSiteSettings(in siteSettings) (siteSettings, error) {
@@ -273,13 +288,11 @@ func (a *App) saveDownload(w http.ResponseWriter, r *http.Request) {
 	if body.StreamingOrder != nil {
 		next.StreamingOrder = body.StreamingOrder
 	}
-	if body.EngineURL != nil {
-		if _, ok := allowedEngineURL(*body.EngineURL); !ok && strings.TrimSpace(*body.EngineURL) != "" {
-			writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "code": "INVALID_REQUEST", "error": "流媒体引擎地址只能是本机 HTTP 或 HTTPS"})
-			return
-		}
-		next.EngineURL = strings.TrimSpace(*body.EngineURL)
-	}
+	// The address field is retired: the installer ships go-music-dl and the
+	// app starts it itself, so a stored address only ever pointed at a
+	// service the user had to run by hand (or at nothing). Any value the page
+	// still sends is dropped; MUSICOPS_ENGINE_URL is the escape hatch.
+	next.EngineURL = ""
 	saved, err := a.saveDownloadSettings(next)
 	if err != nil {
 		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"ok": false, "code": "SETTINGS_UNAVAILABLE"})

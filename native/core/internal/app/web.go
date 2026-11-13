@@ -347,10 +347,10 @@ const appJS = `(function () {
     }).join("");
     return '<article><h2>下载默认</h2><p class="meta">搜索时不指定流媒体回退，就用这里的选择。</p>' +
       '<label><input type="checkbox" id="download-streaming"' + (downloadSettings.streaming_enabled ? " checked" : "") + '> 流媒体回退（已启用的站点都没有精确匹配时，再尝试流媒体）</label>' +
-      '<label>本机流媒体引擎地址<input type="text" id="download-engine" value="' + escapeText(downloadSettings.engine_url || "") + '" placeholder="留空则未接入。本机用 HTTP，其他机器用 HTTPS"></label>' +
+      '<p class="meta">流媒体引擎：随程序启动的内嵌引擎，不需要填地址。要用别的机器上的引擎，设置环境变量 MUSICOPS_ENGINE_URL。</p>' +
       '<p><button type="button" id="save-download" class="primary">保存</button></p>' +
       '<p class="meta">流媒体回退顺序（可上下调整）：</p>' + orderHtml +
-      '<p class="meta">实际会尝试的顺序是 Tidal、Apple Music、QQ 音乐、网易云，最后是已导入的歌单文件。Qobuz 和 Deezer 排在表里，但默认不启用。这个程序不内置流媒体引擎，只连接你填的地址。只有返回的文件通过音频校验才算下载，而且这时仍未入库。</p></article>';
+      '<p class="meta">实际会尝试的顺序是 Tidal、Apple Music、QQ 音乐、网易云，最后是已导入的歌单文件。Qobuz 和 Deezer 排在表里，但默认不启用。下载由随程序启动的内嵌引擎完成（go-music-dl），只有返回的文件通过音频校验才算下载，而且这时仍未入库。</p></article>';
   }
   function cookieCard() {
     var rows = cookieSettings.map(function (site) {
@@ -495,7 +495,7 @@ const appJS = `(function () {
       '<label>歌单链接或 ID<input type="text" id="remote-playlist-id" placeholder="粘贴完整分享链接，或直接填歌单 ID"></label>' +
       '<label>本机测试地址<input type="text" id="remote-base" placeholder="留空则访问各平台公开接口"></label>' +
       '<label><input type="checkbox" id="playlist-enqueue" checked> 拉取后创建入库任务</label>' +
-      '<p><button type="button" id="fetch-playlist">拉取并创建入库任务</button></p><p id="playlist-fetch-result" class="meta"></p>' +
+      '<p><button type="button" id="fetch-playlist">拉取并创建入库任务</button></p><p id="playlist-fetch-result" class="meta"></p><div id="playlist-pick"></div>' +
       '<h2>订阅已存歌单</h2><p class="meta">未绑定平台时只重新读取本机歌单。绑定了公开歌单后，检查会向该平台读取新增曲目。首次默认只记下现有曲目。删除的曲目不会从音乐库移除。</p>' +
       '<label>歌单<select id="subscription-playlist"><option value="">选择已存歌单</option>' + playlistRows.map(function (row) { return '<option value="' + escapeText(row.id) + '">' + escapeText(row.name || row.id) + "</option>"; }).join("") + '</select></label>' +
       '<label>间隔（小时）<input type="number" id="subscription-hours" min="1" max="168" value="6"></label>' +
@@ -613,10 +613,8 @@ const appJS = `(function () {
     setBusy(true);
     setStatus("info", "正在保存");
     try {
-      var engine = document.getElementById("download-engine");
-      var body = await postSetting("/v1/settings/download", {streaming_enabled: document.getElementById("download-streaming").checked, streaming_order: streamingOrder, engine_url: engine ? engine.value.trim() : ""});
+      var body = await postSetting("/v1/settings/download", {streaming_enabled: document.getElementById("download-streaming").checked, streaming_order: streamingOrder});
       downloadSettings.streaming_enabled = body.streaming_enabled;
-      downloadSettings.engine_url = body.engine_url || "";
       if (body.streaming_order && body.streaming_order.length) streamingOrder = body.streaming_order.slice();
       setStatus("ok", "已保存。");
     } catch (err) {

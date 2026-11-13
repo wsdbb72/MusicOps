@@ -67,12 +67,22 @@ func (a *App) reviewObservations(inspection workflow.Inspection, plan SearchPlan
 		}
 		observations[item.Source] = observation
 	}
+	enabled := map[string]bool{}
+	for _, site := range a.effectiveEnabledSites(plan) {
+		enabled[site] = true
+	}
 	sites := make([]reviewSiteView, 0, len(searchdecision.TrackerSites))
 	candidates := []reviewCandidateView{}
 	for _, site := range searchdecision.TrackerSites {
 		observation, ok := observations[site]
 		if !ok {
-			sites = append(sites, reviewSiteView{Site: site, Status: "DISABLED"})
+			status := "DISABLED"
+			if enabled[site] {
+				// Enabled but never searched: the job predates the setting and
+				// has not been retried yet.
+				status = "NOT_SEARCHED"
+			}
+			sites = append(sites, reviewSiteView{Site: site, Status: status})
 			continue
 		}
 		row, _, _ := summarizeSite(plan, site, observation)

@@ -255,6 +255,23 @@ func randomToken() (string, error) {
 	return string(out), nil
 }
 
+// streamingEngineOverride returns an external engine address only when
+// MUSICOPS_ENGINE_URL names one. The settings page no longer asks for it: the
+// installer ships go-music-dl, and a field that most people leave empty (or
+// fill with an address that is not running) only produces confusing failures.
+// The variable is the escape hatch for running the UI against a remote engine.
+func streamingEngineOverride() string {
+	raw := strings.TrimSpace(os.Getenv("MUSICOPS_ENGINE_URL"))
+	if raw == "" {
+		return ""
+	}
+	base, ok := allowedEngineURL(raw)
+	if !ok {
+		return ""
+	}
+	return base
+}
+
 // testStreamingEngine starts the bundled go-music-dl (or uses the configured
 // external engine) and performs one search, so the settings page can prove the
 // engine answers instead of asking the user to trust it.
@@ -273,14 +290,16 @@ func (a *App) testStreamingEngine(w http.ResponseWriter, r *http.Request) {
 	if service == "" {
 		service = "netease"
 	}
-	settings, err := a.loadDownloadSettings()
-	if err != nil {
+	// The address field is retired (see streamingEngineOverride), but the
+	// settings read stays: it fails when the profile itself is unavailable,
+	// and that is still an error worth reporting instead of starting an engine.
+	if _, err := a.loadDownloadSettings(); err != nil {
 		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"ok": false, "code": "SETTINGS_UNAVAILABLE"})
 		return
 	}
-	base, ok := allowedEngineURL(settings.EngineURL)
-	token, external := "", true
-	if !ok || strings.TrimSpace(settings.EngineURL) == "" {
+	base := streamingEngineOverride()
+	token, external := "", base != ""
+	if base == "" {
 		external = false
 		managedBase, managedToken, startErr := a.ensureEngine(engineStreaming)
 		if startErr != nil {

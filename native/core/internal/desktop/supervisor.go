@@ -576,6 +576,14 @@ func logTail(profile string) string {
 	return string(raw)
 }
 
+// coreProcessName reports whether an executable name belongs to a core this
+// program starts. The shipped binary is musicops-core(.exe); the desktop
+// tests build the same program under musicops-test, so the match is on the
+// product prefix rather than the exact file name.
+func coreProcessName(base string) bool {
+	return strings.HasPrefix(strings.ToLower(base), "musicops")
+}
+
 // attachCore tries to attach to the core described by the rendezvous files.
 // It returns (nil, nil) when no rendezvous exists or the recorded process
 // is gone. A live process that cannot be authenticated is an error: starting
@@ -588,7 +596,11 @@ func attachCore(profile string) (*runningCore, error) {
 	if rec == nil {
 		return nil, nil
 	}
-	if !pidAlive(rec.PID) {
+	if !pidAlive(rec.PID) || !processLooksLikeCore(rec.PID) {
+		// The record is stale: the core is gone and something else reused
+		// the PID. Clear it so the next start does not trip over it.
+		_ = os.Remove(coreJSONPath(profile))
+		_ = os.Remove(healthPath(profile))
 		return nil, nil
 	}
 	if password == "" {

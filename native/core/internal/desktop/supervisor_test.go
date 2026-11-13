@@ -12,6 +12,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/wsdbb72/MusicOps/native/core/internal/vault"
 )
 
 // The tests in this file build the real cmd/musicops binary once and drive
@@ -364,4 +366,41 @@ func TestSupervisorStartFailsWithoutBinary(t *testing.T) {
 	}
 	defer func() { _ = sup2.Stop() }()
 	waitCoreStatus(t, profile, true, 30*time.Second)
+}
+
+// A stale rendezvous file whose PID was reused by an unrelated program must
+// not block startup: the shell used to read "the core is running but does
+// not answer" and exit. Windows reuses PIDs, so the check has to look at the
+// process image, not just at the number.
+func TestAttachIgnoresAStaleRendezvous(t *testing.T) {
+	profile := t.TempDir()
+	if err := ensureCoreDirs(profile); err != nil {
+		t.Fatal(err)
+	}
+	// Our own test process is alive, but it is not a musicops binary.
+	rec := rendezvous{URL: "http://127.0.0.1:9", PID: os.Getpid(), StartedAtUnix: time.Now().Unix()}
+	encoded, err := json.Marshal(rec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(coreJSONPath(profile), encoded, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	blob, err := vault.Protect([]byte("password-16-chars"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(corePasswordPath(profile), blob, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	handle, err := attachCore(profile)
+	if err != nil {
+		t.Fatalf("a stale rendezvous must not be an error: %v", err)
+	}
+	if handle != nil {
+		t.Fatal("an unrelated process was attached as the core")
+	}
+	if _, err := os.Stat(coreJSONPath(profile)); !os.IsNotExist(err) {
+		t.Fatal("the stale rendezvous file was left behind")
+	}
 }

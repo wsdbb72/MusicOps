@@ -3,7 +3,12 @@
 package desktop
 
 import (
+	"fmt"
 	"os"
+	"os/exec"
+	"path/filepath"
+	"strconv"
+	"strings"
 	"syscall"
 )
 
@@ -19,6 +24,25 @@ func pidAlive(pid int) bool {
 		return false
 	}
 	return syscall.Kill(pid, 0) == nil
+}
+
+// processLooksLikeCore reports whether pid belongs to a musicops-core
+// process. A stale rendezvous file can outlive the core; without this check
+// the shell treats an unrelated process that reused the PID as a live core.
+func processLooksLikeCore(pid int) bool {
+	if pid <= 0 {
+		return false
+	}
+	if target, err := os.Readlink(fmt.Sprintf("/proc/%d/exe", pid)); err == nil {
+		return coreProcessName(filepath.Base(target))
+	}
+	// macOS has no /proc; ask ps. If that fails too, keep the previous
+	// behaviour (assume it could be ours) rather than starting a duplicate.
+	out, err := exec.Command("ps", "-p", strconv.Itoa(pid), "-o", "comm=").Output()
+	if err != nil {
+		return true
+	}
+	return coreProcessName(filepath.Base(strings.TrimSpace(string(out))))
 }
 
 // signalPID delivers SIGTERM or SIGKILL to pid.

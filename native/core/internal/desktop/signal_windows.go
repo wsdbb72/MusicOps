@@ -4,6 +4,8 @@ package desktop
 
 import (
 	"os"
+	"path/filepath"
+	"strings"
 
 	"golang.org/x/sys/windows"
 )
@@ -31,6 +33,28 @@ func pidAlive(pid int) bool {
 	// STILL_ACTIVE (259) is the Win32 exit code of a running process;
 	// x/sys/windows does not export it as a constant.
 	return code == 259
+}
+
+// processLooksLikeCore reports whether pid belongs to a musicops-core
+// process. Windows reuses PIDs, so a stale rendezvous file can point at an
+// unrelated program; treating that as "the core is running but unhealthy"
+// makes the shell refuse to start at all.
+func processLooksLikeCore(pid int) bool {
+	if pid <= 0 {
+		return false
+	}
+	handle, err := windows.OpenProcess(windows.PROCESS_QUERY_LIMITED_INFORMATION, false, uint32(pid))
+	if err != nil {
+		return false
+	}
+	defer windows.CloseHandle(handle)
+	buf := make([]uint16, windows.MAX_PATH)
+	size := uint32(len(buf))
+	if err := windows.QueryFullProcessImageName(handle, 0, &buf[0], &size); err != nil {
+		return false
+	}
+	base := strings.ToLower(filepath.Base(windows.UTF16ToString(buf[:size])))
+	return coreProcessName(base)
 }
 
 // signalPID delivers a shutdown request to pid. Windows has no SIGTERM:

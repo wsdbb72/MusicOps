@@ -352,13 +352,33 @@ const appJS = `(function () {
       '<p class="meta">流媒体回退顺序（可上下调整）：</p>' + orderHtml +
       '<p class="meta">实际会尝试的顺序是 Tidal、Apple Music、QQ 音乐、网易云，最后是已导入的歌单文件。Qobuz 和 Deezer 排在表里，但默认不启用。下载由随程序启动的内嵌引擎完成（go-music-dl），只有返回的文件通过音频校验才算下载，而且这时仍未入库。</p></article>';
   }
+  // A staled cookie answers as a guest: search still works, the download
+  // does not. Ask each site instead of letting the job fail much later.
+  async function checkCookieLogins() {
+    var out = document.getElementById("cookie-check-result");
+    if (!out) return;
+    out.textContent = "正在问四个站点…";
+    try {
+      var response = await fetch("/v1/settings/cookies/check", {headers: {Accept: "application/json"}});
+      var body = await response.json();
+      if (!response.ok || !body || !body.ok) {
+        out.textContent = "检查失败。";
+        return;
+      }
+      out.innerHTML = (body.sites || []).map(function (row) {
+        return escapeText(row.site) + "：" + (row.logged_in ? "已登录" : "未登录") + "（" + escapeText(row.detail || "") + "）";
+      }).join("<br>");
+    } catch (err) {
+      out.textContent = "检查中断：" + err.message;
+    }
+  }
   function cookieCard() {
     var rows = cookieSettings.map(function (site) {
       return '<label>' + escapeText(site.name) + '（' + escapeText(site.host || "") + '）· ' + escapeText(savedMark(site.saved, site.revision)) +
         '<textarea id="cookie-' + escapeText(site.name) + '" rows="3" placeholder="粘贴 Cookie-Editor JSON；留空保留已保存的值"></textarea></label>' +
         '<p><button type="button" data-cookie-site="' + escapeText(site.name) + '">保存 ' + escapeText(site.name) + ' Cookie</button></p>';
     }).join("");
-    return '<article><h2>站点 Cookie</h2><p class="meta">每站的 Cookie 加密保存在本机，只显示“已保存”，不回显内容。搜索、登录检查和下载优先用这里保存的 Cookie；检索时临时填写的 Cookie 只用于那一次。</p>' + rows + '</article>';
+    return '<article><h2>站点 Cookie</h2><p class="meta">每站的 Cookie 加密保存在本机，只显示“已保存”，不回显内容。搜索、登录检查和下载优先用这里保存的 Cookie；检索时临时填写的 Cookie 只用于那一次。</p>' + rows + '<p><button type="button" id="check-cookies">检查登录状态</button></p><p id="cookie-check-result" class="meta"></p></article>';
   }
   function aiCard() {
     if (!aiSettings) return "";
@@ -534,6 +554,8 @@ const appJS = `(function () {
         moveOrder(parseInt(parts[0], 10), parseInt(parts[1], 10));
       });
     });
+    var checkCookies = document.getElementById("check-cookies");
+    if (checkCookies) checkCookies.addEventListener("click", checkCookieLogins);
     document.querySelectorAll("[data-cookie-site]").forEach(function (button) {
       button.addEventListener("click", function () { saveCookie(button.getAttribute("data-cookie-site")); });
     });

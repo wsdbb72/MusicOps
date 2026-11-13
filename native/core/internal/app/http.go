@@ -165,6 +165,7 @@ func (a *App) Handler() http.Handler {
 	mux.HandleFunc("GET /v1/settings/download", a.downloadSettings)
 	mux.HandleFunc("POST /v1/settings/download", a.saveDownload)
 	mux.HandleFunc("GET /v1/settings/cookies", a.cookieSettingsHandler)
+	mux.HandleFunc("GET /v1/settings/cookies/check", a.cookieCheck)
 	mux.HandleFunc("POST /v1/settings/cookies", a.saveCookie)
 	mux.HandleFunc("GET /v1/settings/ai", a.aiSettingsHandler)
 	mux.HandleFunc("POST /v1/settings/ai", a.saveAI)

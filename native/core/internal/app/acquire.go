@@ -472,11 +472,14 @@ func (a *App) fetchTorrent(ctx context.Context, execution *scheduler.Execution, 
 		Site: site, Resource: resource, Cookie: a.cookieFor(plan.RootJobID, site), Synthetic: plan.Synthetic, BaseURL: plan.BaseURL,
 		UseToken: useToken, Directory: filepath.Join(a.Dir, "torrents"),
 	}
+	// The download key is not typed in by anyone: both sites put it in the
+	// link behind their download button, so a logged-in cookie is enough to
+	// read it from the torrent page (see tracker_key.go).
 	switch site {
 	case "dicmusic":
-		request.AuthKey = a.secret(plan.RootJobID + "/dicmusic")
+		request.AuthKey = a.trackerKey(ctx, plan.RootJobID, site, request.Cookie, resource)
 	case "orpheus":
-		request.TorrentPass = a.secret(plan.RootJobID + "/orpheus")
+		request.TorrentPass = a.trackerKey(ctx, plan.RootJobID, site, request.Cookie, resource)
 	}
 	return torrentfetch.Fetch(ctx, request)
 }

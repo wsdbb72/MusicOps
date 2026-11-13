@@ -206,6 +206,23 @@ func decide(in classified) Decision {
 		}
 		return Decision{Action: ActionQueueRequest, Reason: "exact_match", SelectedSite: selected}
 	}
+	// An explicit pick of a candidate that is not an exact match. A human
+	// accepting it (or the review model passing it) names both the site and
+	// the candidate, and the candidate must exist on that site. Refusing this
+	// made every near-match unaccept: the accept endpoint rebuilt the report,
+	// asked this function, and got "selection_not_exact" back as an invalid
+	// request, so nothing could ever be downloaded from a candidate list.
+	if selected != "" && report.SelectedCandidateID != "" {
+		for _, site := range report.Sites {
+			if site.Site != selected || !site.Attempted || site.CandidateCount == 0 {
+				continue
+			}
+			if report.Scene == "upgrade" && !report.QualityImproved {
+				return Decision{Action: ActionSkip, Reason: "upgrade_not_better"}
+			}
+			return Decision{Action: ActionQueueRequest, Reason: "selected_candidate", SelectedSite: selected}
+		}
+	}
 	if selected != "" {
 		return Decision{Action: ActionReviewCandidate, Reason: "selection_not_exact"}
 	}

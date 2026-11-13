@@ -347,7 +347,8 @@ const appJS = `(function () {
     }).join("");
     return '<article><h2>下载默认</h2><p class="meta">搜索时不指定流媒体回退，就用这里的选择。</p>' +
       '<label><input type="checkbox" id="download-streaming"' + (downloadSettings.streaming_enabled ? " checked" : "") + '> 流媒体回退（已启用的站点都没有精确匹配时，再尝试流媒体）</label>' +
-      '<p class="meta">流媒体引擎：随程序启动的内嵌引擎，不需要填地址。要用别的机器上的引擎，设置环境变量 MUSICOPS_ENGINE_URL。</p>' +
+      '<label>令牌下载预算（每个歌单批次，0 表示不花令牌）<input type="number" id="download-token-budget" min="0" max="100000" value="' + (downloadSettings.token_budget || 0) + '"></label>' +
+      '<p class="meta">dicmusic、orpheus 几乎没有免费种子，正常下载就是用 FL 令牌。这里填每个歌单批次最多用多少个令牌；0 表示只用免费种子。流媒体引擎用随程序启动的内嵌引擎，不需要填地址（远程引擎用环境变量 MUSICOPS_ENGINE_URL）。</p>' +
       '<p><button type="button" id="save-download" class="primary">保存</button></p>' +
       '<p class="meta">流媒体回退顺序（可上下调整）：</p>' + orderHtml +
       '<p class="meta">实际会尝试的顺序是 Tidal、Apple Music、QQ 音乐、网易云，最后是已导入的歌单文件。Qobuz 和 Deezer 排在表里，但默认不启用。下载由随程序启动的内嵌引擎完成（go-music-dl），只有返回的文件通过音频校验才算下载，而且这时仍未入库。</p></article>';
@@ -637,7 +638,8 @@ const appJS = `(function () {
     setBusy(true);
     setStatus("info", "正在保存");
     try {
-      var body = await postSetting("/v1/settings/download", {streaming_enabled: document.getElementById("download-streaming").checked, streaming_order: streamingOrder});
+      var budgetBox = document.getElementById("download-token-budget");
+      var body = await postSetting("/v1/settings/download", {streaming_enabled: document.getElementById("download-streaming").checked, streaming_order: streamingOrder, token_budget: budgetBox ? (parseInt(budgetBox.value, 10) || 0) : 0});
       downloadSettings.streaming_enabled = body.streaming_enabled;
       if (body.streaming_order && body.streaming_order.length) streamingOrder = body.streaming_order.slice();
       setStatus("ok", "已保存。");

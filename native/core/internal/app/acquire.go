@@ -80,6 +80,13 @@ func (a *App) acquire(ctx context.Context, execution *scheduler.Execution, paylo
 		return a.finishAcquire(held, *job, "candidate", "种子字节已保存，专辑尚未下载、尚未入库", "", &receipt)
 	}
 	if tokenledger.IsTokenSite(site) && decision.TokenCost > 0 {
+		// dicmusic and orpheus have almost no freeleech: the FL button is the
+		// normal way to download, and it spends a token. A batch with no
+		// budget must not quietly download without one — that changes what
+		// the account is charged for, so it stops here for a human to decide.
+		if plan.Budget <= 0 {
+			return a.finishAcquire(held, *job, "token", "没有配置令牌预算：该站几乎只有 FL 令牌下载，普通下载需要你确认；尚未下载、尚未入库", "NO_TOKEN_BUDGET", nil)
+		}
 		return a.acquireWithToken(ctx, execution, held, *job, plan, site, resource, decision)
 	}
 	return a.finishAcquire(held, *job, "token", "站点页面没有个人免费，也没有唯一的令牌按钮，未发令牌请求；尚未下载、尚未入库", "evidence", nil)
@@ -213,7 +220,12 @@ func (a *App) acquireWithToken(ctx context.Context, execution *scheduler.Executi
 	if fetchErr != nil {
 		return a.finishAcquire(held, job, "token", "获取未完成，令牌状态待对账；尚未下载、尚未入库", "REQUEST_UNKNOWN", nil)
 	}
-	return a.finishAcquire(held, job, "token", "种子字节已保存，免费是否生效尚未对账；尚未下载、尚未入库", "REQUEST_UNKNOWN", receiptPtr)
+	// The torrent bytes are here: the FL download itself succeeded. Whether
+	// the site applied the freeleech is bookkeeping, and blocking the queue on
+	// it would strand a file that is already paid for. The ledger stays in
+	// REQUEST_UNKNOWN, which is also what keeps a retry from spending a
+	// second token.
+	return a.finishAcquire(held, job, "candidate", "FL 令牌下载已取到种子，免费生效待对账；尚未下载、尚未入库", "TOKEN_PENDING_RECONCILE", receiptPtr)
 }
 
 // bindPageBalance uses the unique total printed on the torrent page when the

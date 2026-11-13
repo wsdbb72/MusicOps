@@ -170,7 +170,12 @@ var downloadSettingsKey = []byte("app/settings/download")
 // order the fallback tries the sources. An empty order means the canonical
 // order; a saved order is a permutation of the canonical source names.
 type downloadSettings struct {
-	StreamingEnabled bool     `json:"streaming_enabled"`
+	StreamingEnabled bool `json:"streaming_enabled"`
+	// TokenBudget is how many FL tokens one playlist batch may spend. The
+	// token sites have almost no freeleech: the FL button is the normal way
+	// to download, so the budget is what authorises it. 0 means "never spend
+	// a token" and the job downloads normally instead.
+	TokenBudget int `json:"token_budget"`
 	StreamingOrder   []string `json:"streaming_order,omitempty"`
 	EngineURL        string   `json:"engine_url,omitempty"`
 	UpdatedNS        int64    `json:"updated_ns"`
@@ -254,7 +259,7 @@ func (a *App) downloadSettings(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "code": "SETTINGS_UNAVAILABLE"})
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "streaming_enabled": settings.StreamingEnabled, "streaming_order": settings.StreamingOrder, "engine_url": settings.EngineURL, "streaming_sources": steps, "streaming_source_status": a.streamingSourceStatus(), "streaming_fallback_wired": true})
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "streaming_enabled": settings.StreamingEnabled, "token_budget": settings.TokenBudget, "streaming_order": settings.StreamingOrder, "engine_url": settings.EngineURL, "streaming_sources": steps, "streaming_source_status": a.streamingSourceStatus(), "streaming_fallback_wired": true})
 }
 
 // saveDownload replaces the saved streaming default and/or the saved
@@ -265,8 +270,9 @@ func (a *App) saveDownload(w http.ResponseWriter, r *http.Request) {
 		StreamingEnabled *bool    `json:"streaming_enabled"`
 		StreamingOrder   []string `json:"streaming_order"`
 		EngineURL        *string  `json:"engine_url"`
+		TokenBudget      *int     `json:"token_budget"`
 	}
-	if err := decode(r, &body); err != nil || (body.StreamingEnabled == nil && body.StreamingOrder == nil && body.EngineURL == nil) {
+	if err := decode(r, &body); err != nil || (body.StreamingEnabled == nil && body.StreamingOrder == nil && body.EngineURL == nil && body.TokenBudget == nil) {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "code": "INVALID_REQUEST"})
 		return
 	}
@@ -293,6 +299,13 @@ func (a *App) saveDownload(w http.ResponseWriter, r *http.Request) {
 	// service the user had to run by hand (or at nothing). Any value the page
 	// still sends is dropped; MUSICOPS_ENGINE_URL is the escape hatch.
 	next.EngineURL = ""
+	if body.TokenBudget != nil {
+		if *body.TokenBudget < 0 || *body.TokenBudget > 100000 {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "code": "INVALID_REQUEST", "error": "令牌预算需要在 0 到 100000 之间"})
+			return
+		}
+		next.TokenBudget = *body.TokenBudget
+	}
 	saved, err := a.saveDownloadSettings(next)
 	if err != nil {
 		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"ok": false, "code": "SETTINGS_UNAVAILABLE"})

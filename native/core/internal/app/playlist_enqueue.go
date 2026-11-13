@@ -113,6 +113,10 @@ func (a *App) enqueuePlaylistTracks(ctx context.Context, playlistJobID string, r
 	if settings, err := a.loadSiteSettings(); err == nil {
 		sites = settings.EnabledSites
 	}
+	budget := 0
+	if settings, err := a.loadDownloadSettings(); err == nil {
+		budget = settings.TokenBudget
+	}
 	client := musicbrainz.NewClient()
 	if opts.CatalogBaseURL != "" && loopbackURL(opts.CatalogBaseURL) {
 		client.BaseURL = opts.CatalogBaseURL
@@ -141,7 +145,7 @@ func (a *App) enqueuePlaylistTracks(ctx context.Context, playlistJobID string, r
 			}
 			seenAlbums[key] = true
 			completeAlbum := library.hasAlbum(artist, album)
-			jobID, err := a.startPlaylistAlbumJob(ctx, client, playlistJobID, sites, row, completeAlbum)
+			jobID, err := a.startPlaylistAlbumJob(ctx, client, playlistJobID, sites, budget, row, completeAlbum)
 			if err != nil {
 				report.Unmatched = append(report.Unmatched, artist+" - "+album+": "+err.Error())
 				continue
@@ -150,7 +154,7 @@ func (a *App) enqueuePlaylistTracks(ctx context.Context, playlistJobID string, r
 			report.Albums++
 			continue
 		}
-		jobID, err := a.startPlaylistAlbumJob(ctx, client, playlistJobID, sites, row, false)
+		jobID, err := a.startPlaylistAlbumJob(ctx, client, playlistJobID, sites, budget, row, false)
 		if err != nil {
 			report.Unmatched = append(report.Unmatched, artist+" - "+title+": "+err.Error())
 			continue
@@ -162,7 +166,7 @@ func (a *App) enqueuePlaylistTracks(ctx context.Context, playlistJobID string, r
 
 // startPlaylistAlbumJob creates one expand job. The album is the unit the
 // pipeline works in, so the job is named after it and the row is the evidence.
-func (a *App) startPlaylistAlbumJob(ctx context.Context, client *musicbrainz.Client, playlistJobID string, sites []string, row playlistTrack, completing bool) (string, error) {
+func (a *App) startPlaylistAlbumJob(ctx context.Context, client *musicbrainz.Client, playlistJobID string, sites []string, budget int, row playlistTrack, completing bool) (string, error) {
 	artist := strings.TrimSpace(row.Artist)
 	album := strings.TrimSpace(row.Album)
 	title := strings.TrimSpace(row.Title)
@@ -180,7 +184,7 @@ func (a *App) startPlaylistAlbumJob(ctx context.Context, client *musicbrainz.Cli
 	plan := SearchPlan{
 		RootJobID: jobID, Scene: "expand",
 		Query: strings.TrimSpace(artist + " " + expected), ExpectedTitle: expected, ExpectedArtist: artist,
-		EnabledSites: sites, StreamingEnabled: true, Identity: identity,
+		EnabledSites: sites, StreamingEnabled: true, Identity: identity, Budget: budget,
 	}
 	raw, err := json.Marshal(plan)
 	if err != nil {

@@ -170,22 +170,18 @@ func (a *App) startPlaylistAlbumJob(ctx context.Context, client *musicbrainz.Cli
 	if album != "" {
 		expected = album
 	}
-	identity := a.playlistIdentity(ctx, client, artist, album, title, nil)
-	// Without a confirmed identity the job parks at the metadata checkpoint,
-	// which is the manual fallback the user asked for: the automation covers
-	// what the catalogue can confirm.
-	plan := SearchPlan{
-		RootJobID: "", Scene: "expand",
-		Query: strings.TrimSpace(artist + " " + expected), ExpectedTitle: expected, ExpectedArtist: artist,
-		EnabledSites: sites, StreamingEnabled: true, Identity: identity,
-	}
 	slug := strings.TrimPrefix(playlistJobID, "pl-")
 	if len(slug) > 32 {
 		slug = slug[:32]
 	}
 	sum := sha256.Sum256([]byte(fmt.Sprintf("%s/%s/%s/%d", playlistJobID, artist, expected, a.now().UnixNano())))
 	jobID := "trk-" + slug + "-" + hex.EncodeToString(sum[:6])
-	plan.RootJobID = jobID
+	identity := a.playlistIdentity(ctx, client, jobID, artist, album, title)
+	plan := SearchPlan{
+		RootJobID: jobID, Scene: "expand",
+		Query: strings.TrimSpace(artist + " " + expected), ExpectedTitle: expected, ExpectedArtist: artist,
+		EnabledSites: sites, StreamingEnabled: true, Identity: identity,
+	}
 	raw, err := json.Marshal(plan)
 	if err != nil {
 		return "", err
@@ -215,7 +211,7 @@ func (a *App) startPlaylistAlbumJob(ctx context.Context, client *musicbrainz.Cli
 // is a valid identity on its own: waiting for a catalogue that may not answer
 // would park every track at a manual checkpoint, which is the behaviour this
 // whole path exists to remove.
-func (a *App) playlistIdentity(ctx context.Context, client *musicbrainz.Client, artist, album, title string, extra map[string]string) Identity {
+func (a *App) playlistIdentity(ctx context.Context, client *musicbrainz.Client, jobID, artist, album, title string) Identity {
 	if artist == "" || album == "" {
 		return Identity{}
 	}
@@ -227,7 +223,7 @@ func (a *App) playlistIdentity(ctx context.Context, client *musicbrainz.Client, 
 			if result.IdentityConfirmed && result.Status == "confirmed" {
 				payload, _ := json.Marshal(lookup.MusicBrainz)
 				return Identity{
-					ID: "plid" + hex.EncodeToString([]byte(lookup.MusicBrainz.ReleaseID))[:16],
+					ID: "plid" + hex.EncodeToString([]byte(jobID+"/"+lookup.MusicBrainz.ReleaseID))[:16],
 					Kind: "catalog", Source: "musicbrainz", SubjectID: lookup.MusicBrainz.ReleaseID,
 					TracklistVerified: true, IdentityConfirmed: true, Payload: string(payload),
 				}
@@ -235,10 +231,10 @@ func (a *App) playlistIdentity(ctx context.Context, client *musicbrainz.Client, 
 		}
 	}
 	payload, _ := json.Marshal(map[string]any{"artist": artist, "album": album, "title": title, "source": "playlist"})
-	for key, value := range extra {
-		payload, _ = json.Marshal(map[string]any{"artist": artist, "album": album, "title": title, "source": "playlist", key: value})
-	}
-	sum := sha256.Sum256(append([]byte(artist+"/"+album+"/"+title+"/"), payload...))
+	// The evidence id includes the job: the store keeps ids unique across the
+	// whole profile, so two jobs built from the same row (a re-enqueue, or a
+	// second row from the same album) must not reuse one.
+	sum := sha256.Sum256(append([]byte(jobID+"/"+artist+"/"+album+"/"+title+"/"), payload...))
 	return Identity{
 		ID: "plsrc" + hex.EncodeToString(sum[:10]), Kind: "api", Source: "playlist",
 		SubjectID: "", TracklistVerified: true, IdentityConfirmed: true, Payload: string(payload),

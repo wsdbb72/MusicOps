@@ -606,8 +606,8 @@ func TestOpenCDFreeFlagWithoutARowDoesNotDownload(t *testing.T) {
 	body["expected_title"] = "Album"
 	body["free_confirmed"] = true
 	post(t, application, "/v1/search", body)
-	job := waitJob(t, application, "process:search:album-open-flag", "needs_review")
-	if downloads.Load() != 0 || !strings.Contains(job.Message, "未发") {
+	job := waitJob(t, application, "process:search:album-open-flag", "skipped")
+	if downloads.Load() != 0 || !strings.Contains(job.Message, "避免产生普通下载量") {
 		t.Fatal(downloads.Load(), job.ReviewKind, job.ErrorClass, job.Message)
 	}
 }

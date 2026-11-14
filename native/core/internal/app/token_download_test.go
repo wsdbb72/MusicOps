@@ -42,7 +42,7 @@ func provisionalTokenJob(t *testing.T, application *App, jobID string) string {
 	body["dicmusic_authkey"] = "sentinel-dic-auth"
 	post(t, application, "/v1/search", body)
 	job := waitJob(t, application, "process:search:"+jobID, "needs_review")
-	if job.ReviewKind != "token" || job.ErrorClass != "REQUEST_UNKNOWN" {
+	if job.ReviewKind != "candidate" || job.ErrorClass != "TOKEN_PENDING_RECONCILE" {
 		t.Fatal(job.ReviewKind, job.ErrorClass, job.Message)
 	}
 	return job.ID

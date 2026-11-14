@@ -117,3 +117,24 @@ func TestPendingListsEachSite(t *testing.T) {
 		t.Fatal(seen)
 	}
 }
+
+func TestAdvancePendingRejectsAStaleSnapshot(t *testing.T) {
+	ledger := openLedger(t)
+	now := time.Unix(1700000300, 0)
+	if _, err := ledger.Reserve(now, quoteAt("dicmusic", "resource", "request", 1, 2, 2, now)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ledger.Advance(now, "dicmusic", "request", StateRequesting, ""); err != nil {
+		t.Fatal(err)
+	}
+	pending, err := ledger.Pending()
+	if err != nil || len(pending) != 1 {
+		t.Fatal(pending, err)
+	}
+	if _, err := ledger.Advance(now.Add(time.Second), "dicmusic", "request", StateRequestUnknown, "tracker answered"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ledger.AdvancePending(now.Add(time.Minute), pending[0], StateExpired, "stale expiry"); err == nil {
+		t.Fatal("expiry overwrote a newer state")
+	}
+}

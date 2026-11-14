@@ -25,6 +25,7 @@ import (
 	"strings"
 
 	"github.com/wsdbb72/MusicOps/native/core/internal/audiorelease"
+	"github.com/wsdbb72/MusicOps/native/core/internal/dataengine"
 	"github.com/wsdbb72/MusicOps/native/core/internal/musicbrainz"
 	"github.com/wsdbb72/MusicOps/native/core/internal/workflow"
 )
@@ -46,12 +47,11 @@ type playlistEnqueueReport struct {
 	Tracks    int      `json:"tracks"`
 }
 
-// playlistLibraryIndex answers "is this track already here?" from the library
-// records. The record carries a path, not tags, so the match is on the file
-// name and its folder: <library>/<artist>/<album>/<nn> <title>.flac.
+// Index only candidate names. Verify bytes lazily for playlist matches.
 type playlistLibraryIndex struct {
-	tracks map[string]bool // normalized "<artist>/<title>"
-	albums map[string]bool // normalized "<artist>/<album>"
+	engine   *dataengine.Engine
+	tracks   map[[3]string][]string
+	verified map[string]bool
 }
 
 func normalizeKey(s string) string {
@@ -80,29 +80,41 @@ func trackKeyOfPath(file string) (artist, album, title string) {
 }
 
 func (a *App) playlistLibrary() playlistLibraryIndex {
-	index := playlistLibraryIndex{tracks: map[string]bool{}, albums: map[string]bool{}}
-	entries, err := audiorelease.List(a.engine)
-	if err != nil {
-		return index
-	}
+	entries, _ := audiorelease.List(a.engine)
+	return indexPlaylistLibrary(a.engine, entries)
+}
+
+func indexPlaylistLibrary(engine *dataengine.Engine, entries []audiorelease.Entry) playlistLibraryIndex {
+	index := playlistLibraryIndex{engine: engine, tracks: map[[3]string][]string{}, verified: map[string]bool{}}
 	for _, entry := range entries {
-		artist, album, title := trackKeyOfPath(entry.File)
-		if artist != "" && title != "" {
-			index.tracks[artist+"/"+title] = true
+		if !entry.FilePresent {
+			continue
 		}
-		if artist != "" && album != "" {
-			index.albums[artist+"/"+album] = true
+		artist, album, title := trackKeyOfPath(entry.File)
+		if artist != "" && artist != "." && album != "" && album != "." && title != "" {
+			key := [3]string{artist, album, title}
+			index.tracks[key] = append(index.tracks[key], entry.RequestID)
 		}
 	}
 	return index
 }
 
-func (index playlistLibraryIndex) hasTrack(artist, title string) bool {
-	return index.tracks[normalizeKey(artist)+"/"+normalizeKey(title)]
-}
-
-func (index playlistLibraryIndex) hasAlbum(artist, album string) bool {
-	return album != "" && index.albums[normalizeKey(artist)+"/"+normalizeKey(album)]
+func (index playlistLibraryIndex) hasTrack(artist, album, title string) bool {
+	if strings.TrimSpace(album) == "" {
+		return false
+	}
+	for _, id := range index.tracks[[3]string{normalizeKey(artist), normalizeKey(album), normalizeKey(title)}] {
+		ok, checked := index.verified[id]
+		if !checked {
+			_, err := audiorelease.Verify(index.engine, id)
+			ok = err == nil
+			index.verified[id] = ok
+		}
+		if ok {
+			return true
+		}
+	}
+	return false
 }
 
 // enqueuePlaylistTracks starts the work for the selected rows.
@@ -121,8 +133,11 @@ func (a *App) enqueuePlaylistTracks(ctx context.Context, playlistJobID string, r
 	if opts.CatalogBaseURL != "" && loopbackURL(opts.CatalogBaseURL) {
 		client.BaseURL = opts.CatalogBaseURL
 	}
-	seenAlbums := map[string]bool{}
+	seenAlbums := map[[2]string]bool{}
 	for _, index := range indices {
+		if err := ctx.Err(); err != nil {
+			return report, err
+		}
 		if index < 0 || index >= len(rows) {
 			return report, fmt.Errorf("曲目序号超出范围：%d", index)
 		}
@@ -133,28 +148,27 @@ func (a *App) enqueuePlaylistTracks(ctx context.Context, playlistJobID string, r
 			continue
 		}
 		report.Tracks++
-		if library.hasTrack(artist, title) {
+		album := strings.TrimSpace(row.Album)
+		if library.hasTrack(artist, album, title) {
 			report.Skipped = append(report.Skipped, artist+" - "+title)
 			continue
 		}
-		album := strings.TrimSpace(row.Album)
 		if opts.AlbumCompletion && album != "" {
-			key := normalizeKey(artist) + "/" + normalizeKey(album)
+			key := [2]string{normalizeKey(artist), normalizeKey(album)}
 			if seenAlbums[key] {
 				continue
 			}
-			seenAlbums[key] = true
-			completeAlbum := library.hasAlbum(artist, album)
-			jobID, err := a.startPlaylistAlbumJob(ctx, client, playlistJobID, sites, budget, row, completeAlbum)
+			jobID, err := a.startPlaylistAlbumJob(ctx, client, playlistJobID, sites, budget, row)
 			if err != nil {
 				report.Unmatched = append(report.Unmatched, artist+" - "+album+": "+err.Error())
 				continue
 			}
 			report.Created = append(report.Created, jobID)
+			seenAlbums[key] = true
 			report.Albums++
 			continue
 		}
-		jobID, err := a.startPlaylistAlbumJob(ctx, client, playlistJobID, sites, budget, row, false)
+		jobID, err := a.startPlaylistAlbumJob(ctx, client, playlistJobID, sites, budget, row)
 		if err != nil {
 			report.Unmatched = append(report.Unmatched, artist+" - "+title+": "+err.Error())
 			continue
@@ -166,7 +180,7 @@ func (a *App) enqueuePlaylistTracks(ctx context.Context, playlistJobID string, r
 
 // startPlaylistAlbumJob creates one expand job. The album is the unit the
 // pipeline works in, so the job is named after it and the row is the evidence.
-func (a *App) startPlaylistAlbumJob(ctx context.Context, client *musicbrainz.Client, playlistJobID string, sites []string, budget int, row playlistTrack, completing bool) (string, error) {
+func (a *App) startPlaylistAlbumJob(ctx context.Context, client *musicbrainz.Client, playlistJobID string, sites []string, budget int, row playlistTrack) (string, error) {
 	artist := strings.TrimSpace(row.Artist)
 	album := strings.TrimSpace(row.Album)
 	title := strings.TrimSpace(row.Title)
@@ -180,7 +194,10 @@ func (a *App) startPlaylistAlbumJob(ctx context.Context, client *musicbrainz.Cli
 	}
 	sum := sha256.Sum256([]byte(fmt.Sprintf("%s/%s/%s/%d", playlistJobID, artist, expected, a.now().UnixNano())))
 	jobID := "trk-" + slug + "-" + hex.EncodeToString(sum[:6])
-	identity := a.playlistIdentity(ctx, client, jobID, artist, album, title)
+	identity := a.playlistIdentity(client, jobID, artist, album, title)
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
 	plan := SearchPlan{
 		RootJobID: jobID, Scene: "expand",
 		Query: strings.TrimSpace(artist + " " + expected), ExpectedTitle: expected, ExpectedArtist: artist,
@@ -215,7 +232,7 @@ func (a *App) startPlaylistAlbumJob(ctx context.Context, client *musicbrainz.Cli
 // is a valid identity on its own: waiting for a catalogue that may not answer
 // would park every track at a manual checkpoint, which is the behaviour this
 // whole path exists to remove.
-func (a *App) playlistIdentity(ctx context.Context, client *musicbrainz.Client, jobID, artist, album, title string) Identity {
+func (a *App) playlistIdentity(client *musicbrainz.Client, jobID, artist, album, title string) Identity {
 	if artist == "" || album == "" {
 		return Identity{}
 	}
@@ -226,8 +243,9 @@ func (a *App) playlistIdentity(ctx context.Context, client *musicbrainz.Client, 
 		for _, result := range lookup.Results {
 			if result.IdentityConfirmed && result.Status == "confirmed" {
 				payload, _ := json.Marshal(lookup.MusicBrainz)
+				sum := sha256.Sum256([]byte(jobID + "/" + lookup.MusicBrainz.ReleaseID))
 				return Identity{
-					ID: "plid" + hex.EncodeToString([]byte(jobID+"/"+lookup.MusicBrainz.ReleaseID))[:16],
+					ID:   "plid" + hex.EncodeToString(sum[:10]),
 					Kind: "catalog", Source: "musicbrainz", SubjectID: lookup.MusicBrainz.ReleaseID,
 					TracklistVerified: true, IdentityConfirmed: true, Payload: string(payload),
 				}
@@ -318,7 +336,7 @@ func (a *App) playlistTracksView(w http.ResponseWriter, r *http.Request) {
 	}
 	out := make([]rowView, 0, len(rows))
 	for i, row := range rows {
-		out = append(out, rowView{Index: i, Artist: row.Artist, Title: row.Title, Album: row.Album, Present: library.hasTrack(row.Artist, row.Title)})
+		out = append(out, rowView{Index: i, Artist: row.Artist, Title: row.Title, Album: row.Album, Present: library.hasTrack(row.Artist, row.Album, row.Title)})
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "name": name, "tracks": out, "total": len(out)})
 }

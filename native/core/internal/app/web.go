@@ -1163,8 +1163,8 @@ const appJS = `(function () {
       // A job that is created parks in 待核对, which the queue view does not
       // list; switching to tasks is what makes the result visible.
       if (body.job_id && mode === "pick") {
-        await showPlaylistTracks(body.job_id);
         await reloadThen("ok", (body.note || "") + " 下面是曲目，勾选后点「入库选中」；库里已有的会标出来。");
+        await showPlaylistTracks(body.job_id);
         return;
       }
       if (body.job_id) view = "tasks";
@@ -1221,7 +1221,8 @@ const appJS = `(function () {
           return;
         }
         box.innerHTML = "";
-        await reloadThen("tasks", result.note || "已开始入库。");
+        view = "tasks";
+        await reloadThen("ok", result.note || "已开始入库。");
       } catch (err) {
         setStatus("fail", err.message);
         apply.disabled = false;

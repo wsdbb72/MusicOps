@@ -235,6 +235,15 @@ func (l *Ledger) Reserve(now time.Time, quote Quote) (Result, error) {
 // Advance moves one reservation. Leaving an in-flight request requires a note,
 // so an unknown spend cannot be dropped from the ledger.
 func (l *Ledger) Advance(now time.Time, site, requestID, state, note string) (Result, error) {
+	return l.advance(now, site, requestID, state, note, nil)
+}
+
+// AdvancePending settles only the request version examined by the caller.
+func (l *Ledger) AdvancePending(now time.Time, pending Pending, state, note string) (Result, error) {
+	return l.advance(now, pending.Site, pending.RequestID, state, note, &pending)
+}
+
+func (l *Ledger) advance(now time.Time, site, requestID, state, note string, expected *Pending) (Result, error) {
 	if l == nil || l.engine == nil || now.IsZero() || !tokenSite(site) || !validID(requestID) || !legalState(state) {
 		return Result{}, dataengine.ErrInvalidRequest
 	}
@@ -267,6 +276,9 @@ func (l *Ledger) Advance(now time.Time, site, requestID, state, note string) (Re
 		})
 		if err != nil {
 			return Result{}, err
+		}
+		if expected != nil && (current.State != expected.State || current.UpdatedNS != expected.UpdatedNS) {
+			return Result{}, dataengine.ErrInvalidRequest
 		}
 		if current.State == state && note == current.Note {
 			return resultFrom(current), nil

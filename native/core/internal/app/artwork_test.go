@@ -70,6 +70,7 @@ func jpegBody() []byte {
 // authorization value goes with it: that is the whole point of configuring it
 // once in the settings page.
 func TestArtworkUsesTheSavedServiceAndItsCredential(t *testing.T) {
+	vaultKey(t)
 	application := newApp(t)
 	cover := jpegBody()
 	server, seen := lrcAPIFake(t, "[00:01.00]hello\n[00:02.00]world", cover, "Authorization", "secret-key")
@@ -138,6 +139,7 @@ func TestArtworkRefusesPlainHTTPOutsideLoopback(t *testing.T) {
 // normal fetch; with one it is refused, because the value must not travel to
 // the redirect target.
 func TestArtworkCoverRedirectDependsOnCredential(t *testing.T) {
+	vaultKey(t)
 	image := jpegBody()
 	cdn := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "image/jpeg")
@@ -169,6 +171,7 @@ func TestArtworkCoverRedirectDependsOnCredential(t *testing.T) {
 // The end-to-end path: metadata completion with no lyrics address in the
 // request still writes the LRC because the saved service supplies it.
 func TestMetadataCompletionFetchesLyricsFromTheSavedService(t *testing.T) {
+	vaultKey(t)
 	application := newApp(t)
 	library := filepath.Join(t.TempDir(), "library")
 	if err := os.MkdirAll(library, 0o755); err != nil {

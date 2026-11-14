@@ -7,6 +7,7 @@ package app
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"io"
 	"mime/multipart"
 	"net/http"
@@ -15,6 +16,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync/atomic"
+	"syscall"
 	"testing"
 )
 
@@ -445,6 +447,9 @@ func TestLibraryDirSymlinkResolves(t *testing.T) {
 	}
 	link := filepath.Join(t.TempDir(), "link")
 	if err := os.Symlink(real, link); err != nil {
+		if errors.Is(err, syscall.Errno(1314)) {
+			t.Skip("Windows account cannot create symbolic links")
+		}
 		t.Fatal(err)
 	}
 	// A symlink is followed, not rejected: on macOS even the system

@@ -27,10 +27,10 @@ type SearchPlan struct {
 	// PlaylistImport marks a job created from a fetched playlist. Scene
 	// alone cannot: "playlist" is also the default scene of the ordinary
 	// search form.
-	PlaylistImport      bool     `json:"playlist_import,omitempty"`
+	PlaylistImport bool `json:"playlist_import,omitempty"`
 	// PlaylistMode: "all" starts every track right after the list is read;
 	// empty parks the list so the page can show it and send a selection.
-	PlaylistMode string `json:"playlist_mode,omitempty"`
+	PlaylistMode        string   `json:"playlist_mode,omitempty"`
 	Query               string   `json:"query"`
 	ExpectedTitle       string   `json:"expected_title"`
 	ExpectedArtist      string   `json:"expected_artist,omitempty"`
@@ -70,7 +70,7 @@ func (a *App) identify(ctx context.Context, execution *scheduler.Execution, payl
 	// lookup here was what made a freshly created playlist job fail with
 	// "invalid data request".
 	if plan.PlaylistImport {
-		return a.identifyPlaylist(execution, plan, token)
+		return a.identifyPlaylist(ctx, execution, plan, token)
 	}
 	evidence := plan.evidence()
 	// A playlist track job has no catalogue identity to attach; its row
@@ -126,7 +126,7 @@ func (a *App) search(ctx context.Context, execution *scheduler.Execution, payloa
 	// lookup here was what made a freshly created playlist job fail with
 	// "invalid data request".
 	if plan.PlaylistImport {
-		return a.identifyPlaylist(execution, plan, token)
+		return a.identifyPlaylist(ctx, execution, plan, token)
 	}
 	task, err := a.tasks.Get(token.ID)
 	if err != nil || task == nil {

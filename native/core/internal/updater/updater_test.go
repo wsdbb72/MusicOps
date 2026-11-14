@@ -7,6 +7,7 @@ import (
 	"crypto/tls"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -14,6 +15,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync/atomic"
+	"syscall"
 	"testing"
 )
 
@@ -437,6 +439,9 @@ func TestVerifyRejectsTamperedAndSymlink(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := os.Symlink(good, staged.Path); err != nil {
+		if errors.Is(err, syscall.Errno(1314)) {
+			t.Skip("Windows account cannot create symbolic links")
+		}
 		t.Fatal(err)
 	}
 	if err := Verify(staged); err == nil {

@@ -21,7 +21,7 @@ on:
         required: false
         default: main
       version:
-        description: 'Release version (X.Y.Z); empty reads it from pyproject.toml'
+        description: 'Release version (X.Y.Z); empty reads it from VERSION'
         type: string
         required: false
         default: ''
@@ -95,7 +95,7 @@ jobs:
           set -o pipefail
           VERSION="${{ inputs.version }}"
           if [ -z "$VERSION" ]; then
-            VERSION="$(python3 -c 'import tomllib; print(tomllib.load(open("pyproject.toml","rb"))["project"]["version"])')"
+            VERSION="$(cat VERSION)"
           fi
           ./packaging/build_macos_go.sh --version "$VERSION" --arch "$BUILD_ARCH" --output dist/macos 2>&1 | tee dist/macos/reports/native-build.log
       - name: Save a directly readable native diagnostic check
@@ -112,7 +112,7 @@ jobs:
           set -euo pipefail
           VERSION="${{ inputs.version }}"
           if [ -z "$VERSION" ]; then
-            VERSION="$(python3 -c 'import tomllib; print(tomllib.load(open("pyproject.toml","rb"))["project"]["version"])')"
+            VERSION="$(cat VERSION)"
           fi
           cd native/core
           MUSICOPS_SMOKE_PKG="$GITHUB_WORKSPACE/dist/macos/MusicOps-${VERSION}-macOS-${BUILD_ARCH}.pkg" \
@@ -126,8 +126,8 @@ jobs:
           BUILD_ARCH: ${{ matrix.arch }}
           INPUT_VERSION: ${{ inputs.version }}
         run: |
-          import json, os, pathlib, tomllib
-          version = os.environ['INPUT_VERSION'] or tomllib.loads(pathlib.Path('pyproject.toml').read_text('utf-8'))['project']['version']
+          import json, os, pathlib
+          version = os.environ['INPUT_VERSION'] or pathlib.Path('VERSION').read_text('ascii').strip()
           arch = os.environ['BUILD_ARCH']
           build = pathlib.Path(f'dist/macos/MusicOps-{version}-macOS-{arch}-build.json')
           report = json.loads(pathlib.Path('dist/macos/reports/installer-smoke.json').read_text('utf-8'))

@@ -2,11 +2,13 @@ package vault
 
 import (
 	"bytes"
+	"errors"
 	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 )
 
@@ -260,6 +262,9 @@ func TestPrivateDirRejectsSymlink(t *testing.T) {
 	// same place Python rejects it.)
 	link := filepath.Join(base, "vault")
 	if err := os.Symlink(target, link); err != nil {
+		if errors.Is(err, syscall.Errno(1314)) {
+			t.Skip("Windows account cannot create symbolic links")
+		}
 		t.Fatal(err)
 	}
 	v, err := Open(base)

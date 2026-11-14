@@ -16,7 +16,7 @@ import (
 	"github.com/wsdbb72/MusicOps/native/core/internal/workflow"
 )
 
-func (a *App) identifyPlaylist(execution *scheduler.Execution, plan SearchPlan, token taskrepo.Token) (scheduler.Outcome, error) {
+func (a *App) identifyPlaylist(ctx context.Context, execution *scheduler.Execution, plan SearchPlan, token taskrepo.Token) (scheduler.Outcome, error) {
 	complete := workflow.Complete{
 		Edge: workflow.EdgeTerminal, NextStage: "needs_review", ReviewKind: "candidate",
 		TaskState: "blocked", NowNS: a.now().UnixNano(),
@@ -62,7 +62,7 @@ func (a *App) identifyPlaylist(execution *scheduler.Execution, plan SearchPlan, 
 		for i := range indices {
 			indices[i] = i
 		}
-		report, enqueueErr := a.enqueuePlaylistTracks(context.Background(), plan.RootJobID, rows, indices, playlistEnqueueOptions{AlbumCompletion: true})
+		report, enqueueErr := a.enqueuePlaylistTracks(ctx, plan.RootJobID, rows, indices, playlistEnqueueOptions{AlbumCompletion: true})
 		if enqueueErr != nil {
 			complete.Message = "歌单已读取 " + fmt.Sprint(len(rows)) + " 首，但任务没有创建：" + enqueueErr.Error()
 			if _, err := a.flows.Complete(intentID("playlist", token.ID, token.Fence), token, complete); err != nil {
@@ -73,12 +73,15 @@ func (a *App) identifyPlaylist(execution *scheduler.Execution, plan SearchPlan, 
 		complete.NextStage = "completed"
 		complete.ReviewKind = ""
 		complete.TaskState = "completed"
-		complete.Message = fmt.Sprintf("歌单%s共 %d 首：已跳过库里已有的 %d 首，按专辑建了 %d 个任务（%d 首）。任务会自己识别 → 检索 → 下载 → 校验 → 刮削 → 入库；目录确认不了的才会停在核对。",
-			playlistSuffix(name), len(rows), len(report.Skipped), len(report.Created), report.Tracks)
+		complete.Message = fmt.Sprintf("歌单%s共 %d 首：库内已核验 %d 首，已创建 %d 个任务，%d 项未能创建。子任务还需要检索和验证下载条件。",
+			playlistSuffix(name), len(rows), len(report.Skipped), len(report.Created), len(report.Unmatched))
+		if len(report.Unmatched) > 0 {
+			complete.NextStage, complete.ReviewKind, complete.TaskState = "needs_review", "candidate", "blocked"
+		}
 		if _, err := a.flows.Complete(intentID("playlist", token.ID, token.Fence), token, complete); err != nil {
 			return scheduler.Outcome{}, err
 		}
-		return scheduler.Outcome{State: "completed", Message: complete.Message}, nil
+		return scheduler.Outcome{State: complete.TaskState, Message: complete.Message}, nil
 	}
 	complete.Message = fmt.Sprintf("歌单已读取 %d 首%s，请选择要入库的曲目；尚未下载、尚未入库", len(rows), playlistSuffix(name))
 	if _, err := a.flows.Complete(intentID("playlist", token.ID, token.Fence), token, complete); err != nil {

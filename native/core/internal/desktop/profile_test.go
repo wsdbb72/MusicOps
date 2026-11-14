@@ -2,10 +2,12 @@ package desktop
 
 import (
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
+	"syscall"
 	"testing"
 )
 
@@ -114,7 +116,7 @@ func TestResolveProfileCheckout(t *testing.T) {
 	}
 	testHome(t)
 	root := testTempDir(t)
-	if err := os.WriteFile(filepath.Join(root, "pyproject.toml"), []byte("[x]"), 0644); err != nil {
+	if err := os.WriteFile(filepath.Join(root, "VERSION"), []byte("[x]"), 0644); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.MkdirAll(filepath.Join(root, "profile", "state"), 0755); err != nil {
@@ -140,7 +142,7 @@ func TestResolveProfileCheckoutNeedsSQLite(t *testing.T) {
 	}
 	testHome(t)
 	root := t.TempDir()
-	if err := os.WriteFile(filepath.Join(root, "pyproject.toml"), []byte("[x]"), 0644); err != nil {
+	if err := os.WriteFile(filepath.Join(root, "VERSION"), []byte("[x]"), 0644); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.MkdirAll(filepath.Join(root, "profile", "state"), 0755); err != nil {
@@ -227,6 +229,9 @@ func TestResolveProfileSymlinkRefused(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := os.Symlink(real, filepath.Join(root, "profile")); err != nil {
+		if errors.Is(err, syscall.Errno(1314)) {
+			t.Skip("Windows account cannot create symbolic links")
+		}
 		t.Fatal(err)
 	}
 	exe := fakeExe(t, root, "musicops-desktop")

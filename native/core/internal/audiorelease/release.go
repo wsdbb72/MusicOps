@@ -14,6 +14,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -1010,12 +1011,31 @@ func writeNew(path string, body []byte) error {
 }
 
 func sameFile(path, digest string) error {
-	body, err := os.ReadFile(path)
+	info, err := os.Lstat(path)
 	if err != nil {
 		return err
 	}
-	sum := sha256.Sum256(body)
-	if hex.EncodeToString(sum[:]) != digest {
+	if !info.Mode().IsRegular() || info.Size() > MaxAudioBytes {
+		return ErrConflict
+	}
+	file, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+	opened, err := file.Stat()
+	if err != nil {
+		return err
+	}
+	if !os.SameFile(info, opened) || !opened.Mode().IsRegular() {
+		return ErrConflict
+	}
+	hash := sha256.New()
+	size, err := io.Copy(hash, io.LimitReader(file, MaxAudioBytes+1))
+	if err != nil {
+		return err
+	}
+	if size != info.Size() || hex.EncodeToString(hash.Sum(nil)) != digest {
 		return ErrConflict
 	}
 	return nil

@@ -123,7 +123,7 @@ POST /v1/open/roon/connect | control | disconnect
 
 ## 从源码运行
 
-需要 **Go 1.26+**（核心）与 **Python 3.12+**（打包与安装器测试）。
+应用源码位于 `native/core`，用 **Go 1.26+** 构建和测试。版本号在根目录 `VERSION`。Python 仅用于发布工具和实际安装器测试，以及冻结第三方 FlareSolverr；MusicOps 本体不依赖 Python。
 
 ```bash
 cd native/core

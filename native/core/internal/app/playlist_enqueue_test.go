@@ -4,8 +4,11 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/wsdbb72/MusicOps/native/core/internal/audiorelease"
 )
 
 func TestTrackKeyOfPath(t *testing.T) {
@@ -19,19 +22,29 @@ func TestTrackKeyOfPath(t *testing.T) {
 	}
 }
 
-func TestPlaylistLibraryIndexMatchesNames(t *testing.T) {
-	index := playlistLibraryIndex{tracks: map[string]bool{}, albums: map[string]bool{}}
-	artist, album, title := trackKeyOfPath(filepath.Join("music", "Artist A", "Album X", "01 - Song One.flac"))
-	index.tracks[artist+"/"+title] = true
-	index.albums[artist+"/"+album] = true
-	if !index.hasTrack("Artist A", "Song One") {
-		t.Fatal("track not matched")
+func TestPlaylistPresenceRequiresMatchingUnchangedAudio(t *testing.T) {
+	application := newApp(t)
+	incoming, library := t.TempDir(), t.TempDir()
+	if err := os.WriteFile(filepath.Join(incoming, "track.wav"), pcmWAV(100), 0o600); err != nil {
+		t.Fatal(err)
 	}
-	if !index.hasAlbum("Artist A", "Album X") {
-		t.Fatal("album not matched")
+	_, err := audiorelease.Release(context.Background(), application.engine, audiorelease.Request{
+		RequestID: "playlist-presence", RootID: "playlist-album", Artist: "Artist A", Album: "Album X",
+		Title: "Song One", Track: 1, SourceName: "track.wav", Incoming: incoming, Library: library,
+	})
+	if err != nil {
+		t.Fatal(err)
 	}
-	if index.hasTrack("Artist A", "Song Two") {
-		t.Fatal("false positive")
+	index := application.playlistLibrary()
+	if !index.hasTrack("Artist A", "Album X", "Song One") || index.hasTrack("Artist A", "Album Y", "Song One") {
+		t.Fatal("presence must match the album")
+	}
+	path := filepath.Join(library, "Artist A", "Album X", "01 Song One.wav")
+	if err := os.WriteFile(path, pcmWAV(200), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if application.playlistLibrary().hasTrack("Artist A", "Album X", "Song One") {
+		t.Fatal("a changed file was reported present")
 	}
 }
 

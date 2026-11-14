@@ -7,87 +7,55 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/wsdbb72/MusicOps/native/core/internal/dataengine"
+	"github.com/wsdbb72/MusicOps/native/core/internal/vault"
 )
 
-// fixtureScript builds a real Python profile with the venv interpreter:
-// a ConfigManager config with streaming on, two tracker sites enabled and
-// updates off, plus two vault references. It is the same code path the
-// desktop writes, not a hand-made sqlite file.
-const fixtureScript = `
-import copy, sys
-sys.path.insert(0, sys.argv[2])
-from pathlib import Path
-from musicops.state.store import StateStore
-from musicops.config.schema import ConfigManager
-from musicops.clients.vault import Vault
-
-base = Path(sys.argv[1])
-store = StateStore(base / "state" / "musicops.sqlite")
-mgr = ConfigManager(store, base)
-cur = mgr.current()
-values = copy.deepcopy(cur["values"])
-values["streaming"]["enabled"] = True
-values["providers"]["dicmusic"]["enabled"] = True
-values["providers"]["open.cd"]["enabled"] = True
-values["providers"]["orpheus"]["enabled"] = False
-values["providers"]["redacted"]["enabled"] = False
-values["updates"]["enabled"] = False
-mgr.save(values, cur["version"])
-vault = Vault(base)
-vault.set("vault://qbt/local/credentials", "qbt-secret", "127.0.0.1")
-vault.set("vault://ai/default/key", "ai-secret", "ai.example.invalid")
-print("fixture-ok")
-`
-
-func repoRoot(t *testing.T) string {
+// Build a synthetic profile using the retired application's on-disk contract.
+func makeLegacyProfile(t *testing.T) string {
 	t.Helper()
-	wd, err := os.Getwd()
+	profile := t.TempDir()
+	state := filepath.Join(profile, "state")
+	if err := os.MkdirAll(state, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	db, err := sql.Open("sqlite", filepath.Join(state, "musicops.sqlite"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	root := filepath.Clean(filepath.Join(wd, "..", "..", "..", ".."))
-	if _, err := os.Stat(filepath.Join(root, "src", "musicops", "__init__.py")); err != nil {
-		t.Skipf("repo root not found from %s: %v", wd, err)
-	}
-	return root
-}
-
-func venvPython(t *testing.T) string {
-	t.Helper()
-	if p := os.Getenv("MUSICOPS_VENV_PYTHON"); p != "" {
-		return p
-	}
-	p := "/home/hatch/.venv-musicops/bin/python"
-	if _, err := os.Stat(p); err != nil {
-		t.Skip("venv python unavailable; set MUSICOPS_VENV_PYTHON")
-	}
-	return p
-}
-
-// makePythonProfile runs the fixture and returns the profile directory.
-func makePythonProfile(t *testing.T) string {
-	t.Helper()
-	profile := filepath.Join(t.TempDir(), "profile")
-	script := filepath.Join(t.TempDir(), "fixture.py")
-	if err := os.WriteFile(script, []byte(fixtureScript), 0600); err != nil {
+	defer db.Close()
+	payload, err := json.Marshal(map[string]any{"version": 2, "values": map[string]any{
+		"streaming": map[string]any{"enabled": true},
+		"providers": map[string]any{"dicmusic": map[string]bool{"enabled": true}, "open.cd": map[string]bool{"enabled": true}},
+		"updates":   map[string]any{"enabled": false},
+		"paths":     map[string]any{"library": filepath.Join(profile, "music")},
+		"offline":   true,
+		"qbt":       map[string]any{"base_url": "http://127.0.0.1:8080"},
+		"ai":        map[string]any{"base_url": "https://ai.example.invalid", "model": "test-model"},
+	}})
+	if err != nil {
 		t.Fatal(err)
 	}
-	keyDir := t.TempDir()
-	t.Setenv("MUSICOPS_VAULT_KEY_FILE", filepath.Join(keyDir, "master.key"))
-	cmd := exec.Command(venvPython(t), script, profile, filepath.Join(repoRoot(t), "src"))
-	cmd.Env = append(os.Environ(), "PYTHONPATH="+filepath.Join(repoRoot(t), "src"))
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		t.Fatalf("python fixture failed: %v\n%s", err, out)
+	if _, err := db.Exec(`CREATE TABLE config_versions (id TEXT PRIMARY KEY, payload TEXT NOT NULL, updated_at TEXT NOT NULL)`); err != nil {
+		t.Fatal(err)
 	}
-	if !strings.Contains(string(out), "fixture-ok") {
-		t.Fatalf("python fixture unexpected output: %s", out)
+	if _, err := db.Exec(`INSERT INTO config_versions VALUES ('2', ?, '2026-01-01T00:00:00Z')`, payload); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("MUSICOPS_VAULT_KEY_FILE", filepath.Join(t.TempDir(), "master.key"))
+	v, err := vault.Open(profile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := v.Set("vault://qbt/local/credentials", "qbt-secret", "127.0.0.1"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := v.Set("vault://ai/default/key", "ai-secret", "ai.example.invalid"); err != nil {
+		t.Fatal(err)
 	}
 	return profile
 }
@@ -143,9 +111,13 @@ func TestMaybeMigrateNoPythonProfile(t *testing.T) {
 }
 
 func TestMaybeMigratePythonFixture(t *testing.T) {
-	profile := makePythonProfile(t)
+	profile := makeLegacyProfile(t)
 	sqlite := filepath.Join(profile, "state", "musicops.sqlite")
-	vaultFile := filepath.Join(profile, "vault", "secrets.aesgcm")
+	v, err := vault.Open(profile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	vaultFile := v.Path()
 	beforeSQLite := sha256File(t, sqlite)
 	beforeVault := sha256File(t, vaultFile)
 
@@ -239,7 +211,7 @@ func TestMaybeMigratePythonFixture(t *testing.T) {
 }
 
 func TestMaybeMigrateDoesNotOverwriteGoSettings(t *testing.T) {
-	profile := makePythonProfile(t)
+	profile := makeLegacyProfile(t)
 	// Seed Go settings first, as a user who already changed them would have.
 	engine, err := dataengine.Open(filepath.Join(profile, "state", "native"))
 	if err != nil {

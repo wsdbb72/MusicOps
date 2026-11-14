@@ -95,7 +95,7 @@ func (a *App) reconcileTokens(ctx context.Context, now time.Time) int {
 			if state == "" {
 				continue
 			}
-			if _, err := a.ledger.Advance(now, site, row.RequestID, state, note); err == nil {
+			if _, err := a.ledger.AdvancePending(now, row, state, note); err == nil {
 				moved++
 			}
 		}

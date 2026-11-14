@@ -55,9 +55,8 @@ func (l *Ledger) Pending() ([]Pending, error) {
 				continue
 			}
 			// The row carries the balance that was observed when the token was
-			// reserved; a reconciler compares it with a fresh read. A row that
-			// cannot be read is skipped rather than reported with a zero
-			// balance, which would look like a confirmed spend.
+			// reserved; a reconciler compares it with a fresh read. A read
+			// error must not be mistaken for an empty or settled ledger.
 			var current row
 			readErr := l.engine.View(func(v *dataengine.View) error {
 				raw, ok, err := v.Get(rowKey(item.ID))
@@ -70,6 +69,9 @@ func (l *Ledger) Pending() ([]Pending, error) {
 				return json.Unmarshal(raw, &current)
 			})
 			if readErr != nil {
+				return nil, readErr
+			}
+			if current.State != item.State || current.UpdatedNS != item.UpdatedNS {
 				continue
 			}
 			out = append(out, Pending{
@@ -99,7 +101,7 @@ func (l *Ledger) SweepExpired(now time.Time, maxAge time.Duration) ([]Pending, e
 		if now.Sub(time.Unix(0, item.UpdatedNS)) < maxAge {
 			continue
 		}
-		if _, err := l.Advance(now, item.Site, item.RequestID, StateExpired, "超过对账时限仍未拿到站点回答，自动到期；未证明扣费"); err != nil {
+		if _, err := l.AdvancePending(now, item, StateExpired, "超过对账时限仍未拿到站点回答，自动到期；未证明扣费"); err != nil {
 			if errors.Is(err, dataengine.ErrInvalidRequest) {
 				// The row moved (confirmed, released, ...) between the index
 				// read and the transition. Its new state wins.

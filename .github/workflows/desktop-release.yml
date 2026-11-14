@@ -42,14 +42,12 @@ jobs:
       - uses: actions/setup-python@v7
         with:
           python-version: '3.12'
-          cache: pip
-          cache-dependency-path: requirements.lock
       - name: Verify exact source and read release version
         id: identity
         shell: python
         run: |
-          import os, pathlib, re, subprocess, tomllib
-          version = tomllib.loads(pathlib.Path('pyproject.toml').read_text('utf-8'))['project']['version']
+          import os, pathlib, re, subprocess
+          version = pathlib.Path('VERSION').read_text('ascii').strip()
           commit = subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip()
           if not re.fullmatch(r'\d+\.\d+\.\d+', version) or commit != os.environ['EXPECTED_COMMIT']:
               raise SystemExit('Invalid version or source commit mismatch')
@@ -68,7 +66,7 @@ jobs:
           go-version: '1.26.3'
           cache: true
           cache-dependency-path: native/core/go.sum
-      - name: Install PyInstaller for the Windows version-resource test
+      - name: Install packaging and installer test tools
         run: |
           python -m pip install pyinstaller==6.22.3 pytest==9.1.1
           if ($LASTEXITCODE -ne 0) { throw 'PyInstaller installation failed' }
@@ -184,8 +182,7 @@ jobs:
           source = root/f'MusicOps-{version}-source.zip'
           subprocess.run(['git', 'archive', '--format=zip', '--prefix=MusicOps-'+version+'/', '--output='+str(source), commit], check=True)
           with zipfile.ZipFile(source) as archive:
-              synthetic_fixture = 'MusicOps-'+version+'/tests/fixtures/providers/synthetic.ncm'
-              if archive.comment.decode('ascii') != commit or any(name != synthetic_fixture and private_path(pathlib.PurePosixPath(name)) for name in archive.namelist()):
+              if archive.comment.decode('ascii') != commit or any(private_path(pathlib.PurePosixPath(name)) for name in archive.namelist()):
                   raise SystemExit('Source archive contains private state or has the wrong commit')
               required_licenses = {'MusicOps-'+version+'/LICENSE', 'MusicOps-'+version+'/packaging/THIRD-PARTY-NOTICES.md', 'MusicOps-'+version+'/docs/references/PlaylistOut-LICENSE.txt', 'MusicOps-'+version+'/packaging/Languages/LICENSE'}
               if not required_licenses.issubset(archive.namelist()):

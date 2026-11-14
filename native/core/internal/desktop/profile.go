@@ -53,7 +53,7 @@ func UserDataRoot() string {
 //
 // (a) portable mode: a profile directory next to the executable (not macOS);
 // (b) a source checkout: walking up at most 3 levels from the executable
-// directory, a directory holding pyproject.toml whose
+// directory, a directory holding VERSION whose
 // profile/state/musicops.sqlite exists (not macOS);
 // (c) the remembered profile in <user-data>/MusicOps/active-profile.json
 // (at most 4096 bytes, JSON {"profile": ...}, absolute, on macOS no path
@@ -86,7 +86,7 @@ func ResolveProfile(executable string) (string, error) {
 		// (root, *list(root.parents)[:3]).
 		dir := root
 		for i := 0; i < 4; i++ {
-			if isFile(filepath.Join(dir, "pyproject.toml")) &&
+			if isFile(filepath.Join(dir, "VERSION")) &&
 				isFile(filepath.Join(dir, "profile", "state", "musicops.sqlite")) {
 				return finalizeProfile(filepath.Join(dir, "profile"))
 			}

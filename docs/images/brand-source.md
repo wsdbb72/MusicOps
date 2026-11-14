@@ -1,6 +1,6 @@
 # MusicOps 图标
 
-图标使用内置 imagegen 生成。`src/musicops/assets/musicops.png` 是原始透明 PNG，`musicops.ico` 由 `packaging/prepare_icon.py` 转为 Windows 多尺寸图标，用于窗口、任务栏、EXE 和安装包。
+图标使用内置 imagegen 生成。`packaging/assets/musicops.png` 是透明 PNG，`packaging/assets/musicops.ico` 是 Windows 多尺寸图标，用于窗口、任务栏、EXE 和安装包。
 
 生成提示：
 

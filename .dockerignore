@@ -1,7 +1,4 @@
 **
-!pyproject.toml
-!src/
-!src/**
 !packaging/
 !packaging/**
 !docs/

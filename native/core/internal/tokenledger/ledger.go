@@ -163,21 +163,32 @@ func (l *Ledger) Reserve(now time.Time, quote Quote) (Result, error) {
 	}
 	for range 8 {
 		var snap indexDoc
-		var raw []byte
+		var raw, previous []byte
 		var found bool
+		var existing row
 		err := l.engine.View(func(v *dataengine.View) error {
 			var err error
 			snap, raw, found, err = readIndex(v, quote.Site)
+			if err != nil {
+				return err
+			}
+			existing, previous, err = readReplay(v, quote)
 			return err
 		})
 		if err != nil {
 			return Result{}, err
 		}
-		if existing, ok, err := l.replay(quote); err != nil || ok {
-			return existing, err
+		retryingHold := previous != nil && existing.State == StateRejected && existing.Class == ClassAccountHold && existing.Cost == 0
+		if previous != nil && (!retryingHold || existing.AccountID != quote.AccountID) {
+			return resultFrom(existing), nil
 		}
 		snap.Items = compactIndex(snap.Items)
 		next, item, reject := decide(now, quote, snap)
+		// Account holds are recorded before any site request. Re-evaluate
+		// them on retry, but only replace the row when a reservation succeeds.
+		if retryingHold && reject.Class != "" {
+			return resultFrom(existing), nil
+		}
 		if reject.Class == ClassAlreadyReserved || reject.Class == ClassPending || reject.Class == ClassAccountHold || reject.Class == ClassTokenBudget || reject.Class == ClassBalanceUnknown || reject.Class == ClassBalanceStale || reject.Class == ClassAuthorization || reject.Class == ClassSpent {
 			next = rejection(now, quote, reject.Class)
 			next.Scope = reject.Scope
@@ -198,18 +209,19 @@ func (l *Ledger) Reserve(now time.Time, quote Quote) (Result, error) {
 			return Result{}, err
 		}
 		condition := dataengine.Condition{Key: indexKey(quote.Site), Absent: !found, Value: raw}
-		ok, err := l.engine.CompareAndSwap(
-			[]dataengine.Condition{
-				condition,
-				{Key: rowKey(next.ID), Absent: true},
-				{Key: requestKey(quote.Site, quote.RequestID), Absent: true},
-			},
-			[]dataengine.Mutation{
-				{Key: indexKey(quote.Site), Value: encodedIndex},
-				{Key: rowKey(next.ID), Value: encodedRow},
-				{Key: requestKey(quote.Site, quote.RequestID), Value: []byte(next.ID)},
-			},
-		)
+		conditions := []dataengine.Condition{
+			condition,
+			{Key: rowKey(next.ID), Absent: !retryingHold, Value: previous},
+			{Key: requestKey(quote.Site, quote.RequestID), Absent: !retryingHold},
+		}
+		if retryingHold {
+			conditions[2].Value = []byte(existing.ID)
+		}
+		ok, err := l.engine.CompareAndSwap(conditions, []dataengine.Mutation{
+			{Key: indexKey(quote.Site), Value: encodedIndex},
+			{Key: rowKey(next.ID), Value: encodedRow},
+			{Key: requestKey(quote.Site, quote.RequestID), Value: []byte(next.ID)},
+		})
 		if err != nil {
 			return Result{}, err
 		}
@@ -312,32 +324,35 @@ func (l *Ledger) Advance(now time.Time, site, requestID, state, note string) (Re
 }
 
 func (l *Ledger) replay(quote Quote) (Result, bool, error) {
-	var result Result
-	var found bool
+	var current row
+	var raw []byte
 	err := l.engine.View(func(v *dataengine.View) error {
-		id, ok, err := readRequest(v, quote.Site, quote.RequestID)
-		if err != nil || !ok {
-			return err
-		}
-		raw, ok, err := v.Get(rowKey(id))
-		if err != nil || !ok {
-			if err == nil {
-				err = dataengine.ErrInvalidRequest
-			}
-			return err
-		}
-		var current row
-		if json.Unmarshal(raw, &current) != nil || current.RequestID != quote.RequestID || current.Site != quote.Site {
-			return dataengine.ErrInvalidRequest
-		}
-		if current.ResourceID != quote.ResourceID || current.BudgetRef != quote.BudgetRef || current.RequestedCost != quote.Cost {
-			return dataengine.ErrInvalidRequest
-		}
-		result = resultFrom(current)
-		found = true
-		return nil
+		var err error
+		current, raw, err = readReplay(v, quote)
+		return err
 	})
-	return result, found, err
+	if err != nil || raw == nil {
+		return Result{}, false, err
+	}
+	return resultFrom(current), true, nil
+}
+
+func readReplay(v *dataengine.View, quote Quote) (row, []byte, error) {
+	var current row
+	id, ok, err := readRequest(v, quote.Site, quote.RequestID)
+	if err != nil || !ok {
+		return current, nil, err
+	}
+	raw, ok, err := v.Get(rowKey(id))
+	if err != nil {
+		return current, nil, err
+	}
+	if !ok || json.Unmarshal(raw, &current) != nil || current.ID != id ||
+		current.RequestID != quote.RequestID || current.Site != quote.Site ||
+		current.ResourceID != quote.ResourceID || current.BudgetRef != quote.BudgetRef || current.RequestedCost != quote.Cost {
+		return row{}, nil, dataengine.ErrInvalidRequest
+	}
+	return current, raw, nil
 }
 
 // Get reads one reservation. It does not contact a site or change the ledger.

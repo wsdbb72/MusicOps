@@ -24,6 +24,7 @@ func TestJobsReviewFilterReturnsOnlyReviewWork(t *testing.T) {
 	// One confirmed identity completes identification and leaves the list.
 	post(t, application, "/v1/search", searchBody("review-done", "http://127.0.0.1:9", nil, false))
 	waitJob(t, application, "review-done", "completed")
+	waitJob(t, application, "search:review-done", "needs_review")
 
 	recorder := getAuth(t, application, "/v1/jobs?review=1")
 	if recorder.Code != http.StatusOK {
@@ -36,7 +37,7 @@ func TestJobsReviewFilterReturnsOnlyReviewWork(t *testing.T) {
 	if err := json.Unmarshal(recorder.Body.Bytes(), &decoded); err != nil {
 		t.Fatal(err)
 	}
-	if len(decoded.Jobs) != 2 {
+	if len(decoded.Jobs) != 3 {
 		t.Fatal(decoded.Jobs)
 	}
 	for _, job := range decoded.Jobs {

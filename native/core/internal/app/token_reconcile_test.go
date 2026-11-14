@@ -71,9 +71,9 @@ func TestReconcileTokensConfirmsWhenTheBalanceDrops(t *testing.T) {
 	doer := &balanceDoer{body: `{"status":"success","response":{"id":7,"userstats":{"tokens":4}}}`}
 	application.searcher.Doer = doer
 
-	start := application.now()
+	start := application.now().Add(-2 * time.Minute)
 	requestID := reserveForReconcile(t, application, 5, start)
-	moved := application.reconcileTokens(context.Background(), start.Add(2*time.Minute))
+	moved := application.reconcileTokens(context.Background(), application.now())
 	if moved != 1 {
 		t.Fatal("the reconciler did not settle the row:", moved)
 	}

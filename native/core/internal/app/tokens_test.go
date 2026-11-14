@@ -38,6 +38,7 @@ func runTokenSpend(t *testing.T, application *App, server *httptest.Server, jobI
 	t.Helper()
 	body := searchBody(jobID, server.URL, []string{"dicmusic"}, false)
 	body["token_cost"] = 1
+	body["budget"] = 1
 	body["balance_known"] = false
 	body["balance"] = 0
 	body["dicmusic_authkey"] = "sentinel-dic-auth"
@@ -93,7 +94,7 @@ func TestTokenFetchIgnoresMismatchedProof(t *testing.T) {
 	writeSpendProof(t, application, `{"contract":"musicops.fixture.v1","account_id":"8","resource_id":"11","request_id":"process:search:album-mismatch","state":"CONSUMED"}`)
 	runTokenSpend(t, application, server, "album-mismatch")
 	job := inspect(t, application, "process:search:album-mismatch")
-	if job.Job.ReviewKind != "token" || job.Job.ErrorClass != "REQUEST_UNKNOWN" {
+	if job.Job.ReviewKind != "candidate" || job.Job.ErrorClass != "TOKEN_PENDING_RECONCILE" {
 		t.Fatal(job.Job)
 	}
 }
@@ -104,7 +105,7 @@ func TestTokenRecheckConfirmsWithProof(t *testing.T) {
 	application := newApp(t)
 	runTokenSpend(t, application, server, "album-recheck")
 	before := inspect(t, application, "process:search:album-recheck")
-	if before.Job.ErrorClass != "REQUEST_UNKNOWN" {
+	if before.Job.ErrorClass != "TOKEN_PENDING_RECONCILE" {
 		t.Fatal(before.Job)
 	}
 	posted := postCode(t, application, "/v1/tokens/recheck", map[string]any{

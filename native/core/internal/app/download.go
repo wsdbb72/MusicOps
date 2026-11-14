@@ -255,7 +255,6 @@ func (a *App) readTorrentBytes(receipt torrentfetch.Receipt) ([]byte, error) {
 	return io.ReadAll(io.LimitReader(file, 8<<20+1))
 }
 
-
 // downloadControlRequest is one POST /v1/jobs/{id}/download/control body. The
 // login is optional: without it the saved qBittorrent settings are used, the
 // same way the download start resolves them.
@@ -907,9 +906,22 @@ func (a *App) ensureTorrent(ctx context.Context, execution *scheduler.Execution,
 // a row that never appeared after an add fails as ADD_UNKNOWN instead of
 // being started blind.
 func (a *App) startIfStopped(ctx context.Context, execution *scheduler.Execution, client *qbittorrent.Client, rec *qbittorrent.Record, evidence qbittorrent.FreeEvidence) (scheduler.Outcome, bool, error) {
-	row, err := client.Query(ctx, *rec)
-	if err != nil {
-		return a.failDownloadStep(execution, "QBITTORENT_UNAVAILABLE", "qBittorrent 查询失败")
+	// qBittorrent acknowledges an add before the torrent shows up in its list.
+	// Querying once turned a successful add into ADD_UNKNOWN; poll briefly so
+	// a slow client is not reported as a failed one.
+	var row *qbittorrent.TorrentRow
+	var err error
+	for attempt := 0; attempt < 8; attempt++ {
+		row, err = client.Query(ctx, *rec)
+		if err != nil {
+			return a.failDownloadStep(execution, "QBITTORENT_UNAVAILABLE", "qBittorrent 查询失败")
+		}
+		if row != nil {
+			break
+		}
+		if attempt < 7 && a.wait(ctx, 400*time.Millisecond) != nil {
+			break
+		}
 	}
 	if row == nil {
 		return a.failDownloadStep(execution, "ADD_UNKNOWN", "qBittorrent 加种未确认，请重试")
@@ -1465,4 +1477,44 @@ func (a *App) finishValidating(execution *scheduler.Execution, held taskrepo.Tok
 		return scheduler.Outcome{}, err
 	}
 	return scheduler.Outcome{State: "completed", Message: message}, nil
+}
+
+// tryAutoDownload starts the qBittorrent download for a job whose torrent has
+// just been saved. Full-playlist ingestion cannot stop at a button, and every
+// failure here is recoverable: the job stays in 待核对 with the same manual
+// action the page offers.
+func (a *App) tryAutoDownload(jobID string) {
+	job, err := a.flows.Job(jobID)
+	if err != nil || job == nil {
+		return
+	}
+	if job.Stage != "needs_review" || (job.ReviewKind != "candidate" && job.ReviewKind != "token") || job.TaskType != "album" {
+		return
+	}
+	effective, resolved := a.effectiveDownloadRequest(downloadRequest{})
+	if !resolved {
+		return
+	}
+	origin, creds, category, tags, ok := a.validDownloadSettings(effective)
+	if !ok {
+		return
+	}
+	plan, err := a.buildDownloadPlan(*job, effective.SavePath, category, tags)
+	if err != nil || plan.FreeMethod == "token-provisional" {
+		return
+	}
+	encoded, err := json.Marshal(plan)
+	if err != nil {
+		return
+	}
+	gen, err := a.rememberQBittorrent(jobID, qbittorrentCredentials{BaseURL: origin, Username: creds.Username, Password: creds.Password})
+	if err != nil {
+		return
+	}
+	nowNS := a.now().UnixNano()
+	if _, err := a.flows.StartDownload("download-"+jobID+"-"+strconv.FormatInt(nowNS, 10), jobID, workflow.DownloadInput{
+		Plan: encoded, Site: plan.Site, ResourceID: plan.ResourceID, InfoHash: plan.InfoHash, FreeConfirmed: plan.FreeConfirmed,
+	}, nowNS); err != nil {
+		a.forgetQBittorrent(jobID, gen)
+	}
 }

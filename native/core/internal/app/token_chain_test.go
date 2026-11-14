@@ -42,7 +42,7 @@ func TestHighSiteBalanceReservesAndHonorsTheBatchBudget(t *testing.T) {
 	first["dicmusic_authkey"] = "sentinel-dic-auth"
 	post(t, application, "/v1/search", first)
 	job := waitJob(t, application, "process:search:album-high", "needs_review")
-	if downloads.Load() != 1 || job.ErrorClass != "REQUEST_UNKNOWN" || !strings.Contains(query, "usetoken=1") || strings.Contains(query, "torrent_pass=") {
+	if downloads.Load() != 1 || job.ErrorClass != "TOKEN_PENDING_RECONCILE" || !strings.Contains(query, "usetoken=1") || strings.Contains(query, "torrent_pass=") {
 		t.Fatal(downloads.Load(), job.ErrorClass, job.Message, query)
 	}
 	confirmed := postRecheck(t, application, map[string]any{
@@ -206,7 +206,7 @@ func TestNotConsumedRecordAllowsOneNewTokenRequest(t *testing.T) {
 	body["orpheus_torrent_pass"] = "sentinel-orpheus-pass"
 	post(t, application, "/v1/search", body)
 	job := waitJob(t, application, "process:search:album-release", "needs_review")
-	if downloads.Load() != 1 || job.ErrorClass != "REQUEST_UNKNOWN" {
+	if downloads.Load() != 1 || job.ErrorClass != "TOKEN_PENDING_RECONCILE" {
 		t.Fatal(downloads.Load(), job.ErrorClass, job.Message)
 	}
 	released := postRecheck(t, application, map[string]any{
@@ -223,7 +223,7 @@ func TestNotConsumedRecordAllowsOneNewTokenRequest(t *testing.T) {
 	again["orpheus_torrent_pass"] = "sentinel-orpheus-pass"
 	post(t, application, "/v1/search", again)
 	second := waitJob(t, application, "process:search:album-release-2", "needs_review")
-	if downloads.Load() != 2 || second.ErrorClass != "REQUEST_UNKNOWN" {
+	if downloads.Load() != 2 || second.ErrorClass != "TOKEN_PENDING_RECONCILE" {
 		t.Fatal(downloads.Load(), second.ErrorClass, second.Message)
 	}
 }
@@ -279,7 +279,7 @@ func TestUnreconciledDicmusicDoesNotBlockOtherSites(t *testing.T) {
 	first["dicmusic_authkey"] = "sentinel-dic-auth"
 	post(t, application, "/v1/search", first)
 	held := waitJob(t, application, "process:search:album-hold", "needs_review")
-	if dicDownloads.Load() != 1 || held.ErrorClass != "REQUEST_UNKNOWN" {
+	if dicDownloads.Load() != 1 || held.ErrorClass != "TOKEN_PENDING_RECONCILE" {
 		t.Fatal(dicDownloads.Load(), held.ErrorClass, held.Message)
 	}
 	second := tokenBody("album-other", server.URL, []string{"dicmusic"})
@@ -296,7 +296,7 @@ func TestUnreconciledDicmusicDoesNotBlockOtherSites(t *testing.T) {
 	orpheus["orpheus_torrent_pass"] = "sentinel-orpheus-pass"
 	post(t, application, "/v1/search", orpheus)
 	orpheusJob := waitJob(t, application, "process:search:album-orpheus", "needs_review")
-	if orpheusDownloads.Load() != 1 || dicDownloads.Load() != 1 || orpheusJob.ErrorClass != "REQUEST_UNKNOWN" {
+	if orpheusDownloads.Load() != 1 || dicDownloads.Load() != 1 || orpheusJob.ErrorClass != "TOKEN_PENDING_RECONCILE" {
 		t.Fatal(orpheusDownloads.Load(), dicDownloads.Load(), orpheusJob.ErrorClass)
 	}
 	open := tokenBody("album-open", server.URL, []string{"open.cd"})
@@ -364,7 +364,7 @@ func TestRateLimitRecheckDoesNotDownloadAndThenRestoresTheRead(t *testing.T) {
 	again["dicmusic_authkey"] = "sentinel-dic-auth"
 	post(t, application, "/v1/search", again)
 	spent := waitJob(t, application, "process:search:album-limit-restored", "needs_review")
-	if downloads.Load() != 1 || spent.ErrorClass != "REQUEST_UNKNOWN" {
+	if downloads.Load() != 1 || spent.ErrorClass != "TOKEN_PENDING_RECONCILE" {
 		t.Fatal(downloads.Load(), spent.ErrorClass, spent.Message)
 	}
 }
@@ -493,7 +493,7 @@ func TestPageButtonChoosesTheTokenCost(t *testing.T) {
 	body["dicmusic_authkey"] = "sentinel-dic-auth"
 	post(t, application, "/v1/search", body)
 	job := waitJob(t, application, "process:search:album-button", "needs_review")
-	if downloads.Load() != 1 || job.ErrorClass != "REQUEST_UNKNOWN" || !strings.Contains(query, "usetoken=1") || strings.Contains(query, "torrent_pass=") {
+	if downloads.Load() != 1 || job.ErrorClass != "TOKEN_PENDING_RECONCILE" || !strings.Contains(query, "usetoken=1") || strings.Contains(query, "torrent_pass=") {
 		t.Fatal(downloads.Load(), job.ErrorClass, query)
 	}
 	state := postRecheck(t, application, map[string]any{"site": "dicmusic", "request_id": "process:search:album-button"})
@@ -678,7 +678,7 @@ func TestSummedPageBalanceMatchesTheAccountAndStillSpends(t *testing.T) {
 	body["dicmusic_authkey"] = "sentinel-dic-auth"
 	post(t, application, "/v1/search", body)
 	job := waitJob(t, application, "process:search:album-sum", "needs_review")
-	if downloads.Load() != 1 || job.ErrorClass != "REQUEST_UNKNOWN" || job.ReviewKind != "token" {
+	if downloads.Load() != 1 || job.ErrorClass != "TOKEN_PENDING_RECONCILE" || job.ReviewKind != "candidate" {
 		t.Fatal(downloads.Load(), job.ErrorClass, job.ReviewKind, job.Message)
 	}
 }
@@ -712,7 +712,7 @@ func TestProfileOrPageBalanceIsUsedWhenTheIndexOmitsTokens(t *testing.T) {
 	body["dicmusic_authkey"] = "sentinel-dic-auth"
 	post(t, application, "/v1/search", body)
 	job := waitJob(t, application, "process:search:album-profile", "needs_review")
-	if downloads.Load() != 1 || job.ErrorClass != "REQUEST_UNKNOWN" {
+	if downloads.Load() != 1 || job.ErrorClass != "TOKEN_PENDING_RECONCILE" {
 		t.Fatal(downloads.Load(), job.ErrorClass, job.Message)
 	}
 }
@@ -746,7 +746,7 @@ func TestPageTotalBindsToTheAccountWhenNeitherDocumentHasTokens(t *testing.T) {
 	body["orpheus_torrent_pass"] = "sentinel-orpheus-pass"
 	post(t, application, "/v1/search", body)
 	job := waitJob(t, application, "process:search:album-page", "needs_review")
-	if downloads.Load() != 1 || job.ErrorClass != "REQUEST_UNKNOWN" || strings.Contains(job.Message, "未发令牌请求") {
+	if downloads.Load() != 1 || job.ErrorClass != "TOKEN_PENDING_RECONCILE" || strings.Contains(job.Message, "未发令牌请求") {
 		t.Fatal(downloads.Load(), job.ErrorClass, job.Message)
 	}
 }
@@ -798,7 +798,7 @@ func TestPersonalFreeAfterTheTokenRequestConfirmsAndReleasesTheAccount(t *testin
 	again["dicmusic_authkey"] = "sentinel-dic-auth"
 	post(t, application, "/v1/search", again)
 	second := waitJob(t, application, "process:search:album-settled-2", "needs_review")
-	if tokenUses.Load() != 2 || second.ErrorClass != "REQUEST_UNKNOWN" {
+	if tokenUses.Load() != 2 || second.ErrorClass != "TOKEN_PENDING_RECONCILE" {
 		t.Fatal(tokenUses.Load(), second.ErrorClass, second.Message)
 	}
 }
@@ -845,6 +845,7 @@ func TestTokenHTTPRejectionDoesNotBanTheSiteOrRetry(t *testing.T) {
 
 func tokenBody(jobID, base string, sites []string) map[string]any {
 	body := searchBody(jobID, base, sites, false)
+	body["budget"] = 10
 	body["identity"] = map[string]any{
 		"evidence_id": "ev-" + jobID, "kind": "catalog", "source": "musicbrainz", "subject_id": "release-" + jobID,
 		"tracklist_verified": true, "identity_confirmed": true, "payload": "catalogue-row",

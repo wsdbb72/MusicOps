@@ -54,8 +54,8 @@ func TestSweepExpiredReleasesTheSiteButNotTheResource(t *testing.T) {
 		t.Fatal("an expired row is still pending:", pending, err)
 	}
 
-	// The site is free again for a different resource.
-	second, err := ledger.Reserve(start.Add(31*time.Minute), quoteAt("dicmusic", "resource-2", "request-3", 1, 5, 5, start.Add(31*time.Minute)))
+	// The same job that hit the hold can now reserve for a different resource.
+	second, err := ledger.Reserve(start.Add(31*time.Minute), quoteAt("dicmusic", "resource-2", "request-2", 1, 5, 5, start.Add(31*time.Minute)))
 	if err != nil || !second.Spent {
 		t.Fatal("the site stayed held after the expiry:", second, err)
 	}

@@ -50,7 +50,7 @@ func TestSearchHitQueuesAcquisitionWithoutADownloadExecutor(t *testing.T) {
 	if searchJob.SearchAction != "queue_request" {
 		t.Fatal(searchJob)
 	}
-	child := waitJob(t, application, "process:search:album-exact", "needs_review")
+	child := waitJob(t, application, "process:search:album-exact", "skipped")
 	if !strings.Contains(child.Message, "尚未下载") || strings.Contains(child.Message, "已入库") {
 		t.Fatal(child)
 	}
@@ -172,6 +172,7 @@ func TestUnknownBalanceDoesNotRequestATokenDownload(t *testing.T) {
 	application := newApp(t)
 	body := searchBody("album-token", server.URL, []string{"dicmusic"}, false)
 	body["token_cost"] = 1
+	body["budget"] = 1
 	post(t, application, "/v1/search", body)
 	job := waitJob(t, application, "process:search:album-token", "needs_review")
 	if downloads.Load() != 0 || job.ReviewKind != "token" || !strings.Contains(job.Message, "尚未下载") {
@@ -204,13 +205,14 @@ func TestTokenFetchStaysUnreconciled(t *testing.T) {
 	application := newApp(t)
 	body := searchBody("album-spend", server.URL, []string{"dicmusic"}, false)
 	body["token_cost"] = 1
+	body["budget"] = 1
 	body["balance_known"] = false
 	body["balance"] = 0
 	body["dicmusic_authkey"] = "sentinel-dic-auth"
 	post(t, application, "/v1/search", body)
 	job := waitJob(t, application, "process:search:album-spend", "needs_review")
 	parsed, err := url.ParseQuery(query)
-	if err != nil || parsed.Get("action") != "download" || parsed.Get("id") != "11" || parsed.Get("usetoken") != "1" || parsed.Get("authkey") != "sentinel-dic-auth" || parsed.Get("torrent_pass") != "" || job.ErrorClass != "REQUEST_UNKNOWN" || job.ReviewKind != "token" || !strings.Contains(job.Message, "尚未下载") {
+	if err != nil || parsed.Get("action") != "download" || parsed.Get("id") != "11" || parsed.Get("usetoken") != "1" || parsed.Get("authkey") != "sentinel-dic-auth" || parsed.Get("torrent_pass") != "" || job.ErrorClass != "TOKEN_PENDING_RECONCILE" || job.ReviewKind != "candidate" || !strings.Contains(job.Message, "尚未下载") {
 		t.Fatal(job.ErrorClass, job.ReviewKind, job.Message)
 	}
 	if dirContains(t, application.Dir, "sentinel-dic-auth") {

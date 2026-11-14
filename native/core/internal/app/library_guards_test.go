@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -16,7 +17,7 @@ import (
 // skipping it.
 func TestFieldLockBlocksTheCatalogueWrite(t *testing.T) {
 	application := newApp(t)
-	library := filepath.Join(application.Dir, "library-audio")
+	library := filepath.Join(realPath(t, application.Dir), "library-audio")
 	albumDir := filepath.Join(library, "Some Artist", "First Album")
 	if err := os.MkdirAll(albumDir, 0o755); err != nil {
 		t.Fatal(err)
@@ -67,7 +68,7 @@ func TestFieldLockBlocksTheCatalogueWrite(t *testing.T) {
 // The same lock applies to the batch path.
 func TestFieldLockBlocksBatchScrape(t *testing.T) {
 	application := newApp(t)
-	library := filepath.Join(application.Dir, "library-audio")
+	library := filepath.Join(realPath(t, application.Dir), "library-audio")
 	albumDir := filepath.Join(library, "Some Artist", "First Album")
 	if err := os.MkdirAll(albumDir, 0o755); err != nil {
 		t.Fatal(err)
@@ -191,7 +192,7 @@ func TestGuardApiValidatesInput(t *testing.T) {
 	if recorder := postCode(t, application, "/v1/library/guards", map[string]any{"dir": "../../etc", "fields": []string{"title"}}); recorder.Code != http.StatusBadRequest {
 		t.Fatal("a path outside the library was accepted", recorder.Code)
 	}
-	library := filepath.Join(application.Dir, "library-audio")
+	library := filepath.Join(realPath(t, application.Dir), "library-audio")
 	if err := os.MkdirAll(filepath.Join(library, "A", "B"), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -212,7 +213,7 @@ func TestGuardApiValidatesInput(t *testing.T) {
 		t.Fatal(got)
 	}
 	// Windows path case must not create a second entry for the same album.
-	post(t, application, "/v1/library/guards", map[string]any{"dir": strings.ToUpper(filepath.Join(library, "A", "B")), "suppressed": true})
+	post(t, application, "/v1/library/guards", map[string]any{"dir": guardTestUpdatePath(filepath.Join(library, "A", "B")), "suppressed": true})
 	list := getAuth(t, application, "/v1/library/guards")
 	if !strings.Contains(list.Body.String(), `"suppressed":true`) {
 		t.Fatal(list.Body.String())
@@ -221,4 +222,11 @@ func TestGuardApiValidatesInput(t *testing.T) {
 	if err != nil || len(guards.Albums) != 1 {
 		t.Fatalf("%d entries, %v", len(guards.Albums), err)
 	}
+}
+
+func guardTestUpdatePath(dir string) string {
+	if runtime.GOOS == "windows" {
+		return strings.ToUpper(dir)
+	}
+	return dir
 }

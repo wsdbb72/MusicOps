@@ -19,6 +19,7 @@ const UnknownExpire = 30 * time.Minute
 // and has no answer yet.
 type Pending struct {
 	Site       string
+	AccountID  string
 	RequestID  string
 	ResourceID string
 	State      string
@@ -26,9 +27,9 @@ type Pending struct {
 	UpdatedNS  int64
 	// The row's own balance observation at reservation time. A reconciler
 	// compares it with a fresh read to decide whether the spend happened.
-	Balance       int
-	BalanceKnown  bool
-	ObservedAtNS  int64
+	Balance      int
+	BalanceKnown bool
+	ObservedAtNS int64
 }
 
 // Pending lists the unsettled rows of every token site. It reads the per-site
@@ -61,6 +62,9 @@ func (l *Ledger) Pending() ([]Pending, error) {
 			readErr := l.engine.View(func(v *dataengine.View) error {
 				raw, ok, err := v.Get(rowKey(item.ID))
 				if err != nil || !ok {
+					if err == nil {
+						err = dataengine.ErrInvalidRequest
+					}
 					return err
 				}
 				return json.Unmarshal(raw, &current)
@@ -69,7 +73,7 @@ func (l *Ledger) Pending() ([]Pending, error) {
 				continue
 			}
 			out = append(out, Pending{
-				Site: site, RequestID: item.RequestID, ResourceID: item.ResourceID,
+				Site: site, AccountID: current.AccountID, RequestID: item.RequestID, ResourceID: item.ResourceID,
 				State: item.State, Cost: item.Cost, UpdatedNS: item.UpdatedNS,
 				Balance: current.Balance, BalanceKnown: current.BalanceKnown, ObservedAtNS: current.ObservedAtNS,
 			})

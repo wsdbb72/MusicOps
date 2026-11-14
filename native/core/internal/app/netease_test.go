@@ -1,8 +1,8 @@
 package app
 
 import (
-	"context"
 	"bytes"
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -67,6 +67,7 @@ func saveNeteaseTestCookie(t *testing.T, application *App) {
 // The built-in source searches, resolves a lossless URL, keeps the FLAC and
 // writes the identity the search confirmed.
 func TestNeteaseStreamKeepsLosslessAudio(t *testing.T) {
+	vaultKey(t)
 	application := newApp(t)
 	saveNeteaseTestCookie(t, application)
 	// The fixture is a header-only FLAC; a real file is larger than the
@@ -99,6 +100,7 @@ func TestNeteaseStreamKeepsLosslessAudio(t *testing.T) {
 // A 320k mp3 is what an account without lossless permission gets. The library
 // is FLAC-only, so the file is reported, not stored.
 func TestNeteaseStreamRejectsLossyAudio(t *testing.T) {
+	vaultKey(t)
 	application := newApp(t)
 	saveNeteaseTestCookie(t, application)
 	server := neteaseFake(t, "mp3", syntheticFLAC(t, false))
@@ -152,6 +154,7 @@ func TestNeteaseMediaHostAllowlist(t *testing.T) {
 // Saving the cookie also records the playlist credential, so reading a
 // playlist and falling back to a track share one paste.
 func TestNeteaseCookieIsSharedWithPlaylists(t *testing.T) {
+	vaultKey(t)
 	application := newApp(t)
 	saveNeteaseTestCookie(t, application)
 	header, err := application.playlistCookie("netease", "music.163.com")

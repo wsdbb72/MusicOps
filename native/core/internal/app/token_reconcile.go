@@ -132,7 +132,7 @@ func (a *App) markTokenRead(site string, now time.Time) {
 // A row without a known balance at reservation time cannot be judged; it is
 // left to the expiry deadline.
 func reconcileVerdict(now time.Time, row tokenledger.Pending, observation tokenledger.Observation) (string, string) {
-	if !row.BalanceKnown || !observation.Known {
+	if !row.BalanceKnown || !observation.Known || row.AccountID == "" || row.AccountID != observation.AccountID || observation.ObservedAtNS <= row.UpdatedNS {
 		return "", ""
 	}
 	if observation.Balance < row.Balance {

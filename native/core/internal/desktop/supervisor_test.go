@@ -373,7 +373,7 @@ func TestSupervisorStartFailsWithoutBinary(t *testing.T) {
 // not answer" and exit. Windows reuses PIDs, so the check has to look at the
 // process image, not just at the number.
 func TestAttachIgnoresAStaleRendezvous(t *testing.T) {
-	profile := t.TempDir()
+	profile := testProfile(t)
 	if err := ensureCoreDirs(profile); err != nil {
 		t.Fatal(err)
 	}

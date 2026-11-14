@@ -128,12 +128,11 @@ func (a *App) acquireWithToken(ctx context.Context, execution *scheduler.Executi
 	if !tokenledger.IsTokenSite(site) {
 		return a.finishAcquire(held, job, "token", "该站不使用这条令牌账本；尚未下载、尚未入库", "", nil)
 	}
-	// One unanswered request used to hold the whole site forever: every later
-	// token request was refused as ACCOUNT_HOLD. Release the ones that passed
-	// the reconciliation deadline before looking at this site again (P1-6).
-	// The sweep is lazy on purpose until a background reconciler exists; this
-	// is the point where a held site would block a user.
-	_, _ = a.ledger.SweepExpired(a.now(), tokenledger.UnknownExpire)
+	// Enforce the same deadline as the background reconciler, including
+	// when it has not yet had a chance to run after startup.
+	if _, err := a.ledger.SweepExpired(a.now(), tokenledger.UnknownExpire); err != nil {
+		return a.finishAcquire(held, job, "token", "令牌账本暂时无法读取，未向站点请求；尚未下载、尚未入库", "ledger_rejected", nil)
+	}
 	observation, _, err := a.observeBalance(ctx, site, a.cookieFor(plan.RootJobID, site), plan.Synthetic, plan.BaseURL)
 	if err != nil {
 		return a.finishAcquire(held, job, "token", "余额读取失败，未发令牌请求；尚未下载、尚未入库", observation.ErrorClass, nil)
@@ -532,6 +531,11 @@ func (a *App) finishAcquire(held taskrepo.Token, job workflow.Job, review, messa
 	}
 	if _, err := a.flows.Complete(intentID("acquire", held.ID, held.Fence), held, complete); err != nil {
 		return scheduler.Outcome{}, err
+	}
+	if receipt != nil && review == "candidate" && strings.HasPrefix(job.BatchID, "pl-") {
+		// The torrent is saved: hand it to qBittorrent now. A failure leaves
+		// the job exactly where the manual 继续下载 button expects it.
+		a.tryAutoDownload(job.ID)
 	}
 	return scheduler.Outcome{State: "blocked", Message: message}, nil
 }

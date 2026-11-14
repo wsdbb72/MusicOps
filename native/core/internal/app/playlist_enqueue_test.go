@@ -4,15 +4,16 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"testing"
 )
 
 func TestTrackKeyOfPath(t *testing.T) {
-	artist, album, title := trackKeyOfPath(`E:\music\周杰伦\范特西\03 简单爱.flac`)
+	artist, album, title := trackKeyOfPath(filepath.Join("music", "周杰伦", "范特西", "03 简单爱.flac"))
 	if artist != "周杰伦" || album != "范特西" || title != "简单爱" {
 		t.Fatalf("%q %q %q", artist, album, title)
 	}
-	_, _, title = trackKeyOfPath(`E:\music\A\B\01 - Song Name.flac`)
+	_, _, title = trackKeyOfPath(filepath.Join("music", "A", "B", "01 - Song Name.flac"))
 	if title != "song name" {
 		t.Fatalf("%q", title)
 	}
@@ -20,7 +21,7 @@ func TestTrackKeyOfPath(t *testing.T) {
 
 func TestPlaylistLibraryIndexMatchesNames(t *testing.T) {
 	index := playlistLibraryIndex{tracks: map[string]bool{}, albums: map[string]bool{}}
-	artist, album, title := trackKeyOfPath(`E:\music\Artist A\Album X\01 - Song One.flac`)
+	artist, album, title := trackKeyOfPath(filepath.Join("music", "Artist A", "Album X", "01 - Song One.flac"))
 	index.tracks[artist+"/"+title] = true
 	index.albums[artist+"/"+album] = true
 	if !index.hasTrack("Artist A", "Song One") {

@@ -60,8 +60,6 @@ jobs:
         with:
           python-version: '3.12'
           architecture: arm64
-          cache: pip
-          cache-dependency-path: packaging/requirements-macos.txt
       - name: Set up pinned Go for bundled engines
         uses: actions/setup-go@v6
         with:

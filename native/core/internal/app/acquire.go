@@ -86,6 +86,9 @@ func (a *App) acquire(ctx context.Context, execution *scheduler.Execution, paylo
 		// budget must not quietly download without one — that changes what
 		// the account is charged for, so it stops here for a human to decide.
 		if plan.Budget <= 0 {
+			if plan.StreamingEnabled && isNeteasePlaylistFallback(job.BatchID, plan) {
+				return a.acquireFallback(ctx, execution, held, *job, plan)
+			}
 			// A normal download would add real download volume to the account.
 			// That is never done silently: without a token budget this torrent
 			// is skipped instead.
@@ -184,6 +187,12 @@ func (a *App) acquireWithToken(ctx context.Context, execution *scheduler.Executi
 		return a.reconcileInFlightToken(ctx, execution, held, job, plan, site, resource)
 	case tokenledger.StateReserved:
 	default:
+		if reserved.State == tokenledger.StateRejected && plan.StreamingEnabled && isNeteasePlaylistFallback(job.BatchID, plan) {
+			switch reserved.Class {
+			case tokenledger.ClassTokenBudget, tokenledger.ClassSpent, tokenledger.ClassAccountHold:
+				return a.acquireFallback(ctx, execution, held, job, plan)
+			}
+		}
 		return a.finishAcquire(held, job, "token", "令牌预留没有成立，未向站点请求；尚未下载、尚未入库", reserved.Class, nil)
 	}
 	if allowed, class, _ := a.ledger.ReadAllowed(site, a.now()); !allowed {

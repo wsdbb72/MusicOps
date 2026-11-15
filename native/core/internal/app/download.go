@@ -772,6 +772,16 @@ func (a *App) download(ctx context.Context, execution *scheduler.Execution, payl
 		return a.failDownload(execution, "RECEIPT_MISMATCH", "种子内容与收据不一致")
 	}
 	creds, ok := a.qbittorrentSecret(plan.JobID)
+	if !ok && strings.HasPrefix(job.BatchID, "pl-") && plan.PlaylistBatch && plan.SavePath == "" {
+		// Automatic playlist jobs use the saved client with no per-task
+		// override. The queued plan can continue after a core update.
+		if effective, resolved := a.effectiveDownloadRequest(downloadRequest{}); resolved {
+			_, saved, category, tags, valid := a.validDownloadSettings(effective)
+			if valid && category == plan.Category && tags == plan.Tags {
+				creds, ok = saved, true
+			}
+		}
+	}
 	if !ok {
 		return a.failDownload(execution, "MISSING_CREDENTIALS", "没有可用的 qBittorrent 凭据，请重新提交下载请求")
 	}

@@ -35,6 +35,7 @@ type playlistEnqueueOptions struct {
 	// album, so a partially present album is completed rather than patched
 	// track by track.
 	AlbumCompletion bool
+	NeteaseOnly     bool
 	// CatalogBaseURL is a test seam (loopback only); empty uses MusicBrainz.
 	CatalogBaseURL string
 }
@@ -218,7 +219,7 @@ func (a *App) enqueuePlaylistTracks(ctx context.Context, playlistJobID string, r
 			if seenAlbums[key] {
 				continue
 			}
-			jobID, err := a.startPlaylistAlbumJob(ctx, client, playlistJobID, sites, budget, row, opts.AlbumCompletion)
+			jobID, err := a.startPlaylistAlbumJob(ctx, client, playlistJobID, sites, budget, row, opts.AlbumCompletion, opts.NeteaseOnly)
 			if err != nil {
 				report.Unmatched = append(report.Unmatched, artist+" - "+album+": "+err.Error())
 				continue
@@ -228,7 +229,7 @@ func (a *App) enqueuePlaylistTracks(ctx context.Context, playlistJobID string, r
 			report.Albums++
 			continue
 		}
-		jobID, err := a.startPlaylistAlbumJob(ctx, client, playlistJobID, sites, budget, row, opts.AlbumCompletion)
+		jobID, err := a.startPlaylistAlbumJob(ctx, client, playlistJobID, sites, budget, row, opts.AlbumCompletion, opts.NeteaseOnly)
 		if err != nil {
 			report.Unmatched = append(report.Unmatched, artist+" - "+title+": "+err.Error())
 			continue
@@ -240,7 +241,7 @@ func (a *App) enqueuePlaylistTracks(ctx context.Context, playlistJobID string, r
 
 // startPlaylistAlbumJob creates one expand job. The album is the unit the
 // pipeline works in, so the job is named after it and the row is the evidence.
-func (a *App) startPlaylistAlbumJob(ctx context.Context, client *musicbrainz.Client, playlistJobID string, sites []string, budget int, row playlistTrack, albumCompletion bool) (string, error) {
+func (a *App) startPlaylistAlbumJob(ctx context.Context, client *musicbrainz.Client, playlistJobID string, sites []string, budget int, row playlistTrack, albumCompletion, neteaseOnly bool) (string, error) {
 	artist := strings.TrimSpace(row.Artist)
 	album := strings.TrimSpace(row.Album)
 	title := strings.TrimSpace(row.Title)
@@ -256,7 +257,11 @@ func (a *App) startPlaylistAlbumJob(ctx context.Context, client *musicbrainz.Cli
 	if albumCompletion && album != "" {
 		keyTitle = ""
 	}
-	jobKey, _ := json.Marshal([]string{playlistJobID, normalizeKey(artist), normalizeKey(album), normalizeKey(keyTitle)})
+	parts := []string{playlistJobID, normalizeKey(artist), normalizeKey(album), normalizeKey(keyTitle)}
+	if neteaseOnly {
+		parts = append(parts, "netease-only")
+	}
+	jobKey, _ := json.Marshal(parts)
 	sum := sha256.Sum256(jobKey)
 	jobID := "trk-" + slug + "-" + hex.EncodeToString(sum[:6])
 	if existing, err := a.flows.Job(jobID); err != nil {
@@ -272,7 +277,7 @@ func (a *App) startPlaylistAlbumJob(ctx context.Context, client *musicbrainz.Cli
 		RootJobID: jobID, Scene: "expand",
 		Query: strings.TrimSpace(artist + " " + expected), ExpectedTitle: expected, ExpectedArtist: artist,
 		EnabledSites: sites, StreamingEnabled: true, Identity: identity, Budget: budget, PlaylistTrack: title,
-		NeteaseSongID: row.NeteaseSongID, NeteaseAlbumID: row.NeteaseAlbumID,
+		NeteaseOnly: neteaseOnly, NeteaseSongID: row.NeteaseSongID, NeteaseAlbumID: row.NeteaseAlbumID,
 	}
 	raw, err := json.Marshal(plan)
 	if err != nil {
@@ -420,9 +425,14 @@ func (a *App) enqueuePlaylist(w http.ResponseWriter, r *http.Request) {
 		JobID           string `json:"job_id"`
 		Indices         []int  `json:"indices"`
 		AlbumCompletion *bool  `json:"album_completion"`
+		NeteaseOnly     bool   `json:"netease_only"`
 	}
 	if err := decode(r, &body); err != nil || !workflow.ValidID(body.JobID) {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "code": "INVALID_REQUEST"})
+		return
+	}
+	if body.NeteaseOnly && !strings.HasPrefix(body.JobID, "pl-netease-") {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "code": "NETEASE_ORIGIN_REQUIRED"})
 		return
 	}
 	rows, name, err := a.playlistTrackRows(body.JobID)
@@ -439,7 +449,7 @@ func (a *App) enqueuePlaylist(w http.ResponseWriter, r *http.Request) {
 	if body.AlbumCompletion != nil {
 		albumCompletion = *body.AlbumCompletion
 	}
-	report, err := a.enqueuePlaylistTracks(r.Context(), body.JobID, rows, indices, playlistEnqueueOptions{AlbumCompletion: albumCompletion})
+	report, err := a.enqueuePlaylistTracks(r.Context(), body.JobID, rows, indices, playlistEnqueueOptions{AlbumCompletion: albumCompletion, NeteaseOnly: body.NeteaseOnly})
 	if err != nil {
 		writeJSON(w, http.StatusBadGateway, map[string]any{"ok": false, "code": "PLAYLIST_ENQUEUE_FAILED", "error": err.Error()})
 		return

@@ -60,7 +60,9 @@ func TestNeteaseAlbumCompletesOnlyMissingTracks(t *testing.T) {
 	}
 	post(t, a, "/v1/library/reindex", map[string]any{})
 	hits := atomic.Int32{}
+	trackerHits := atomic.Int32{}
 	mux := http.NewServeMux()
+	mux.HandleFunc("/ajax.php", func(w http.ResponseWriter, r *http.Request) { trackerHits.Add(1); http.NotFound(w, r) })
 	var server *httptest.Server
 	mux.HandleFunc("/api/search/get/web", func(w http.ResponseWriter, r *http.Request) {
 		io.WriteString(w, `{"code":200,"result":{"songs":[{"id":10,"name":"One","artists":[{"name":"Artist"}],"album":{"id":80,"name":"Album","size":2},"duration":3000}]}}`)
@@ -79,7 +81,7 @@ func TestNeteaseAlbumCompletesOnlyMissingTracks(t *testing.T) {
 	server = httptest.NewServer(mux)
 	defer server.Close()
 	a.neteaseBases = map[string]string{"api": server.URL}
-	plan := SearchPlan{RootJobID: "net-album-fixture", Scene: "expand", Query: "Artist Album", ExpectedTitle: "Album", ExpectedArtist: "Artist", PlaylistTrack: "One", StreamingEnabled: true,
+	plan := SearchPlan{RootJobID: "net-album-fixture", Scene: "expand", Query: "Artist Album", ExpectedTitle: "Album", ExpectedArtist: "Artist", PlaylistTrack: "One", StreamingEnabled: true, NeteaseOnly: true,
 		EnabledSites: []string{"dicmusic"}, Synthetic: true, BaseURL: server.URL, Identity: Identity{ID: "net-album-ident", Kind: "api", Source: "playlist", IdentityConfirmed: true, TracklistVerified: true, Payload: "fixture"}}
 	raw, _ := json.Marshal(plan)
 	_, err = a.flows.Start("start-net-album-fixture", workflow.Start{JobID: plan.RootJobID, BatchID: "pl-netease-80-fixture", Scene: "expand", Stage: "identifying", Label: "Album", Payload: raw, NowNS: a.now().UnixNano()})
@@ -97,7 +99,7 @@ func TestNeteaseAlbumCompletesOnlyMissingTracks(t *testing.T) {
 			count++
 		}
 	}
-	if count != 2 || hits.Load() != 1 {
+	if count != 2 || hits.Load() != 1 || trackerHits.Load() != 0 {
 		t.Fatal(files, hits.Load())
 	}
 	if _, err := os.Stat(existing); err != nil {

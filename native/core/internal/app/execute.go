@@ -30,6 +30,7 @@ type SearchPlan struct {
 	PlaylistImport bool `json:"playlist_import,omitempty"`
 	// PlaylistMode: "all" starts every track right after the list is read;
 	// empty parks the list so the page can show it and send a selection.
+	NeteaseOnly         bool                 `json:"netease_only,omitempty"`
 	NeteaseSongID       int64                `json:"netease_song_id,omitempty"`
 	NeteaseAlbumID      int64                `json:"netease_album_id,omitempty"`
 	PlaylistTrack       string               `json:"playlist_track,omitempty"`
@@ -232,8 +233,10 @@ func (a *App) search(ctx context.Context, execution *scheduler.Execution, payloa
 
 func (a *App) observe(ctx context.Context, execution *scheduler.Execution, job workflow.Job, plan SearchPlan, token taskrepo.Token) (searchdecision.Report, []workflow.EvidenceInput, string, error) {
 	enabled := map[string]bool{}
-	for _, site := range a.effectiveEnabledSites(plan) {
-		enabled[site] = true
+	if !plan.NeteaseOnly || !isNeteasePlaylistFallback(job.BatchID, plan) {
+		for _, site := range a.effectiveEnabledSites(plan) {
+			enabled[site] = true
+		}
 	}
 	report := searchdecision.Report{
 		Scene: job.Scene, IdentityConfirmed: plan.Identity.IdentityConfirmed, StreamingEnabled: plan.StreamingEnabled,

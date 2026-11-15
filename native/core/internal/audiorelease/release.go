@@ -482,6 +482,7 @@ func RefreshDigest(engine *dataengine.Engine, requestID string) (Result, error) 
 	}
 	updated := rec
 	updated.SHA256 = digest
+	updated.IndexedStat = nil
 	encoded, err := json.Marshal(updated)
 	if err != nil {
 		return Result{}, err

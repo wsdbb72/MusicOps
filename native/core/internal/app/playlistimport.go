@@ -404,6 +404,9 @@ func encodeM3U(name string, tracks []playlistTrack) []byte {
 		b.WriteString("#PLAYLIST:" + oneLine(name) + "\n")
 	}
 	for _, track := range tracks {
+		if track.NeteaseSongID > 0 && track.NeteaseAlbumID > 0 {
+			fmt.Fprintf(&b, "#MUSICOPS-NETEASE:%d:%d\n", track.NeteaseSongID, track.NeteaseAlbumID)
+		}
 		if track.Album != "" {
 			b.WriteString("#MUSICOPS-ALBUM:" + oneLine(track.Album) + "\n")
 		}

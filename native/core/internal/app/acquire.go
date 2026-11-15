@@ -94,7 +94,7 @@ func (a *App) acquire(ctx context.Context, execution *scheduler.Execution, paylo
 		return a.acquireWithToken(ctx, execution, held, *job, plan, site, resource, decision)
 	}
 	if strictFL {
-		if plan.PlaylistTrack != "" && plan.StreamingEnabled && normalizeKey(plan.PlaylistTrack) == normalizeKey(plan.ExpectedTitle) {
+		if plan.PlaylistTrack != "" && plan.StreamingEnabled && (isNeteasePlaylistFallback(job.BatchID, plan) || normalizeKey(plan.PlaylistTrack) == normalizeKey(plan.ExpectedTitle)) {
 			return a.acquireFallback(ctx, execution, held, *job, plan)
 		}
 		return a.finishSkipAcquire(held, *job, "本批次要求 FL 令牌，详情没有可核实的令牌按钮；未发下载请求")

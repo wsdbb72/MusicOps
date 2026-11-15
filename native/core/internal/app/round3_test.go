@@ -94,11 +94,9 @@ func TestWorkflowUsesTheSelectedFileWithoutSpending(t *testing.T) {
 	if missing.Code != http.StatusBadRequest {
 		t.Fatal(missing.Code, missing.Body.String())
 	}
-	started := post(t, application, "/v1/library/workflow", map[string]any{"scene": "fill", "label": "补缺", "path": path, "confirmed": true})
-	note, _ := started["note"].(string)
-	gotPath, _ := started["path"].(string)
-	if started["downloaded"] != false || !strings.Contains(note, "令牌规则") || !strings.Contains(note, "尚未下载") || filepath.Base(gotPath) != "01 opening.flac" {
-		t.Fatal(started)
+	invalid := postCode(t, application, "/v1/library/workflow", map[string]any{"scene": "fill", "path": path, "confirmed": true})
+	if invalid.Code != http.StatusUnprocessableEntity || !strings.Contains(invalid.Body.String(), "LOCAL_IDENTITY_UNAVAILABLE") {
+		t.Fatal(invalid.Code, invalid.Body.String())
 	}
 }
 

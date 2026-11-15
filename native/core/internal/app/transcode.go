@@ -359,13 +359,18 @@ func checkWAVPCM(path string) error {
 // layout and hashes the bytes, so a WAV and its FLAC conversion compare
 // equal only when the decoded audio is identical.
 func pcmHash(ctx context.Context, path string) (string, error) {
+	return pcmHashWithFormat(ctx, path, []string{"-f", "s16le", "-ac", "2", "-ar", "44100"})
+}
+
+func pcmHashWithFormat(ctx context.Context, path string, format []string) (string, error) {
 	ffmpeg, err := exec.LookPath("ffmpeg")
 	if err != nil {
 		return "", err
 	}
 	runCtx, cancel := context.WithTimeout(ctx, transcodeTimeout)
 	defer cancel()
-	command := exec.CommandContext(runCtx, ffmpeg, "-nostdin", "-v", "error", "-xerror", "-i", path, "-map", "0:a:0", "-f", "s16le", "-ac", "2", "-ar", "44100", "-")
+	args := append([]string{"-nostdin", "-v", "error", "-xerror", "-i", path, "-map", "0:a:0"}, format...)
+	command := exec.CommandContext(runCtx, ffmpeg, append(args, "-")...)
 	stdout, err := command.StdoutPipe()
 	if err != nil {
 		return "", err

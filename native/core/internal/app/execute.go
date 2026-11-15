@@ -30,20 +30,23 @@ type SearchPlan struct {
 	PlaylistImport bool `json:"playlist_import,omitempty"`
 	// PlaylistMode: "all" starts every track right after the list is read;
 	// empty parks the list so the page can show it and send a selection.
-	PlaylistTrack       string   `json:"playlist_track,omitempty"`
-	PlaylistMode        string   `json:"playlist_mode,omitempty"`
-	Query               string   `json:"query"`
-	ExpectedTitle       string   `json:"expected_title"`
-	ExpectedArtist      string   `json:"expected_artist,omitempty"`
-	EnabledSites        []string `json:"enabled_sites"`
-	StreamingEnabled    bool     `json:"streaming_enabled"`
-	Synthetic           bool     `json:"synthetic"`
-	BaseURL             string   `json:"base_url,omitempty"`
-	Budget              int      `json:"budget,omitempty"`
-	SafetyMargin        int      `json:"safety_margin,omitempty"`
-	SelectedSite        string   `json:"selected_site,omitempty"`
-	SelectedCandidateID string   `json:"selected_candidate_id,omitempty"`
-	Identity            Identity `json:"identity"`
+	NeteaseSongID       int64                `json:"netease_song_id,omitempty"`
+	NeteaseAlbumID      int64                `json:"netease_album_id,omitempty"`
+	PlaylistTrack       string               `json:"playlist_track,omitempty"`
+	PlaylistMode        string               `json:"playlist_mode,omitempty"`
+	Query               string               `json:"query"`
+	ExpectedTitle       string               `json:"expected_title"`
+	ExpectedArtist      string               `json:"expected_artist,omitempty"`
+	EnabledSites        []string             `json:"enabled_sites"`
+	StreamingEnabled    bool                 `json:"streaming_enabled"`
+	Synthetic           bool                 `json:"synthetic"`
+	BaseURL             string               `json:"base_url,omitempty"`
+	Budget              int                  `json:"budget,omitempty"`
+	SafetyMargin        int                  `json:"safety_margin,omitempty"`
+	SelectedSite        string               `json:"selected_site,omitempty"`
+	SelectedCandidateID string               `json:"selected_candidate_id,omitempty"`
+	LibraryTracks       []localWorkflowTrack `json:"library_tracks,omitempty"`
+	Identity            Identity             `json:"identity"`
 }
 
 // Identity is caller-supplied catalogue evidence. AI cannot confirm it.
@@ -72,6 +75,14 @@ func (a *App) identify(ctx context.Context, execution *scheduler.Execution, payl
 	// "invalid data request".
 	if plan.PlaylistImport {
 		return a.identifyPlaylist(ctx, execution, plan, token)
+	}
+	if len(plan.LibraryTracks) > 0 && !plan.Identity.IdentityConfirmed {
+		if err := a.confirmSelectedLibrary(ctx, &plan); err == nil {
+			payload, err = json.Marshal(plan)
+			if err != nil {
+				return scheduler.Outcome{}, err
+			}
+		}
 	}
 	evidence := plan.evidence()
 	// A playlist track job has no catalogue identity to attach; its row
@@ -167,7 +178,7 @@ func (a *App) search(ctx context.Context, execution *scheduler.Execution, payloa
 	if err := a.cancelled(ctx, execution); err != nil {
 		return scheduler.Outcome{}, err
 	}
-	if plan.PlaylistTrack != "" && plan.StreamingEnabled && report.SelectedSite == "" && normalizeKey(plan.PlaylistTrack) == normalizeKey(plan.ExpectedTitle) {
+	if plan.PlaylistTrack != "" && plan.StreamingEnabled && report.SelectedSite == "" && (isNeteasePlaylistFallback(job.BatchID, plan) || normalizeKey(plan.PlaylistTrack) == normalizeKey(plan.ExpectedTitle)) {
 		report.ExplicitFallback = true
 	}
 	decision, err := searchdecision.Decide(report)
@@ -302,6 +313,14 @@ func (a *App) observe(ctx context.Context, execution *scheduler.Execution, job w
 	if chosen != "" {
 		report.SelectedSite = chosen
 		report.SelectedCandidateID = chosenID
+		if plan.Scene == "upgrade" {
+			for _, p := range picks {
+				if p.id == chosenID && localUpgradeAdmits(plan, p.hit) {
+					report.QualityImproved = true
+					break
+				}
+			}
+		}
 	}
 	return report, evidence, adviseClass, nil
 }
@@ -321,7 +340,7 @@ func summarizeSite(plan SearchPlan, site string, observation trackersearch.Obser
 	for _, candidate := range observation.Candidates {
 		hit := releaseHit(candidate)
 		pool = append(pool, reviewai.Candidate{ID: hit.ID, Title: hit.Title, Artists: hit.Artists, Aliases: hit.Aliases, Edition: hit.Edition, GroupID: hit.GroupID, Format: hit.Format, Year: hit.Year})
-		if !reviewmatch.CompareSource(site, plan.ExpectedTitle, plan.ExpectedArtist, hit).Pass {
+		if !localUpgradeAdmits(plan, hit) || !reviewmatch.CompareSource(site, plan.ExpectedTitle, plan.ExpectedArtist, hit).Pass {
 			continue
 		}
 		row.Exact = true

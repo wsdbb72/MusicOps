@@ -97,19 +97,20 @@ var downloadArchiveSettleTimeout = 30 * time.Second
 // It is the download task's payload, so it is stored in Pebble: it must
 // never contain credentials.
 type downloadPlan struct {
-	RootJobID      string `json:"root_job_id"`
-	JobID          string `json:"job_id"`
-	Site           string `json:"site"`
-	ResourceID     string `json:"resource_id"`
-	InfoHash       string `json:"infohash"`
-	ExpectedTitle  string `json:"expected_title"`
-	ExpectedArtist string `json:"expected_artist,omitempty"`
-	FreeConfirmed  bool   `json:"free_confirmed"`
-	PlaylistBatch  bool   `json:"playlist_batch,omitempty"`
-	FreeMethod     string `json:"free_method"`
-	SavePath       string `json:"save_path,omitempty"`
-	Category       string `json:"category,omitempty"`
-	Tags           string `json:"tags,omitempty"`
+	RootJobID      string               `json:"root_job_id"`
+	JobID          string               `json:"job_id"`
+	Site           string               `json:"site"`
+	ResourceID     string               `json:"resource_id"`
+	InfoHash       string               `json:"infohash"`
+	ExpectedTitle  string               `json:"expected_title"`
+	ExpectedArtist string               `json:"expected_artist,omitempty"`
+	FreeConfirmed  bool                 `json:"free_confirmed"`
+	UpgradeTracks  []localWorkflowTrack `json:"upgrade_tracks,omitempty"`
+	PlaylistBatch  bool                 `json:"playlist_batch,omitempty"`
+	FreeMethod     string               `json:"free_method"`
+	SavePath       string               `json:"save_path,omitempty"`
+	Category       string               `json:"category,omitempty"`
+	Tags           string               `json:"tags,omitempty"`
 }
 
 // qbittorrentCredentials is the in-memory-only qBittorrent login for one
@@ -665,10 +666,18 @@ func (a *App) buildDownloadPlan(job workflow.Job, savePath, category, tags strin
 			return downloadPlan{}, errTokenNotSettled
 		}
 	}
+	var upgrade []localWorkflowTrack
+	if job.Scene == "upgrade" {
+		if len(plan.LibraryTracks) == 0 {
+			return downloadPlan{}, errors.New("missing verified upgrade baseline")
+		}
+		upgrade = plan.LibraryTracks
+	}
 	return downloadPlan{
-		RootJobID: job.RootID, JobID: job.ID, Site: receipt.Site, ResourceID: receipt.ResourceID,
+		UpgradeTracks: upgrade,
+		RootJobID:     job.RootID, JobID: job.ID, Site: receipt.Site, ResourceID: receipt.ResourceID,
 		InfoHash: receipt.InfoHash, ExpectedTitle: plan.ExpectedTitle, ExpectedArtist: plan.ExpectedArtist,
-		FreeConfirmed: true, FreeMethod: freeMethod, PlaylistBatch: strings.HasPrefix(job.BatchID, "pl-"),
+		FreeConfirmed: true, FreeMethod: freeMethod, PlaylistBatch: strings.HasPrefix(job.BatchID, "pl-") || len(plan.LibraryTracks) > 0,
 		SavePath: savePath, Category: category, Tags: tags,
 	}, nil
 }
@@ -1305,6 +1314,46 @@ func samePath(a, b string) bool {
 // "Unknown Artist" and the torrent root name when the search carried none
 // (the audio itself is verified either way; the fallback is a library
 // convention, not a confirmed identity claim).
+// Container conversion is never an upgrade. Check the actual downloaded
+// FLAC, keep only selected recordings, and reject mixed or ambiguous matches.
+func selectUpgradeTracks(plan downloadPlan, meta qbittorrent.Metainfo, seedDir string) (map[string]bool, error) {
+	selected := map[string]bool{}
+	for _, old := range plan.UpgradeTracks {
+		matched := ""
+		if !isLossyUpgradeSource(old.Codec) {
+			return nil, downloadError("QUALITY_NOT_PROVEN", "所选原文件并非已核实的有损音频")
+		}
+		for _, file := range meta.Files {
+			if file.Padding || !strings.EqualFold(filepath.Ext(file.Path), ".flac") {
+				continue
+			}
+			path, err := archiveJoin(seedDir, file.Path)
+			if err != nil {
+				continue
+			}
+			tags, err := readFLACTagsPrefix(path)
+			if err != nil || tags.StreamInfo.SampleRate == 0 || tags.StreamInfo.TotalSamples == 0 ||
+				normalizeKey(tags.Album) != normalizeKey(old.Album) || normalizeKey(tags.Title) != normalizeKey(old.Title) ||
+				!playlistArtistsMatch(strings.Split(old.Artist, " / "), tags.Artists) {
+				continue
+			}
+			seconds := float64(tags.StreamInfo.TotalSamples) / float64(tags.StreamInfo.SampleRate)
+			if seconds-old.Duration < -1.5 || seconds-old.Duration > 1.5 {
+				continue
+			}
+			if matched != "" {
+				return nil, downloadError("UPGRADE_IDENTITY_AMBIGUOUS", "下载中有多个同名候选，原文件保留")
+			}
+			matched = file.Path
+		}
+		if matched == "" {
+			return nil, downloadError("UPGRADE_IDENTITY_UNPROVEN", "无损文件与所选曲目的发行、标签或时长不符，原文件保留")
+		}
+		selected[matched] = true
+	}
+	return selected, nil
+}
+
 func (a *App) ingestDownload(ctx context.Context, plan downloadPlan, meta qbittorrent.Metainfo, seedDir string) ([]publishReceipt, error) {
 	incoming, library := a.workPath("incoming"), a.libraryDir()
 	if err := os.MkdirAll(incoming, 0o700); err != nil || os.MkdirAll(library, 0o700) != nil {
@@ -1331,6 +1380,13 @@ func (a *App) ingestDownload(ctx context.Context, plan downloadPlan, meta qbitto
 	if len(short) > 12 {
 		short = short[:12]
 	}
+	if len(plan.UpgradeTracks) > 0 && audiorelease.SystemDecoder() == nil {
+		return nil, downloadError("QUALITY_NOT_PROVEN", "无法完整解码验证无损音频，原文件保留")
+	}
+	upgradeFiles, err := selectUpgradeTracks(plan, meta, seedDir)
+	if err != nil {
+		return nil, err
+	}
 	receipts := []publishReceipt{}
 	track, present := 0, 0
 	for _, f := range meta.Files {
@@ -1339,6 +1395,9 @@ func (a *App) ingestDownload(ctx context.Context, plan downloadPlan, meta qbitto
 		}
 		ext := strings.ToLower(filepath.Ext(f.Path))
 		if ext != ".wav" && ext != ".flac" {
+			continue
+		}
+		if len(plan.UpgradeTracks) > 0 && !upgradeFiles[f.Path] {
 			continue
 		}
 		track++

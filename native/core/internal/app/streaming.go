@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 
 	"github.com/wsdbb72/MusicOps/native/core/internal/downloadpolicy"
@@ -34,10 +35,12 @@ import (
 // playlistTrack is one M3U entry: artist and title from EXTINF, nothing
 // else. The URI line is discarded, exactly like the Python importer.
 type playlistTrack struct {
-	Artist   string `json:"artist"`
-	Title    string `json:"title"`
-	Album    string `json:"album,omitempty"`
-	Duration string `json:"duration"`
+	Artist         string `json:"artist"`
+	Title          string `json:"title"`
+	Album          string `json:"album,omitempty"`
+	Duration       string `json:"duration"`
+	NeteaseSongID  int64  `json:"netease_song_id,omitempty"`
+	NeteaseAlbumID int64  `json:"netease_album_id,omitempty"`
 }
 
 const maxPlaylistTracks = 50000
@@ -51,6 +54,7 @@ func parseM3U(data []byte) ([]playlistTrack, string, error) {
 	var rows []playlistTrack
 	var name string
 	var album string
+	var neteaseSong, neteaseAlbum int64
 	var pending *playlistTrack
 	for _, raw := range strings.Split(string(data), "\n") {
 		value := strings.TrimSpace(raw)
@@ -63,6 +67,14 @@ func parseM3U(data []byte) ([]playlistTrack, string, error) {
 		}
 		if strings.HasPrefix(value, "#MUSICOPS-ALBUM:") {
 			album = strings.TrimSpace(strings.TrimPrefix(value, "#MUSICOPS-ALBUM:"))
+			continue
+		}
+		if strings.HasPrefix(value, "#MUSICOPS-NETEASE:") {
+			song, albumID, ok := strings.Cut(strings.TrimPrefix(value, "#MUSICOPS-NETEASE:"), ":")
+			if ok {
+				neteaseSong, _ = strconv.ParseInt(song, 10, 64)
+				neteaseAlbum, _ = strconv.ParseInt(albumID, 10, 64)
+			}
 			continue
 		}
 		if strings.HasPrefix(value, "#EXTINF:") {
@@ -80,6 +92,10 @@ func parseM3U(data []byte) ([]playlistTrack, string, error) {
 				track.Artist = parts[0]
 			}
 			track.Album = album
+			if neteaseSong > 0 && neteaseAlbum > 0 {
+				track.NeteaseSongID, track.NeteaseAlbumID = neteaseSong, neteaseAlbum
+			}
+			neteaseSong, neteaseAlbum = 0, 0
 			album = ""
 			pending = &track
 			continue
@@ -199,6 +215,9 @@ func playlistFallbackSteps(order []string, neteaseOnly bool) ([]downloadpolicy.S
 
 func (a *App) acquireFallback(ctx context.Context, execution *scheduler.Execution, held taskrepo.Token, job workflow.Job, plan SearchPlan) (scheduler.Outcome, error) {
 	neteaseOnly := isNeteasePlaylistFallback(job.BatchID, plan)
+	if neteaseOnly {
+		return a.acquireNeteaseAlbum(ctx, execution, held, job, plan)
+	}
 	steps, err := playlistFallbackSteps(a.streamingOrder(), neteaseOnly)
 	if err != nil {
 		return scheduler.Outcome{}, err

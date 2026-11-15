@@ -201,7 +201,7 @@ func neteaseArtists(raw any) []playlistTrack {
 		if title == "" {
 			continue
 		}
-		out = append(out, playlistTrack{Title: title, Artist: artist, Album: textField(album["name"]), Duration: millisField(row["dt"])})
+		out = append(out, playlistTrack{Title: title, Artist: artist, Album: textField(album["name"]), Duration: millisField(row["dt"]), NeteaseSongID: int64(wideID(row["id"])), NeteaseAlbumID: int64(wideID(album["id"]))})
 	}
 	return out
 }

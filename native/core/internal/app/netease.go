@@ -120,6 +120,7 @@ type neteaseSong struct {
 	Artists    []string
 	Album      string
 	DurationMS int
+	AlbumID    int64
 }
 
 // neteaseSearchSong finds the best match for a query. A hit counts only when
@@ -127,6 +128,9 @@ type neteaseSong struct {
 // matches; otherwise nothing is returned and the caller records "no result".
 func (a *App) neteaseSearchSong(ctx context.Context, plan SearchPlan) (*neteaseSong, error) {
 	query := strings.TrimSpace(plan.Query)
+	if plan.PlaylistTrack != "" {
+		query = strings.TrimSpace(plan.ExpectedArtist + " " + plan.PlaylistTrack)
+	}
 	if query == "" {
 		query = strings.TrimSpace(plan.ExpectedArtist + " " + plan.ExpectedTitle)
 	}
@@ -158,6 +162,7 @@ func (a *App) neteaseSearchSong(ctx context.Context, plan SearchPlan) (*neteaseS
 				} `json:"artists"`
 				Album struct {
 					Name string `json:"name"`
+					ID   int64  `json:"id"`
 					Size int    `json:"size"`
 				} `json:"album"`
 				Duration int `json:"duration"`
@@ -170,7 +175,7 @@ func (a *App) neteaseSearchSong(ctx context.Context, plan SearchPlan) (*neteaseS
 	if decoded.Code != 200 {
 		return nil, errors.New("netease: 搜索被拒绝")
 	}
-	wantTitle := foldTagText(plan.ExpectedTitle)
+	wantTitle := foldTagText(firstNonEmpty(plan.PlaylistTrack, plan.ExpectedTitle))
 	if wantTitle == "" {
 		wantTitle = foldTagText(plan.Query)
 	}
@@ -197,16 +202,21 @@ func (a *App) neteaseSearchSong(ctx context.Context, plan SearchPlan) (*neteaseS
 			}
 		}
 		if plan.PlaylistTrack != "" {
-			artistMatch = playlistArtistsMatch(wantParts, artists) && normalizeKey(item.Album.Name) == normalizeKey(plan.ExpectedTitle) && item.Album.Size <= 1
+			artistMatch = playlistArtistsMatch(wantParts, artists) && normalizeKey(item.Album.Name) == normalizeKey(plan.ExpectedTitle)
 		}
 		if !artistMatch || len(artists) == 0 {
 			continue
 		}
-		candidate := &neteaseSong{ID: item.ID, Name: item.Name, Artists: artists, Album: item.Album.Name, DurationMS: item.Duration}
+		candidate := &neteaseSong{ID: item.ID, Name: item.Name, Artists: artists, Album: item.Album.Name, DurationMS: item.Duration, AlbumID: item.Album.ID}
 		// Prefer the first exact match: the catalogue ranks by relevance and
 		// the title/artist check above already rejected the rest.
+		if plan.PlaylistTrack != "" && best != nil && (best.AlbumID != candidate.AlbumID || best.ID != candidate.ID) {
+			return nil, errors.New("网易云返回多个同名录音，无法唯一确认发行版")
+		}
 		best = candidate
-		break
+		if plan.PlaylistTrack == "" {
+			break
+		}
 	}
 	return best, nil
 }
@@ -310,6 +320,10 @@ func (a *App) tryNeteaseStream(ctx context.Context, plan SearchPlan) (string, st
 	if song == nil {
 		return "", "netease 没有找到标题与艺人同时对得上的曲目", downloadpolicy.ClassNoResult, true
 	}
+	return a.stageNeteaseSong(ctx, plan, song)
+}
+
+func (a *App) stageNeteaseSong(ctx context.Context, plan SearchPlan, song *neteaseSong) (string, string, string, bool) {
 	mediaURL, kind, err := a.neteaseURLFor(ctx, song)
 	if err != nil {
 		return "", "netease 取不到音源地址", downloadpolicy.ClassNoResult, true
@@ -329,6 +343,12 @@ func (a *App) tryNeteaseStream(ctx context.Context, plan SearchPlan) (string, st
 	tags, err := flactags.ReadBytes(body)
 	if err != nil || tags.StreamInfo.SampleRate == 0 || tags.StreamInfo.TotalSamples == 0 {
 		return "", "netease 返回的 FLAC 没有可用时长", downloadpolicy.ClassNoResult, true
+	}
+	if plan.PlaylistTrack != "" && song.DurationMS > 0 {
+		actual := int64(tags.StreamInfo.TotalSamples) * 1000 / int64(tags.StreamInfo.SampleRate)
+		if drift := actual - int64(song.DurationMS); drift < -1500 || drift > 1500 {
+			return "", "网易云无损音频时长与目录不符，未保存", downloadpolicy.ClassNoResult, true
+		}
 	}
 	if err := os.MkdirAll(a.workPath("incoming"), 0o700); err != nil {
 		return "", "netease 校验通过但没有写入", downloadpolicy.ClassNoResult, true

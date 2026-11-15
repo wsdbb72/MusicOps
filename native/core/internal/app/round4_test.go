@@ -195,12 +195,9 @@ func TestWorkflowPagesAndConfirmsBeforeStarting(t *testing.T) {
 	if empty.Code != http.StatusBadRequest || !strings.Contains(empty.Body.String(), "逐首确认") {
 		t.Fatal(empty.Code, empty.Body.String())
 	}
-	started := post(t, application, "/v1/library/workflow", map[string]any{
-		"scene": "fill", "label": "补缺", "paths": []string{first, second}, "confirmed": true,
-	})
-	note, _ := started["note"].(string)
-	if started["downloaded"] != false || started["started"] != true || !strings.Contains(note, "令牌规则") || !strings.Contains(note, "尚未下载") {
-		t.Fatal(started)
+	invalid := postCode(t, application, "/v1/library/workflow", map[string]any{"scene": "fill", "paths": []string{first, second}, "confirmed": true})
+	if invalid.Code != http.StatusUnprocessableEntity || !strings.Contains(invalid.Body.String(), "LOCAL_IDENTITY_UNAVAILABLE") {
+		t.Fatal(invalid.Code, invalid.Body.String())
 	}
 }
 

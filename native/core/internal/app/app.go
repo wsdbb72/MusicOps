@@ -16,8 +16,8 @@ import (
 	"github.com/wsdbb72/MusicOps/native/core/internal/dataengine"
 	"github.com/wsdbb72/MusicOps/native/core/internal/livemigrate"
 	"github.com/wsdbb72/MusicOps/native/core/internal/reviewai"
-	"github.com/wsdbb72/MusicOps/native/core/internal/scheduler"
 	"github.com/wsdbb72/MusicOps/native/core/internal/roon"
+	"github.com/wsdbb72/MusicOps/native/core/internal/scheduler"
 	"github.com/wsdbb72/MusicOps/native/core/internal/taskrepo"
 	"github.com/wsdbb72/MusicOps/native/core/internal/tokenledger"
 	"github.com/wsdbb72/MusicOps/native/core/internal/trackersearch"
@@ -58,9 +58,10 @@ type App struct {
 	// uses http.DefaultClient); tests set it to a fake server's client
 	// so a TLS test server is trusted. The same seam pattern as
 	// searcher.Now and Wait above.
-	aiHTTPClient *http.Client
-	mu           sync.Mutex
-	secrets      map[string]string
+	aiHTTPClient  *http.Client
+	mu            sync.Mutex
+	duplicateMu   sync.Mutex
+	secrets       map[string]string
 	stopSubs      chan struct{}
 	stopReconcile chan struct{}
 	// lastTokenRead bounds the background balance reads to one per site per

@@ -112,25 +112,19 @@ func TestDuplicateScanGroupsIdenticalPCM(t *testing.T) {
 		t.Fatal(groups)
 	}
 	group := groups[0]
-	if group.State != "ready" || group.Keep == nil || group.Album != "Album" {
+	if group.State != "review" || group.Keep != nil || len(group.Files) != 3 {
 		t.Fatal(group)
 	}
-	if len(group.Files) != 3 {
-		t.Fatal(group)
-	}
-	// The two identical-PCM files share one fingerprint; the 880 Hz
-	// file has a different one.
 	seen := map[string]int{}
 	for _, file := range group.Files {
 		seen[file.PCMSHA256]++
 	}
-	if len(seen) != 2 || seen[group.Keep.PCMSHA256] != 2 {
+	if len(seen) != 2 {
 		t.Fatal(group)
 	}
-	// FLAC beats WAV in the rank, but both are WAV here: the keep is
-	// one of the identical pair either way.
-	if group.Keep.RequestID != "rel-dup-1" && group.Keep.RequestID != "rel-dup-2" {
-		t.Fatal(group)
+	rec := postCode(t, application, "/v1/library/duplicates/merge", map[string]any{"group_id": group.GroupID})
+	if rec.Code != http.StatusConflict {
+		t.Fatal(rec.Code, rec.Body.String())
 	}
 }
 
@@ -181,7 +175,7 @@ func TestDuplicateScanStructuralWithoutDecoder(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if group == nil || group.State != "ready" || group.IdentityUsed != "structural" {
+	if group == nil || group.State != "review" || group.IdentityUsed != "structural" {
 		t.Fatal(group)
 	}
 	if !strings.Contains(group.Reason, "结构级比对") {
@@ -818,4 +812,17 @@ func containsStringValue(values []string, want string) bool {
 		}
 	}
 	return false
+}
+
+func TestDuplicateAcrossTrackSlotsWithSameTitleAndPCM(t *testing.T) {
+	application := newApp(t)
+	incoming := filepath.Join(application.Dir, "incoming")
+	writeToneWAV(t, filepath.Join(incoming, "a.wav"), 440)
+	writeToneWAV(t, filepath.Join(incoming, "b.wav"), 440)
+	releaseLibraryFile(t, application, "a.wav", "slot-one", "Artist", "Album", "Song", 1)
+	releaseLibraryFile(t, application, "b.wav", "slot-two", "Artist", "Album", "Artist - Song", 7)
+	groups := duplicateGroups(t, application)
+	if len(groups) != 1 || groups[0].State != "ready" || len(groups[0].Files) != 2 {
+		t.Fatal(groups)
+	}
 }

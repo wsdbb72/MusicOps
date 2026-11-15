@@ -26,6 +26,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -141,8 +142,24 @@ func (a *App) scanDuplicates(ctx context.Context) ([]duplicateGroup, string, boo
 		}
 		key := artist + "\x00" + album + "\x00" + slot
 		bySlot[key] = append(bySlot[key], entry)
+		// Some releases and older imports use different track positions.
+		// A common title is only a scan candidate; the audio gate still
+		// compares the original decoded samples before anything can move.
+		_, _, title := trackKeyOfPath(entry.File)
+		stem := trackTitle(entry.File)
+		if credit, track, ok := strings.Cut(stem, " - "); ok && normalizeKey(credit) == normalizeKey(artist) {
+			title = normalizeKey(track)
+		}
+		if title != "" {
+			titleKey := normalizeKey(artist) + "\x00" + normalizeKey(album) + "\x00title:" + title
+			if titleKey != key {
+				bySlot[titleKey] = append(bySlot[titleKey], entry)
+			}
+		}
+
 	}
 	groups := []duplicateGroup{}
+	seenGroups := map[string]bool{}
 	truncated := false
 	for _, rows := range bySlot {
 		if len(rows) < 2 {
@@ -152,6 +169,11 @@ func (a *App) scanDuplicates(ctx context.Context) ([]duplicateGroup, string, boo
 			truncated = true
 			break
 		}
+		id := duplicateGroupID(rows)
+		if seenGroups[id] {
+			continue
+		}
+		seenGroups[id] = true
 		group, err := a.fingerprintGroup(ctx, rows, decoder)
 		if err != nil {
 			return nil, "", false, err
@@ -173,11 +195,15 @@ func (a *App) fingerprintGroup(ctx context.Context, rows []audiorelease.Entry, d
 	byIdentity := map[string][]int{}
 	for _, entry := range rows {
 		full := a.entryFilePath(entry)
+		digest, err := hashFile(full)
+		if err != nil {
+			return nil, err
+		}
 		rate, channels, bits, streamErr := streamInfoFor(full, entry.Format)
 		pcm := ""
 		identity := ""
-		if decoder != nil {
-			digest, err := pcmFingerprint(ctx, full)
+		if decoder != nil && streamErr == nil {
+			digest, err := pcmHashWithFormat(ctx, full, []string{"-f", "s32le"})
 			if err != nil {
 				return &duplicateGroup{
 					GroupID: duplicateGroupID(rows), Album: album, Artists: []string{artist},
@@ -187,7 +213,7 @@ func (a *App) fingerprintGroup(ctx context.Context, rows []audiorelease.Entry, d
 			pcm = digest
 			identity = fmt.Sprintf("pcm:%s:%d:%d", digest, rate, channels)
 		} else {
-			identity = fmt.Sprintf("structural:%s:%s", entry.Format, entry.SHA256)
+			identity = fmt.Sprintf("structural:%s:%s", entry.Format, digest)
 		}
 		if streamErr != nil {
 			// Stream info is advisory for ranking; a missing rate never
@@ -195,7 +221,7 @@ func (a *App) fingerprintGroup(ctx context.Context, rows []audiorelease.Entry, d
 			rate, channels, bits = 0, 0, 0
 		}
 		file := duplicateFile{
-			RequestID: entry.RequestID, File: entry.File, Format: entry.Format, SHA256: entry.SHA256,
+			RequestID: entry.RequestID, File: entry.File, Format: entry.Format, SHA256: digest,
 			PCMSHA256: pcm, SampleRate: rate, Channels: channels, BitsPerSample: bits,
 			Lossless: entry.Format == "flac" || entry.Format == "wav", LibraryDir: entry.LibraryDir,
 		}
@@ -219,7 +245,7 @@ func (a *App) fingerprintGroup(ctx context.Context, rows []audiorelease.Entry, d
 	if decoder == nil {
 		group.IdentityUsed = "structural"
 	}
-	if !shared {
+	if !shared || len(byIdentity) != 1 {
 		group.State = "review"
 		if decoder == nil {
 			group.Reason = "结构级比对：无解码器，相同 PCM、不同编码的文件不会分进同一组"
@@ -355,6 +381,8 @@ type mergeMove struct {
 func mergeReceiptKey(id string) []byte { return []byte("library/merge/" + id) }
 
 func (a *App) duplicateMerge(w http.ResponseWriter, r *http.Request) {
+	a.duplicateMu.Lock()
+	defer a.duplicateMu.Unlock()
 	var body struct {
 		GroupID string `json:"group_id"`
 	}
@@ -427,6 +455,20 @@ func (a *App) duplicateMerge(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 		if err := a.quarantineFile(&receipt, file, quarantineRoot); err != nil {
+			unrestored := []mergeMove{}
+			for i := len(receipt.Moved) - 1; i >= 0; i-- {
+				move := receipt.Moved[i]
+				if restoreErr := moveCheckedFile(move.Quarantine, move.From, move.SHA256); restoreErr != nil {
+					err = errors.Join(err, restoreErr)
+					unrestored = append(unrestored, move)
+				}
+			}
+			if len(unrestored) > 0 {
+				receipt.Moved = unrestored
+				if raw, encodeErr := json.Marshal(receipt); encodeErr == nil {
+					_, _ = a.engine.CompareAndSwap([]dataengine.Condition{{Key: mergeReceiptKey(mergeID), Absent: true}}, []dataengine.Mutation{{Key: mergeReceiptKey(mergeID), Value: raw}})
+				}
+			}
 			writeJSON(w, http.StatusConflict, map[string]any{"ok": false, "code": "MERGE_CONFLICT", "error": err.Error()})
 			return
 		}
@@ -437,6 +479,7 @@ func (a *App) duplicateMerge(w http.ResponseWriter, r *http.Request) {
 	}
 	encoded, err := json.Marshal(receipt)
 	if err != nil {
+		_ = rollbackMergeMoves(receipt.Moved)
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "code": "LIBRARY_UNAVAILABLE"})
 		return
 	}
@@ -445,6 +488,7 @@ func (a *App) duplicateMerge(w http.ResponseWriter, r *http.Request) {
 		[]dataengine.Mutation{{Key: mergeReceiptKey(mergeID), Value: encoded}},
 	)
 	if err != nil {
+		_ = rollbackMergeMoves(receipt.Moved)
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "code": "LIBRARY_UNAVAILABLE"})
 		return
 	}
@@ -453,6 +497,7 @@ func (a *App) duplicateMerge(w http.ResponseWriter, r *http.Request) {
 		// moving files a second time.
 		existing, found, err := a.readMergeReceipt(mergeID)
 		if err != nil || !found {
+			_ = rollbackMergeMoves(receipt.Moved)
 			writeJSON(w, http.StatusConflict, map[string]any{"ok": false, "code": "MERGE_CONFLICT"})
 			return
 		}
@@ -600,7 +645,7 @@ func (a *App) quarantineFile(receipt *mergeReceipt, file duplicateFile, quaranti
 	if _, err := os.Lstat(dest); err == nil {
 		return fmt.Errorf("quarantine destination already exists: %s", dest)
 	}
-	if err := os.Rename(from, dest); err != nil {
+	if err := moveCheckedFile(from, dest, file.SHA256); err != nil {
 		return err
 	}
 	receipt.Moved = append(receipt.Moved, mergeMove{RequestID: file.RequestID, From: from, Quarantine: dest, SHA256: file.SHA256})
@@ -619,12 +664,73 @@ func (a *App) quarantineFile(receipt *mergeReceipt, file duplicateFile, quaranti
 			// the file back under the name it had.
 			sidecarDest = dest + ".lrc"
 		}
-		if err := os.Rename(sidecarFrom, sidecarDest); err != nil {
+		if err := moveCheckedFile(sidecarFrom, sidecarDest, hex.EncodeToString(sum[:])); err != nil {
 			return err
 		}
 		receipt.Moved = append(receipt.Moved, mergeMove{RequestID: file.RequestID, From: sidecarFrom, Quarantine: sidecarDest, SHA256: hex.EncodeToString(sum[:]), Sidecar: true})
 	}
 	return nil
+}
+
+// Copy, verify and only then remove the source. Unlike rename this
+// supports a library and quarantine on different drives, without replacing
+// any existing destination.
+func moveCheckedFile(from, to, digest string) error {
+	in, err := os.Open(from)
+	if err != nil {
+		return err
+	}
+	defer in.Close()
+	info, err := in.Stat()
+	if err != nil || !info.Mode().IsRegular() {
+		return errors.New("source is not a regular file")
+	}
+	out, err := os.OpenFile(to, os.O_CREATE|os.O_EXCL|os.O_WRONLY, info.Mode().Perm())
+	if err != nil {
+		return err
+	}
+	keep := false
+	defer func() {
+		if !keep {
+			_ = os.Remove(to)
+		}
+	}()
+	sum := sha256.New()
+	_, err = io.Copy(io.MultiWriter(out, sum), in)
+	if err == nil {
+		err = out.Sync()
+	}
+	closeErr := out.Close()
+	if err != nil {
+		return err
+	}
+	if closeErr != nil {
+		return closeErr
+	}
+	if hex.EncodeToString(sum.Sum(nil)) != digest {
+		return errors.New("source digest changed")
+	}
+	latest, err := os.Lstat(from)
+	if err != nil || !latest.Mode().IsRegular() || !os.SameFile(info, latest) || latest.Size() != info.Size() || !latest.ModTime().Equal(info.ModTime()) {
+		return errors.New("source changed while copying")
+	}
+	if err := in.Close(); err != nil {
+		return err
+	}
+	if err := os.Remove(from); err != nil {
+		return err
+	}
+	keep = true
+	return nil
+}
+
+func rollbackMergeMoves(moves []mergeMove) error {
+	var result error
+	for i := len(moves) - 1; i >= 0; i-- {
+		move := moves[i]
+		result = errors.Join(result, moveCheckedFile(move.Quarantine, move.From, move.SHA256))
+	}
+	return result
 }
 
 // sidecarCandidates lists the lyric sidecar names that may sit next to an
@@ -654,6 +760,8 @@ func (a *App) readMergeReceipt(id string) (mergeReceipt, bool, error) {
 }
 
 func (a *App) duplicateRestore(w http.ResponseWriter, r *http.Request) {
+	a.duplicateMu.Lock()
+	defer a.duplicateMu.Unlock()
 	var body struct {
 		MergeID string `json:"merge_id"`
 	}
@@ -705,7 +813,7 @@ func (a *App) duplicateRestore(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "code": "LIBRARY_UNAVAILABLE"})
 			return
 		}
-		if err := os.Rename(move.Quarantine, move.From); err != nil {
+		if err := moveCheckedFile(move.Quarantine, move.From, move.SHA256); err != nil {
 			writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "code": "LIBRARY_UNAVAILABLE", "error": err.Error()})
 			return
 		}

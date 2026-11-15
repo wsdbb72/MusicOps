@@ -190,6 +190,11 @@ func (a *App) libraryWorkflow(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "code": "INVALID_REQUEST", "error": "请选择音乐库里的文件"})
 			return
 		}
+		resolved, err = resolveInDir(a.libraryDir(), resolved)
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "code": "INVALID_REQUEST", "error": "请选择音乐库里的文件"})
+			return
+		}
 		info, statErr := os.Stat(resolved)
 		if statErr != nil || info.IsDir() {
 			writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "code": "INVALID_REQUEST", "error": "本地文件不存在"})
@@ -210,21 +215,41 @@ func (a *App) libraryWorkflow(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "code": "INVALID_REQUEST", "error": "请先逐首确认，再进入下载", "downloaded": false})
 		return
 	}
-	label := strings.TrimSpace(body.Label)
-	if label == "" {
-		label = body.Scene + " " + firstNonEmpty(body.Root, chosen[0], "本地专辑")
+	if len(chosen) > 32 {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "code": "TOO_MANY_TRACKS"})
+		return
 	}
+	tracks := make([]localWorkflowTrack, 0, len(chosen))
+	ctx, cancel := context.WithTimeout(r.Context(), 20*time.Second)
+	defer cancel()
 	for _, path := range chosen {
-		if !strings.Contains(label, path) {
-			label = label + " " + path
+		track, err := probeLocalWorkflowTrack(ctx, path)
+		if err != nil {
+			writeJSON(w, http.StatusUnprocessableEntity, map[string]any{"ok": false, "code": "LOCAL_IDENTITY_UNAVAILABLE", "error": err.Error()})
+			return
 		}
+		if len(tracks) > 0 && (normalizeKey(track.Album) != normalizeKey(tracks[0].Album) || normalizeKey(track.Artist) != normalizeKey(tracks[0].Artist)) {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "code": "MIXED_ALBUM", "error": "请选择同一专辑的文件"})
+			return
+		}
+		if body.Scene == "upgrade" && !isLossyUpgradeSource(track.Codec) {
+			writeJSON(w, http.StatusUnprocessableEntity, map[string]any{"ok": false, "code": "QUALITY_NOT_PROVEN", "error": "此入口只自动处理有损转无损；现有无损文件不以格式变化当升级"})
+			return
+		}
+		tracks = append(tracks, track)
 	}
-	if len(label) > 500 {
-		label = label[:500]
-	}
+	first := tracks[0]
+	label := first.Artist + " — " + first.Album
 	id := libraryFileID(body.Scene + "|" + label + "|" + strconv.FormatInt(a.now().UnixNano(), 10))
-	_, err := a.flows.Start(id, workflow.Start{
-		JobID: id, BatchID: id, Scene: body.Scene, Stage: "snapshotting", Label: label, NowNS: a.now().UnixNano(),
+	settings, _ := a.loadDownloadSettings()
+	plan := SearchPlan{RootJobID: id, Scene: body.Scene, Query: first.Artist + " " + first.Album, ExpectedTitle: first.Album, ExpectedArtist: first.Artist, Budget: settings.TokenBudget, LibraryTracks: tracks}
+	raw, err := json.Marshal(plan)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "code": "INVALID_REQUEST"})
+		return
+	}
+	_, err = a.flows.Start(id, workflow.Start{
+		JobID: id, BatchID: id, Scene: body.Scene, Stage: "snapshotting", Label: label, Payload: raw, NowNS: a.now().UnixNano(),
 	})
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "code": "INVALID_REQUEST", "error": "没有创建任务，也没有下载"})
@@ -819,23 +844,35 @@ func (a *App) libraryFiles(w http.ResponseWriter, r *http.Request) {
 func (a *App) libraryFilePage(offset, limit int) ([]string, int, int) {
 	root := a.libraryDir()
 	files := []string{}
-	_ = filepath.WalkDir(root, func(path string, entry fs.DirEntry, walkErr error) error {
-		if walkErr != nil {
-			return walkErr
+	if entries, err := audiorelease.ListIndexed(a.engine); err == nil {
+		seen := map[string]bool{}
+		for _, row := range entries {
+			if !strings.EqualFold(filepath.Clean(row.LibraryDir), filepath.Clean(root)) {
+				continue
+			}
+			path := filepath.Join(root, filepath.FromSlash(row.File))
+			if !seen[path] {
+				seen[path] = true
+				files = append(files, path)
+			}
 		}
-		if entry.IsDir() {
+	}
+	if len(files) == 0 {
+		_ = filepath.WalkDir(root, func(path string, entry fs.DirEntry, walkErr error) error {
+			if walkErr != nil {
+				return walkErr
+			}
+			if entry.IsDir() {
+				return nil
+			}
+			ext := strings.TrimPrefix(strings.ToLower(filepath.Ext(path)), ".")
+			if !audioExtensions[ext] {
+				return nil
+			}
+			files = append(files, path)
 			return nil
-		}
-		ext := strings.TrimPrefix(strings.ToLower(filepath.Ext(path)), ".")
-		if !audioExtensions[ext] {
-			return nil
-		}
-		files = append(files, path)
-		if len(files) >= 500 {
-			return fs.SkipAll
-		}
-		return nil
-	})
+		})
+	}
 	sort.Strings(files)
 	if offset > len(files) {
 		offset = len(files)

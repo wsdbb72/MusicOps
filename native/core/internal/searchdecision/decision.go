@@ -88,6 +88,7 @@ type Report struct {
 	Scene               string       `json:"scene"`
 	IdentityConfirmed   bool         `json:"identity_confirmed"`
 	StreamingEnabled    bool         `json:"streaming_enabled"`
+	SourceFallback      bool         `json:"source_fallback,omitempty"`
 	ExplicitFallback    bool         `json:"explicit_fallback"`
 	QualityImproved     bool         `json:"quality_improved"`
 	VersionChoice       bool         `json:"version_choice"`
@@ -189,6 +190,9 @@ func decide(in classified) Decision {
 	report := in.report
 	if !report.IdentityConfirmed {
 		return Decision{Action: ActionReviewSearch, Reason: "unknown_release"}
+	}
+	if report.SourceFallback && report.Scene == "expand" && report.StreamingEnabled && report.SelectedSite == "" {
+		return Decision{Action: ActionFallback, Reason: "original_playlist_source"}
 	}
 	if report.VersionChoice && (len(in.qualified) > 0 || in.mismatch || in.held) {
 		return Decision{Action: ActionReviewCandidate, Reason: "version_choice"}

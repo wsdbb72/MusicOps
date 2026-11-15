@@ -179,7 +179,16 @@ func (a *App) search(ctx context.Context, execution *scheduler.Execution, payloa
 	if err := a.cancelled(ctx, execution); err != nil {
 		return scheduler.Outcome{}, err
 	}
-	if plan.PlaylistTrack != "" && plan.StreamingEnabled && report.SelectedSite == "" && (isNeteasePlaylistFallback(job.BatchID, plan) || normalizeKey(plan.PlaylistTrack) == normalizeKey(plan.ExpectedTitle)) {
+	neteaseSource := isNeteasePlaylistFallback(job.BatchID, plan) && plan.StreamingEnabled && report.SelectedSite == ""
+	if neteaseSource {
+		// The model has already reviewed any eligible real tracker hits in
+		// observe. An unresolved comparison uses the source catalogue rather
+		// than turning the model's guess into download authorization.
+		report.SourceFallback = true
+		evidence = append(evidence, workflow.EvidenceInput{
+			ID: evidenceID(token.ID, token.Fence, "netease"), Kind: "api", Source: "netease", SubjectID: plan.RootJobID, Payload: []byte(plan.Identity.Payload),
+		})
+	} else if plan.PlaylistTrack != "" && plan.StreamingEnabled && report.SelectedSite == "" && normalizeKey(plan.PlaylistTrack) == normalizeKey(plan.ExpectedTitle) {
 		report.ExplicitFallback = true
 	}
 	decision, err := searchdecision.Decide(report)

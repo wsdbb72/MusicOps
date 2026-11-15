@@ -42,8 +42,8 @@ func decodeNeteaseAlbum(raw []byte, anchor *neteaseSong) ([]neteaseSong, error) 
 	if len(rows) == 0 {
 		rows = data.Album.Songs
 	}
-	if len(rows) < 1 || len(rows) > 32 || len(rows) != data.Album.Size {
-		return nil, errors.New("网易云专辑轨道清单不完整或超过 32 首")
+	if len(rows) < 1 || len(rows) > 100 || len(rows) != data.Album.Size {
+		return nil, errors.New("网易云专辑轨道清单不完整或超过 100 首")
 	}
 	seen := map[int64]bool{}
 	found := false
@@ -118,6 +118,7 @@ func (a *App) acquireNeteaseAlbum(ctx context.Context, execution *scheduler.Exec
 		position int
 	}
 	stagedFiles := make([]staged, 0, len(tracks))
+	missing := []string{}
 	for i := range tracks {
 		song := &tracks[i]
 		if err := execution.Checkpoint(ctx, "netease_album", float64(i)*100/float64(len(tracks)), song.Name); err != nil {
@@ -143,11 +144,15 @@ func (a *App) acquireNeteaseAlbum(ctx context.Context, execution *scheduler.Exec
 		trackPlan.PlaylistTrack = song.Name
 		path, note, _, _ := a.stageNeteaseSong(ctx, trackPlan, song)
 		if path == "" {
-			return review("专辑仍有曲目无法获取无损音频："+song.Name+"；"+note, "NETEASE_ALBUM_INCOMPLETE")
+			missing = append(missing, song.Name+"："+note)
+			continue
 		}
 		stagedFiles = append(stagedFiles, staged{path, trackPlan, i + 1})
 	}
 	if len(stagedFiles) == 0 {
+		if len(missing) > 0 {
+			return review("没有可入库的无损缺轨："+missing[0], "NETEASE_ALBUM_INCOMPLETE")
+		}
 		return a.finishSkipAcquire(held, job, "网易云专辑的全部曲目已在库")
 	}
 	receipts := make([]publishReceipt, 0, len(stagedFiles))
@@ -161,5 +166,5 @@ func (a *App) acquireNeteaseAlbum(ctx context.Context, execution *scheduler.Exec
 		}
 		receipts = append(receipts, item)
 	}
-	return a.finishPlaylistStreams(held, job, receipts, fmt.Sprintf("网易云发行版共 %d 首，补齐 %d 首无损并执行刮削；等待发布校验", len(tracks), len(receipts)))
+	return a.finishPlaylistStreams(held, job, receipts, fmt.Sprintf("网易云发行版共 %d 首，取到 %d 首无损，%d 首未取得；等待发布校验", len(tracks), len(receipts), len(missing)), missing...)
 }

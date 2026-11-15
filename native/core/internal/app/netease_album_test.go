@@ -65,12 +65,16 @@ func TestNeteaseAlbumCompletesOnlyMissingTracks(t *testing.T) {
 	mux.HandleFunc("/ajax.php", func(w http.ResponseWriter, r *http.Request) { trackerHits.Add(1); http.NotFound(w, r) })
 	var server *httptest.Server
 	mux.HandleFunc("/api/search/get/web", func(w http.ResponseWriter, r *http.Request) {
-		io.WriteString(w, `{"code":200,"result":{"songs":[{"id":10,"name":"One","artists":[{"name":"Artist"}],"album":{"id":80,"name":"Album","size":2},"duration":3000}]}}`)
+		io.WriteString(w, `{"code":200,"result":{"songs":[{"id":10,"name":"One","artists":[{"name":"Artist"}],"album":{"id":80,"name":"Album","size":3},"duration":3000}]}}`)
 	})
 	mux.HandleFunc("/api/v1/album/80", func(w http.ResponseWriter, r *http.Request) {
-		io.WriteString(w, `{"code":200,"album":{"id":80,"name":"Album","size":2},"songs":[{"id":10,"name":"One","ar":[{"name":"Artist"}],"dt":3000},{"id":11,"name":"Two","ar":[{"name":"Artist"}],"dt":3000}]}`)
+		io.WriteString(w, `{"code":200,"album":{"id":80,"name":"Album","size":3},"songs":[{"id":10,"name":"One","ar":[{"name":"Artist"}],"dt":3000},{"id":11,"name":"Two","ar":[{"name":"Artist"}],"dt":3000},{"id":12,"name":"Three","ar":[{"name":"Artist"}],"dt":3000}]}`)
 	})
 	mux.HandleFunc("/api/song/enhance/player/url/v1", func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Query().Get("ids") == "[12]" {
+			io.WriteString(w, "{}")
+			return
+		}
 		if r.URL.Query().Get("ids") != "[11]" {
 			t.Errorf("requested unexpected song: %s", r.URL.Query().Get("ids"))
 		}
@@ -89,6 +93,10 @@ func TestNeteaseAlbumCompletesOnlyMissingTracks(t *testing.T) {
 		t.Fatal(err)
 	}
 	waitRootPublished(t, a, plan.RootJobID)
+	root := inspect(t, a, plan.RootJobID)
+	if !strings.Contains(root.Job.Message, "仍缺 1 首") || !strings.Contains(root.Job.Message, "Three") {
+		t.Fatal(root.Job.Message)
+	}
 	files, err := os.ReadDir(folder)
 	if err != nil {
 		t.Fatal(err)

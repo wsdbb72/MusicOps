@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 
 	"github.com/wsdbb72/MusicOps/native/core/internal/audiopublish"
 	"github.com/wsdbb72/MusicOps/native/core/internal/audiorelease"
@@ -35,20 +36,21 @@ type publishReceipt struct {
 // loopback URL and organised into the library by audiopublish, then the
 // organised file is hash-verified the same way.
 type publishPayload struct {
-	RootID      string           `json:"root_id"`
-	TrackID     string           `json:"track_id"`
-	RequestID   string           `json:"request_id"`
-	SHA256      string           `json:"sha256"`
-	Format      string           `json:"format"`
-	Origin      string           `json:"origin"`
-	SourceName  string           `json:"source_name"`
-	DecodeState string           `json:"decode_state"`
-	SourceURL   string           `json:"source_url,omitempty"`
-	Artist      string           `json:"artist,omitempty"`
-	Album       string           `json:"album,omitempty"`
-	Title       string           `json:"title,omitempty"`
-	Track       int              `json:"track,omitempty"`
-	Receipts    []publishReceipt `json:"receipts,omitempty"`
+	RootID        string           `json:"root_id"`
+	TrackID       string           `json:"track_id"`
+	RequestID     string           `json:"request_id"`
+	SHA256        string           `json:"sha256"`
+	Format        string           `json:"format"`
+	Origin        string           `json:"origin"`
+	SourceName    string           `json:"source_name"`
+	DecodeState   string           `json:"decode_state"`
+	SourceURL     string           `json:"source_url,omitempty"`
+	Artist        string           `json:"artist,omitempty"`
+	Album         string           `json:"album,omitempty"`
+	Title         string           `json:"title,omitempty"`
+	Track         int              `json:"track,omitempty"`
+	MissingTracks []string         `json:"missing_tracks,omitempty"`
+	Receipts      []publishReceipt `json:"receipts,omitempty"`
 }
 
 // publish verifies the library record for the released track and only then
@@ -157,16 +159,32 @@ func (a *App) publishReceipts(ctx context.Context, execution *scheduler.Executio
 		if err != nil {
 			return scheduler.Outcome{}, err
 		}
-		evidence = append(evidence, workflow.EvidenceInput{ID: "publish-" + item.RequestID, Kind: "catalog", Source: "local-library", SubjectID: receipt.RootID, TracklistVerified: true, Payload: encoded})
+		if len(receipt.Receipts) <= 30 {
+			evidence = append(evidence, workflow.EvidenceInput{ID: "publish-" + item.RequestID, Kind: "catalog", Source: "local-library", SubjectID: receipt.RootID, TracklistVerified: true, Payload: encoded})
+		}
 	}
 	result, err := json.Marshal(verified)
 	if err != nil {
 		return scheduler.Outcome{}, err
 	}
-	if err := a.completePublish(ctx, execution, receipt, "已入库并校验完成。", evidence, result); err != nil {
+	message := "已入库并校验完成。"
+	if len(receipt.Receipts) > 30 || len(receipt.MissingTracks) > 0 {
+		summary, err := json.Marshal(struct {
+			Tracks  []publishReceipt `json:"tracks"`
+			Missing []string         `json:"missing_tracks,omitempty"`
+		}{receipt.Receipts, receipt.MissingTracks})
+		if err != nil {
+			return scheduler.Outcome{}, err
+		}
+		evidence = append(evidence, workflow.EvidenceInput{ID: "result-" + receipt.RequestID, Kind: "catalog", Source: "local-library", SubjectID: receipt.RootID, Payload: summary, TracklistVerified: len(receipt.MissingTracks) == 0})
+	}
+	if len(receipt.MissingTracks) > 0 {
+		message = fmt.Sprintf("已部分入库并校验：%d 首；仍缺 %d 首无损。首个缺口：%s", len(verified), len(receipt.MissingTracks), receipt.MissingTracks[0])
+	}
+	if err := a.completePublish(ctx, execution, receipt, message, evidence, result); err != nil {
 		return scheduler.Outcome{}, err
 	}
-	return scheduler.Outcome{State: "completed", Message: "已入库并校验完成"}, nil
+	return scheduler.Outcome{State: "completed", Message: message}, nil
 }
 
 // failPublish fails the publish task and moves the job to the "failed"

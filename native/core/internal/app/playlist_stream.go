@@ -49,9 +49,9 @@ func (a *App) ingestPlaylistStream(ctx context.Context, job workflow.Job, plan S
 	return publishReceipt{TrackID: strconv.Itoa(position), RequestID: id, SHA256: result.SHA256, Format: result.Format, Origin: result.Origin, SourceName: result.SourceName, DecodeState: result.DecodeState, Scrape: scrape}, nil
 }
 
-func (a *App) finishPlaylistStreams(held taskrepo.Token, job workflow.Job, items []publishReceipt, message string) (scheduler.Outcome, error) {
+func (a *App) finishPlaylistStreams(held taskrepo.Token, job workflow.Job, items []publishReceipt, message string, missing ...string) (scheduler.Outcome, error) {
 	payload, err := json.Marshal(publishPayload{RootID: job.RootID, RequestID: publishRequestID(job.RootID, "stream"),
-		Receipts: items})
+		Receipts: items, MissingTracks: missing})
 	if err != nil {
 		return scheduler.Outcome{}, err
 	}

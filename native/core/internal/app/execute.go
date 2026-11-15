@@ -30,6 +30,7 @@ type SearchPlan struct {
 	PlaylistImport bool `json:"playlist_import,omitempty"`
 	// PlaylistMode: "all" starts every track right after the list is read;
 	// empty parks the list so the page can show it and send a selection.
+	NeteaseTrackOnly    bool                 `json:"netease_track_only,omitempty"`
 	NeteaseOnly         bool                 `json:"netease_only,omitempty"`
 	NeteaseSongID       int64                `json:"netease_song_id,omitempty"`
 	NeteaseAlbumID      int64                `json:"netease_album_id,omitempty"`

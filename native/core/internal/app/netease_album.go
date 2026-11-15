@@ -121,6 +121,9 @@ func (a *App) acquireNeteaseAlbum(ctx context.Context, execution *scheduler.Exec
 	missing := []string{}
 	for i := range tracks {
 		song := &tracks[i]
+		if plan.NeteaseTrackOnly && song.ID != anchor.ID {
+			continue
+		}
 		if err := execution.Checkpoint(ctx, "netease_album", float64(i)*100/float64(len(tracks)), song.Name); err != nil {
 			return scheduler.Outcome{}, err
 		}
@@ -152,6 +155,9 @@ func (a *App) acquireNeteaseAlbum(ctx context.Context, execution *scheduler.Exec
 	if len(stagedFiles) == 0 {
 		if len(missing) > 0 {
 			return review("没有可入库的无损缺轨："+missing[0], "NETEASE_ALBUM_INCOMPLETE")
+		}
+		if plan.NeteaseTrackOnly {
+			return a.finishSkipAcquire(held, job, "网易云歌单目标曲目已在库")
 		}
 		return a.finishSkipAcquire(held, job, "网易云专辑的全部曲目已在库")
 	}

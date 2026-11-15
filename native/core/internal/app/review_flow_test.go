@@ -111,6 +111,15 @@ func TestModelPassCannotOverrideMissingEvidence(t *testing.T) {
 	if job.SearchAction == "queue_request" || calls.Load() == 0 || strings.Contains(job.Message, "已入库") {
 		t.Fatal(job.SearchAction, job.Message, calls.Load())
 	}
+	recorder := postCode(t, application, "/v1/jobs/"+job.ID+"/review", map[string]any{"action": "ai"})
+	if recorder.Code != http.StatusConflict || !strings.Contains(recorder.Body.String(), "AI_NO_CONFIRMED_MATCH") {
+		t.Fatal(recorder.Code, recorder.Body.String())
+	}
+	unchanged := inspect(t, application, job.ID)
+	if unchanged.Job.Stage != "needs_review" {
+		t.Fatal(unchanged.Job)
+	}
+
 }
 
 type reviewCaller struct {

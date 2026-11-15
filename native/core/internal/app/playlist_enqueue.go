@@ -277,7 +277,7 @@ func (a *App) startPlaylistAlbumJob(ctx context.Context, client *musicbrainz.Cli
 		RootJobID: jobID, Scene: "expand",
 		Query: strings.TrimSpace(artist + " " + expected), ExpectedTitle: expected, ExpectedArtist: artist,
 		EnabledSites: sites, StreamingEnabled: true, Identity: identity, Budget: budget, PlaylistTrack: title,
-		NeteaseOnly: neteaseOnly, NeteaseSongID: row.NeteaseSongID, NeteaseAlbumID: row.NeteaseAlbumID,
+		NeteaseOnly: neteaseOnly, NeteaseTrackOnly: neteaseOnly && !albumCompletion, NeteaseSongID: row.NeteaseSongID, NeteaseAlbumID: row.NeteaseAlbumID,
 	}
 	raw, err := json.Marshal(plan)
 	if err != nil {

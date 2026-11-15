@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/wsdbb72/MusicOps/native/core/internal/dataengine"
+	"github.com/wsdbb72/MusicOps/native/core/internal/reviewai"
 	"github.com/wsdbb72/MusicOps/native/core/internal/searchdecision"
 	"github.com/wsdbb72/MusicOps/native/core/internal/trackersearch"
 	"github.com/wsdbb72/MusicOps/native/core/internal/workflow"
@@ -164,6 +165,7 @@ func (a *App) reviewData(w http.ResponseWriter, r *http.Request) {
 		"ok": true, "job": publicJob(inspection.Job), "review_kind": inspection.Job.ReviewKind,
 		"message": inspection.Job.Message, "expected_title": expectedTitle, "expected_artist": expectedArtist,
 		"sites": sites, "candidates": candidates, "actions": actions,
+		"ai_review_available": a.reviewModel != nil && len(candidates) > 0 && inspection.Job.Stage == "needs_review" && inspection.Job.TaskType == "search",
 	})
 }
 
@@ -202,7 +204,7 @@ func (a *App) reviewJob(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	switch body.Action {
-	case "accept", "retry", "skip":
+	case "accept", "retry", "skip", "ai":
 	default:
 		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "code": "INVALID_REQUEST"})
 		return
@@ -210,12 +212,60 @@ func (a *App) reviewJob(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	nowNS := time.Now().UnixNano()
 	requestID := "review-" + id + "-" + body.Action + "-" + strconv.FormatInt(nowNS, 10)
+	if body.Action == "ai" {
+		a.reviewWithAI(w, r, id, requestID, nowNS)
+		return
+	}
 	if body.Action == "accept" {
 		a.reviewAccept(w, id, requestID, body.Site, body.CandidateID, nowNS)
 		return
 	}
 	result, err := a.flows.Review(requestID, id, workflow.ReviewDecision{Action: body.Action}, nowNS)
 	a.writeReviewResult(w, result, err, body.Action)
+}
+
+func (a *App) reviewWithAI(w http.ResponseWriter, r *http.Request, id, requestID string, nowNS int64) {
+	inspection, err := a.flows.Inspect(id)
+	if err != nil || inspection.Task == nil || inspection.Job.Stage != "needs_review" || inspection.Job.TaskType != "search" {
+		writeJSON(w, http.StatusConflict, map[string]any{"ok": false, "code": "REVIEW_UNAVAILABLE"})
+		return
+	}
+	if a.reviewModel == nil || a.reviews == nil {
+		writeJSON(w, http.StatusConflict, map[string]any{"ok": false, "code": "AI_UNAVAILABLE", "message": "请先启用 AI 并保存 API 密钥"})
+		return
+	}
+	raw, found, err := a.tasks.Data(inspection.Task.ID, "arguments", 0)
+	plan, planErr := decodePlan(raw)
+	if err != nil || !found || planErr != nil {
+		writeJSON(w, http.StatusConflict, map[string]any{"ok": false, "code": "REVIEW_UNAVAILABLE"})
+		return
+	}
+	observations, _, _, err := a.reviewObservations(inspection, plan)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "code": "REVIEW_UNAVAILABLE"})
+		return
+	}
+	pool := []reviewai.Candidate{}
+	sites := map[string]string{}
+	for _, site := range searchdecision.TrackerSites {
+		obs := observations[site]
+		_, _, items := summarizeSite(plan, site, obs)
+		pool = append(pool, items...)
+		if obs.Status != "OK" {
+			continue
+		}
+		for _, hit := range obs.Candidates {
+			if site == "open.cd" || hit.Seeders != nil && *hit.Seeders > 0 {
+				sites[hit.CandidateID] = site
+			}
+		}
+	}
+	advice := a.reviews.Advise(r.Context(), a.reviewModel, reviewai.Request{ExpectedTitle: plan.ExpectedTitle, ExpectedArtist: plan.ExpectedArtist, Candidates: pool})
+	if site := sites[advice.CandidateID]; advice.Pass && site != "" && inspection.Job.ReviewKind == "candidate" {
+		a.reviewAccept(w, id, requestID, site, advice.CandidateID, nowNS)
+		return
+	}
+	writeJSON(w, http.StatusConflict, map[string]any{"ok": false, "code": "AI_NO_CONFIRMED_MATCH", "reason": advice.Reason, "message": "AI 未能核实可下载的发行版"})
 }
 
 func (a *App) reviewAccept(w http.ResponseWriter, id, requestID, site, candidateID string, nowNS int64) {

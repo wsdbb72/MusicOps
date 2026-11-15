@@ -1940,6 +1940,7 @@ const appJS = `(function () {
       var allowed = {};
       (body.actions || []).forEach(function (action) { allowed[action.action] = action; });
       html += '<p id="review-actions">';
+      if (body.ai_review_available) html += '<button type="button" id="review-ai">AI 核对</button> ';
       if (allowed.accept && allowed.accept.allowed) html += '<button type="button" id="review-accept" class="primary">接受选中</button> ';
       else if (allowed.accept) html += '<span class="meta">接受不可用：' + escapeText(allowed.accept.reason || "") + "</span> ";
       if (allowed.retry && allowed.retry.allowed) html += '<button type="button" id="review-retry">重试</button> ';
@@ -1952,6 +1953,8 @@ const appJS = `(function () {
       if (body.review_kind === "candidate" || body.review_kind === "token") html += ' <button type="button" id="review-download" class="primary">继续下载</button>';
       html += "</p>";
       box.innerHTML = html;
+      var aiReview = document.getElementById("review-ai");
+      if (aiReview) aiReview.addEventListener("click", function () { reviewAction("ai"); });
       var accept = document.getElementById("review-accept");
       if (accept) accept.addEventListener("click", function () { reviewAction("accept"); });
       var retry = document.getElementById("review-retry");
@@ -1977,15 +1980,15 @@ const appJS = `(function () {
       candidateID = picked.value;
     }
     setBusy(true);
-    setStatus("info", "正在处理核对");
+    setStatus("info", action === "ai" ? "AI 正在核对候选" : "正在处理核对");
     try {
       var response = await fetch("/v1/jobs/" + encodeURIComponent(currentJob.job_id) + "/review", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({action: action, site: site, candidate_id: candidateID})});
       var body = await response.json();
       if (!response.ok || !body || !body.ok) {
-        setStatus("fail", "核对操作失败。" + (body && body.code ? "（" + body.code + "）" : ""));
+        setStatus("fail", (body && body.message) || ("核对操作失败。" + (body && body.code ? "（" + body.code + "）" : "")));
         return;
       }
-      setStatus(action === "skip" ? "review" : "ok", action === "accept" ? "已接受候选，继续处理。" : (action === "retry" ? "已重试。" : "已跳过。"));
+      setStatus(action === "skip" ? "review" : "ok", (action === "accept" || action === "ai") ? "已接受候选，继续处理。" : (action === "retry" ? "已重试。" : "已跳过。"));
     } catch (err) {
       setStatus("fail", "核对操作中断。");
     } finally {

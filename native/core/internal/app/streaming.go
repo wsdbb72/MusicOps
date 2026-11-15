@@ -178,12 +178,28 @@ func (a *App) playlistFile(rootJobID string) (string, bool) {
 // It replaces the old "尚未接入" punt: the walk really runs, each source's
 // outcome is recorded, and the job ends in needs_review with the walk as
 // evidence instead of an empty placeholder message.
+// Batch IDs come from the saved playlist slug. Using the batch ID also
+// applies this to jobs already persisted before source routing was added.
+func isNeteasePlaylistFallback(batchID string, plan SearchPlan) bool {
+	return strings.HasPrefix(batchID, "pl-netease-") && plan.PlaylistTrack != ""
+}
+
+func playlistFallbackSteps(order []string, neteaseOnly bool) ([]downloadpolicy.Step, error) {
+	steps, err := downloadpolicy.PlanOrdered(downloadpolicy.DefaultSources(), order, downloadpolicy.Track{SourceKnown: neteaseOnly})
+	if err != nil || !neteaseOnly {
+		return steps, err
+	}
+	for _, step := range steps {
+		if step.Name == "netease" {
+			return []downloadpolicy.Step{step}, nil
+		}
+	}
+	return nil, errors.New("网易云回退源未启用")
+}
+
 func (a *App) acquireFallback(ctx context.Context, execution *scheduler.Execution, held taskrepo.Token, job workflow.Job, plan SearchPlan) (scheduler.Outcome, error) {
-	// The fallback job carries album-level identity only; it has no
-	// per-track source or identifying information, so the playlist step
-	// stays in the plan. The walk follows the saved streaming order
-	// (canonical when nothing was saved).
-	steps, err := downloadpolicy.PlanOrdered(downloadpolicy.DefaultSources(), a.streamingOrder(), downloadpolicy.Track{})
+	neteaseOnly := isNeteasePlaylistFallback(job.BatchID, plan)
+	steps, err := playlistFallbackSteps(a.streamingOrder(), neteaseOnly)
 	if err != nil {
 		return scheduler.Outcome{}, err
 	}
@@ -234,6 +250,11 @@ func (a *App) acquireFallback(ctx context.Context, execution *scheduler.Executio
 					}
 					continue
 				}
+			}
+			if neteaseOnly {
+				outcomes = append(outcomes, downloadpolicy.Outcome{Source: step.Name, Class: downloadpolicy.ClassAuth})
+				notes = append(notes, "网易云歌单需要已登录的网易云账号，没有切换到其他平台")
+				continue
 			}
 			// Without a configured engine the note stays "未接入". A saved
 			// file is a download only after the FLAC check inside

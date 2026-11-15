@@ -72,7 +72,8 @@ func (a *App) acquire(ctx context.Context, execution *scheduler.Execution, paylo
 	// a real loss with no benefit. sitefree only reports Global when the
 	// response was about this resource id, so a stray flag cannot route an
 	// unrelated torrent here.
-	if decision.Personal || decision.Global {
+	strictFL := strings.HasPrefix(job.BatchID, "pl-") && (site == "dicmusic" || site == "orpheus")
+	if !strictFL && (decision.Personal || decision.Global) {
 		receipt, err := a.fetchTorrent(ctx, execution, plan, site, resource, false)
 		if err != nil {
 			return a.finishAcquire(held, *job, "candidate", "种子响应不是有效元信息；尚未下载、尚未入库", "PARSE_ERROR", nil)
@@ -91,6 +92,12 @@ func (a *App) acquire(ctx context.Context, execution *scheduler.Execution, paylo
 			return a.finishSkipAcquire(held, *job, "没有配置令牌预算：为避免产生普通下载量，已跳过；尚未下载、尚未入库")
 		}
 		return a.acquireWithToken(ctx, execution, held, *job, plan, site, resource, decision)
+	}
+	if strictFL {
+		if plan.PlaylistTrack != "" && plan.StreamingEnabled && normalizeKey(plan.PlaylistTrack) == normalizeKey(plan.ExpectedTitle) {
+			return a.acquireFallback(ctx, execution, held, *job, plan)
+		}
+		return a.finishSkipAcquire(held, *job, "本批次要求 FL 令牌，详情没有可核实的令牌按钮；未发下载请求")
 	}
 	// No personal free and no token button: the only way left would be a
 	// normal download, which spends ratio. Skipping is the honest outcome.
@@ -280,6 +287,10 @@ func (a *App) confirmTokenFromSite(ctx context.Context, execution *scheduler.Exe
 	}
 	if receipt != nil {
 		outcome, err := a.finishConfirmedToken(held, job, "站点已确认免费生效，种子已保存；尚未下载、尚未入库", "", receipt)
+		return outcome, true, err
+	}
+	if strings.HasPrefix(job.BatchID, "pl-") && (site == "dicmusic" || site == "orpheus") {
+		outcome, err := a.finishAcquire(held, job, "token", "站点已确认免费，但没有收到令牌种子；未改用普通下载链接", "SPEND_CONFIRMED", nil)
 		return outcome, true, err
 	}
 	return a.saveFreeTorrent(ctx, execution, held, job, plan, site, resource)

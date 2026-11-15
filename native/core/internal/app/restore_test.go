@@ -60,6 +60,34 @@ func TestReindexListsGapsAndDoesNotDeleteAudio(t *testing.T) {
 	}
 }
 
+func TestReindexKeepsMultipleUnnumberedFilesAndDoesNotConvertWAV(t *testing.T) {
+	application := newApp(t)
+	library := t.TempDir()
+	files := map[string][]byte{"first.wav": pcmWAV(100), "second.wav": pcmWAV(200)}
+	for name, data := range files {
+		if err := os.WriteFile(filepath.Join(library, name), data, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	post(t, application, "/v1/settings/library", map[string]any{"library_dir": library})
+	reply := post(t, application, "/v1/library/reindex", map[string]any{})
+	if reply["added"] != float64(2) {
+		t.Fatal(reply)
+	}
+	for name, want := range files {
+		if got, err := os.ReadFile(filepath.Join(library, name)); err != nil || !bytes.Equal(got, want) {
+			t.Fatal(name, err)
+		}
+	}
+	if entries, err := os.ReadDir(library); err != nil || len(entries) != len(files) {
+		t.Fatal(entries, err)
+	}
+	replay := post(t, application, "/v1/library/reindex", map[string]any{})
+	if replay["added"] != float64(0) || replay["kept"] != float64(2) {
+		t.Fatal(replay)
+	}
+}
+
 func TestCompilationPreviewDoesNotMoveUntilMerge(t *testing.T) {
 	application := newApp(t)
 	library := filepath.Join(t.TempDir(), "music")

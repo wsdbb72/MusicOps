@@ -18,13 +18,14 @@ import (
 // the single-track local-import path; Receipts carries the multi-track
 // download path.
 type publishReceipt struct {
-	TrackID     string `json:"track_id"`
-	RequestID   string `json:"request_id"`
-	SHA256      string `json:"sha256"`
-	Format      string `json:"format"`
-	Origin      string `json:"origin"`
-	SourceName  string `json:"source_name"`
-	DecodeState string `json:"decode_state"`
+	TrackID     string                `json:"track_id"`
+	RequestID   string                `json:"request_id"`
+	SHA256      string                `json:"sha256"`
+	Format      string                `json:"format"`
+	Origin      string                `json:"origin"`
+	SourceName  string                `json:"source_name"`
+	DecodeState string                `json:"decode_state"`
+	Scrape      *playlistScrapeResult `json:"scrape,omitempty"`
 }
 
 // publishPayload is the receipt one verified ingest hands to the publish task.
@@ -149,7 +150,10 @@ func (a *App) publishReceipts(ctx context.Context, execution *scheduler.Executio
 			return a.failPublish(execution, receipt, "VERIFY_FAILED", "library record does not match the release receipt")
 		}
 		verified = append(verified, record)
-		encoded, err := json.Marshal(record)
+		encoded, err := json.Marshal(struct {
+			audiorelease.Result
+			Scrape *playlistScrapeResult `json:"scrape,omitempty"`
+		}{record, item.Scrape})
 		if err != nil {
 			return scheduler.Outcome{}, err
 		}

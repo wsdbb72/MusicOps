@@ -153,3 +153,28 @@ func simplifiedTitleAccept(expected, observed string) bool {
 	}
 	return !searchdecision.TitlesConflict(observed, expected)
 }
+
+func TestBilingualTrackerArtistCredit(t *testing.T) {
+	for _, credit := range []string{"夏日入侵企画 (Summer Warz)", "Summer Warz（夏日入侵企画）"} {
+		if !Compare("极恶都市", "夏日入侵企画", Hit{Title: "极恶都市", Artists: []string{credit}}).Pass {
+			t.Fatal(credit)
+		}
+	}
+	for _, credit := range []string{"夏日入侵企画乐队 (Summer Warz)", "夏日入侵企画 (其他歌手)"} {
+		if Compare("极恶都市", "夏日入侵企画", Hit{Title: "极恶都市", Artists: []string{credit}}).Pass {
+			t.Fatal("unproven artist credit accepted", credit)
+		}
+	}
+}
+
+func TestLivePlaylistEvidenceMatchesBilingualReleaseAndSplitCredit(t *testing.T) {
+	if !Compare("丑奴儿", "草东没有派对", Hit{Title: "丑奴儿 (The Servile)", Artists: []string{"草东没有派对 (No Party For Cao Dong)"}}).Pass {
+		t.Fatal("exact bilingual release title was rejected")
+	}
+	if !Compare("Stranger Things, Vol. 1", "Kyle Dixon & Michael Stein", Hit{Title: "Stranger Things, Vol. 1", Artists: []string{"Kyle Dixon", "Michael Stein"}}).Pass {
+		t.Fatal("separate structured credits were rejected")
+	}
+	if Compare("Stranger Things, Vol. 1", "Kyle Dixon & Michael Stein", Hit{Title: "Stranger Things, Vol. 2", Artists: []string{"Kyle Dixon", "Michael Stein"}}).Pass {
+		t.Fatal("different volume was accepted")
+	}
+}

@@ -151,13 +151,14 @@ func (a *App) neteaseSearchSong(ctx context.Context, plan SearchPlan) (*neteaseS
 		Code   int `json:"code"`
 		Result struct {
 			Songs []struct {
-				ID      int64   `json:"id"`
-				Name    string  `json:"name"`
+				ID      int64  `json:"id"`
+				Name    string `json:"name"`
 				Artists []struct {
 					Name string `json:"name"`
 				} `json:"artists"`
 				Album struct {
 					Name string `json:"name"`
+					Size int    `json:"size"`
 				} `json:"album"`
 				Duration int `json:"duration"`
 			} `json:"songs"`
@@ -174,6 +175,7 @@ func (a *App) neteaseSearchSong(ctx context.Context, plan SearchPlan) (*neteaseS
 		wantTitle = foldTagText(plan.Query)
 	}
 	wantArtist := foldTagText(plan.ExpectedArtist)
+	wantParts := strings.Split(plan.ExpectedArtist, "/")
 	best := (*neteaseSong)(nil)
 	for _, item := range decoded.Result.Songs {
 		if item.ID <= 0 || strings.TrimSpace(item.Name) == "" {
@@ -193,6 +195,9 @@ func (a *App) neteaseSearchSong(ctx context.Context, plan SearchPlan) (*neteaseS
 			if wantArtist != "" && (foldTagText(name) == wantArtist || strings.Contains(foldTagText(name), wantArtist)) {
 				artistMatch = true
 			}
+		}
+		if plan.PlaylistTrack != "" {
+			artistMatch = playlistArtistsMatch(wantParts, artists) && normalizeKey(item.Album.Name) == normalizeKey(plan.ExpectedTitle) && item.Album.Size <= 1
 		}
 		if !artistMatch || len(artists) == 0 {
 			continue
@@ -346,4 +351,20 @@ func (a *App) tryNeteaseStream(ctx context.Context, plan SearchPlan) (string, st
 		return "", "netease 写入标签失败，文件已删除", downloadpolicy.ClassNoResult, true
 	}
 	return path, "netease 已取到无损音频并通过校验（" + song.Name + "）", downloadpolicy.ClassDownload, true
+}
+
+func playlistArtistsMatch(want, got []string) bool {
+	for _, expected := range want {
+		found := false
+		for _, actual := range got {
+			if normalizeKey(expected) == normalizeKey(actual) && normalizeKey(expected) != "" {
+				found = true
+				break
+			}
+		}
+		if !found {
+			return false
+		}
+	}
+	return len(want) > 0
 }

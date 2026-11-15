@@ -70,6 +70,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/wsdbb72/MusicOps/native/core/internal/audiorelease"
 	"github.com/wsdbb72/MusicOps/native/core/internal/dataengine"
@@ -104,6 +105,7 @@ type downloadPlan struct {
 	ExpectedTitle  string `json:"expected_title"`
 	ExpectedArtist string `json:"expected_artist,omitempty"`
 	FreeConfirmed  bool   `json:"free_confirmed"`
+	PlaylistBatch  bool   `json:"playlist_batch,omitempty"`
 	FreeMethod     string `json:"free_method"`
 	SavePath       string `json:"save_path,omitempty"`
 	Category       string `json:"category,omitempty"`
@@ -626,6 +628,10 @@ func (a *App) buildDownloadPlan(job workflow.Job, savePath, category, tags strin
 	if err != nil {
 		return downloadPlan{}, err
 	}
+	strictFL := strings.HasPrefix(job.BatchID, "pl-") && (receipt.Site == "dicmusic" || receipt.Site == "orpheus")
+	if strictFL && !receipt.UseToken {
+		return downloadPlan{}, errTokenNotSettled
+	}
 	if _, err := a.readTorrentBytes(receipt); err != nil {
 		return downloadPlan{}, err
 	}
@@ -645,6 +651,9 @@ func (a *App) buildDownloadPlan(job workflow.Job, savePath, category, tags strin
 		case tokenledger.StateConfirmed, tokenledger.StateConsumed:
 			freeMethod = "token"
 		case tokenledger.StateRequestUnknown, tokenledger.StateExpired:
+			if strictFL {
+				return downloadPlan{}, errTokenNotSettled
+			}
 			// D3 balanced: the request was sent once and the bytes are in
 			// hand. Downloading cannot spend a second token, so it proceeds
 			// while reconciliation decides CONFIRMED or RELEASED_NOT_CONSUMED.
@@ -659,7 +668,7 @@ func (a *App) buildDownloadPlan(job workflow.Job, savePath, category, tags strin
 	return downloadPlan{
 		RootJobID: job.RootID, JobID: job.ID, Site: receipt.Site, ResourceID: receipt.ResourceID,
 		InfoHash: receipt.InfoHash, ExpectedTitle: plan.ExpectedTitle, ExpectedArtist: plan.ExpectedArtist,
-		FreeConfirmed: true, FreeMethod: freeMethod,
+		FreeConfirmed: true, FreeMethod: freeMethod, PlaylistBatch: strings.HasPrefix(job.BatchID, "pl-"),
 		SavePath: savePath, Category: category, Tags: tags,
 	}, nil
 }
@@ -827,9 +836,12 @@ func (a *App) download(ctx context.Context, execution *scheduler.Execution, payl
 		}
 		return a.failDownload(execution, "ARCHIVE_FAILED", "归档失败")
 	}
-	receipts, err := a.ingestDownload(plan, meta, seedDir)
+	receipts, err := a.ingestDownload(ctx, plan, meta, seedDir)
 	if err != nil {
 		if df, ok := err.(*downloadFailure); ok {
+			if df.Class == "ALREADY_IN_LIBRARY" {
+				return a.finishSkipAcquire(held, *job, df.Message)
+			}
 			return a.failDownload(execution, df.Class, df.Message)
 		}
 		return a.failDownload(execution, "INGEST_FAILED", "入库失败")
@@ -957,6 +969,7 @@ func (a *App) startIfStopped(ctx context.Context, execution *scheduler.Execution
 // retry to resume.
 func (a *App) pollDownload(ctx context.Context, execution *scheduler.Execution, client *qbittorrent.Client, rec *qbittorrent.Record, evidence qbittorrent.FreeEvidence, jobID string) (scheduler.Outcome, bool, error) {
 	deadline := time.Now().Add(downloadPollTimeout)
+	observedRunning := false
 	for {
 		// A cancel is checked here as well as at the checkpoint: the control
 		// that cancels the job also removes the torrent, so a poll that read
@@ -997,10 +1010,21 @@ func (a *App) pollDownload(ctx context.Context, execution *scheduler.Execution, 
 		case qbittorrent.OutcomeComplete:
 			return scheduler.Outcome{}, false, nil
 		case qbittorrent.OutcomeStopped:
-			// A paused job pauses its torrent; the race where the torrent
-			// stops before the job's pause lands must not be reported as a
-			// failure. Wait for the resume instead.
 			if job, jobErr := a.flows.Job(jobID); jobErr == nil && job != nil && job.Paused {
+				if err := a.wait(ctx, downloadPollInterval); err != nil {
+					return scheduler.Outcome{}, false, err
+				}
+				continue
+			}
+			// A new torrent may first appear as checking/resuming and only
+			// then reach the stopped state. Start it once at that point.
+			if !observedRunning && rec.StartRequestedAt.IsZero() {
+				rec.State = qbittorrent.StateStopped
+				if err := client.StartDownload(ctx, rec, evidence); err != nil {
+					return a.failDownloadStep(execution, "START_FAILED", "qBittorrent 启动未成功")
+				}
+			}
+			if !observedRunning && !rec.StartRequestedAt.IsZero() && time.Since(rec.StartRequestedAt) < 20*time.Second {
 				if err := a.wait(ctx, downloadPollInterval); err != nil {
 					return scheduler.Outcome{}, false, err
 				}
@@ -1010,6 +1034,9 @@ func (a *App) pollDownload(ctx context.Context, execution *scheduler.Execution, 
 		case qbittorrent.OutcomeBlocked:
 			return a.failDownloadStep(execution, "DOWNLOAD_BLOCKED", "qBittorrent 报告错误或文件缺失")
 		default:
+			if result.Outcome == qbittorrent.OutcomeDownloading {
+				observedRunning = true
+			}
 			if err := a.wait(ctx, downloadPollInterval); err != nil {
 				return scheduler.Outcome{}, false, err
 			}
@@ -1052,15 +1079,8 @@ func (a *App) finishDownload(execution *scheduler.Execution, held taskrepo.Token
 	}); err != nil {
 		return scheduler.Outcome{}, err
 	}
-	// A failure here must not interrupt the job: the download task already
-	// completed, and the validating task carries the same receipts and
-	// re-attempts this same RecordRelease idempotently (see
-	// finishValidating), so the chain still completes.
-	_, _ = a.flows.RecordRelease(workflow.RecordReleaseInput{
-		JobID: plan.RootJobID, RequestID: "record-" + payload.RequestID,
-		Evidence: workflow.EvidenceInput{ID: "pub-" + payload.RequestID, Kind: "catalog", Source: "local-library", SubjectID: plan.RootJobID, TracklistVerified: true, Payload: payloadJSON},
-		Payload:  payloadJSON, NowNS: time.Now().UnixNano(),
-	})
+	// The durable validating task owns the publish handoff. Recording it
+	// here as well caused the same request ID to carry two timestamps.
 	return scheduler.Outcome{State: "completed", Message: "下载完成，已归档做种，音频已交给发布校验；尚未确认入库"}, nil
 }
 
@@ -1285,7 +1305,7 @@ func samePath(a, b string) bool {
 // "Unknown Artist" and the torrent root name when the search carried none
 // (the audio itself is verified either way; the fallback is a library
 // convention, not a confirmed identity claim).
-func (a *App) ingestDownload(plan downloadPlan, meta qbittorrent.Metainfo, seedDir string) ([]publishReceipt, error) {
+func (a *App) ingestDownload(ctx context.Context, plan downloadPlan, meta qbittorrent.Metainfo, seedDir string) ([]publishReceipt, error) {
 	incoming, library := a.workPath("incoming"), a.libraryDir()
 	if err := os.MkdirAll(incoming, 0o700); err != nil || os.MkdirAll(library, 0o700) != nil {
 		return nil, downloadError("INGEST_FAILED", "入库目录不可用")
@@ -1300,13 +1320,19 @@ func (a *App) ingestDownload(plan downloadPlan, meta qbittorrent.Metainfo, seedD
 	if album == "" {
 		album = meta.Name
 	}
-	artist, album = truncateName(artist), truncateName(album)
+	artist, album = publishComponent(artist), publishComponent(album)
+	var existingTracks map[string][]string
+	var trackNumbers map[string]int
+	if plan.PlaylistBatch {
+		existingTracks = a.verifiedPlaylistAlbumTracks(library, artist, album, plan.ExpectedTitle)
+		trackNumbers = playlistTrackNumbers(meta, seedDir)
+	}
 	short := downloadRecordID(plan.JobID)
 	if len(short) > 12 {
 		short = short[:12]
 	}
 	receipts := []publishReceipt{}
-	track := 0
+	track, present := 0, 0
 	for _, f := range meta.Files {
 		if f.Padding {
 			continue
@@ -1316,6 +1342,10 @@ func (a *App) ingestDownload(plan downloadPlan, meta qbittorrent.Metainfo, seedD
 			continue
 		}
 		track++
+		position := track
+		if trackNumbers != nil {
+			position = trackNumbers[f.Path]
+		}
 		title := truncateName(strings.TrimSuffix(filepath.Base(f.Path), filepath.Ext(f.Path)))
 		if title == "" {
 			title = fmt.Sprintf("Track %d", track)
@@ -1324,6 +1354,13 @@ func (a *App) ingestDownload(plan downloadPlan, meta qbittorrent.Metainfo, seedD
 		source, err := archiveJoin(seedDir, f.Path)
 		if err != nil {
 			return nil, downloadError("INGEST_FAILED", "种子文件路径越界："+f.Path)
+		}
+		if plan.PlaylistBatch && ext == ".flac" && len(existingTracks) > 0 {
+			if tags, err := readFLACTagsPrefix(source); err == nil &&
+				normalizeKey(tags.Album) == normalizeKey(planAlbum) && playlistSamePCM(source, existingTracks[normalizeKey(tags.Title)]) {
+				present++
+				continue
+			}
 		}
 		incomingName := fmt.Sprintf("dl-%s-%02d-%s", short, track, filepath.Base(f.Path))
 		if err := copyIncoming(source, filepath.Join(incoming, incomingName)); err != nil {
@@ -1348,11 +1385,19 @@ func (a *App) ingestDownload(plan downloadPlan, meta qbittorrent.Metainfo, seedD
 				title = truncateName(compared.After.Title)
 			}
 		}
-		result, err := audiorelease.Release(context.Background(), a.engine, audiorelease.Request{
-			RequestID: audioRequestID(plan.RootJobID, track), RootID: plan.RootJobID,
-			Artist: trackArtist, Album: trackAlbum, Title: title, Track: track,
+		var scrape *playlistScrapeResult
+		if plan.PlaylistBatch {
+			var err error
+			incomingName, title, scrape, err = a.scrapePlaylistIncoming(ctx, incoming, incomingName, trackArtist, trackAlbum, title, position)
+			if err != nil {
+				return nil, downloadError("SCRAPE_FAILED", "刮削未写完："+filepath.Base(f.Path))
+			}
+		}
+		result, err := audiorelease.Release(ctx, a.engine, audiorelease.Request{
+			RequestID: audioRequestID(plan.RootJobID, position), RootID: plan.RootJobID,
+			Artist: publishComponent(trackArtist), Album: publishComponent(trackAlbum), Title: publishComponent(title), Track: position,
 			SourceName: incomingName, Origin: "local_import",
-			Incoming: incoming, Library: library, Decoder: audiorelease.SystemDecoder(),
+			Incoming: incoming, Library: library, Decoder: audiorelease.SystemDecoder(), InternalDownload: true,
 		})
 		if err != nil {
 			class := "INGEST_FAILED"
@@ -1368,16 +1413,122 @@ func (a *App) ingestDownload(plan downloadPlan, meta qbittorrent.Metainfo, seedD
 			}
 			return nil, downloadError(class, "入库失败："+filepath.Base(f.Path))
 		}
+		if scrape != nil && scrape.lyrics != "" {
+			path, found, err := audiorelease.PathFor(a.engine, result.RequestID)
+			if err != nil || !found {
+				return nil, downloadError("SCRAPE_FAILED", "未找到入库文件来写歌词")
+			}
+			if !hasLyricsSidecar(path) {
+				if err := writeLyricsSidecar(path, scrape.lyrics); err != nil {
+					return nil, downloadError("SCRAPE_FAILED", "歌词侧车写入失败")
+				}
+			}
+		}
 		receipts = append(receipts, publishReceipt{
-			TrackID: strconv.Itoa(track), RequestID: result.RequestID, SHA256: result.SHA256,
+			TrackID: strconv.Itoa(position), RequestID: result.RequestID, SHA256: result.SHA256,
 			Format: result.Format, Origin: result.Origin, SourceName: result.SourceName,
-			DecodeState: result.DecodeState,
+			DecodeState: result.DecodeState, Scrape: scrape,
 		})
 	}
 	if len(receipts) == 0 {
+		if present > 0 {
+			return nil, downloadError("ALREADY_IN_LIBRARY", "此发行的曲目已在库，保留原文件，未重复入库")
+		}
 		return nil, downloadError("NO_AUDIO", "种子内没有可入库的音频文件")
 	}
 	return receipts, nil
+}
+
+// Preserve the recorded positions only when every file has a distinct
+// position. Multi-disc or incomplete credits keep the manifest sequence.
+func playlistTrackNumbers(meta qbittorrent.Metainfo, seedDir string) map[string]int {
+	numbers, used := map[string]int{}, map[int]bool{}
+	for _, file := range meta.Files {
+		if file.Padding {
+			continue
+		}
+		switch strings.ToLower(filepath.Ext(file.Path)) {
+		case ".wav":
+			return nil
+		case ".flac":
+		default:
+			continue
+		}
+		path, err := archiveJoin(seedDir, file.Path)
+		if err != nil {
+			return nil
+		}
+		tags, err := readFLACTagsPrefix(path)
+		if err != nil || tags.TrackNumber < 1 || tags.TrackNumber > 999 || used[tags.TrackNumber] {
+			return nil
+		}
+		numbers[file.Path] = tags.TrackNumber
+		used[tags.TrackNumber] = true
+	}
+	return numbers
+}
+
+// Use an unchanged indexed local file with matching tags, even when its
+// filename or track position differs from the acquired edition.
+func (a *App) verifiedPlaylistAlbumTracks(library, artist, album, expectedAlbum string) map[string][]string {
+	dir := filepath.Join(library, artist, album)
+	files, err := os.ReadDir(dir)
+	if err != nil {
+		return nil
+	}
+	titles := map[string][]string{}
+	for _, file := range files {
+		if !file.Type().IsRegular() || !strings.EqualFold(filepath.Ext(file.Name()), ".flac") {
+			continue
+		}
+		path := filepath.Join(dir, file.Name())
+		if !audiorelease.PresenceUnchanged(a.engine, libraryFileID(path)) {
+			continue
+		}
+		tags, err := readFLACTagsPrefix(path)
+		if err == nil && normalizeKey(tags.Album) == normalizeKey(expectedAlbum) && normalizeKey(tags.Title) != "" {
+			key := normalizeKey(tags.Title)
+			titles[key] = append(titles[key], path)
+		}
+	}
+	return titles
+}
+
+// The FLAC STREAMINFO block contains the decoded-audio MD5, sample format
+// and sample count. Only matching nonzero checksums can suppress a copy.
+func playlistSamePCM(source string, matches []string) bool {
+	if len(matches) == 0 {
+		return false
+	}
+	read := func(path string) ([24]byte, bool) {
+		var key [24]byte
+		f, err := os.Open(path)
+		if err != nil {
+			return key, false
+		}
+		defer f.Close()
+		var header [42]byte
+		if _, err = io.ReadFull(f, header[:]); err != nil || string(header[:4]) != "fLaC" ||
+			header[4]&0x7f != 0 || header[5] != 0 || header[6] != 0 || header[7] != 34 {
+			return key, false
+		}
+		var zero [16]byte
+		if bytes.Equal(header[26:42], zero[:]) {
+			return key, false
+		}
+		copy(key[:], header[18:42])
+		return key, true
+	}
+	want, ok := read(source)
+	if !ok {
+		return false
+	}
+	for _, candidate := range matches {
+		if got, ok := read(candidate); ok && got == want {
+			return true
+		}
+	}
+	return false
 }
 
 // audioRequestID derives the deterministic release request id for one
@@ -1392,9 +1543,16 @@ func audioRequestID(root string, track int) string {
 // truncateName caps a library name at the 80 characters Release accepts.
 // Longer names are cut, not rejected: the audio is verified either way,
 // and a failed ingest over a long title would block the whole download.
+// publishComponent uses the same cross-platform path rules as library
+// organization, and truncates only at a UTF-8 boundary.
+func publishComponent(name string) string {
+	return cleanFolderComponent(truncateName(name))
+}
+
 func truncateName(name string) string {
-	if len(name) > 80 {
-		return name[:80]
+	for len(name) > 80 {
+		_, size := utf8.DecodeLastRuneInString(name)
+		name = name[:len(name)-size]
 	}
 	return name
 }
@@ -1403,6 +1561,10 @@ func truncateName(name string) string {
 // the same bytes are already there, so a re-run does not ingest twice). A
 // different file under the same name is a conflict, never an overwrite.
 func copyIncoming(source, dest string) error {
+	info, err := os.Lstat(source)
+	if err != nil || !info.Mode().IsRegular() || info.Size() > audiorelease.MaxStagedAudioBytes {
+		return downloadError("AUDIO_REJECTED", "做种音频不是普通文件或超出入库大小限制")
+	}
 	body, err := os.ReadFile(source)
 	if err != nil {
 		return downloadError("AUDIO_MISSING", "做种文件不可读")
@@ -1444,10 +1606,7 @@ func copyIncoming(source, dest string) error {
 // the publish verification is tracked on the root job, which RecordRelease
 // moved to publishing.
 //
-// RecordRelease is called here with the same request id the download
-// executor used, so it is idempotent: when the executor already recorded
-// the release, this call replays it; when the executor crashed before it,
-// this call records it now and no manual POST /v1/audio/release is needed.
+// The validating task is the sole owner of the publish intent.
 func (a *App) finishValidating(execution *scheduler.Execution, held taskrepo.Token, job workflow.Job, payload []byte) (scheduler.Outcome, error) {
 	var receipt publishPayload
 	if err := json.Unmarshal(payload, &receipt); err != nil || receipt.RootID == "" || len(receipt.Receipts) == 0 {
@@ -1457,11 +1616,15 @@ func (a *App) finishValidating(execution *scheduler.Execution, held taskrepo.Tok
 	if err != nil {
 		return scheduler.Outcome{}, err
 	}
+	task, err := a.tasks.Get(held.ID)
+	if err != nil || task == nil {
+		return scheduler.Outcome{}, errors.New("validating task unavailable")
+	}
 	message := "音频已交给发布校验，根任务确认后才算入库"
 	if _, err := a.flows.RecordRelease(workflow.RecordReleaseInput{
 		JobID: receipt.RootID, RequestID: "record-" + receipt.RequestID,
 		Evidence: workflow.EvidenceInput{ID: "pub-" + receipt.RequestID, Kind: "catalog", Source: "local-library", SubjectID: receipt.RootID, TracklistVerified: true, Payload: encoded},
-		Payload:  encoded, NowNS: time.Now().UnixNano(),
+		Payload:  encoded, NowNS: task.CreatedNS,
 	}); err != nil {
 		// The download and ingest are done either way; only the root
 		// publish record failed (the root is paused or cancelled, or the

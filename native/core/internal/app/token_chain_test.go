@@ -587,6 +587,34 @@ func TestGlobalFreeDownloadsWithoutATokenOnBothTokenSites(t *testing.T) {
 	}
 }
 
+func TestPlaylistBatchRejectsDirectDownloadAtRequiredFLTrackers(t *testing.T) {
+	for _, site := range []string{"dicmusic", "orpheus"} {
+		t.Run(site, func(t *testing.T) {
+			var requests atomic.Int32
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch r.URL.Query().Get("action") {
+				case "torrent":
+					io.WriteString(w, `{"status":"success","response":{"group":{"id":10},"torrent":{"id":11,"isFreeleech":true}}}`)
+				case "download":
+					requests.Add(1)
+					io.WriteString(w, sampleTorrent)
+				default:
+					io.WriteString(w, gazelleHit("11"))
+				}
+			}))
+			defer server.Close()
+			a := newApp(t)
+			body := tokenBody("album-required-fl", server.URL, []string{site})
+			body["batch_id"] = "pl-requires-fl"
+			post(t, a, "/v1/search", body)
+			job := waitJob(t, a, "process:search:album-required-fl", "skipped")
+			if requests.Load() != 0 || !strings.Contains(job.Message, "要求 FL 令牌") {
+				t.Fatal(requests.Load(), job.Message)
+			}
+		})
+	}
+}
+
 func TestOpenCDFreeFlagWithoutARowDoesNotDownload(t *testing.T) {
 	var downloads atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

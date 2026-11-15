@@ -12,9 +12,13 @@ package app
 
 import (
 	"context"
+	"encoding/json"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/wsdbb72/MusicOps/native/core/internal/tokenledger"
+	"github.com/wsdbb72/MusicOps/native/core/internal/workflow"
 )
 
 const (
@@ -63,7 +67,11 @@ func (a *App) reconcileTokens(ctx context.Context, now time.Time) int {
 	}
 	// Expiry first: a row past the deadline must leave the in-flight set even
 	// if the balance cannot be read.
-	_, _ = a.ledger.SweepExpired(now, tokenledger.UnknownExpire)
+	expired, _ := a.ledger.SweepExpired(now, tokenledger.UnknownExpire)
+	retrySites := map[string]bool{}
+	for _, row := range expired {
+		retrySites[row.Site] = true
+	}
 	pending, err := a.ledger.Pending()
 	if err != nil {
 		return 0
@@ -97,9 +105,16 @@ func (a *App) reconcileTokens(ctx context.Context, now time.Time) int {
 			}
 			if _, err := a.ledger.AdvancePending(now, row, state, note); err == nil {
 				moved++
+				retrySites[site] = true
+				if state == tokenledger.StateConfirmed {
+					if job, err := a.flows.Job(row.RequestID); err == nil && job != nil && strings.HasPrefix(job.BatchID, "pl-") {
+						a.tryAutoDownload(row.RequestID)
+					}
+				}
 			}
 		}
 	}
+	a.retryHeldPlaylistTokens(now, retrySites)
 	return moved
 }
 
@@ -147,4 +162,33 @@ func reconcileVerdict(now time.Time, row tokenledger.Pending, observation tokenl
 		return "", ""
 	}
 	return tokenledger.StateReleased, "对账：余额两次读数一致，判定这次请求没有扣费"
+}
+
+// Resume just one previously rejected album per site when reconciliation
+// frees the account. Each retry must obtain a fresh balance and reserve again.
+func (a *App) retryHeldPlaylistTokens(now time.Time, sites map[string]bool) {
+	for cursor := []byte(nil); len(sites) > 0; {
+		page, err := a.flows.List(cursor, 100)
+		if err != nil {
+			return
+		}
+		for _, job := range page.Jobs {
+			if job.Stage != "needs_review" || job.ErrorClass != tokenledger.ClassAccountHold || job.Paused || job.CancelRequested || !strings.HasPrefix(job.BatchID, "pl-") {
+				continue
+			}
+			raw, found, err := a.tasks.Data(job.ActiveTaskID, "arguments", 0)
+			var plan SearchPlan
+			if err != nil || !found || json.Unmarshal(raw, &plan) != nil || plan.PlaylistTrack == "" || !sites[plan.SelectedSite] {
+				continue
+			}
+			request := "FL-retry-" + job.ID + "-" + strconv.FormatUint(job.Revision, 10)
+			if _, err := a.flows.Review(request, job.ID, workflow.ReviewDecision{Action: "retry"}, now.UnixNano()); err == nil {
+				delete(sites, plan.SelectedSite)
+			}
+		}
+		if len(page.Next) == 0 {
+			return
+		}
+		cursor = page.Next
+	}
 }

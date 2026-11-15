@@ -49,14 +49,16 @@ type playlistEnqueueReport struct {
 
 // Index only candidate names. Verify bytes lazily for playlist matches.
 type playlistLibraryIndex struct {
-	engine   *dataengine.Engine
-	tracks   map[[3]string][]string
-	verified map[string]bool
+	engine    *dataengine.Engine
+	tracks    map[[3]string][]string
+	albums    map[[2]string][]string
+	verified  map[string]bool
+	tagTitles map[[2]string]map[string]bool
 }
 
 func normalizeKey(s string) string {
 	s = strings.ToLower(strings.TrimSpace(s))
-	replacer := strings.NewReplacer("_", " ", "-", " ", "　", " ", "’", "'", "‘", "'", "“", "\"", "”", "\"")
+	replacer := strings.NewReplacer("_", " ", "-", " ", "/", " ", "　", " ", "’", "'", "‘", "'", "“", "\"", "”", "\"")
 	s = replacer.Replace(s)
 	return strings.Join(strings.Fields(s), " ")
 }
@@ -80,12 +82,12 @@ func trackKeyOfPath(file string) (artist, album, title string) {
 }
 
 func (a *App) playlistLibrary() playlistLibraryIndex {
-	entries, _ := audiorelease.List(a.engine)
+	entries, _ := audiorelease.ListIndexed(a.engine)
 	return indexPlaylistLibrary(a.engine, entries)
 }
 
 func indexPlaylistLibrary(engine *dataengine.Engine, entries []audiorelease.Entry) playlistLibraryIndex {
-	index := playlistLibraryIndex{engine: engine, tracks: map[[3]string][]string{}, verified: map[string]bool{}}
+	index := playlistLibraryIndex{engine: engine, tracks: map[[3]string][]string{}, albums: map[[2]string][]string{}, verified: map[string]bool{}, tagTitles: map[[2]string]map[string]bool{}}
 	for _, entry := range entries {
 		if !entry.FilePresent {
 			continue
@@ -94,23 +96,78 @@ func indexPlaylistLibrary(engine *dataengine.Engine, entries []audiorelease.Entr
 		if artist != "" && artist != "." && album != "" && album != "." && title != "" {
 			key := [3]string{artist, album, title}
 			index.tracks[key] = append(index.tracks[key], entry.RequestID)
+			albumKey := [2]string{artist, album}
+			index.albums[albumKey] = append(index.albums[albumKey], entry.RequestID)
 		}
 	}
 	return index
 }
 
 func (index playlistLibraryIndex) hasTrack(artist, album, title string) bool {
-	if strings.TrimSpace(album) == "" {
+	key := [2]string{normalizeKey(artist), normalizeKey(album)}
+	want := normalizeKey(title)
+	if key[0] == "" || key[1] == "" || want == "" {
 		return false
 	}
-	for _, id := range index.tracks[[3]string{normalizeKey(artist), normalizeKey(album), normalizeKey(title)}] {
-		ok, checked := index.verified[id]
-		if !checked {
-			_, err := audiorelease.Verify(index.engine, id)
-			ok = err == nil
-			index.verified[id] = ok
+	for _, id := range index.tracks[[3]string{key[0], key[1], want}] {
+		if index.isUnchanged(id) {
+			return true
 		}
-		if ok {
+	}
+	titles, checked := index.tagTitles[key]
+	if !checked {
+		titles = map[string]bool{}
+		for _, id := range index.albums[key] {
+			if !index.isUnchanged(id) {
+				continue
+			}
+			path, found, err := audiorelease.PathFor(index.engine, id)
+			if err != nil || !found || !strings.EqualFold(filepath.Ext(path), ".flac") {
+				continue
+			}
+			tags, err := readFLACTagsPrefix(path)
+			if err == nil && normalizeKey(tags.Album) == key[1] && normalizeKey(tags.Title) != "" {
+				titles[normalizeKey(tags.Title)] = true
+			}
+		}
+		index.tagTitles[key] = titles
+	}
+	return titles[want]
+}
+
+func (index playlistLibraryIndex) isUnchanged(id string) bool {
+	ok, checked := index.verified[id]
+	if !checked {
+		ok = audiorelease.PresenceUnchanged(index.engine, id)
+		index.verified[id] = ok
+	}
+	return ok
+}
+
+// Only an explicit total in a local file is evidence that a folder has gaps.
+func (index playlistLibraryIndex) hasAlbumGap(artist, album string) bool {
+	ids := index.albums[[2]string{normalizeKey(artist), normalizeKey(album)}]
+	if len(ids) == 0 {
+		return false
+	}
+	for _, id := range ids {
+		path, found, err := audiorelease.PathFor(index.engine, id)
+		if err != nil || !found || !strings.EqualFold(filepath.Ext(path), ".flac") {
+			continue
+		}
+		tags, err := readFLACTagsPrefix(path)
+		if err != nil {
+			continue
+		}
+		total := firstValue(tags.Raw["TRACKTOTAL"])
+		if total == "" {
+			total = firstValue(tags.Raw["TOTALTRACKS"])
+		}
+		if total == "" {
+			_, total, _ = strings.Cut(firstValue(tags.Raw["TRACKNUMBER"]), "/")
+		}
+		count, err := strconv.Atoi(total)
+		if err == nil && count > len(ids) {
 			return true
 		}
 	}
@@ -129,8 +186,11 @@ func (a *App) enqueuePlaylistTracks(ctx context.Context, playlistJobID string, r
 	if settings, err := a.loadDownloadSettings(); err == nil {
 		budget = settings.TokenBudget
 	}
-	client := musicbrainz.NewClient()
+	// Playlist rows lack the measured duration required for catalogue confirmation.
+	// Do not issue one serial external lookup per album while building the queue.
+	var client *musicbrainz.Client
 	if opts.CatalogBaseURL != "" && loopbackURL(opts.CatalogBaseURL) {
+		client = musicbrainz.NewClient()
 		client.BaseURL = opts.CatalogBaseURL
 	}
 	seenAlbums := map[[2]string]bool{}
@@ -149,7 +209,7 @@ func (a *App) enqueuePlaylistTracks(ctx context.Context, playlistJobID string, r
 		}
 		report.Tracks++
 		album := strings.TrimSpace(row.Album)
-		if library.hasTrack(artist, album, title) {
+		if library.hasTrack(artist, album, title) && (!opts.AlbumCompletion || !library.hasAlbumGap(artist, album)) {
 			report.Skipped = append(report.Skipped, artist+" - "+title)
 			continue
 		}
@@ -158,7 +218,7 @@ func (a *App) enqueuePlaylistTracks(ctx context.Context, playlistJobID string, r
 			if seenAlbums[key] {
 				continue
 			}
-			jobID, err := a.startPlaylistAlbumJob(ctx, client, playlistJobID, sites, budget, row)
+			jobID, err := a.startPlaylistAlbumJob(ctx, client, playlistJobID, sites, budget, row, opts.AlbumCompletion)
 			if err != nil {
 				report.Unmatched = append(report.Unmatched, artist+" - "+album+": "+err.Error())
 				continue
@@ -168,7 +228,7 @@ func (a *App) enqueuePlaylistTracks(ctx context.Context, playlistJobID string, r
 			report.Albums++
 			continue
 		}
-		jobID, err := a.startPlaylistAlbumJob(ctx, client, playlistJobID, sites, budget, row)
+		jobID, err := a.startPlaylistAlbumJob(ctx, client, playlistJobID, sites, budget, row, opts.AlbumCompletion)
 		if err != nil {
 			report.Unmatched = append(report.Unmatched, artist+" - "+title+": "+err.Error())
 			continue
@@ -180,7 +240,7 @@ func (a *App) enqueuePlaylistTracks(ctx context.Context, playlistJobID string, r
 
 // startPlaylistAlbumJob creates one expand job. The album is the unit the
 // pipeline works in, so the job is named after it and the row is the evidence.
-func (a *App) startPlaylistAlbumJob(ctx context.Context, client *musicbrainz.Client, playlistJobID string, sites []string, budget int, row playlistTrack) (string, error) {
+func (a *App) startPlaylistAlbumJob(ctx context.Context, client *musicbrainz.Client, playlistJobID string, sites []string, budget int, row playlistTrack, albumCompletion bool) (string, error) {
 	artist := strings.TrimSpace(row.Artist)
 	album := strings.TrimSpace(row.Album)
 	title := strings.TrimSpace(row.Title)
@@ -192,8 +252,18 @@ func (a *App) startPlaylistAlbumJob(ctx context.Context, client *musicbrainz.Cli
 	if len(slug) > 32 {
 		slug = slug[:32]
 	}
-	sum := sha256.Sum256([]byte(fmt.Sprintf("%s/%s/%s/%d", playlistJobID, artist, expected, a.now().UnixNano())))
+	keyTitle := title
+	if albumCompletion && album != "" {
+		keyTitle = ""
+	}
+	jobKey, _ := json.Marshal([]string{playlistJobID, normalizeKey(artist), normalizeKey(album), normalizeKey(keyTitle)})
+	sum := sha256.Sum256(jobKey)
 	jobID := "trk-" + slug + "-" + hex.EncodeToString(sum[:6])
+	if existing, err := a.flows.Job(jobID); err != nil {
+		return "", err
+	} else if existing != nil {
+		return jobID, nil
+	}
 	identity := a.playlistIdentity(client, jobID, artist, album, title)
 	if err := ctx.Err(); err != nil {
 		return "", err
@@ -201,7 +271,7 @@ func (a *App) startPlaylistAlbumJob(ctx context.Context, client *musicbrainz.Cli
 	plan := SearchPlan{
 		RootJobID: jobID, Scene: "expand",
 		Query: strings.TrimSpace(artist + " " + expected), ExpectedTitle: expected, ExpectedArtist: artist,
-		EnabledSites: sites, StreamingEnabled: true, Identity: identity, Budget: budget,
+		EnabledSites: sites, StreamingEnabled: true, Identity: identity, Budget: budget, PlaylistTrack: title,
 	}
 	raw, err := json.Marshal(plan)
 	if err != nil {
@@ -236,18 +306,20 @@ func (a *App) playlistIdentity(client *musicbrainz.Client, jobID, artist, album,
 	if artist == "" || album == "" {
 		return Identity{}
 	}
-	if lookup, err := identifyCatalogLookup(client, a.engine, catalogIdentifyRequest{
-		Artist: artist, Album: album, Title: title,
-		Tracks: []catalogTrackRequest{{Title: title, Artists: []string{artist}}},
-	}, catalogBudget, catalogTTL); err == nil && lookup.MusicBrainz != nil && lookup.MusicBrainz.ReleaseID != "" {
-		for _, result := range lookup.Results {
-			if result.IdentityConfirmed && result.Status == "confirmed" {
-				payload, _ := json.Marshal(lookup.MusicBrainz)
-				sum := sha256.Sum256([]byte(jobID + "/" + lookup.MusicBrainz.ReleaseID))
-				return Identity{
-					ID:   "plid" + hex.EncodeToString(sum[:10]),
-					Kind: "catalog", Source: "musicbrainz", SubjectID: lookup.MusicBrainz.ReleaseID,
-					TracklistVerified: true, IdentityConfirmed: true, Payload: string(payload),
+	if client != nil {
+		if lookup, err := identifyCatalogLookup(client, a.engine, catalogIdentifyRequest{
+			Artist: artist, Album: album, Title: title,
+			Tracks: []catalogTrackRequest{{Title: title, Artists: []string{artist}}},
+		}, catalogBudget, catalogTTL); err == nil && lookup.MusicBrainz != nil && lookup.MusicBrainz.ReleaseID != "" {
+			for _, result := range lookup.Results {
+				if result.IdentityConfirmed && result.Status == "confirmed" {
+					payload, _ := json.Marshal(lookup.MusicBrainz)
+					sum := sha256.Sum256([]byte(jobID + "/" + lookup.MusicBrainz.ReleaseID))
+					return Identity{
+						ID:   "plid" + hex.EncodeToString(sum[:10]),
+						Kind: "catalog", Source: "musicbrainz", SubjectID: lookup.MusicBrainz.ReleaseID,
+						TracklistVerified: true, IdentityConfirmed: true, Payload: string(payload),
+					}
 				}
 			}
 		}

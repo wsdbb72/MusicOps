@@ -251,7 +251,7 @@ func decide(in classified) Decision {
 }
 
 func override(report Report, decision Decision) Decision {
-	if report.ExplicitFallback && report.IdentityConfirmed && report.StreamingEnabled && fallbackScene(report.Scene) {
+	if report.ExplicitFallback && report.IdentityConfirmed && report.StreamingEnabled && (fallbackScene(report.Scene) || report.Scene == "expand") {
 		return Decision{Action: ActionFallback, Reason: "review_confirmed_fallback"}
 	}
 	return decision

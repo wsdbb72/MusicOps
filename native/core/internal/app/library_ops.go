@@ -25,9 +25,9 @@ import (
 
 var audioExtensions = map[string]bool{"flac": true, "mp3": true, "wav": true, "aac": true, "alac": true, "aiff": true, "m4a": true, "ogg": true}
 
-func (a *App) reindexLibrary(w http.ResponseWriter, _ *http.Request) {
+func (a *App) reindexLibrary(w http.ResponseWriter, r *http.Request) {
 	root := a.libraryDir()
-	added, kept, err := a.indexLibraryTree(root)
+	added, kept, err := a.indexLibraryTree(r.Context(), root)
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "code": "LIBRARY_UNAVAILABLE", "error": "没有可索引的音乐库目录"})
 		return
@@ -35,10 +35,13 @@ func (a *App) reindexLibrary(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "added": added, "kept": kept, "deleted_files": 0, "note": "只补充索引。不删除磁盘上的文件，也不把缺少的文件说成已下载。"})
 }
 
-func (a *App) indexLibraryTree(root string) (added, kept int, err error) {
+func (a *App) indexLibraryTree(ctx context.Context, root string) (added, kept int, err error) {
 	info, err := os.Stat(root)
-	if err != nil || !info.IsDir() {
+	if err != nil {
 		return 0, 0, err
+	}
+	if !info.IsDir() {
+		return 0, 0, fs.ErrInvalid
 	}
 	existing, err := audiorelease.List(a.engine)
 	if err != nil {
@@ -48,17 +51,34 @@ func (a *App) indexLibraryTree(root string) (added, kept int, err error) {
 	for _, entry := range existing {
 		seen[entry.RequestID] = true
 	}
+	const indexBatchSize = 128
+	batch := make([]audiorelease.Existing, 0, indexBatchSize)
+	flush := func() error {
+		wrote, err := audiorelease.IndexSnapshots(a.engine, batch)
+		if err != nil {
+			return err
+		}
+		added += wrote
+		kept += len(batch) - wrote
+		batch = batch[:0]
+		return nil
+	}
 	err = filepath.WalkDir(root, func(path string, entry fs.DirEntry, walkErr error) error {
-		if walkErr != nil || entry.IsDir() {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if walkErr != nil {
+			return walkErr
+		}
+		if entry.IsDir() {
 			return nil
 		}
 		ext := strings.TrimPrefix(strings.ToLower(filepath.Ext(path)), ".")
 		if !audioExtensions[ext] {
 			return nil
 		}
-		if ext == "wav" {
-			path = a.maybeConvertIndexedWAV(path)
-			ext = strings.TrimPrefix(strings.ToLower(filepath.Ext(path)), ".")
+		if !entry.Type().IsRegular() {
+			return nil
 		}
 		abs, err := filepath.Abs(path)
 		if err != nil || abs != filepath.Clean(abs) {
@@ -70,20 +90,18 @@ func (a *App) indexLibraryTree(root string) (added, kept int, err error) {
 			kept++
 			return nil
 		}
-		ok, err := audiorelease.IndexExisting(a.engine, audiorelease.Existing{
+		batch = append(batch, audiorelease.Existing{
 			RequestID: requestID, RootID: libraryRootID(filepath.Dir(abs)), Track: track,
-			Path: abs, Library: root, Format: ext, SourceName: "reindex",
+			Path: abs, Library: root, Format: ext, SourceName: "reindex", MetadataOnly: true,
 		})
-		if err != nil {
-			return err
-		}
-		if ok {
-			added++
-		} else {
-			kept++
+		if len(batch) == indexBatchSize {
+			return flush()
 		}
 		return nil
 	})
+	if err == nil {
+		err = flush()
+	}
 	return added, kept, err
 }
 
@@ -694,7 +712,10 @@ func (a *App) compilationMoves(apply bool) ([]compilationMove, error) {
 	root := a.libraryDir()
 	var moves []compilationMove
 	err := filepath.WalkDir(root, func(path string, entry fs.DirEntry, walkErr error) error {
-		if walkErr != nil || entry.IsDir() {
+		if walkErr != nil {
+			return walkErr
+		}
+		if entry.IsDir() {
 			return nil
 		}
 		ext := strings.TrimPrefix(strings.ToLower(filepath.Ext(path)), ".")
@@ -799,7 +820,10 @@ func (a *App) libraryFilePage(offset, limit int) ([]string, int, int) {
 	root := a.libraryDir()
 	files := []string{}
 	_ = filepath.WalkDir(root, func(path string, entry fs.DirEntry, walkErr error) error {
-		if walkErr != nil || entry.IsDir() {
+		if walkErr != nil {
+			return walkErr
+		}
+		if entry.IsDir() {
 			return nil
 		}
 		ext := strings.TrimPrefix(strings.ToLower(filepath.Ext(path)), ".")

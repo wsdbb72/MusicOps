@@ -548,7 +548,7 @@ func legalEdge(job Job, edge, next string) error {
 			if job.TaskType != "album" {
 				return ErrStale
 			}
-		case "validating>publishing", "publishing>notifying", "requesting>downloading", "downloading>validating":
+		case "validating>publishing", "publishing>notifying", "requesting>downloading", "requesting>validating", "downloading>validating", "fallback>validating":
 		default:
 			return ErrStale
 		}

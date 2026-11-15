@@ -76,7 +76,7 @@ func CompareSource(source, expectedTitle, expectedArtist string, hit Hit) Result
 	}
 	prefix := source == "open.cd" && openCDTitle(expectedArtist, expectedTitle, hit.Title)
 	sameBase := albumBase(expectedTitle) != "" && albumBase(hit.Title) == albumBase(expectedTitle)
-	titleOK := prefix || fold(hit.Title) == fold(expectedTitle) || sameBase
+	titleOK := prefix || fold(hit.Title) == fold(expectedTitle) || sameBase || creditAliasMatches(fold(expectedTitle), fold(hit.Title))
 	if !titleOK {
 		for _, alias := range hit.Aliases {
 			if fold(alias) == fold(expectedTitle) || albumBase(alias) == albumBase(expectedTitle) {
@@ -129,11 +129,60 @@ func artistsAgree(expected string, observed []string) bool {
 		return false
 	}
 	for _, name := range observed {
-		if fold(name) == wanted {
+		if fold(name) == wanted || creditAliasMatches(wanted, fold(name)) {
 			return true
 		}
 	}
-	return false
+	// Structured tracker credits can list each collaborator separately.
+	// Split only spaced separators so a name such as AC/DC stays intact.
+	parts := strings.Split(strings.ReplaceAll(wanted, " & ", " / "), " / ")
+	if len(parts) < 2 || len(observed) < len(parts) {
+		return false
+	}
+	used := make(map[int]bool, len(parts))
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			return false
+		}
+		matched := false
+		for i, name := range observed {
+			actual := fold(name)
+			if !used[i] && (actual == part || creditAliasMatches(part, actual)) {
+				used[i], matched = true, true
+				break
+			}
+		}
+		if !matched {
+			return false
+		}
+	}
+	return true
+}
+
+// A bilingual tracker credit sometimes spells one artist as "中文 (Latin)"
+// or "Latin (中文)". Only accept an exact half of that two-script credit.
+func creditAliasMatches(expected, observed string) bool {
+	main, alias, found := strings.Cut(observed, "(")
+	if !found || !strings.HasSuffix(alias, ")") || strings.ContainsAny(alias[:len(alias)-1], "()") {
+		return false
+	}
+	main = strings.TrimSpace(main)
+	alias = strings.TrimSpace(strings.TrimSuffix(alias, ")"))
+	if main == "" || alias == "" {
+		return false
+	}
+	isHan := func(text string) bool {
+		return strings.ContainsFunc(text, func(r rune) bool { return unicode.Is(unicode.Han, r) })
+	}
+	isLatin := func(text string) bool {
+		return strings.ContainsFunc(text, func(r rune) bool { return unicode.Is(unicode.Latin, r) }) &&
+			!strings.ContainsFunc(text, func(r rune) bool { return unicode.IsLetter(r) && !unicode.Is(unicode.Latin, r) })
+	}
+	if !(isHan(main) && isLatin(alias) || isLatin(main) && isHan(alias)) {
+		return false
+	}
+	return expected == main || expected == alias
 }
 
 func editionKey(title, edition string) string {

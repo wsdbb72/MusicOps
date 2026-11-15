@@ -30,6 +30,7 @@ type SearchPlan struct {
 	PlaylistImport bool `json:"playlist_import,omitempty"`
 	// PlaylistMode: "all" starts every track right after the list is read;
 	// empty parks the list so the page can show it and send a selection.
+	PlaylistTrack       string   `json:"playlist_track,omitempty"`
 	PlaylistMode        string   `json:"playlist_mode,omitempty"`
 	Query               string   `json:"query"`
 	ExpectedTitle       string   `json:"expected_title"`
@@ -166,6 +167,9 @@ func (a *App) search(ctx context.Context, execution *scheduler.Execution, payloa
 	if err := a.cancelled(ctx, execution); err != nil {
 		return scheduler.Outcome{}, err
 	}
+	if plan.PlaylistTrack != "" && plan.StreamingEnabled && report.SelectedSite == "" && normalizeKey(plan.PlaylistTrack) == normalizeKey(plan.ExpectedTitle) {
+		report.ExplicitFallback = true
+	}
 	decision, err := searchdecision.Decide(report)
 	if err != nil {
 		return scheduler.Outcome{}, err
@@ -228,6 +232,7 @@ func (a *App) observe(ctx context.Context, execution *scheduler.Execution, job w
 	evidence := []workflow.EvidenceInput{}
 	var picks []identityPick
 	var pool []reviewai.Candidate
+	seededSites := map[string]string{}
 	for _, site := range searchdecision.TrackerSites {
 		row := searchdecision.SiteReport{Site: site, ExpectedTitle: plan.ExpectedTitle}
 		if !enabled[site] {
@@ -255,6 +260,14 @@ func (a *App) observe(ctx context.Context, execution *scheduler.Execution, job w
 		}
 		row, seeded, sitePool := summarizeSite(plan, site, observation)
 		pool = append(pool, sitePool...)
+		if observation.Status == "OK" {
+			for _, hit := range observation.Candidates {
+				if (site == "open.cd" || hit.Seeders != nil && *hit.Seeders > 0) && hit.CandidateID != "" {
+					seededSites[hit.CandidateID] = site
+				}
+			}
+		}
+
 		if seeded != nil {
 			picks = append(picks, *seeded)
 		}
@@ -282,12 +295,8 @@ func (a *App) observe(ctx context.Context, execution *scheduler.Execution, job w
 			ExpectedTitle: plan.ExpectedTitle, ExpectedArtist: plan.ExpectedArtist, Candidates: pool,
 		})
 		adviseClass = advice.Class
-		if advice.Pass {
-			for _, item := range picks {
-				if item.id == advice.CandidateID {
-					chosen, chosenID = item.site, item.id
-				}
-			}
+		if site := seededSites[advice.CandidateID]; advice.Pass && site != "" {
+			chosen, chosenID = site, advice.CandidateID
 		}
 	}
 	if chosen != "" {

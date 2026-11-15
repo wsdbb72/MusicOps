@@ -263,6 +263,9 @@ func (a *App) acquireFallback(ctx context.Context, execution *scheduler.Executio
 	if walk.Recoverable {
 		complete.Message += fmt.Sprintf("（%d 秒后可重试）", walk.RetryAfterSec)
 	}
+	if validated != "" && plan.PlaylistTrack != "" && normalizeKey(plan.PlaylistTrack) == normalizeKey(plan.ExpectedTitle) {
+		return a.publishPlaylistStream(ctx, held, job, plan, validated)
+	}
 	encoded, err := json.Marshal(walk)
 	if err != nil {
 		return scheduler.Outcome{}, err

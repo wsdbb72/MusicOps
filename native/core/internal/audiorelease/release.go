@@ -31,6 +31,9 @@ import (
 // The incoming upload endpoint enforces the same limit.
 const MaxAudioBytes = 32 << 20
 
+// MaxStagedAudioBytes is the separate ceiling for internal download staging.
+const MaxStagedAudioBytes = 160 << 20
+
 var (
 	ErrRejected = errors.New("audio rejected")
 	ErrMissing  = errors.New("audio file missing")
@@ -50,17 +53,18 @@ type Decoder func(context.Context, string) error
 // Origin says how the file reached Incoming: "manual" when a person placed it by
 // hand, "local_import" otherwise. An empty Origin means "local_import".
 type Request struct {
-	RequestID  string
-	RootID     string
-	Artist     string
-	Album      string
-	Title      string
-	Track      int
-	SourceName string
-	Origin     string
-	Incoming   string
-	Library    string
-	Decoder    Decoder
+	RequestID        string
+	RootID           string
+	Artist           string
+	Album            string
+	Title            string
+	Track            int
+	SourceName       string
+	Origin           string
+	Incoming         string
+	Library          string
+	Decoder          Decoder
+	InternalDownload bool
 }
 
 // Result is the file outcome. Downloaded stays false: the bytes were verified
@@ -105,7 +109,8 @@ type record struct {
 	// Downloaded is retained only so records written before the local-import
 	// correction still decode. New records always leave it false: a verified
 	// local import is not a download.
-	Downloaded bool `json:"downloaded"`
+	Downloaded  bool         `json:"downloaded"`
+	IndexedStat *indexedStat `json:"indexed_stat,omitempty"`
 }
 
 // Release verifies the incoming file and publishes a copy. The source stays in place.
@@ -148,7 +153,11 @@ func Release(ctx context.Context, engine *dataengine.Engine, input Request) (Res
 	} else if found {
 		return replay(existing, source)
 	}
-	body, err := os.ReadFile(source)
+	limit := MaxAudioBytes
+	if input.InternalDownload {
+		limit = MaxStagedAudioBytes
+	}
+	body, err := readAudioLimited(source, limit)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			if receipt, ok, rerr := replayMissing(engine, input.RequestID); rerr == nil && ok {
@@ -160,7 +169,7 @@ func Release(ctx context.Context, engine *dataengine.Engine, input Request) (Res
 		return empty, err
 	}
 	before := sha256.Sum256(body)
-	format, reason := classify(input.SourceName, body)
+	format, reason := classifyLimited(input.SourceName, body, limit)
 	if reason != "" {
 		empty.Class = reason
 		return empty, ErrRejected
@@ -661,7 +670,13 @@ type Entry struct {
 // list view must not hash every file on each load, and a missing file stays
 // listed so the gap is visible instead of hidden. Verify is the per-record
 // check that re-hashes the file.
-func List(engine *dataengine.Engine) ([]Entry, error) {
+func List(engine *dataengine.Engine) ([]Entry, error) { return list(engine, true) }
+
+// ListIndexed reads the catalogue without opening every file on disk. Callers
+// must verify candidate paths before treating them as present.
+func ListIndexed(engine *dataengine.Engine) ([]Entry, error) { return list(engine, false) }
+
+func list(engine *dataengine.Engine, checkPresence bool) ([]Entry, error) {
 	if engine == nil {
 		return nil, dataengine.ErrInvalidRequest
 	}
@@ -687,17 +702,22 @@ func List(engine *dataengine.Engine) ([]Entry, error) {
 			root, track := id, 0
 			if i := strings.LastIndex(id, "/"); i >= 0 {
 				root = id[:i]
-				track, _ = strconv.Atoi(id[i+1:])
+				number, _, _ := strings.Cut(id[i+1:], ":")
+				track, _ = strconv.Atoi(number)
 			}
 			if root != rec.RootID {
 				continue
 			}
-			_, statErr := os.Stat(rec.Path)
+			present := true
+			if checkPresence {
+				_, statErr := os.Stat(rec.Path)
+				present = statErr == nil
+			}
 			entries = append(entries, Entry{
 				RequestID: rec.RequestID, RootID: rec.RootID, Track: track,
 				File: libraryFileFor(rec.Path, rec.Library), Format: rec.Format, DecodeState: rec.DecodeState,
 				SHA256: rec.SHA256, Origin: rec.Origin, SourceName: rec.SourceName,
-				FilePresent: statErr == nil, LibraryDir: rec.Library,
+				FilePresent: present, LibraryDir: rec.Library,
 			})
 		}
 		if len(page.Next) == 0 {
@@ -823,7 +843,20 @@ func resultFrom(rec record, preserved, replayed bool) Result {
 }
 
 func classify(name string, body []byte) (string, string) {
-	if len(body) == 0 || len(body) > MaxAudioBytes {
+	return classifyLimited(name, body, MaxAudioBytes)
+}
+
+func readAudioLimited(path string, limit int) ([]byte, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	return io.ReadAll(io.LimitReader(f, int64(limit)+1))
+}
+
+func classifyLimited(name string, body []byte, limit int) (string, string) {
+	if len(body) == 0 || len(body) > limit {
 		return "", "audio_rejected"
 	}
 	if torrent(name, body) {
@@ -1015,7 +1048,7 @@ func sameFile(path, digest string) error {
 	if err != nil {
 		return err
 	}
-	if !info.Mode().IsRegular() || info.Size() > MaxAudioBytes {
+	if !info.Mode().IsRegular() {
 		return ErrConflict
 	}
 	file, err := os.Open(path)
@@ -1031,11 +1064,15 @@ func sameFile(path, digest string) error {
 		return ErrConflict
 	}
 	hash := sha256.New()
-	size, err := io.Copy(hash, io.LimitReader(file, MaxAudioBytes+1))
+	size, err := io.Copy(hash, io.LimitReader(file, info.Size()))
 	if err != nil {
 		return err
 	}
-	if size != info.Size() || hex.EncodeToString(hash.Sum(nil)) != digest {
+	after, err := file.Stat()
+	if err != nil {
+		return err
+	}
+	if size != info.Size() || after.Size() != info.Size() || !after.ModTime().Equal(info.ModTime()) || hex.EncodeToString(hash.Sum(nil)) != digest {
 		return ErrConflict
 	}
 	return nil

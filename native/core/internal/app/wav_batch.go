@@ -93,7 +93,7 @@ func (a *App) saveWAVSettings(w http.ResponseWriter, r *http.Request) {
 }
 
 func wavSettingNote(settings wavSettings) string {
-	note := "默认开启：下载进入待入库或重新索引时，先把整数 PCM WAV 无损转成 FLAC 并迁移标签，再做识别入库。关闭后 WAV 保持原样，识别仍会读取里面的 LIST/INFO 和 ID3。"
+	note := "默认开启：下载进入待入库时，先把整数 PCM WAV 无损转成 FLAC 并迁移标签，再做识别入库。关闭后 WAV 保持原样，识别仍会读取里面的 LIST/INFO 和 ID3。"
 	switch settings.Disposal {
 	case "recycle":
 		note += "原 WAV 移入可恢复的回收目录。"

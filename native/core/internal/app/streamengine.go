@@ -129,6 +129,9 @@ func (a *App) tryConfiguredStream(ctx context.Context, source string, plan Searc
 		return "", source + " 返回的内容没有通过音频校验", downloadpolicy.ClassNoResult
 	}
 	if string(body[:4]) != "fLaC" {
+		if plan.PlaylistTrack != "" {
+			return "", source + " 未提供可验证的无损音源", downloadpolicy.ClassNoResult
+		}
 		converted, convErr := a.transcodeEngineAudio(body, source, plan)
 		if convErr != nil {
 			return "", source + " 返回的是有损音频，转 FLAC 失败", downloadpolicy.ClassNoResult
@@ -275,6 +278,9 @@ func (a *App) streamSearch(ctx context.Context, base, service string, plan Searc
 		song := cards[i]
 		if song.Source == "" {
 			song.Source = service
+		}
+		if plan.PlaylistTrack != "" && (normalizeKey(song.Album) != normalizeKey(plan.ExpectedTitle) || !playlistArtistsMatch(strings.Split(plan.ExpectedArtist, "/"), strings.Split(song.Artist, "/"))) {
+			continue
 		}
 		if wantTitle != "" && foldTagText(song.Name) != wantTitle {
 			continue

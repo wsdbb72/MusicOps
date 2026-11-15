@@ -173,20 +173,25 @@ func (a *App) backfillLyricsSidecars(root string, dryRun bool) {
 // full read is the fallback). On a library of 30 MB tracks this is the
 // difference between minutes and an hour.
 func lyricsTagOf(path string) string {
-	file, err := os.Open(path)
+	tags, err := readFLACTagsPrefix(path)
 	if err != nil {
 		return ""
+	}
+	return firstTagValue(tags.Raw, "LYRICS")
+}
+
+func readFLACTagsPrefix(path string) (*flactags.Tags, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, err
 	}
 	defer file.Close()
 	prefix := make([]byte, 1<<20)
 	n, _ := io.ReadFull(file, prefix)
 	if tags, parseErr := flactags.ReadBytes(prefix[:n]); parseErr == nil {
-		return firstTagValue(tags.Raw, "LYRICS")
+		return tags, nil
 	}
-	if tags, readErr := flactags.ReadFile(path); readErr == nil {
-		return firstTagValue(tags.Raw, "LYRICS")
-	}
-	return ""
+	return flactags.ReadFile(path)
 }
 
 func (report *lyricsBackfillReport) remember(line string) {

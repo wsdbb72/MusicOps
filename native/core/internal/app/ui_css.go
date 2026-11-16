@@ -140,7 +140,7 @@ fieldset label:last-child{margin-bottom:var(--s-2)}
 
 /* ---------- cards ---------- */
 .cards{display:grid;gap:var(--s-3);min-width:0}
-@media (min-width:52rem){.cards{grid-template-columns:repeat(auto-fill,minmax(27rem,1fr));align-items:start}}
+@media (min-width:52rem){.cards{grid-template-columns:minmax(0,1fr);align-items:start}}
 article{display:flex;flex-direction:column;min-width:0;background:var(--surface);border:1px solid var(--line);border-radius:var(--r-lg);padding:var(--s-4);box-shadow:var(--shadow-1);transition:border-color var(--dur) var(--ease),box-shadow var(--dur) var(--ease)}
 article:has(.card-link):hover{border-color:var(--line-strong);box-shadow:var(--shadow-2)}
 article>h2:first-child{margin-top:0}
@@ -182,13 +182,6 @@ dd{margin:0;color:var(--fg);overflow-wrap:anywhere}
 #list{min-width:0}
 
 /* ---------- responsive ---------- */
-@media (min-width:67.5rem){
-  .app{grid-template-rows:minmax(0,1fr);grid-template-columns:15.5rem minmax(0,1fr)}
-  .app-bar{grid-column:1;grid-row:1;align-self:start;position:sticky;top:0;height:100dvh;border-bottom:0;border-right:1px solid var(--line);gap:var(--s-5)}
-  nav{flex-direction:column;margin:0;padding:0;overflow:visible}
-  nav button{width:100%;justify-content:flex-start;border-radius:var(--r-sm);padding:.5rem .7rem;text-align:left}
-  main{grid-column:2;grid-row:1;padding:var(--s-6) var(--s-6) var(--s-7)}
-}
 @media (max-width:720px){
   header,main{padding-left:var(--s-4);padding-right:var(--s-4)}
   nav{margin:0 calc(var(--s-4) * -1);padding:0 var(--s-4)}

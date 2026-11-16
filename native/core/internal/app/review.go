@@ -226,6 +226,10 @@ func (a *App) reviewJob(w http.ResponseWriter, r *http.Request) {
 
 func (a *App) reviewWithAI(w http.ResponseWriter, r *http.Request, id, requestID string, nowNS int64) {
 	inspection, err := a.flows.Inspect(id)
+	if err == nil && inspection.Job.TaskType == "search" && inspection.Job.Stage == "completed" && inspection.Job.ProcessingJobID != "" {
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "already_processed": true})
+		return
+	}
 	if err != nil || inspection.Task == nil || inspection.Job.Stage != "needs_review" || inspection.Job.TaskType != "search" {
 		writeJSON(w, http.StatusConflict, map[string]any{"ok": false, "code": "REVIEW_UNAVAILABLE"})
 		return

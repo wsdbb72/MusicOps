@@ -14,3 +14,5 @@
 - Also build and smoke-test the Linux amd64 native HTML WebUI container on GitHub Actions. Publish the exact tested image to `wsdbb72/muiscops` using the encrypted Actions secret, and promote `latest` only after the matching desktop Release succeeds. Preserve `/config` and sibling media storage, require browser authentication, and keep Docker deployment instructions current.
 
 - Keep the native HTML Docker interface and desktop operations synchronized, including album deduplication/restore, selected-album completion, single-to-full-album expansion, review controls and credential setup. Do not reintroduce noVNC, a virtual desktop or a separate implementation of the library workflow.
+
+- For this maintainer, deliver changes through the official release and main, then verify the official installer checksum, install it locally, and resume real tasks. Temporary cores are only for isolated verification.

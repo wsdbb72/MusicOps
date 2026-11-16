@@ -335,6 +335,43 @@ func acceptsGzip(header string) bool {
 	return false
 }
 
+// jobCounts rolls up the entire catalogue by root, including pending children.
+func (a *App) jobCounts() (map[string]int, error) {
+	states := map[string]int{}
+	var cursor []byte
+	for {
+		page, err := a.flows.List(cursor, 200)
+		if err != nil {
+			return nil, err
+		}
+		for _, job := range page.Jobs {
+			root := job.RootID
+			if root == "" {
+				root = job.ID
+			}
+			state := 1
+			switch job.Stage {
+			case "needs_review", "failed":
+				state = 2
+			case "preparing", "identifying", "snapshotting", "metadata", "searching", "fallback", "requesting", "downloading", "validating", "publishing", "notifying":
+				state = 3
+			}
+			if state > states[root] {
+				states[root] = state
+			}
+		}
+		if len(page.Next) == 0 {
+			break
+		}
+		cursor = page.Next
+	}
+	counts := map[string]int{"total": len(states), "running": 0, "review": 0, "finished": 0}
+	for _, state := range states {
+		counts[[]string{"", "finished", "review", "running"}[state]]++
+	}
+	return counts, nil
+}
+
 func (a *App) jobs(w http.ResponseWriter, r *http.Request) {
 	var after []byte
 	if raw := r.URL.Query().Get("after"); raw != "" {
@@ -351,6 +388,22 @@ func (a *App) jobs(w http.ResponseWriter, r *http.Request) {
 	// page boundary: the cursor always points at the next page, never at a
 	// job inside the page just returned.
 	reviewOnly := r.URL.Query().Get("review") == "1"
+	rootsOnly := r.URL.Query().Get("roots") == "1"
+	var counts map[string]int
+	countsMode := r.URL.Query().Get("counts")
+	if countsMode == "1" || countsMode == "only" {
+		var err error
+		counts, err = a.jobCounts()
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "code": "JOBS_UNAVAILABLE"})
+			return
+		}
+	}
+	if countsMode == "only" {
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "counts": counts})
+		return
+	}
+
 	collected := make([]workflow.Job, 0, 100)
 	next := ""
 	for scanned := 0; scanned < 2000; {
@@ -365,7 +418,7 @@ func (a *App) jobs(w http.ResponseWriter, r *http.Request) {
 		}
 		scanned += len(page.Jobs)
 		for _, job := range page.Jobs {
-			if !reviewOnly || job.Stage == "needs_review" {
+			if (!reviewOnly || job.Stage == "needs_review") && (!rootsOnly || job.ParentJobID == "") {
 				collected = append(collected, job)
 			}
 		}
@@ -375,7 +428,7 @@ func (a *App) jobs(w http.ResponseWriter, r *http.Request) {
 		}
 		after = page.Next
 		next = base64.RawURLEncoding.EncodeToString(page.Next)
-		if !reviewOnly || len(collected) >= 100 {
+		if (!reviewOnly && !rootsOnly) || len(collected) >= 100 {
 			break
 		}
 	}
@@ -413,7 +466,7 @@ func (a *App) jobs(w http.ResponseWriter, r *http.Request) {
 		activeCount = len(a.runner.Health().Active)
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"ok": true, "jobs": jobs, "next": next, "active_count": activeCount, "pipeline_paused": a.pipelinePaused(), "downloaded": downloaded, "library_published": published, "production_verified": false, "python": false,
+		"ok": true, "jobs": jobs, "next": next, "counts": counts, "active_count": activeCount, "pipeline_paused": a.pipelinePaused(), "downloaded": downloaded, "library_published": published, "production_verified": false, "python": false,
 	})
 }
 

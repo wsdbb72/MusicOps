@@ -5,7 +5,7 @@ const appJS = `(function () {
   var active = {identifying: true, searching: true, requesting: true, downloading: true, fallback: true, validating: true, publishing: true};
   var view = "tasks";
   var jobs = [];
-  var activeCount = 0, pipelinePaused = false;
+  var activeCount = 0, pipelinePaused = false, globalJobCounts = null;
   var currentJob = null;
   var siteRows = [];
   var downloadSettings = null;
@@ -90,7 +90,7 @@ const appJS = `(function () {
   async function reviewAllAI() {
     if (loading) return;
     setBusy(true);
-    var ids = new Set(), checked = 0, accepted = 0, failed = 0;
+    var ids = new Set(), checked = 0, accepted = 0, failed = 0, already = 0, failures = {};
     try {
       var cursor = "";
       setStatus("info", "正在读取全部待核对任务");
@@ -102,15 +102,19 @@ const appJS = `(function () {
         cursor = page.next || "";
       } while (cursor);
       for (var id of ids) {
-        setStatus("info", "AI 核对 " + (checked + 1) + " / " + ids.size);
+        setStatus("info", "AI 核对 " + (checked + failed + already + 1) + " / " + ids.size);
         var response = await fetch("/v1/jobs/" + encodeURIComponent(id) + "/review", {method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify({action:"ai"})});
         var result = await response.json();
         if (result.code === "AI_UNAVAILABLE") throw new Error(result.message || "AI 未启用");
-        if (!response.ok && result.code !== "AI_NO_CONFIRMED_MATCH") failed++;
-        else checked++;
+        if (result.already_processed) { already++; continue; }
+        if (!response.ok && result.code !== "AI_NO_CONFIRMED_MATCH") {
+          failed++;
+          var reason = result.code || ("HTTP " + response.status);
+          failures[reason] = (failures[reason] || 0) + 1;
+        } else checked++;
         if (response.ok && result.ok) accepted++;
       }
-      await reloadThen("ok", "AI 已核对 " + checked + " 项，确认推进 " + accepted + " 项，仍待核对 " + (checked - accepted) + " 项，调用或提交失败 " + failed + " 项。");
+      await reloadThen("ok", "AI 已核对 " + checked + " 项，确认推进 " + accepted + " 项，仍待核对 " + (checked - accepted) + " 项，调用或提交失败 " + failed + " 项，已处理 " + already + " 项。" + Object.keys(failures).map(function(code) { return code + " " + failures[code] + " 项"; }).join(" · "));
     } catch(err) {
       setStatus("fail", err.message + "。已核对 " + checked + " 项，确认推进 " + accepted + " 项。");
     } finally { setBusy(false); }
@@ -129,7 +133,7 @@ const appJS = `(function () {
     if (view === "library") { renderLibrary(); return; }
     if (view === "logs") { renderLogs(); return; }
     var rows = visible();
-    var counts = taskCounts();
+    var counts = globalJobCounts || taskCounts();
     if (!rows.length) {
       if (view === "tasks") {
         list.innerHTML = newTaskCard() + pipelineBar();
@@ -149,7 +153,7 @@ const appJS = `(function () {
     setStatus("", "");
     var html = '<p class="meta">后台调度 ' + (pipelinePaused ? "已暂停" : "已开启") + " · 正在执行 " + activeCount + " 项</p>";
     if (view === "tasks") {
-      html += '<p class="meta">共 ' + (counts.running + counts.review + counts.finished) + ' 个任务：进行中 ' + counts.running + ' · 待核对 ' + counts.review + ' · 已完成 ' + counts.finished + '。点任务查看详情。</p>';
+      html += '<p class="meta" id="job-counts">共 ' + (counts.running + counts.review + counts.finished) + ' 个任务：进行中 ' + counts.running + ' · 待处理 ' + counts.review + ' · 已结束 ' + counts.finished + '。点任务查看详情。</p>';
       html += newTaskCard() + pipelineBar() + batchBar();
     } else if (view === "queue") {
       html += '<p class="meta">队列只显示正在识别、检索、下载、校验或入库的任务，每 3 秒刷新。待核对的任务在「任务」里处理。</p>';
@@ -163,7 +167,7 @@ const appJS = `(function () {
       var stage = (state ? " · " + escapeText(state) : "") + (view === "queue" ? ' · ' + escapeText(stageLabel(job.stage)) : "");
       html += '<article>' + box + '<button type="button" class="card-link" data-job="' + escapeText(job.job_id) + '"><h2>' + escapeText(job.label || "未命名") + '</h2><p class="meta">' + pill(job) + stage + '</p><p>' + escapeText(job.headline || "") + "</p></button></article>";
     });
-    if (view === "review" && jobsNext) html += '<p><button type="button" id="review-more">加载更多待核对</button></p>';
+    if ((view === "review" || view === "tasks") && jobsNext) html += '<p><button type="button" id="review-more">加载更多</button></p>';
     list.innerHTML = html + "</div>";
     if (view === "tasks") { bindPipeline(); bindPlaylists(); }
     var aiAll = document.getElementById("review-ai-all");
@@ -175,10 +179,24 @@ const appJS = `(function () {
   var queueTimer = null;
   function scheduleQueueRefresh() {
     if (queueTimer) { clearTimeout(queueTimer); queueTimer = null; }
-    if (view !== "queue") return;
+    if (view !== "queue" && view !== "tasks") return;
     queueTimer = setTimeout(async function () {
-      if (view !== "queue") return;
-      await load(true);
+      if (view === "queue") {
+        await load(true);
+      } else if (view === "tasks" && !loading && detail.hidden) {
+        try {
+          var response = await fetch("/v1/jobs?counts=only");
+          if (response.ok && view === "tasks") {
+            var body = await response.json();
+            var counts = body.counts;
+            var label = document.getElementById("job-counts");
+            if (counts && label) {
+              globalJobCounts = counts;
+              label.textContent = "共 " + counts.total + " 个任务，进行中 " + counts.running + "，待处理 " + counts.review + "，已结束 " + counts.finished + "。点任务查看详情。";
+            }
+          }
+        } catch (err) { /* The next refresh retries a transient connection failure. */ }
+      }
       scheduleQueueRefresh();
     }, 3000);
   }
@@ -2179,11 +2197,12 @@ const appJS = `(function () {
         logRows = logBody && Array.isArray(logBody.tasks) ? logBody.tasks : [];
         logEvents = logBody && Array.isArray(logBody.events) ? logBody.events : [];
       } else {
-        var jobsURL = view === "review" ? "/v1/jobs?review=1" : "/v1/jobs";
+        var jobsURL = view === "review" ? "/v1/jobs?review=1" : (view === "tasks" ? "/v1/jobs?roots=1&counts=1" : "/v1/jobs");
         var response = await fetch(jobsURL, {headers: {Accept: "application/json"}});
         var body = await response.json();
         jobs = body && Array.isArray(body.jobs) ? body.jobs : [];
         jobsNext = body && body.next ? body.next : "";
+        globalJobCounts = body.counts || null;
         activeCount = body.active_count || 0;
         pipelinePaused = !!body.pipeline_paused;
       }
@@ -2200,7 +2219,7 @@ const appJS = `(function () {
     setBusy(true);
     setStatus("info", "正在读取更多待核对");
     try {
-      var response = await fetch("/v1/jobs?review=1&after=" + encodeURIComponent(jobsNext), {headers: {Accept: "application/json"}});
+      var response = await fetch("/v1/jobs?" + (view === "tasks" ? "roots=1" : "review=1") + "&after=" + encodeURIComponent(jobsNext), {headers: {Accept: "application/json"}});
       var body = await response.json();
       if (!response.ok || !body || !body.ok) { setStatus("fail", "没有读到更多任务。"); return; }
       (body.jobs || []).forEach(function (job) { jobs.push(job); });

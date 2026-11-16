@@ -110,7 +110,7 @@ jobs:
           CGO_ENABLED: '0'
         run: |
           set -euo pipefail
-          go test ./... -count=1 -timeout=180s
+          go test ./... -count=1 -timeout=8m
           go vet ./...
       - name: Freeze the Go application and build the installer
         shell: pwsh

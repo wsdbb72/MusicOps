@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -247,6 +248,35 @@ func newApp(t *testing.T) *App {
 	}
 	t.Cleanup(func() { application.Close() })
 	return application
+}
+
+func TestOpenReportsStartupStagesAndHealthReadsStore(t *testing.T) {
+	root := t.TempDir()
+	var mu sync.Mutex
+	stages := map[string]bool{}
+	application, err := OpenWithLogger(filepath.Join(root, "state"), filepath.Join(root, "backups"), "test-password-16b", func(stage, detail string) {
+		if strings.Contains(detail, "test-password") {
+			t.Errorf("startup log leaked the password")
+		}
+		mu.Lock()
+		stages[stage] = true
+		mu.Unlock()
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer application.Close()
+	for _, stage := range []string{"native_store_open", "native_store_ready", "scheduler_start", "ready"} {
+		if !stages[stage] {
+			t.Fatalf("missing startup stage %s: %v", stage, stages)
+		}
+	}
+	request := httptest.NewRequest(http.MethodGet, "/healthz", nil)
+	recorder := httptest.NewRecorder()
+	application.Handler().ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusOK || !strings.Contains(recorder.Body.String(), `"scheduler_stopping":false`) {
+		t.Fatal(recorder.Code, recorder.Body.String())
+	}
 }
 
 func searchBody(jobID, base string, sites []string, streaming bool) map[string]any {

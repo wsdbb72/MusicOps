@@ -12,11 +12,14 @@ package desktop
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"log"
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/wailsapp/wails/v2"
@@ -83,7 +86,7 @@ func Run(opts Options) error {
 		// non-GET request goes to Handler too (assetserver.Options docs).
 		AssetServer: &assetserver.Options{Handler: proxy},
 		SingleInstanceLock: &options.SingleInstanceLock{
-			UniqueId: "musicops-desktop",
+			UniqueId: singleInstanceKey(),
 			OnSecondInstanceLaunch: func(data options.SecondInstanceData) {
 				if appCtx != nil {
 					wailsruntime.WindowShow(appCtx)
@@ -116,6 +119,18 @@ func Run(opts Options) error {
 	}
 	_ = sup.Stop()
 	return nil
+}
+
+// singleInstanceKey isolates QA, portable and alternate-profile runs without
+// changing the one-window guarantee for normal installations. The override is
+// hashed so it remains a bounded, opaque lock id on every platform.
+func singleInstanceKey() string {
+	override := strings.TrimSpace(os.Getenv("MUSICOPS_SINGLE_INSTANCE_ID"))
+	if override == "" {
+		return "musicops-desktop"
+	}
+	sum := sha256.Sum256([]byte(override))
+	return "musicops-desktop-" + hex.EncodeToString(sum[:8])
 }
 
 // checkForUpdates runs one manual update check: Check, ask the user, then

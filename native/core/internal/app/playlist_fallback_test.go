@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	"github.com/wsdbb72/MusicOps/native/core/internal/downloadpolicy"
+	"github.com/wsdbb72/MusicOps/native/core/internal/searchdecision"
 )
 
 func TestNeteasePlaylistFallbackKeepsOriginalPlatform(t *testing.T) {
@@ -21,5 +22,23 @@ func TestNeteasePlaylistFallbackKeepsOriginalPlatform(t *testing.T) {
 	normal, err := playlistFallbackSteps(order, false)
 	if err != nil || len(normal) < 2 || normal[0].Name == "netease" {
 		t.Fatal(normal, err)
+	}
+}
+
+func TestLegacyNeteasePlanIsPromotedToSourceFallback(t *testing.T) {
+	report := searchdecision.Report{
+		Scene: "expand", IdentityConfirmed: false, StreamingEnabled: false,
+		Sites: []searchdecision.SiteReport{
+			{Site: "open.cd", Status: "NO_RESOURCE", Attempted: true}, {Site: "dicmusic", Status: "NO_RESOURCE", Attempted: true},
+			{Site: "orpheus", Status: "NO_RESOURCE", Attempted: true}, {Site: "redacted", Status: "DISABLED"},
+		},
+	}
+	markNeteaseSourceFallback(&report)
+	if !report.SourceFallback || !report.IdentityConfirmed || !report.StreamingEnabled {
+		t.Fatal(report)
+	}
+	decision, err := searchdecision.Decide(report)
+	if err != nil || decision.Action != searchdecision.ActionFallback {
+		t.Fatal(decision, err)
 	}
 }

@@ -53,7 +53,7 @@ func TestPlaylistAlbumFillMatchesExistingTrackByTags(t *testing.T) {
 	if err := os.WriteFile(name, body, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if added, _, err := a.indexLibraryTree(context.Background(), lib); err != nil || added != 1 {
+	if added, _, _, err := a.indexLibraryTree(context.Background(), lib); err != nil || added != 1 {
 		t.Fatal(added, err)
 	}
 	if tracks := a.verifiedPlaylistAlbumTracks(lib, "Artist", "Album", "Album"); len(tracks["track"]) != 1 {

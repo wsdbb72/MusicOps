@@ -44,6 +44,22 @@ func TestSyncedAtomicWriteAndConditionalRejection(t *testing.T) {
 	}
 }
 
+func TestHealthReadsOpenStoreAndFailsAfterClose(t *testing.T) {
+	e, err := Open(filepath.Join(t.TempDir(), "data"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := e.Health(); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.Health(); !errors.Is(err, ErrClosed) {
+		t.Fatal(err)
+	}
+}
+
 func TestInvalidMutationCannotPartiallyApply(t *testing.T) {
 	e := openTest(t)
 	_, err := e.CompareAndSwap(nil, []Mutation{{Key: []byte("record/a"), Value: []byte("x")}, {Key: []byte("system/schema"), Value: []byte("bad")}})

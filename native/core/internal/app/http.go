@@ -241,7 +241,34 @@ func (a *App) authorized(r *http.Request) bool {
 }
 
 func (a *App) health(w http.ResponseWriter, _ *http.Request) {
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "engine": "pebble", "application": "musicops", "python": false, "data_schema": dataengine.SchemaVersion})
+	body := map[string]any{"ok": false, "engine": "pebble", "application": "musicops", "python": false, "data_schema": dataengine.SchemaVersion}
+	if a == nil || a.engine == nil {
+		body["error"] = "native store unavailable"
+		writeJSON(w, http.StatusServiceUnavailable, body)
+		return
+	}
+	// Docker and the desktop must not keep a wedged process alive merely
+	// because its HTTP loop can answer. Read the schema through the same
+	// engine every request uses, then include scheduler liveness.
+	err := a.engine.Health()
+	if err != nil {
+		body["error"] = "native store read failed"
+		writeJSON(w, http.StatusServiceUnavailable, body)
+		return
+	}
+	if a.runner != nil {
+		health := a.runner.Health()
+		body["scheduler_active"] = len(health.Active)
+		body["scheduler_errors"] = len(health.Errors)
+		body["scheduler_stopping"] = health.Stopping
+		if health.Stopping {
+			body["error"] = "scheduler is stopping"
+			writeJSON(w, http.StatusServiceUnavailable, body)
+			return
+		}
+	}
+	body["ok"] = true
+	writeJSON(w, http.StatusOK, body)
 }
 
 func (a *App) home(w http.ResponseWriter, _ *http.Request) {
@@ -434,7 +461,7 @@ func (a *App) jobs(w http.ResponseWriter, r *http.Request) {
 	}
 	jobs := make([]jobView, 0, len(collected))
 	for _, job := range collected {
-		entry := publicJob(job)
+		entry := a.publicJobWithResult(job)
 		entry.AIReviewEligible = job.Stage == "needs_review" && job.TaskType == "search" && job.ReviewKind == "candidate"
 		if task, err := a.tasks.Get(job.ActiveTaskID); err == nil && task != nil {
 			entry.ExecutionState = task.State
@@ -675,8 +702,13 @@ func (a *App) job(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	views := make([]jobView, 0, len(family))
+	var selectedResult *jobResultView
 	for _, job := range family {
-		views = append(views, publicJob(job))
+		view := a.publicJobWithResult(job)
+		if job.ID == inspection.Job.ID {
+			selectedResult = view.Result
+		}
+		views = append(views, view)
 	}
 	views = presentJobs(views)
 	albums, err := audiorelease.Albums(a.engine)
@@ -693,10 +725,14 @@ func (a *App) job(w http.ResponseWriter, r *http.Request) {
 			downloaded, published = job.Downloaded, job.LibraryPublished
 		}
 	}
-	writeJSON(w, http.StatusOK, map[string]any{
+	response := map[string]any{
 		"ok": true, "inspection": scrubInspection(inspection), "progress": progress, "headline": headline,
 		"downloaded": downloaded, "library_published": published, "production_verified": false,
-	})
+	}
+	if selectedResult != nil {
+		response["result"] = selectedResult
+	}
+	writeJSON(w, http.StatusOK, response)
 }
 
 // controlJob pauses, resumes or cancels one workflow job. It only exposes

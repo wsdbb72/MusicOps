@@ -55,8 +55,8 @@ type CoreStatusInfo struct {
 const (
 	// readyTimeout is how long to wait for a freshly started core to print
 	// its ready JSON and answer /healthz (mirrors client.ensure_running's
-	// 90s deadline).
-	readyTimeout = 90 * time.Second
+	// 120s deadline).
+	readyTimeout = 120 * time.Second
 	// healthProbeInterval is the /healthz poll interval while waiting for
 	// readiness.
 	healthProbeInterval = 200 * time.Millisecond
@@ -472,7 +472,7 @@ func startCore(profile, coreBinary string, detached bool) (*runningCore, error) 
 			_ = cmd.Process.Kill()
 			<-rc.exited
 			closeStdin()
-			return nil, fmt.Errorf("core did not become ready within %s", readyTimeout)
+			return nil, fmt.Errorf("core did not become ready within %s (diagnostics: %s)", readyTimeout, strings.TrimSpace(rc.diagText(profile)))
 		}
 	}
 
@@ -492,14 +492,14 @@ func startCore(profile, coreBinary string, detached bool) (*runningCore, error) 
 			_ = cmd.Process.Kill()
 			<-rc.exited
 			closeStdin()
-			return nil, fmt.Errorf("core did not answer /healthz within %s", readyTimeout)
+			return nil, fmt.Errorf("core did not answer /healthz within %s (diagnostics: %s)", readyTimeout, strings.TrimSpace(rc.diagText(profile)))
 		}
 	}
 	if !probeHealth(url, password) {
 		_ = cmd.Process.Kill()
 		<-rc.exited
 		closeStdin()
-		return nil, fmt.Errorf("core did not answer /healthz within %s", readyTimeout)
+		return nil, fmt.Errorf("core did not answer /healthz within %s (diagnostics: %s)", readyTimeout, strings.TrimSpace(rc.diagText(profile)))
 	}
 
 	handle := &CoreHandle{URL: url, PID: cmd.Process.Pid, Password: password, StartedByUs: true}
@@ -541,7 +541,7 @@ func waitReadyFromLog(profile string, deadline time.Time, exited chan error, cmd
 	}
 	_ = cmd.Process.Kill()
 	<-exited
-	return "", fmt.Errorf("core did not become ready within %s", readyTimeout)
+	return "", fmt.Errorf("core did not become ready within %s (log tail: %s)", readyTimeout, strings.TrimSpace(logTail(profile)))
 }
 
 // readyURLFromLog scans core.log for a {"ready":true,"url":...} line.

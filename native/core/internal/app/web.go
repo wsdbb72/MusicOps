@@ -1923,6 +1923,11 @@ const appJS = `(function () {
       field("说明", body.headline);
       field("下载", body.downloaded ? "已下载" : "未下载");
       field("入库", body.library_published ? "已入库" : "未入库");
+      if (body.result) {
+        var failure = body.result;
+        var diagnostic = [failure.error_class, failure.phase, failure.message].filter(Boolean).join(" · ");
+        field("失败诊断", diagnostic || failure.state || "未返回详细原因");
+      }
       currentJob = job;
       showActions(job);
       if (job.stage === "needs_review") openReview(job.job_id);

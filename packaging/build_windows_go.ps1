@@ -31,6 +31,19 @@ $coreRoot=Join-Path $projectRoot 'native/core'
 $buildRoot=Join-Path $projectRoot 'work/build-go'
 $distRoot=Join-Path $projectRoot 'dist'
 $bundleRoot=Join-Path $distRoot 'MusicOps-Windows'
+$bundleFull=[IO.Path]::GetFullPath($bundleRoot)
+$distFull=[IO.Path]::GetFullPath($distRoot)
+$distPrefix=$distFull.TrimEnd([IO.Path]::DirectorySeparatorChar)+[IO.Path]::DirectorySeparatorChar
+if (-not $bundleFull.StartsWith($distPrefix, [StringComparison]::OrdinalIgnoreCase)) { throw "Refusing to clean unexpected bundle path: $bundleFull" }
+if (Test-Path -LiteralPath $bundleFull) {
+    # Repeated local builds can leave a managed engine running from the
+    # previous bundle. Stop only processes whose executable is inside this
+    # verified build directory, then remove the stale read-only outputs.
+    Get-Process -ErrorAction SilentlyContinue | Where-Object {
+        $_.Path -and [IO.Path]::GetFullPath($_.Path).StartsWith($bundleFull.TrimEnd([IO.Path]::DirectorySeparatorChar)+[IO.Path]::DirectorySeparatorChar, [StringComparison]::OrdinalIgnoreCase)
+    } | Stop-Process -Force -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath $bundleFull -Recurse -Force
+}
 New-Item -ItemType Directory -Force -Path $buildRoot,$distRoot,$bundleRoot | Out-Null
 
 # 1. Managed engines (go-music-dl, FlareSolverr, browser, driver).
@@ -187,7 +200,12 @@ if ($Compiler) {
     $env:MUSICOPS_SMOKE_INSTALLER_BUNDLE=$bundleRoot
     $env:MUSICOPS_SMOKE_INSTALLER_COMPILER=$Compiler
     $env:MUSICOPS_SMOKE_INSTALLER_WORK=Join-Path $buildRoot 'installer-acceptance'
-    $env:MUSICOPS_SMOKE_INSTALLER_EXE=$installer.FullName
+    # Compile the acceptance installer with its own random QA AppIdentity.
+    # Using the shipping AppIdentity makes the test collide with an existing
+    # production install on a developer machine (and can replace its files).
+    # The same .iss and bundle are still exercised; only the registry identity
+    # and target directory are isolated.
+    $env:MUSICOPS_SMOKE_INSTALLER_EXE=''
     $env:MUSICOPS_SMOKE_INSTALLER_VERSION=$Version
     $env:MUSICOPS_SMOKE_INSTALLER_REPORT=Join-Path $buildRoot 'installer-windows.json'
     Push-Location $coreRoot

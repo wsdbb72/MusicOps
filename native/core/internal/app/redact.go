@@ -98,24 +98,39 @@ func redactJSON(value any) any {
 }
 
 type jobView struct {
-	ExecutionState   string `json:"execution_state,omitempty"`
-	AIReviewEligible bool   `json:"ai_review_eligible,omitempty"`
-	ID               string `json:"job_id"`
-	RootID           string `json:"root_id,omitempty"`
-	ParentID         string `json:"parent_job_id,omitempty"`
-	Scene            string `json:"scene"`
-	Stage            string `json:"stage"`
-	Progress         string `json:"progress"`
-	Headline         string `json:"headline"`
-	Label            string `json:"label,omitempty"`
-	Message          string `json:"message,omitempty"`
-	ReviewKind       string `json:"review_kind,omitempty"`
-	ErrorClass       string `json:"error_class,omitempty"`
-	Paused           bool   `json:"paused,omitempty"`
-	CancelRequested  bool   `json:"cancel_requested,omitempty"`
-	Downloaded       bool   `json:"downloaded,omitempty"`
-	LibraryPublished bool   `json:"library_published,omitempty"`
-	UpdatedNS        int64  `json:"updated_ns"`
+	ExecutionState   string         `json:"execution_state,omitempty"`
+	AIReviewEligible bool           `json:"ai_review_eligible,omitempty"`
+	ID               string         `json:"job_id"`
+	RootID           string         `json:"root_id,omitempty"`
+	ParentID         string         `json:"parent_job_id,omitempty"`
+	Scene            string         `json:"scene"`
+	Stage            string         `json:"stage"`
+	Progress         string         `json:"progress"`
+	Headline         string         `json:"headline"`
+	Label            string         `json:"label,omitempty"`
+	Message          string         `json:"message,omitempty"`
+	ReviewKind       string         `json:"review_kind,omitempty"`
+	ErrorClass       string         `json:"error_class,omitempty"`
+	Paused           bool           `json:"paused,omitempty"`
+	CancelRequested  bool           `json:"cancel_requested,omitempty"`
+	Downloaded       bool           `json:"downloaded,omitempty"`
+	LibraryPublished bool           `json:"library_published,omitempty"`
+	Result           *jobResultView `json:"result,omitempty"`
+	UpdatedNS        int64          `json:"updated_ns"`
+}
+
+// jobResultView is the sanitized failure result shown to the UI and returned
+// by the job API. Go has no SQL statement or traceback to expose here; the
+// durable executor phase, class, task id and cause are the actionable
+// diagnostics. Credentials are removed by scrub before serialization.
+type jobResultView struct {
+	OK         bool   `json:"ok"`
+	TaskID     string `json:"task_id,omitempty"`
+	Stage      string `json:"stage"`
+	State      string `json:"state"`
+	ErrorClass string `json:"error_class,omitempty"`
+	Phase      string `json:"phase,omitempty"`
+	Message    string `json:"message,omitempty"`
 }
 
 func publicJob(job workflow.Job) jobView {
@@ -124,6 +139,25 @@ func publicJob(job workflow.Job) jobView {
 		Label: scrub(job.Label), Message: scrub(job.Message), ReviewKind: job.ReviewKind,
 		ErrorClass: job.ErrorClass, Paused: job.Paused, CancelRequested: job.CancelRequested, UpdatedNS: job.UpdatedNS,
 	}
+}
+
+func (a *App) publicJobWithResult(job workflow.Job) jobView {
+	view := publicJob(job)
+	if a == nil || a.tasks == nil || job.ActiveTaskID == "" {
+		return view
+	}
+	if job.Stage != "failed" && job.ReviewKind != "interrupted" && job.ReviewKind != "error" {
+		return view
+	}
+	task, err := a.tasks.Get(job.ActiveTaskID)
+	if err != nil || task == nil {
+		return view
+	}
+	view.Result = &jobResultView{
+		OK: task.State == "completed", TaskID: task.ID, Stage: job.Stage, State: task.State,
+		ErrorClass: scrub(task.ErrorClass), Phase: scrub(task.Phase), Message: scrub(firstNonEmpty(task.Message, job.Message)),
+	}
+	return view
 }
 
 // presentJobs gives every record in one album the same current progress.

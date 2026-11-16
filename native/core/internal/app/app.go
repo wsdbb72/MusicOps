@@ -5,6 +5,7 @@ package app
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"os"
 	"os/exec"
@@ -24,6 +25,12 @@ import (
 	"github.com/wsdbb72/MusicOps/native/core/internal/vault"
 	"github.com/wsdbb72/MusicOps/native/core/internal/workflow"
 )
+
+// StartupLogger receives sanitized, stage-level progress while the native
+// store opens. WAL replay happens synchronously inside Pebble, so the log
+// records both sides of that call; if replay stalls, the last line identifies
+// the stage without exposing credentials or request bodies.
+type StartupLogger func(stage, detail string)
 
 // App owns one native directory and its scheduler. Secrets stay in memory.
 type App struct {
@@ -107,6 +114,22 @@ type App struct {
 // Open creates the native store and starts the scheduler. Torrent bytes are
 // not treated as an imported album.
 func Open(dir, backup, password string) (*App, error) {
+	return open(dir, backup, password, nil)
+}
+
+// OpenWithLogger is Open with bounded stage diagnostics for the desktop and
+// container entrypoint. The callback must not log the password or payloads.
+func OpenWithLogger(dir, backup, password string, logger StartupLogger) (*App, error) {
+	return open(dir, backup, password, logger)
+}
+
+func open(dir, backup, password string, logger StartupLogger) (*App, error) {
+	progress := func(stage, detail string) {
+		if logger != nil {
+			logger(stage, detail)
+		}
+	}
+	progress("arguments", "validating state and backup directories")
 	if len(password) < 16 || dir == "" || backup == "" {
 		return nil, errors.New("state directory, backup directory and a password of at least 16 characters are required")
 	}
@@ -122,22 +145,27 @@ func Open(dir, backup, password string) (*App, error) {
 	// (P0-4). The failure is reported on GET /v1/migration and the next
 	// start retries; nothing is deleted or overwritten.
 	var migrationFailure string
+	progress("legacy_config", "checking the optional legacy profile")
 	if _, statErr := os.Stat(legacyDB); statErr == nil {
 		// Config migration opens the native store itself, so it has to
 		// finish before this process keeps the store open.
 		if _, err = configmigrate.MaybeMigrate(profile); err != nil {
 			migrationFailure = "旧版配置迁移失败：" + scrub(err.Error())
+			progress("legacy_config", migrationFailure)
 		}
 	}
+	progress("native_store_open", "opening Pebble; WAL replay may be in progress")
 	engine, err := dataengine.Open(dir)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("open native Pebble store: %w", err)
 	}
+	progress("native_store_ready", "Pebble opened and schema checked")
 	app := &App{Dir: dir, Backup: backup, password: password, engine: engine, tasks: taskrepo.New(engine), searcher: &trackersearch.Client{}, now: time.Now, secrets: map[string]string{}}
+	progress("vault", "opening the encrypted credential vault")
 	app.vault, err = vault.Open(filepath.Dir(filepath.Dir(absDir)))
 	if err != nil {
 		engine.Close()
-		return nil, err
+		return nil, fmt.Errorf("open credential vault: %w", err)
 	}
 	app.ledger = tokenledger.New(engine)
 	// The spend source is a file the operator writes (spend-proofs.jsonl
@@ -153,6 +181,7 @@ func Open(dir, backup, password string) (*App, error) {
 	app.flows = workflow.New(engine, app.tasks)
 	app.loadPipelinePause()
 	if _, statErr := os.Stat(legacyDB); statErr == nil {
+		progress("legacy_migration", "importing the legacy profile into the native store")
 		if backupErr := app.backupBeforeLiveMigration(); backupErr != nil {
 			migrationFailure = "迁移前备份失败，旧库未导入：" + scrub(backupErr.Error())
 		} else if _, err = livemigrate.Activate(engine, profile, app.flows, app.ledger, app.now()); err != nil {
@@ -164,10 +193,11 @@ func Open(dir, backup, password string) (*App, error) {
 	// A recovered panic keeps its first frame in the task row; the whole
 	// stack goes to panic.log, redacted the same way.
 	runnerConfig.OnPanic = app.recordPanic
+	progress("scheduler_init", "creating bounded workflow queues")
 	runner, err := scheduler.New(app.tasks, app.handlers(), runnerConfig)
 	if err != nil {
 		engine.Close()
-		return nil, err
+		return nil, fmt.Errorf("create scheduler: %w", err)
 	}
 	if err = runner.SetWorkflowHooks(scheduler.WorkflowHooks{
 		Block: func(requestID string, token taskrepo.Token, nowNS int64) error {
@@ -189,11 +219,12 @@ func Open(dir, backup, password string) (*App, error) {
 		},
 	}); err != nil {
 		engine.Close()
-		return nil, err
+		return nil, fmt.Errorf("install workflow hooks: %w", err)
 	}
+	progress("scheduler_start", "starting scheduler workers")
 	if err = runner.Start(context.Background()); err != nil {
 		engine.Close()
-		return nil, err
+		return nil, fmt.Errorf("start scheduler: %w", err)
 	}
 	app.runner = runner
 	app.stopSubs = make(chan struct{})
@@ -208,6 +239,7 @@ func Open(dir, backup, password string) (*App, error) {
 	// MusicOps is a Roon extension: with a stored token it rejoins on its own,
 	// which is also what keeps it visible in Roon's Extensions list.
 	app.startRoonSupervisor()
+	progress("ready", "native store and scheduler are ready")
 	return app, nil
 }
 

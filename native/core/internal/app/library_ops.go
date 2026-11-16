@@ -27,25 +27,25 @@ var audioExtensions = map[string]bool{"flac": true, "mp3": true, "wav": true, "a
 
 func (a *App) reindexLibrary(w http.ResponseWriter, r *http.Request) {
 	root := a.libraryDir()
-	added, kept, err := a.indexLibraryTree(r.Context(), root)
+	added, kept, pruned, err := a.indexLibraryTree(r.Context(), root)
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "code": "LIBRARY_UNAVAILABLE", "error": "没有可索引的音乐库目录"})
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "added": added, "kept": kept, "deleted_files": 0, "note": "只补充索引。不删除磁盘上的文件，也不把缺少的文件说成已下载。"})
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "added": added, "kept": kept, "deleted_files": pruned, "note": "已完成增量索引；只清理磁盘上已不存在的旧元数据映射，不删除音乐文件，也不把缺少的文件说成已下载。"})
 }
 
-func (a *App) indexLibraryTree(ctx context.Context, root string) (added, kept int, err error) {
+func (a *App) indexLibraryTree(ctx context.Context, root string) (added, kept, pruned int, err error) {
 	info, err := os.Stat(root)
 	if err != nil {
-		return 0, 0, err
+		return 0, 0, 0, err
 	}
 	if !info.IsDir() {
-		return 0, 0, fs.ErrInvalid
+		return 0, 0, 0, fs.ErrInvalid
 	}
 	existing, err := audiorelease.List(a.engine)
 	if err != nil {
-		return 0, 0, err
+		return 0, 0, 0, err
 	}
 	seen := map[string]bool{}
 	for _, entry := range existing {
@@ -102,7 +102,10 @@ func (a *App) indexLibraryTree(ctx context.Context, root string) (added, kept in
 	if err == nil {
 		err = flush()
 	}
-	return added, kept, err
+	if err == nil {
+		pruned, err = audiorelease.PruneMissingIndexed(a.engine, filepath.Clean(root))
+	}
+	return added, kept, pruned, err
 }
 
 func (a *App) libraryGaps(w http.ResponseWriter, _ *http.Request) {

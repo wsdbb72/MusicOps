@@ -7,6 +7,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strconv"
 	"sync"
 
 	"github.com/cockroachdb/pebble/v2"
@@ -208,6 +209,29 @@ func (e *Engine) Checkpoint(destination string) error {
 		return err
 	}
 	return writeOwner(destination)
+}
+
+// Health performs a real read through the open database. It is deliberately
+// independent of the HTTP process being able to answer: a container must
+// restart when Pebble can no longer be read, even if the listener is alive.
+func (e *Engine) Health() error {
+	if e == nil || e.db == nil {
+		return ErrClosed
+	}
+	e.life.RLock()
+	defer e.life.RUnlock()
+	if e.closed {
+		return ErrClosed
+	}
+	value, closer, err := e.db.Get([]byte("system/schema"))
+	if err != nil {
+		return err
+	}
+	defer closer.Close()
+	if !bytes.Equal(value, []byte(strconv.Itoa(SchemaVersion))) {
+		return errors.New("native data schema is unavailable")
+	}
+	return nil
 }
 
 func (e *Engine) Close() error {

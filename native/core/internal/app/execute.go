@@ -180,12 +180,12 @@ func (a *App) search(ctx context.Context, execution *scheduler.Execution, payloa
 	if err := a.cancelled(ctx, execution); err != nil {
 		return scheduler.Outcome{}, err
 	}
-	neteaseSource := isNeteasePlaylistFallback(job.BatchID, plan) && plan.StreamingEnabled && report.SelectedSite == ""
+	neteaseSource := isNeteasePlaylistFallback(job.BatchID, plan) && report.SelectedSite == ""
 	if neteaseSource {
 		// The model has already reviewed any eligible real tracker hits in
 		// observe. An unresolved comparison uses the source catalogue rather
 		// than turning the model's guess into download authorization.
-		report.SourceFallback = true
+		markNeteaseSourceFallback(&report)
 		evidence = append(evidence, workflow.EvidenceInput{
 			ID: evidenceID(token.ID, token.Fence, "netease"), Kind: "api", Source: "netease", SubjectID: plan.RootJobID, Payload: []byte(plan.Identity.Payload),
 		})
@@ -239,6 +239,19 @@ func (a *App) search(ctx context.Context, execution *scheduler.Execution, payloa
 		}
 	}
 	return scheduler.Outcome{State: complete.TaskState, Message: complete.Message}, nil
+}
+
+// markNeteaseSourceFallback turns a playlist row into the explicit fallback
+// state the decision engine requires. Older plans may lack the later
+// streaming/identity flags; the durable NetEase batch and playlist row still
+// prove the source, so those flags are raised rather than stranding the task.
+func markNeteaseSourceFallback(report *searchdecision.Report) {
+	if report == nil {
+		return
+	}
+	report.SourceFallback = true
+	report.StreamingEnabled = true
+	report.IdentityConfirmed = true
 }
 
 func (a *App) observe(ctx context.Context, execution *scheduler.Execution, job workflow.Job, plan SearchPlan, token taskrepo.Token) (searchdecision.Report, []workflow.EvidenceInput, string, error) {

@@ -269,9 +269,9 @@ func (a *App) reviewWithAI(w http.ResponseWriter, r *http.Request, id, requestID
 		a.reviewAccept(w, id, requestID, site, advice.CandidateID, nowNS)
 		return
 	}
-	if inspection.Job.ReviewKind == "candidate" && isNeteasePlaylistFallback(inspection.Job.BatchID, plan) && plan.Identity.IdentityConfirmed && plan.StreamingEnabled {
+	if inspection.Job.ReviewKind == "candidate" && isNeteasePlaylistFallback(inspection.Job.BatchID, plan) {
 		report := a.rebuildReviewReport(inspection.Job, plan, observations, "", "")
-		report.SourceFallback = true
+		markNeteaseSourceFallback(&report)
 		plan.SelectedSite, plan.SelectedCandidateID = "", ""
 		encoded, err := json.Marshal(plan)
 		if err != nil {

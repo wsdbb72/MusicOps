@@ -83,10 +83,7 @@ func IndexExisting(engine *dataengine.Engine, item Existing) (bool, error) {
 	}
 	primary := albumKey(item.RootID, item.Track)
 	for _, key := range [][]byte{primary, alternateAlbumKey(item.RootID, item.Track, item.RequestID)} {
-		ok, err := engine.CompareAndSwap(
-			[]dataengine.Condition{{Key: releaseKey(item.RequestID), Absent: true}, {Key: key, Absent: true}},
-			[]dataengine.Mutation{{Key: releaseKey(item.RequestID), Value: encoded}, {Key: key, Value: encoded}},
-		)
+		ok, err := indexRecordAt(engine, item.RequestID, item.Path, key, encoded)
 		if err != nil || ok {
 			return ok, err
 		}
@@ -95,6 +92,69 @@ func IndexExisting(engine *dataengine.Engine, item Existing) (bool, error) {
 		}
 	}
 	return false, dataengine.ErrInvalidRequest
+}
+
+// indexRecordAt writes the request record and one album mapping atomically.
+// A stale metadata snapshot for the same logical album track is replaced in
+// place. This is the KV equivalent of an UPSERT on (root, track, file): a
+// converted or renamed file does not leave the old format mapped alongside
+// the new one. Verified downloaded audio is never displaced by a metadata
+// index; that case falls back to the path-qualified key.
+func indexRecordAt(engine *dataengine.Engine, requestID, path string, key, encoded []byte) (bool, error) {
+	if _, found, err := readRaw(engine, releaseKey(requestID)); err != nil || found {
+		return false, err
+	}
+	currentRaw, found, err := readRaw(engine, key)
+	if err != nil {
+		return false, err
+	}
+	conditions := []dataengine.Condition{{Key: releaseKey(requestID), Absent: true}}
+	mutations := []dataengine.Mutation{
+		{Key: releaseKey(requestID), Value: encoded},
+		{Key: key, Value: encoded},
+	}
+	if found {
+		var current record
+		if json.Unmarshal(currentRaw, &current) != nil {
+			return false, ErrConflict
+		}
+		if current.RequestID == requestID {
+			return false, nil
+		}
+		// Only a different extension/re-encode of the same file stem is a
+		// version replacement. Two unnumbered files in one folder share a
+		// track number but are separate recordings and must keep separate keys.
+		if !sameLogicalStem(current.Path, path) {
+			return false, nil
+		}
+		if current.IndexedStat == nil && current.SourceName != "wav-convert" {
+			return false, nil
+		}
+		conditions = append(conditions, dataengine.Condition{Key: key, Value: currentRaw})
+		if oldRaw, oldFound, readErr := readRaw(engine, releaseKey(current.RequestID)); readErr != nil {
+			return false, readErr
+		} else if oldFound {
+			var old record
+			if json.Unmarshal(oldRaw, &old) != nil || old.RequestID != current.RequestID {
+				return false, ErrConflict
+			}
+			conditions = append(conditions, dataengine.Condition{Key: releaseKey(current.RequestID), Value: oldRaw})
+			mutations = append(mutations, dataengine.Mutation{Key: releaseKey(current.RequestID), Delete: true})
+		}
+	} else {
+		conditions = append(conditions, dataengine.Condition{Key: key, Absent: true})
+	}
+	return engine.CompareAndSwap(conditions, mutations)
+}
+
+func sameLogicalStem(left, right string) bool {
+	left, right = filepath.Clean(left), filepath.Clean(right)
+	if filepath.Dir(left) != filepath.Dir(right) {
+		return false
+	}
+	left = strings.TrimSuffix(filepath.Base(left), filepath.Ext(left))
+	right = strings.TrimSuffix(filepath.Base(right), filepath.Ext(right))
+	return left != "" && strings.EqualFold(left, right)
 }
 
 func alternateAlbumKey(root string, track int, request string) []byte {
@@ -162,14 +222,17 @@ func PresenceUnchanged(engine *dataengine.Engine, requestID string) bool {
 }
 
 // IndexSnapshots commits a bounded group of existing files in one durable
-// write. Indexed metadata uses a path-qualified album key, so equally
-// numbered files and multi-disc folders have independent records.
+// write. Unique (root, track) rows use the primary mapping; a collision such
+// as two unnumbered files falls back to a path-qualified key so neither file
+// is lost.
 func IndexSnapshots(engine *dataengine.Engine, items []Existing) (int, error) {
 	if len(items) == 0 {
 		return 0, nil
 	}
 	conditions := make([]dataengine.Condition, 0, len(items)*2)
 	mutations := make([]dataengine.Mutation, 0, len(items)*2)
+	keys := make(map[string]bool, len(items))
+	batchable := true
 	for _, item := range items {
 		if !validID(item.RequestID) || !validID(item.RootID) || item.Track < 1 || item.Track > 999 ||
 			!filepath.IsAbs(item.Path) || item.Path != filepath.Clean(item.Path) {
@@ -186,21 +249,36 @@ func IndexSnapshots(engine *dataengine.Engine, items []Existing) (int, error) {
 			Library: item.Library, SourceName: item.SourceName, Origin: "local_import", State: "published",
 			Verified: true, LibraryPublished: true, DecodeState: "not_run",
 			IndexedStat: &indexedStat{Size: info.Size(), ModifiedNS: info.ModTime().UnixNano()}}
+		if rec.SourceName == "" {
+			rec.SourceName = "migrated"
+		}
 		encoded, err := json.Marshal(rec)
 		if err != nil {
 			return 0, err
 		}
-		for _, key := range [][]byte{releaseKey(item.RequestID), alternateAlbumKey(item.RootID, item.Track, item.RequestID)} {
-			conditions = append(conditions, dataengine.Condition{Key: key, Absent: true})
-			mutations = append(mutations, dataengine.Mutation{Key: key, Value: encoded})
+		primary := albumKey(item.RootID, item.Track)
+		if keys[string(primary)] {
+			batchable = false
+			continue
 		}
+		keys[string(primary)] = true
+		conditions = append(conditions,
+			dataengine.Condition{Key: releaseKey(item.RequestID), Absent: true},
+			dataengine.Condition{Key: primary, Absent: true},
+		)
+		mutations = append(mutations,
+			dataengine.Mutation{Key: releaseKey(item.RequestID), Value: encoded},
+			dataengine.Mutation{Key: primary, Value: encoded},
+		)
 	}
-	ok, err := engine.CompareAndSwap(conditions, mutations)
-	if err != nil {
-		return 0, err
-	}
-	if ok {
-		return len(items), nil
+	if batchable {
+		ok, err := engine.CompareAndSwap(conditions, mutations)
+		if err != nil {
+			return 0, err
+		}
+		if ok {
+			return len(items), nil
+		}
 	}
 	added := 0
 	for _, item := range items {
@@ -214,4 +292,83 @@ func IndexSnapshots(engine *dataengine.Engine, items []Existing) (int, error) {
 		}
 	}
 	return added, nil
+}
+
+// PruneMissingIndexed removes metadata-only mappings whose files are gone.
+// A missing verified download stays in the catalogue so the gap and its
+// history remain visible. Only one full library scan calls this, after the
+// walk has succeeded, and paths outside the configured library are ignored.
+func PruneMissingIndexed(engine *dataengine.Engine, root string) (int, error) {
+	if engine == nil || root == "" || !filepath.IsAbs(root) || root != filepath.Clean(root) {
+		return 0, dataengine.ErrInvalidRequest
+	}
+	type staleRecord struct {
+		rec  record
+		keys [][]byte
+		raws [][]byte
+	}
+	stale := map[string]*staleRecord{}
+	err := engine.View(func(v *dataengine.View) error {
+		var after []byte
+		for {
+			page, err := v.Scan([]byte("library/album-audio/"), after, 200)
+			if err != nil {
+				return err
+			}
+			for _, item := range page.Items {
+				var rec record
+				if json.Unmarshal(item.Value, &rec) != nil || rec.RequestID == "" {
+					continue
+				}
+				if rec.IndexedStat == nil && rec.SourceName != "wav-convert" {
+					continue
+				}
+				if rec.Library != root && !inside(root, rec.Path) {
+					continue
+				}
+				if _, statErr := os.Stat(rec.Path); statErr == nil {
+					continue
+				} else if !os.IsNotExist(statErr) {
+					return statErr
+				}
+				group := stale[rec.RequestID]
+				if group == nil {
+					group = &staleRecord{rec: rec}
+					stale[rec.RequestID] = group
+				}
+				group.keys = append(group.keys, append([]byte(nil), item.Key...))
+				group.raws = append(group.raws, append([]byte(nil), item.Value...))
+			}
+			if len(page.Next) == 0 {
+				return nil
+			}
+			after = page.Next
+		}
+	})
+	if err != nil {
+		return 0, err
+	}
+	removed := 0
+	for requestID, group := range stale {
+		conditions := make([]dataengine.Condition, 0, len(group.keys)+1)
+		mutations := make([]dataengine.Mutation, 0, len(group.keys)+1)
+		for i, key := range group.keys {
+			conditions = append(conditions, dataengine.Condition{Key: key, Value: group.raws[i]})
+			mutations = append(mutations, dataengine.Mutation{Key: key, Delete: true})
+		}
+		if raw, found, readErr := readRaw(engine, releaseKey(requestID)); readErr != nil {
+			return removed, readErr
+		} else if found {
+			conditions = append(conditions, dataengine.Condition{Key: releaseKey(requestID), Value: raw})
+			mutations = append(mutations, dataengine.Mutation{Key: releaseKey(requestID), Delete: true})
+		}
+		ok, err := engine.CompareAndSwap(conditions, mutations)
+		if err != nil {
+			return removed, err
+		}
+		if ok {
+			removed++
+		}
+	}
+	return removed, nil
 }

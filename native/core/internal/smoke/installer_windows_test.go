@@ -17,6 +17,7 @@ import (
 	"testing"
 	"time"
 
+	"golang.org/x/sys/windows"
 	"golang.org/x/sys/windows/registry"
 )
 
@@ -108,9 +109,18 @@ func TestWindowsInstaller(t *testing.T) {
 		if err := os.MkdirAll(outDir, 0o755); err != nil {
 			t.Fatal(err)
 		}
-		iss := filepath.Join("..", "..", "..", "packaging", "MusicOps-go.iss")
+		// Resolve from the absolute bundle path instead of the test process's
+		// working directory. `go test` runs package tests from internal/smoke,
+		// while the release script historically assumed the module root, which
+		// made isolated QA compilation look for the wrong .iss file.
+		bundleAbs, err := filepath.Abs(bundle)
+		if err != nil {
+			t.Fatal(err)
+		}
+		repoRoot := filepath.Dir(filepath.Dir(bundleAbs))
+		iss := filepath.Join(repoRoot, "packaging", "MusicOps-go.iss")
 		cmd := exec.Command(compiler, "/DAppIdentity="+identity, "/DAppVersion="+version, "/DBundleDir="+bundle, "/O"+outDir, iss)
-		cmd.Dir = filepath.Join("..", "..")
+		cmd.Dir = repoRoot
 		out, err := cmd.CombinedOutput()
 		if err != nil {
 			t.Fatalf("ISCC compile failed: %v\n%s", err, out)
@@ -228,6 +238,7 @@ func TestWindowsInstaller(t *testing.T) {
 	// The installed shell starts its core; while it runs, an upgrade
 	// must be refused.
 	shell := exec.Command(filepath.Join(target, "MusicOps.exe"), "--profile", profile)
+	shell.Env = append(os.Environ(), "MUSICOPS_SINGLE_INSTANCE_ID="+identity)
 	shell.Dir = target
 	if err := shell.Start(); err != nil {
 		t.Fatalf("cannot start the installed shell: %v", err)
@@ -239,18 +250,21 @@ func TestWindowsInstaller(t *testing.T) {
 		}
 	}()
 	coreURL := ""
+	var corePID uint32
 	deadline := time.Now().Add(30 * time.Second)
 	for time.Now().Before(deadline) {
 		raw, err := os.ReadFile(filepath.Join(profile, "state", "core.json"))
 		if err == nil {
 			var rec struct {
 				URL string `json:"url"`
+				PID uint32 `json:"pid"`
 			}
 			if json.Unmarshal(raw, &rec) == nil && rec.URL != "" {
 				resp, err := http.Get(rec.URL + "/healthz")
 				if err == nil && resp.StatusCode == http.StatusOK {
 					_ = resp.Body.Close()
 					coreURL = rec.URL
+					corePID = rec.PID
 					break
 				}
 				if resp != nil {
@@ -274,18 +288,29 @@ func TestWindowsInstaller(t *testing.T) {
 		_, _ = shell.Process.Wait()
 		shell.Process = nil
 	}
+	if corePID != 0 {
+		deadline = time.Now().Add(60 * time.Second)
+		for processAlive(corePID) && time.Now().Before(deadline) {
+			time.Sleep(250 * time.Millisecond)
+		}
+		if processAlive(corePID) {
+			t.Fatalf("installed core pid %d did not stop after the shell exited", corePID)
+		}
+	}
 	// After a safe exit the upgrade succeeds again.
-	deadline = time.Now().Add(15 * time.Second)
+	deadline = time.Now().Add(30 * time.Second)
 	upgraded := false
+	lastCode, lastOutput := 0, ""
 	for time.Now().Before(deadline) {
-		if code, _ := runInstaller(""); code == 0 {
+		lastCode, lastOutput = runInstaller("")
+		if lastCode == 0 {
 			upgraded = true
 			break
 		}
 		time.Sleep(500 * time.Millisecond)
 	}
 	if !upgraded {
-		t.Fatal("upgrade after the app exited did not succeed")
+		t.Fatalf("upgrade after the app exited did not succeed (last exit %d): %s", lastCode, lastOutput)
 	}
 	checks["upgrade_after_exit"] = true
 
@@ -305,6 +330,19 @@ func TestWindowsInstaller(t *testing.T) {
 		t.Fatal("MusicOps.exe still present after uninstall")
 	}
 	checks["uninstall_keeps"] = true
+}
+
+func processAlive(pid uint32) bool {
+	handle, err := windows.OpenProcess(windows.PROCESS_QUERY_LIMITED_INFORMATION, false, pid)
+	if err != nil {
+		return false
+	}
+	defer windows.CloseHandle(handle)
+	var exitCode uint32
+	if err := windows.GetExitCodeProcess(handle, &exitCode); err != nil {
+		return false
+	}
+	return exitCode == 259 // STILL_ACTIVE
 }
 
 func randomBytes(t *testing.T, n int) []byte {

@@ -46,9 +46,11 @@ func serve() {
 		fmt.Fprintln(os.Stderr, "backup directory unavailable")
 		os.Exit(1)
 	}
-	application, err := app.Open(*dir, *backup, password)
+	application, err := app.OpenWithLogger(*dir, *backup, password, func(stage, detail string) {
+		log.Printf("startup stage=%s %s", stage, detail)
+	})
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "application failed to open the native store")
+		fmt.Fprintln(os.Stderr, "application failed to open the native store: "+err.Error())
 		os.Exit(1)
 	}
 	listener, err := net.Listen("tcp4", *listen)

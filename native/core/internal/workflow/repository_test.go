@@ -361,7 +361,7 @@ func TestDuplicatePlaylistIDsAndSameJobAdvance(t *testing.T) {
 		t.Fatal(result, err)
 	}
 	next, err := tasks.Get("stage:repair1:validating")
-	if err != nil || next == nil || next.State != "queued" || next.Command != cmdProcess || next.Lane != "aux" || next.WorkflowJobID != "repair1" {
+	if err != nil || next == nil || next.State != "queued" || next.Command != cmdProcess || next.Lane != "publish" || next.WorkflowJobID != "repair1" {
 		t.Fatal(next, err)
 	}
 }

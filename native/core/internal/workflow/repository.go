@@ -593,7 +593,9 @@ func successor(job Job, in Complete, decision *searchdecision.Decision) (id, com
 		return stageTaskID(job.ID, kind+":"+strconv.Itoa(nextCount)), cmdSearch, "identify", job.TaskType, job.TaskGroup, "searching", false, nil
 	case edgeAdvance:
 		switch in.NextStage {
-		case "validating", "downloading":
+		case "validating":
+			return stageTaskID(job.ID, in.NextStage), cmdProcess, "publish", job.TaskType, job.TaskGroup, in.NextStage, false, nil
+		case "downloading":
 			return stageTaskID(job.ID, in.NextStage), cmdProcess, "aux", job.TaskType, job.TaskGroup, in.NextStage, false, nil
 		case "publishing", "notifying":
 			return stageTaskID(job.ID, in.NextStage), cmdPublish, "publish", job.TaskType, job.TaskGroup, in.NextStage, false, nil

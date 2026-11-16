@@ -381,7 +381,12 @@ func (a *App) jobs(w http.ResponseWriter, r *http.Request) {
 	}
 	jobs := make([]jobView, 0, len(collected))
 	for _, job := range collected {
-		jobs = append(jobs, publicJob(job))
+		entry := publicJob(job)
+		entry.AIReviewEligible = job.Stage == "needs_review" && job.TaskType == "search" && job.ReviewKind == "candidate"
+		if task, err := a.tasks.Get(job.ActiveTaskID); err == nil && task != nil {
+			entry.ExecutionState = task.State
+		}
+		jobs = append(jobs, entry)
 	}
 	jobs = presentJobs(jobs)
 	roots := make([]string, 0, len(jobs))
@@ -403,8 +408,12 @@ func (a *App) jobs(w http.ResponseWriter, r *http.Request) {
 		downloaded = downloaded || job.Downloaded
 		published = published || job.LibraryPublished
 	}
+	activeCount := 0
+	if a.runner != nil {
+		activeCount = len(a.runner.Health().Active)
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"ok": true, "jobs": jobs, "next": next, "downloaded": downloaded, "library_published": published, "production_verified": false, "python": false,
+		"ok": true, "jobs": jobs, "next": next, "active_count": activeCount, "pipeline_paused": a.pipelinePaused(), "downloaded": downloaded, "library_published": published, "production_verified": false, "python": false,
 	})
 }
 

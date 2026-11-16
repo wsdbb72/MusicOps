@@ -46,6 +46,7 @@ func (a *App) ingestPlaylistStream(ctx context.Context, job workflow.Job, plan S
 			}
 		}
 	}
+	removeNeteaseStaging(root, path, name)
 	return publishReceipt{TrackID: strconv.Itoa(position), RequestID: id, SHA256: result.SHA256, Format: result.Format, Origin: result.Origin, SourceName: result.SourceName, DecodeState: result.DecodeState, Scrape: scrape}, nil
 }
 

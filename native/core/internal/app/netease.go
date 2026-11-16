@@ -359,6 +359,11 @@ func (a *App) stageNeteaseSong(ctx context.Context, plan SearchPlan, song *netea
 	}
 	name := "netease-" + safeStreamID(plan.RootJobID) + "-" + strconv.FormatInt(song.ID, 10) + ".flac"
 	path := filepath.Join(dir, name)
+	release, err := reserveAudioCache(dir, 2*int64(len(body))+65536)
+	if err != nil {
+		return "", err.Error(), downloadpolicy.ClassNoResult, true
+	}
+	defer release()
 	if err := os.WriteFile(path, body, 0o600); err != nil {
 		return "", "netease 校验通过但没有写入", downloadpolicy.ClassNoResult, true
 	}

@@ -98,6 +98,8 @@ func redactJSON(value any) any {
 }
 
 type jobView struct {
+	ExecutionState   string `json:"execution_state,omitempty"`
+	AIReviewEligible bool   `json:"ai_review_eligible,omitempty"`
 	ID               string `json:"job_id"`
 	RootID           string `json:"root_id,omitempty"`
 	ParentID         string `json:"parent_job_id,omitempty"`

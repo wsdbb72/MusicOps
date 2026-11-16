@@ -82,6 +82,11 @@ func (a *App) scrapePlaylistIncoming(ctx context.Context, incoming, name, artist
 					return "", "", nil, err
 				}
 			}
+			release, err := reserveAudioCache(incoming, int64(len(body)))
+			if err != nil {
+				return "", "", nil, err
+			}
+			defer release()
 			temp, err := os.CreateTemp(incoming, ".scraped-*.tmp")
 			if err != nil {
 				return "", "", nil, err

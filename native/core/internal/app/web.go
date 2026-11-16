@@ -5,6 +5,7 @@ const appJS = `(function () {
   var active = {identifying: true, searching: true, requesting: true, downloading: true, fallback: true, validating: true, publishing: true};
   var view = "tasks";
   var jobs = [];
+  var activeCount = 0, pipelinePaused = false;
   var currentJob = null;
   var siteRows = [];
   var downloadSettings = null;
@@ -82,6 +83,37 @@ const appJS = `(function () {
     loading = next;
     document.querySelectorAll("#nav button[data-view], #back").forEach(function (button) { button.disabled = next; });
   }
+  function executionLabel(state, paused) {
+    if (paused) return "已暂停";
+    return ({queued:"排队中", running:"运行中", paused:"已暂停", failed:"已失败", cancelled:"已取消", blocked:"待核对", recovery_required:"已中断", completed:"已完成"})[state] || "";
+  }
+  async function reviewAllAI() {
+    if (loading) return;
+    setBusy(true);
+    var ids = new Set(), checked = 0, accepted = 0;
+    try {
+      var cursor = "";
+      setStatus("info", "正在读取全部待核对任务");
+      do {
+        var response = await fetch("/v1/jobs?review=1&after=" + encodeURIComponent(cursor));
+        if (!response.ok) throw new Error("读取待核对任务失败");
+        var page = await response.json();
+        (page.jobs || []).forEach(function(job) { if (job.ai_review_eligible) ids.add(job.job_id); });
+        cursor = page.next || "";
+      } while (cursor);
+      for (var id of ids) {
+        setStatus("info", "AI 核对 " + (checked + 1) + " / " + ids.size);
+        var response = await fetch("/v1/jobs/" + encodeURIComponent(id) + "/review", {method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify({action:"ai"})});
+        var result = await response.json();
+        if (result.code === "AI_UNAVAILABLE") throw new Error(result.message || "AI 未启用");
+        checked++;
+        if (response.ok && result.ok) accepted++;
+      }
+      await reloadThen("ok", "AI 已核对 " + checked + " 项，确认推进 " + accepted + " 项，仍待核对 " + (checked - accepted) + " 项。");
+    } catch(err) {
+      setStatus("fail", err.message + "。已核对 " + checked + " 项，确认推进 " + accepted + " 项。");
+    } finally { setBusy(false); }
+  }
   function render() {
     heading.textContent = titles[view];
     document.querySelectorAll("#nav button[data-view]").forEach(function (button) {
@@ -114,23 +146,27 @@ const appJS = `(function () {
       return;
     }
     setStatus("", "");
-    var html = "";
+    var html = '<p class="meta">后台调度 ' + (pipelinePaused ? "已暂停" : "已开启") + " · 正在执行 " + activeCount + " 项</p>";
     if (view === "tasks") {
       html += '<p class="meta">共 ' + (counts.running + counts.review + counts.finished) + ' 个任务：进行中 ' + counts.running + ' · 待核对 ' + counts.review + ' · 已完成 ' + counts.finished + '。点任务查看详情。</p>';
       html += newTaskCard() + pipelineBar() + batchBar();
     } else if (view === "queue") {
       html += '<p class="meta">队列只显示正在识别、检索、下载、校验或入库的任务，每 3 秒刷新。待核对的任务在「任务」里处理。</p>';
     }
+    if (view === "review") html += '<p><button type="button" id="review-ai-all">AI 核对全部</button></p>';
     html += '<div class="cards">';
     rows.forEach(function (job) {
       var checked = selectedJobs[job.job_id] ? " checked" : "";
       var box = (view === "tasks" || view === "queue") ? '<label><input type="checkbox" data-batch="' + escapeText(job.job_id) + '"' + checked + '> 批量</label>' : "";
-      var stage = view === "queue" ? ' · ' + escapeText(stageLabel(job.stage)) : "";
+      var state = executionLabel(job.execution_state, job.paused);
+      var stage = (state ? " · " + escapeText(state) : "") + (view === "queue" ? ' · ' + escapeText(stageLabel(job.stage)) : "");
       html += '<article>' + box + '<button type="button" class="card-link" data-job="' + escapeText(job.job_id) + '"><h2>' + escapeText(job.label || "未命名") + '</h2><p class="meta">' + pill(job) + stage + '</p><p>' + escapeText(job.headline || "") + "</p></button></article>";
     });
     if (view === "review" && jobsNext) html += '<p><button type="button" id="review-more">加载更多待核对</button></p>';
     list.innerHTML = html + "</div>";
     if (view === "tasks") { bindPipeline(); bindPlaylists(); }
+    var aiAll = document.getElementById("review-ai-all");
+    if (aiAll) aiAll.addEventListener("click", reviewAllAI);
     scheduleQueueRefresh();
   }
   // The queue is a live view: without a timer it would show a snapshot and
@@ -1863,6 +1899,7 @@ const appJS = `(function () {
       detail.hidden = false;
       document.getElementById("detail-title").textContent = job.label || "未命名";
       detailFields.replaceChildren();
+      field("执行状态", executionLabel(body.inspection.task && body.inspection.task.state, job.paused) || "未知");
       field("进度", body.progress);
       field("说明", body.headline);
       field("下载", body.downloaded ? "已下载" : "未下载");
@@ -1940,7 +1977,7 @@ const appJS = `(function () {
       var allowed = {};
       (body.actions || []).forEach(function (action) { allowed[action.action] = action; });
       html += '<p id="review-actions">';
-      if (body.ai_review_available) html += '<button type="button" id="review-ai">AI 核对</button> ';
+      if (body.ai_review_available) html += '<button type="button" id="review-ai">AI 核对单项</button> ';
       if (allowed.accept && allowed.accept.allowed) html += '<button type="button" id="review-accept" class="primary">接受选中</button> ';
       else if (allowed.accept) html += '<span class="meta">接受不可用：' + escapeText(allowed.accept.reason || "") + "</span> ";
       if (allowed.retry && allowed.retry.allowed) html += '<button type="button" id="review-retry">重试</button> ';
@@ -2146,6 +2183,8 @@ const appJS = `(function () {
         var body = await response.json();
         jobs = body && Array.isArray(body.jobs) ? body.jobs : [];
         jobsNext = body && body.next ? body.next : "";
+        activeCount = body.active_count || 0;
+        pipelinePaused = !!body.pipeline_paused;
       }
       if (detail.hidden) render();
       arm();

@@ -154,6 +154,11 @@ func (a *App) tryConfiguredStream(ctx context.Context, source string, plan Searc
 		return "", source + " 校验通过但没有写入", downloadpolicy.ClassNoResult
 	}
 	path := filepath.Join(dir, name)
+	release, cacheErr := reserveAudioCache(dir, 2*int64(len(body))+65536)
+	if cacheErr != nil {
+		return "", cacheErr.Error(), downloadpolicy.ClassNoResult
+	}
+	defer release()
 	if err := os.WriteFile(path, body, 0o600); err != nil {
 		return "", source + " 校验通过但没有写入", downloadpolicy.ClassNoResult
 	}

@@ -1386,10 +1386,8 @@ func (a *App) ingestDownload(ctx context.Context, plan downloadPlan, meta qbitto
 		existingTracks = a.verifiedPlaylistAlbumTracks(library, artist, album, plan.ExpectedTitle)
 		trackNumbers = playlistTrackNumbers(meta, seedDir)
 	}
-	short := downloadRecordID(plan.JobID)
-	if len(short) > 12 {
-		short = short[:12]
-	}
+	jobDigest := sha256.Sum256([]byte(plan.JobID))
+	short := hex.EncodeToString(jobDigest[:8])
 	if len(plan.UpgradeTracks) > 0 && audiorelease.SystemDecoder() == nil {
 		return nil, downloadError("QUALITY_NOT_PROVEN", "无法完整解码验证无损音频，原文件保留")
 	}
@@ -1432,6 +1430,7 @@ func (a *App) ingestDownload(ctx context.Context, plan downloadPlan, meta qbitto
 			}
 		}
 		incomingName := fmt.Sprintf("dl-%s-%02d-%s", short, track, filepath.Base(f.Path))
+		copiedName := incomingName
 		if err := copyIncoming(source, filepath.Join(incoming, incomingName)); err != nil {
 			if df, ok := err.(*downloadFailure); ok {
 				return nil, df
@@ -1491,6 +1490,11 @@ func (a *App) ingestDownload(ctx context.Context, plan downloadPlan, meta qbitto
 				if err := writeLyricsSidecar(path, scrape.lyrics); err != nil {
 					return nil, downloadError("SCRAPE_FAILED", "歌词侧车写入失败")
 				}
+			}
+		}
+		for _, cached := range []string{copiedName, incomingName} {
+			if filepath.Base(cached) == cached && (strings.HasPrefix(cached, "dl-") || strings.HasPrefix(cached, "scraped-dl-")) {
+				_ = os.Remove(filepath.Join(incoming, cached))
 			}
 		}
 		receipts = append(receipts, publishReceipt{
@@ -1646,6 +1650,11 @@ func copyIncoming(source, dest string) error {
 	} else if err != nil && !os.IsNotExist(err) {
 		return err
 	}
+	release, err := reserveAudioCache(filepath.Dir(dest), int64(len(body)))
+	if err != nil {
+		return downloadError("CACHE_LIMIT", err.Error())
+	}
+	defer release()
 	temp := dest + ".tmp"
 	if err := os.WriteFile(temp, body, 0o600); err != nil {
 		return err

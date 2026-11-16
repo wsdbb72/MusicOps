@@ -21,6 +21,10 @@ func TestNeteaseAlbumRejectsMissingTracksOrWrongEdition(t *testing.T) {
 	if err != nil || len(tracks) != 2 || tracks[1].ID != 11 || tracks[1].DurationMS != 4000 {
 		t.Fatal(tracks, err)
 	}
+	legacy := &neteaseSong{ID: 10, Album: "Album", AlbumID: 81}
+	if _, err = decodeNeteaseAlbum(rip, legacy); err != nil || legacy.Name != "One" || len(legacy.Artists) != 1 || legacy.Artists[0] != "Artist" {
+		t.Fatal("legacy NetEase row was not recovered by song id", legacy, err)
+	}
 	song.Name = "Other recording"
 	if _, err = decodeNeteaseAlbum(rip, song); err == nil {
 		t.Fatal("album did not contain the selected recording")

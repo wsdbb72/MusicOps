@@ -197,7 +197,23 @@ func (a *App) playlistFile(rootJobID string) (string, bool) {
 // Batch IDs come from the saved playlist slug. Using the batch ID also
 // applies this to jobs already persisted before source routing was added.
 func isNeteasePlaylistFallback(batchID string, plan SearchPlan) bool {
-	return strings.HasPrefix(batchID, "pl-netease-") && plan.PlaylistTrack != ""
+	return strings.HasPrefix(batchID, "pl-netease-")
+}
+
+// neteasePlaylistTitle recovers the source row title for jobs created before
+// the durable PlaylistTrack field was added. The playlist identity payload is
+// secret-free catalogue data written at enqueue time.
+func neteasePlaylistTitle(plan SearchPlan) string {
+	if title := strings.TrimSpace(plan.PlaylistTrack); title != "" {
+		return title
+	}
+	var identity struct {
+		Title string `json:"title"`
+	}
+	if json.Unmarshal([]byte(plan.Identity.Payload), &identity) == nil {
+		return strings.TrimSpace(identity.Title)
+	}
+	return ""
 }
 
 func playlistFallbackSteps(order []string, neteaseOnly bool) ([]downloadpolicy.Step, error) {

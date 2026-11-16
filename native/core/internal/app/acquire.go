@@ -86,7 +86,7 @@ func (a *App) acquire(ctx context.Context, execution *scheduler.Execution, paylo
 		// budget must not quietly download without one — that changes what
 		// the account is charged for, so it stops here for a human to decide.
 		if plan.Budget <= 0 {
-			if plan.StreamingEnabled && isNeteasePlaylistFallback(job.BatchID, plan) {
+			if isNeteasePlaylistFallback(job.BatchID, plan) {
 				return a.acquireFallback(ctx, execution, held, *job, plan)
 			}
 			// A normal download would add real download volume to the account.
@@ -97,7 +97,7 @@ func (a *App) acquire(ctx context.Context, execution *scheduler.Execution, paylo
 		return a.acquireWithToken(ctx, execution, held, *job, plan, site, resource, decision)
 	}
 	if strictFL {
-		if plan.PlaylistTrack != "" && plan.StreamingEnabled && (isNeteasePlaylistFallback(job.BatchID, plan) || normalizeKey(plan.PlaylistTrack) == normalizeKey(plan.ExpectedTitle)) {
+		if isNeteasePlaylistFallback(job.BatchID, plan) || (plan.PlaylistTrack != "" && plan.StreamingEnabled && normalizeKey(plan.PlaylistTrack) == normalizeKey(plan.ExpectedTitle)) {
 			return a.acquireFallback(ctx, execution, held, *job, plan)
 		}
 		return a.finishSkipAcquire(held, *job, "本批次要求 FL 令牌，详情没有可核实的令牌按钮；未发下载请求")

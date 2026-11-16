@@ -53,9 +53,6 @@ func decodeNeteaseAlbum(raw []byte, anchor *neteaseSong) ([]neteaseSong, error) 
 			return nil, errors.New("网易云专辑含无效曲目")
 		}
 		seen[row.ID] = true
-		if row.ID == anchor.ID {
-			found = normalizeKey(row.Name) == normalizeKey(anchor.Name)
-		}
 		artists := row.Artists
 		if len(artists) == 0 {
 			artists = row.AR
@@ -66,8 +63,18 @@ func decodeNeteaseAlbum(raw []byte, anchor *neteaseSong) ([]neteaseSong, error) 
 				credited = append(credited, artist.Name)
 			}
 		}
-		if row.ID == anchor.ID && len(anchor.Artists) > 0 && !playlistArtistsMatch(anchor.Artists, credited) {
-			found = false
+		if row.ID == anchor.ID {
+			if anchor.Name == "" || normalizeKey(row.Name) == normalizeKey(anchor.Name) {
+				found = true
+				if anchor.Name == "" {
+					anchor.Name = row.Name
+				}
+				if len(anchor.Artists) == 0 {
+					anchor.Artists = append([]string(nil), credited...)
+				} else if !playlistArtistsMatch(anchor.Artists, credited) {
+					found = false
+				}
+			}
 		}
 		duration := row.Duration
 		if duration == 0 {
@@ -87,6 +94,9 @@ func decodeNeteaseAlbum(raw []byte, anchor *neteaseSong) ([]neteaseSong, error) 
 func (a *App) acquireNeteaseAlbum(ctx context.Context, execution *scheduler.Execution, held taskrepo.Token, job workflow.Job, plan SearchPlan) (scheduler.Outcome, error) {
 	review := func(message, class string) (scheduler.Outcome, error) {
 		return a.finishAcquire(held, job, "candidate", message, class, nil)
+	}
+	if plan.PlaylistTrack == "" {
+		plan.PlaylistTrack = neteasePlaylistTitle(plan)
 	}
 	cookie := a.neteaseCookie()
 	if cookie == "" {

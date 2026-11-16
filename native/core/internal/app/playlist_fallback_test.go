@@ -11,8 +11,12 @@ func TestNeteasePlaylistFallbackKeepsOriginalPlatform(t *testing.T) {
 	plan := SearchPlan{PlaylistTrack: "夏恋慕"}
 	if !isNeteasePlaylistFallback("pl-netease-590536461-batch", plan) ||
 		isNeteasePlaylistFallback("pl-qqmusic-123-batch", plan) ||
-		isNeteasePlaylistFallback("pl-netease-590536461-batch", SearchPlan{}) {
+		!isNeteasePlaylistFallback("pl-netease-590536461-batch", SearchPlan{}) {
 		t.Fatal("fallback source did not reflect the playlist origin")
+	}
+	legacy := SearchPlan{Identity: Identity{Payload: `{"artist":"Artist","album":"Album","title":"Track"}`}}
+	if got := neteasePlaylistTitle(legacy); got != "Track" {
+		t.Fatal(got)
 	}
 	order := downloadpolicy.CanonicalOrder()
 	steps, err := playlistFallbackSteps(order, true)

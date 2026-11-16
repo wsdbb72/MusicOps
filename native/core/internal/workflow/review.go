@@ -220,7 +220,7 @@ func (r *Repository) reviewAccept(requestID string, job Job, task *taskrepo.Task
 	}
 	decision := searchdecision.Decision{Action: searchdecision.ActionQueueRequest}
 	{
-		if in.Site == "" || in.CandidateID == "" || in.Search == nil || len(in.Plan) == 0 {
+		if in.Search == nil || len(in.Plan) == 0 {
 			return Result{}, dataengine.ErrInvalidRequest
 		}
 		if in.Search.Scene != job.Scene || job.IdentificationJobID == "" {
@@ -235,7 +235,7 @@ func (r *Repository) reviewAccept(requestID string, job Job, task *taskrepo.Task
 		// report. Both must match the user's selection: the report is rebuilt
 		// from stored evidence, so a selection that is not in the evidence
 		// cannot classify as an exact match.
-		if decision.Action != searchdecision.ActionQueueRequest || decision.SelectedSite != in.Site || in.Search.SelectedSite != in.Site || in.Search.SelectedCandidateID != in.CandidateID {
+		if !((decision.Action == searchdecision.ActionQueueRequest && in.Site != "" && in.CandidateID != "" && decision.SelectedSite == in.Site && in.Search.SelectedSite == in.Site && in.Search.SelectedCandidateID == in.CandidateID) || (decision.Action == searchdecision.ActionFallback && in.Search.SourceFallback && strings.HasPrefix(job.BatchID, "pl-netease-") && in.Site == "" && in.CandidateID == "" && in.Search.SelectedCandidateID == "")) {
 			return Result{}, dataengine.ErrInvalidRequest
 		}
 	}
@@ -245,6 +245,9 @@ func (r *Repository) reviewAccept(requestID string, job Job, task *taskrepo.Task
 	child.ParentJobID = job.ID
 	child.RootID = job.RootID
 	child.Stage = "requesting"
+	if decision.Action == searchdecision.ActionFallback {
+		child.Stage = "fallback"
+	}
 	child.TaskType = "album"
 	child.TaskGroup = "process"
 	child.ActiveTaskID = childID
@@ -262,10 +265,13 @@ func (r *Repository) reviewAccept(requestID string, job Job, task *taskrepo.Task
 	child.SearchRetryCount = 0
 	child.AIResearchCount = 0
 	child.SearchRetryAfterSec = 0
-	child.SearchAction = searchdecision.ActionQueueRequest
+	child.SearchAction = decision.Action
 	child.Message = "已确认候选，等待获取；尚未下载、尚未入库"
+	if child.Stage == "fallback" {
+		child.Message = "站点候选未确认，等待网易云原发行版处理"
+	}
 	followup := taskrepo.NewTask{Spec: taskrepo.Spec{ID: childID, Command: cmdProcess, Lane: "aux", Priority: 1, CreatedNS: nowNS}, Payload: in.Plan}
-	end := taskrepo.Completion{State: "completed", NowNS: nowNS, Message: "已确认候选，等待获取", Payload: in.Plan}
+	end := taskrepo.Completion{State: "completed", NowNS: nowNS, Message: child.Message, Payload: in.Plan}
 	extra, _ := json.Marshal(struct{ JobID, Action string }{job.ID, "accept"})
 	result, err := r.tasks.ResolveOwned(requestID, task.ID, end, []taskrepo.NewTask{followup}, map[string]string{childID: childID}, extra, func(v *dataengine.View, _, after *taskrepo.Task, children []taskrepo.Task) ([]dataengine.Condition, []dataengine.Mutation, json.RawMessage, error) {
 		live, raw, err := readJob(v, job.ID)
@@ -284,10 +290,10 @@ func (r *Repository) reviewAccept(requestID string, job Job, task *taskrepo.Task
 		next := *live
 		next.Stage = "completed"
 		next.ProcessingJobID = childID
-		next.SearchAction = searchdecision.ActionQueueRequest
+		next.SearchAction = decision.Action
 		next.ReviewKind = ""
 		next.ErrorClass = ""
-		next.Message = "检索命中，已创建获取任务；尚未下载、尚未入库"
+		next.Message = child.Message
 		updated, err := bump(next, nowNS, true)
 		if err != nil {
 			return nil, nil, nil, err

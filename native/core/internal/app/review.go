@@ -265,6 +265,23 @@ func (a *App) reviewWithAI(w http.ResponseWriter, r *http.Request, id, requestID
 		a.reviewAccept(w, id, requestID, site, advice.CandidateID, nowNS)
 		return
 	}
+	if inspection.Job.ReviewKind == "candidate" && isNeteasePlaylistFallback(inspection.Job.BatchID, plan) && plan.Identity.IdentityConfirmed && plan.StreamingEnabled {
+		report := a.rebuildReviewReport(inspection.Job, plan, observations, "", "")
+		report.SourceFallback = true
+		plan.SelectedSite, plan.SelectedCandidateID = "", ""
+		encoded, err := json.Marshal(plan)
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "code": "REVIEW_UNAVAILABLE"})
+			return
+		}
+		result, err := a.flows.Review(requestID, id, workflow.ReviewDecision{Action: "accept", Search: &report, Plan: encoded}, nowNS)
+		a.writeReviewResult(w, result, err, "ai")
+		return
+	}
+	if advice.Class == "infrastructure" {
+		writeJSON(w, http.StatusBadGateway, map[string]any{"ok": false, "code": "AI_CALL_FAILED", "reason": advice.Reason, "message": "AI 调用失败，候选仍待核对"})
+		return
+	}
 	writeJSON(w, http.StatusConflict, map[string]any{"ok": false, "code": "AI_NO_CONFIRMED_MATCH", "reason": advice.Reason, "message": "AI 未能核实可下载的发行版"})
 }
 

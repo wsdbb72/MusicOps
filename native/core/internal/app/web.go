@@ -90,7 +90,7 @@ const appJS = `(function () {
   async function reviewAllAI() {
     if (loading) return;
     setBusy(true);
-    var ids = new Set(), checked = 0, accepted = 0;
+    var ids = new Set(), checked = 0, accepted = 0, failed = 0;
     try {
       var cursor = "";
       setStatus("info", "正在读取全部待核对任务");
@@ -106,10 +106,11 @@ const appJS = `(function () {
         var response = await fetch("/v1/jobs/" + encodeURIComponent(id) + "/review", {method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify({action:"ai"})});
         var result = await response.json();
         if (result.code === "AI_UNAVAILABLE") throw new Error(result.message || "AI 未启用");
-        checked++;
+        if (!response.ok && result.code !== "AI_NO_CONFIRMED_MATCH") failed++;
+        else checked++;
         if (response.ok && result.ok) accepted++;
       }
-      await reloadThen("ok", "AI 已核对 " + checked + " 项，确认推进 " + accepted + " 项，仍待核对 " + (checked - accepted) + " 项。");
+      await reloadThen("ok", "AI 已核对 " + checked + " 项，确认推进 " + accepted + " 项，仍待核对 " + (checked - accepted) + " 项，调用或提交失败 " + failed + " 项。");
     } catch(err) {
       setStatus("fail", err.message + "。已核对 " + checked + " 项，确认推进 " + accepted + " 项。");
     } finally { setBusy(false); }

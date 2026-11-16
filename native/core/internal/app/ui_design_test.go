@@ -26,11 +26,13 @@ func TestDesignSystemDeclaresTokensAndSchemes(t *testing.T) {
 		".app-bar",
 		".card-link",
 		"max-width:720px",
-		"min-width:67.5rem",
 	} {
 		if !strings.Contains(appCSS, rule) {
 			t.Fatal("missing rule", rule)
 		}
+	}
+	if strings.Contains(appCSS, "grid-template-columns:15.5rem minmax(0,1fr)") {
+		t.Fatal("wide screens must keep the top navigation")
 	}
 	// A dark scheme that never overrides the surface tokens is not a scheme.
 	dark := appCSS[strings.Index(appCSS, "@media (prefers-color-scheme:dark)"):]

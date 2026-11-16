@@ -9,7 +9,7 @@ import (
 )
 
 func (a *App) recoverOrphanedTasks(currentOwner string, log StartupLogger) {
-	tasks, err := a.tasks.RunningOwnedByOther(currentOwner)
+	tasks, err := a.tasks.RestartRecoverable(currentOwner)
 	if err != nil {
 		if log != nil {
 			log("task_recovery", "scan failed: "+scrub(err.Error()))
@@ -18,6 +18,23 @@ func (a *App) recoverOrphanedTasks(currentOwner string, log StartupLogger) {
 	}
 	recovered := 0
 	for _, task := range tasks {
+		if task.State == "recovery_required" {
+			if task.Execution != "interrupted" || task.WorkflowJobID == "" || !autoRecoverableCommand(task.Command) {
+				continue
+			}
+			if task.Command == workflow.CommandDownload && !a.restoreDownloadCredentials(task.WorkflowJobID) {
+				if log != nil {
+					log("task_recovery", "download "+task.ID+" left interrupted: no saved qBittorrent login")
+				}
+				continue
+			}
+			if _, err = a.flows.RecoverInterrupted("orphan-recover-"+task.ID+"-"+strconv.FormatUint(task.Fence, 10), task.WorkflowJobID, time.Now().UnixNano()); err == nil {
+				recovered++
+			} else if log != nil {
+				log("task_recovery", "recover "+task.ID+" failed: "+scrub(err.Error()))
+			}
+			continue
+		}
 		if task.Owner == "" {
 			continue
 		}

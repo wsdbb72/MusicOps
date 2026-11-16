@@ -14,11 +14,11 @@ func TestOrphanScanClaimReleaseAndRecover(t *testing.T) {
 	if err != nil || claim.Task == nil {
 		t.Fatal(claim, err)
 	}
-	orphans, err := r.RunningOwnedByOther("new-owner")
+	orphans, err := r.RestartRecoverable("new-owner")
 	if err != nil || len(orphans) != 1 || orphans[0].ID != "queued" || orphans[0].Execution != "claimed" {
 		t.Fatalf("orphans=%+v err=%v", orphans, err)
 	}
-	if current, err := r.RunningOwnedByOther("old-owner"); err != nil || len(current) != 0 {
+	if current, err := r.RestartRecoverable("old-owner"); err != nil || len(current) != 0 {
 		t.Fatalf("current owner's live claim treated as orphan: %+v %v", current, err)
 	}
 	token := Token{ID: claim.Task.ID, Owner: claim.Task.Owner, Fence: claim.Task.Fence}
@@ -40,6 +40,10 @@ func TestOrphanScanClaimReleaseAndRecover(t *testing.T) {
 		t.Fatal(err)
 	}
 	state(t, r, "started", "recovery_required")
+	recoverable, err := r.RestartRecoverable("new-owner")
+	if err != nil || len(recoverable) != 1 || recoverable[0].ID != "started" || recoverable[0].Execution != "interrupted" {
+		t.Fatalf("recoverable=%+v err=%v", recoverable, err)
+	}
 	domain := func(*dataengine.View, *Task, *Task, []Task) ([]dataengine.Condition, []dataengine.Mutation, json.RawMessage, error) {
 		return nil, nil, nil, nil
 	}

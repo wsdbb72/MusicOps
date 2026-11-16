@@ -420,27 +420,30 @@ func (r *Repository) List(lane, state string, after []byte, limit int) (Page, er
 	return r.page([]byte("task-index/"+lane+"/"+state+"/"), after, limit)
 }
 
-// RunningOwnedByOther returns live-looking tasks left behind by a previous
-// scheduler process. Callers must be the sole instance for this profile before
-// interrupting or requeueing any returned row.
-func (r *Repository) RunningOwnedByOther(owner string) ([]Task, error) {
+// RestartRecoverable returns tasks left behind by a previous scheduler process:
+// live-looking rows with another owner and rows already marked for recovery by
+// the graceful shutdown path. Callers must be the sole instance for this
+// profile before interrupting or requeueing any returned row.
+func (r *Repository) RestartRecoverable(owner string) ([]Task, error) {
 	var result []Task
 	for _, lane := range lanes {
-		var after []byte
-		for {
-			page, err := r.List(lane, "running", after, 200)
-			if err != nil {
-				return nil, err
-			}
-			for _, task := range page.Tasks {
-				if task.Owner != "" && task.Owner != owner {
-					result = append(result, task)
+		for _, state := range []string{"running", "recovery_required"} {
+			var after []byte
+			for {
+				page, err := r.List(lane, state, after, 200)
+				if err != nil {
+					return nil, err
 				}
+				for _, task := range page.Tasks {
+					if task.State == "recovery_required" || task.Owner != "" && task.Owner != owner {
+						result = append(result, task)
+					}
+				}
+				if len(page.Next) == 0 {
+					break
+				}
+				after = page.Next
 			}
-			if len(page.Next) == 0 {
-				break
-			}
-			after = page.Next
 		}
 	}
 	return result, nil

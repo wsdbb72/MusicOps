@@ -384,6 +384,14 @@ func TestInterruptRejectsTheOldFenceAndSearchHandoff(t *testing.T) {
 	if _, err = tasks.Interrupt("bare", token, 5000, "不要绕过工作流"); !errors.Is(err, taskrepo.ErrWorkflowOwned) {
 		t.Fatal(err)
 	}
+	recovered, err := repo.RecoverInterrupted("recover-orphan", "album1", 6000)
+	if err != nil || recovered.Job == nil || recovered.Job.Stage != "identifying" || recovered.Job.ReviewKind != "" {
+		t.Fatal(recovered, err)
+	}
+	task, err = tasks.Get("album1")
+	if err != nil || task == nil || task.State != "queued" || task.Owner != "" || task.Execution != "" {
+		t.Fatal(task, err)
+	}
 	search, _ := tasks.Get("search:album1")
 	if search != nil {
 		t.Fatal(search)

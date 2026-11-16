@@ -419,6 +419,32 @@ func (r *Repository) List(lane, state string, after []byte, limit int) (Page, er
 	}
 	return r.page([]byte("task-index/"+lane+"/"+state+"/"), after, limit)
 }
+
+// RunningOwnedByOther returns live-looking tasks left behind by a previous
+// scheduler process. Callers must be the sole instance for this profile before
+// interrupting or requeueing any returned row.
+func (r *Repository) RunningOwnedByOther(owner string) ([]Task, error) {
+	var result []Task
+	for _, lane := range lanes {
+		var after []byte
+		for {
+			page, err := r.List(lane, "running", after, 200)
+			if err != nil {
+				return nil, err
+			}
+			for _, task := range page.Tasks {
+				if task.Owner != "" && task.Owner != owner {
+					result = append(result, task)
+				}
+			}
+			if len(page.Next) == 0 {
+				break
+			}
+			after = page.Next
+		}
+	}
+	return result, nil
+}
 func (r *Repository) Recent(after []byte, limit int) (Page, error) {
 	return r.page([]byte("task-recent/"), after, limit)
 }

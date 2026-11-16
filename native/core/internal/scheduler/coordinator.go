@@ -52,6 +52,7 @@ func (p *panicError) frame() string {
 	}
 	return ""
 }
+
 var ErrShutdownPending = errors.New("owned execution has not reached shutdown")
 
 type Outcome struct {
@@ -147,6 +148,11 @@ func New(repo *taskrepo.Repository, handlers map[string]Handler, config Config) 
 	config.Limits = limits
 	return &Coordinator{repo: repo, handlers: copied, config: config, owner: nonce(), done: make(chan struct{}), active: map[string]string{}, failures: map[string]string{}}, nil
 }
+
+// Owner identifies this scheduler incarnation. Tasks carrying another owner
+// can no longer have a live executor in this process and are recovered at
+// startup after the process-level single-instance lock has been acquired.
+func (c *Coordinator) Owner() string { return c.owner }
 func (c *Coordinator) SetWorkflowHooks(hooks WorkflowHooks) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()

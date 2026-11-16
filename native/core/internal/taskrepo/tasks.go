@@ -385,9 +385,11 @@ func controlDecision(v *dataengine.View, current *Task, id, action string, nowNS
 				extra = append(extra, dataengine.Mutation{Key: attemptKey(token), Value: raw})
 			}
 		}
-	case "retry":
+	case "retry", "recover":
 		if current.State != "failed" && current.State != "cancelled" && current.State != "blocked" {
-			return nil, nil, ErrStale
+			if action != "recover" || current.State != "recovery_required" || current.Execution != "interrupted" || current.Owner != "" {
+				return nil, nil, ErrStale
+			}
 		}
 		next.State = "queued"
 		next.Owner = ""

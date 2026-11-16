@@ -227,6 +227,7 @@ func open(dir, backup, password string, logger StartupLogger) (*App, error) {
 		return nil, fmt.Errorf("start scheduler: %w", err)
 	}
 	app.runner = runner
+	go app.recoverOrphanedTasks(runner.Owner(), progress)
 	app.stopSubs = make(chan struct{})
 	go app.runSubscriptions(app.stopSubs)
 	// Token reconciliation runs with the app: an unanswered spend must stop

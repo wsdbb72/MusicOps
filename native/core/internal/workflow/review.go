@@ -28,7 +28,7 @@
 //     (no executor is registered, so a re-run would block again
 //     deterministically), for "interrupted" (the task is recovery_required
 //     and taskrepo retry deliberately refuses it until the external effects
-//     are reconciled, which is not built yet), for a process job whose
+//     are reconciled; startup recovery requeues only idempotent commands), for a process job whose
 //     restored stage would be "fallback" (streaming acquisition is not wired,
 //     so a re-run would block again), and for cancelled jobs (cancellation
 //     is final). Retrying a paused job clears the pause: retry is an explicit
@@ -142,7 +142,7 @@ func (r *Repository) retryAction(job *Job, task *taskrepo.Task) ReviewAction {
 		case "error":
 			return ReviewAction{Action: "retry", Reason: "执行器尚未注册，重试也不会推进"}
 		case "interrupted":
-			return ReviewAction{Action: "retry", Reason: "已中断，需先核对外部影响（暂未接入）"}
+			return ReviewAction{Action: "retry", Reason: "已中断；只读检索和可续传下载会在启动时自动恢复，其他任务需先核对外部影响"}
 		default:
 			return ReviewAction{Action: "retry", Reason: "这次核对不能重试"}
 		}
@@ -206,6 +206,75 @@ func (r *Repository) Review(requestID, jobID string, in ReviewDecision, nowNS in
 	default:
 		return r.reviewRetry(requestID, *job, task, nowNS)
 	}
+}
+
+// RecoverInterrupted requeues a task interrupted because its previous process
+// disappeared. It is intentionally limited to stable, idempotent commands:
+// searches are read-only, downloads Query qBittorrent before resuming, and
+// local identify/snapshot/publish work can be verified and replayed. Acquire
+// tasks stay in needs_review because a replay could spend another token.
+func (r *Repository) RecoverInterrupted(requestID, jobID string, nowNS int64) (Result, error) {
+	if !validID(jobID) || requestID == "" || len(requestID) > 128 || nowNS <= 0 {
+		return Result{}, dataengine.ErrInvalidRequest
+	}
+	job, task, err := r.reviewTarget(jobID)
+	if err != nil || job == nil || task == nil {
+		if err != nil {
+			return Result{}, err
+		}
+		return Result{}, ErrNotFound
+	}
+	if job.Stage != "needs_review" || job.ReviewKind != "interrupted" || task.State != "recovery_required" {
+		return Result{}, ErrStale
+	}
+	switch task.Command {
+	case cmdSearch, cmdDownload, cmdIdentify, cmdSnapshot, cmdPublish:
+	default:
+		return Result{}, ErrStale
+	}
+	if task.Command == cmdSearch && job.SearchRetryCount >= 3 {
+		return Result{}, ErrStale
+	}
+	stage, err := r.retryStage(*job, task)
+	if err != nil {
+		return Result{}, err
+	}
+	extra, _ := json.Marshal(struct{ JobID, Action string }{job.ID, "recover"})
+	result, err := r.tasks.ControlOwned(requestID, task.ID, "recover", nowNS, extra, func(v *dataengine.View, _, after *taskrepo.Task, _ []taskrepo.Task) ([]dataengine.Condition, []dataengine.Mutation, json.RawMessage, error) {
+		live, raw, err := readJob(v, job.ID)
+		if err != nil || live == nil {
+			if err != nil {
+				return nil, nil, nil, err
+			}
+			return nil, nil, nil, ErrNotFound
+		}
+		if live.Revision != job.Revision || live.ActiveTaskID != task.ID || live.Stage != "needs_review" || live.ReviewKind != "interrupted" {
+			return nil, nil, nil, errRetry
+		}
+		if after == nil || after.State != "queued" || after.Owner != "" || after.Execution != "" {
+			return nil, nil, nil, ErrStale
+		}
+		next := *live
+		next.Stage = stage
+		next.Paused = false
+		next.ReviewKind = ""
+		next.ErrorClass = ""
+		next.Message = "旧进程遗留任务已自动恢复"
+		if task.Command == cmdSearch {
+			next.SearchRetryCount = live.SearchRetryCount + 1
+		}
+		updated, err := bump(next, nowNS, next.Stage != live.Stage)
+		if err != nil {
+			return nil, nil, nil, err
+		}
+		condition, writes, err := putJob(raw, updated)
+		if err != nil {
+			return nil, nil, nil, err
+		}
+		attached, err := json.Marshal(Result{Job: &updated})
+		return []dataengine.Condition{condition}, writes, attached, err
+	})
+	return decode(result, err)
 }
 
 func (r *Repository) reviewAccept(requestID string, job Job, task *taskrepo.Task, in ReviewDecision, nowNS int64) (Result, error) {

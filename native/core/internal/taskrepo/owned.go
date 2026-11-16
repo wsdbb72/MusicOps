@@ -263,13 +263,15 @@ func resolveDecision(v *dataengine.View, current *Task, end Completion, hash str
 	return &next, extra, nil
 }
 
-// ControlOwned records a pause, resume, cancel or retry on a workflow-owned task.
+// ControlOwned records a pause, resume, cancel, retry or startup recovery on a
+// workflow-owned task. Recovery is only issued after the prior owner is known
+// to be gone and the command is idempotent for a restart.
 func (r *Repository) ControlOwned(requestID, id, action string, nowNS int64, extra []byte, domain Domain) (Result, error) {
 	if !validID(id) || nowNS <= 0 || domain == nil {
 		return Result{}, dataengine.ErrInvalidRequest
 	}
 	switch action {
-	case "pause", "resume", "cancel", "retry":
+	case "pause", "resume", "cancel", "retry", "recover":
 	default:
 		return Result{}, dataengine.ErrInvalidRequest
 	}

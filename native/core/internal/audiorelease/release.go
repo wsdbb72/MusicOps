@@ -196,21 +196,38 @@ func Release(ctx context.Context, engine *dataengine.Engine, input Request) (Res
 	if !inside(library, dest) || inside(incoming, dest) {
 		return empty, dataengine.ErrInvalidRequest
 	}
-	if _, err = os.Lstat(dest); err == nil {
-		return empty, ErrConflict
+	created := false
+	exists := false
+	if info, statErr := os.Lstat(dest); statErr == nil {
+		if !info.Mode().IsRegular() || sameFile(dest, digest) != nil {
+			return empty, ErrConflict
+		}
+		exists = true
+	} else if !os.IsNotExist(statErr) {
+		return empty, statErr
 	}
-	temp := filepath.Join(folder, ".musicops-"+input.RequestID+".partial")
-	if err = writeNew(temp, body); err != nil {
-		os.Remove(temp)
-		return empty, err
-	}
-	if err = os.Rename(temp, dest); err != nil {
-		os.Remove(temp)
-		return empty, err
-	}
-	if err = sameFile(dest, digest); err != nil {
-		os.Remove(dest)
-		return empty, err
+	if !exists {
+		temp := filepath.Join(folder, ".musicops-"+input.RequestID+".partial")
+		if err = writeNew(temp, body); err != nil {
+			os.Remove(temp)
+			return empty, err
+		}
+		if err = os.Rename(temp, dest); err != nil {
+			os.Remove(temp)
+			// A concurrent identical release may have won the rename after our
+			// existence check. Reuse it; a different file remains a conflict.
+			if sameFile(dest, digest) != nil {
+				return empty, ErrConflict
+			}
+		} else {
+			created = true
+		}
+		if err = sameFile(dest, digest); err != nil {
+			if created {
+				os.Remove(dest)
+			}
+			return empty, err
+		}
 	}
 	rec := record{
 		RequestID: input.RequestID, RootID: input.RootID, Path: dest, SHA256: digest, Format: format,
@@ -248,9 +265,11 @@ func Release(ctx context.Context, engine *dataengine.Engine, input Request) (Res
 		// Remove our file when it still holds our bytes, so a lost CAS race
 		// cannot leave an orphaned library file behind. A destination whose
 		// bytes differ from our digest belongs to another publish and is left alone.
-		if data, err := os.ReadFile(dest); err == nil {
-			if sum := sha256.Sum256(data); hex.EncodeToString(sum[:]) == digest {
-				os.Remove(dest)
+		if created {
+			if data, readErr := os.ReadFile(dest); readErr == nil {
+				if sum := sha256.Sum256(data); hex.EncodeToString(sum[:]) == digest {
+					os.Remove(dest)
+				}
 			}
 		}
 		return empty, ErrConflict

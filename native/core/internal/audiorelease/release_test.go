@@ -41,6 +41,33 @@ func TestWAVPublishesOnceAndKeepsTheSource(t *testing.T) {
 	}
 }
 
+func TestExistingIdenticalLibraryFileCanBeAdoptedByAnotherRoot(t *testing.T) {
+	engine, incoming, library := openRelease(t)
+	body := wav(48)
+	writeSource(t, incoming, "song.wav", body)
+	first := sample(incoming, library, "song.wav")
+	if _, err := Release(context.Background(), engine, first); err != nil {
+		t.Fatal(err)
+	}
+	second := sample(incoming, library, "song.wav")
+	second.RequestID, second.RootID = "rel-2", "root-2"
+	got, err := Release(context.Background(), engine, second)
+	if err != nil || got.LibraryPublished != true || got.SHA256 == "" {
+		t.Fatal(got, err)
+	}
+	published := filepath.Join(library, "Artist", "Album", "01 Title.wav")
+	if data, err := os.ReadFile(published); err != nil || !bytes.Equal(data, body) {
+		t.Fatal("identical destination changed", err)
+	}
+
+	writeSource(t, incoming, "song.wav", wav(64))
+	third := sample(incoming, library, "song.wav")
+	third.RequestID, third.RootID = "rel-3", "root-3"
+	if _, err := Release(context.Background(), engine, third); !errors.Is(err, ErrConflict) {
+		t.Fatal("different destination bytes were overwritten or adopted", err)
+	}
+}
+
 func TestTorrentAndFixtureNeverPublish(t *testing.T) {
 	engine, incoming, library := openRelease(t)
 	cases := []struct {

@@ -796,8 +796,19 @@ func SystemDecoder() Decoder {
 		defer cancelDecode()
 		command := exec.CommandContext(decodeCtx, ffmpeg, "-nostdin", "-v", "error", "-xerror", "-err_detect", "explode", "-threads", "1", "-i", path, "-map", "0:a:0", "-f", "null", "-")
 		stderr, err := command.CombinedOutput()
-		if err != nil || strings.TrimSpace(string(stderr)) != "" {
-			return errors.New("audio decode failed")
+		// -xerror and -err_detect explode make audio corruption a non-zero exit.
+		// ffmpeg can still print recoverable metadata warnings (for example a
+		// malformed embedded PNG cover) while returning success; those must not
+		// reject otherwise valid lossless audio.
+		if err != nil {
+			detail := strings.TrimSpace(string(stderr))
+			if len(detail) > 500 {
+				detail = detail[:500]
+			}
+			if detail == "" {
+				return fmt.Errorf("audio decode failed: %w", err)
+			}
+			return fmt.Errorf("audio decode failed: %s", detail)
 		}
 		return nil
 	}

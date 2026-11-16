@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	"github.com/wsdbb72/MusicOps/native/core/internal/dataengine"
+	"github.com/wsdbb72/MusicOps/native/core/internal/flactags"
 )
 
 func TestWAVPublishesOnceAndKeepsTheSource(t *testing.T) {
@@ -187,6 +188,51 @@ func TestSystemDecoderAcceptsWAVWhenPresent(t *testing.T) {
 	input.Decoder = decoder
 	got, err := Release(context.Background(), engine, input)
 	if err != nil || got.DecodeState != "decoded" || got.Downloaded || got.ProductionVerified {
+		t.Fatal(got, err)
+	}
+}
+
+func TestSystemDecoderIgnoresNonfatalCoverWarning(t *testing.T) {
+	decoder := SystemDecoder()
+	if decoder == nil {
+		t.Skip("ffmpeg and ffprobe are not installed")
+	}
+	engine, incoming, library := openRelease(t)
+	sourceWAV := filepath.Join(incoming, "source.wav")
+	if err := os.WriteFile(sourceWAV, wav(64), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	flacPath := filepath.Join(incoming, "song.flac")
+	command := exec.Command("ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-i", sourceWAV, "-c:a", "flac", flacPath)
+	if out, err := command.CombinedOutput(); err != nil {
+		t.Fatalf("ffmpeg generate: %v %s", err, out)
+	}
+	audio, err := os.ReadFile(flacPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A valid signature with an impossible chunk length makes ffmpeg emit a
+	// recoverable cover warning, while -xerror still proves the FLAC frames.
+	brokenCover := append([]byte("\x89PNG\r\n\x1a\n\x7f\xff\xff\xffIHDR"), bytes.Repeat([]byte{0}, 32)...)
+	audio, err = flactags.EmbedFrontCover(audio, brokenCover)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(flacPath, audio, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	verify := exec.Command("ffmpeg", "-nostdin", "-v", "error", "-xerror", "-err_detect", "explode", "-threads", "1", "-i", flacPath, "-map", "0:a:0", "-f", "null", "-")
+	stderr, err := verify.CombinedOutput()
+	if err != nil {
+		t.Fatalf("strict decode failed: %v %s", err, stderr)
+	}
+	if !bytes.Contains(stderr, []byte("chunk too big")) {
+		t.Skipf("this ffmpeg build did not emit the expected recoverable cover warning: %s", stderr)
+	}
+	input := sample(incoming, library, "song.flac")
+	input.Decoder = decoder
+	got, err := Release(context.Background(), engine, input)
+	if err != nil || got.DecodeState != "decoded" || got.Class != "" {
 		t.Fatal(got, err)
 	}
 }

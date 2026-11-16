@@ -4,8 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"path/filepath"
 	"strconv"
+	"strings"
 
 	"github.com/wsdbb72/MusicOps/native/core/internal/audiorelease"
 	"github.com/wsdbb72/MusicOps/native/core/internal/scheduler"
@@ -25,7 +27,7 @@ func (a *App) ingestPlaylistStream(ctx context.Context, job workflow.Job, plan S
 	root := a.workPath("incoming")
 	name, title, scrape, err := a.scrapePlaylistIncoming(ctx, root, filepath.Base(path), plan.ExpectedArtist, plan.ExpectedTitle, plan.PlaylistTrack, position)
 	if err != nil {
-		return publishReceipt{}, errors.New("流媒体音频刮削失败，尚未入库")
+		return publishReceipt{}, fmt.Errorf("流媒体音频刮削失败，尚未入库: %w", err)
 	}
 	id := audioRequestID(job.RootID, position)
 	result, err := audiorelease.Release(ctx, a.engine, audiorelease.Request{
@@ -33,21 +35,38 @@ func (a *App) ingestPlaylistStream(ctx context.Context, job workflow.Job, plan S
 		SourceName: name, Incoming: root, Library: a.libraryDir(), Decoder: audiorelease.SystemDecoder(), InternalDownload: true,
 	})
 	if err != nil {
-		return publishReceipt{}, errors.New("流媒体音频未通过发布校验，尚未入库")
+		return publishReceipt{}, playlistReleaseError(err, result)
 	}
 	if scrape.lyrics != "" {
 		placed, found, err := audiorelease.PathFor(a.engine, id)
 		if err != nil || !found {
-			return publishReceipt{}, errors.New("已复制音频，但无法确认歌词写入位置")
+			return publishReceipt{}, fmt.Errorf("已复制音频，但无法确认歌词写入位置: %w", err)
 		}
 		if !hasLyricsSidecar(placed) {
 			if err := writeLyricsSidecar(placed, scrape.lyrics); err != nil {
-				return publishReceipt{}, errors.New("已复制音频，但歌词写入失败")
+				return publishReceipt{}, fmt.Errorf("已复制音频，但歌词写入失败: %w", err)
 			}
 		}
 	}
 	removeNeteaseStaging(root, path, name)
 	return publishReceipt{TrackID: strconv.Itoa(position), RequestID: id, SHA256: result.SHA256, Format: result.Format, Origin: result.Origin, SourceName: result.SourceName, DecodeState: result.DecodeState, Scrape: scrape}, nil
+}
+
+func playlistReleaseError(err error, result audiorelease.Result) error {
+	detail := strings.TrimSpace(result.Class)
+	if detail == "" {
+		switch {
+		case errors.Is(err, audiorelease.ErrConflict):
+			detail = "library_conflict"
+		case errors.Is(err, audiorelease.ErrMissing):
+			detail = "audio_missing"
+		case errors.Is(err, audiorelease.ErrTool):
+			detail = "decoder_missing"
+		default:
+			detail = "release_failed"
+		}
+	}
+	return fmt.Errorf("流媒体音频未通过发布校验（%s），尚未入库: %w", detail, err)
 }
 
 func (a *App) finishPlaylistStreams(held taskrepo.Token, job workflow.Job, items []publishReceipt, message string, missing ...string) (scheduler.Outcome, error) {

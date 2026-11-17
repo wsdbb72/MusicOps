@@ -158,7 +158,18 @@ func (a *App) fetchRemotePlaylist(ctx context.Context, platform, id, base string
 		return remotePlaylist{}, errors.New("YouTube 需要用户自己的 API Key，不会改去读取网页")
 	}
 	if platform == "netease" {
-		return a.fetchNetease(ctx, spec, origin, id, header, bearer)
+		remote, fetchErr := a.fetchNetease(ctx, spec, origin, id, header, bearer)
+		if fetchErr == nil {
+			return remote, nil
+		}
+		fallback := a.neteaseCookie()
+		if fallback != "" && fallback != header {
+			// playlist-sources may still point at an older credential. A
+			// signed-in streaming cookie is the same account and can read the
+			// selected liked playlist without weakening public-playlist reads.
+			return a.fetchNetease(ctx, spec, origin, id, fallback, bearer)
+		}
+		return remote, fetchErr
 	}
 	if platform == "kugou" && (strings.HasPrefix(id, "collection_") || strings.HasPrefix(id, "gcid_")) {
 		return a.fetchKugouList(ctx, origin, id)

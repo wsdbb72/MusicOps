@@ -13,6 +13,7 @@ import (
 	"sync/atomic"
 	"testing"
 
+	"github.com/wsdbb72/MusicOps/native/core/internal/cookies"
 	"github.com/wsdbb72/MusicOps/native/core/internal/workflow"
 )
 
@@ -215,7 +216,18 @@ func TestNeteasePlaylistRefreshesLegacyM3UOnce(t *testing.T) {
 	vaultKey(t)
 	a := newApp(t)
 	saveNeteaseTestCookie(t, a)
-	if err := a.casSaveJSON([]byte("app/settings/playlist-sources"), []byte("{}")); err != nil {
+	stale, err := cookies.ParseEditor(`[{"name":"MUSIC_U","value":"stale-session","domain":"music.163.com","path":"/","secure":true,"httpOnly":true,"sameSite":"unspecified","hostOnly":true}]`, neteaseHost)
+	if err != nil {
+		t.Fatal(err)
+	}
+	encoded, err := cookies.Marshal(stale)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := a.vault.Set("vault://playlist/netease-stale", encoded, neteaseHost); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.casSaveJSON([]byte("app/settings/playlist-sources"), []byte(`{"netease":{"credential_ref":"vault://playlist/netease-stale"}}`)); err != nil {
 		t.Fatal(err)
 	}
 	batchID := "pl-netease-590536461-refresh"
@@ -228,8 +240,9 @@ func TestNeteasePlaylistRefreshesLegacyM3UOnce(t *testing.T) {
 		t.Fatal(err)
 	}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Header.Get("Cookie") == "" {
-			t.Error("recovery did not reuse the saved NetEase session")
+		if r.Header.Get("Cookie") != a.neteaseCookie() {
+			http.NotFound(w, r)
+			return
 		}
 		if r.URL.Path != "/api/v3/playlist/detail" || r.URL.Query().Get("id") != "590536461" {
 			http.NotFound(w, r)

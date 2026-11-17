@@ -30,6 +30,43 @@ import (
 	"github.com/wsdbb72/MusicOps/native/core/internal/workflow"
 )
 
+const hotSlowCompilationAlbum = "最新热歌慢摇"
+const hotSlowCompilationArtist = "群星"
+
+// normalizePlaylistAlbumTitle folds the numbered "最新热歌慢摇" source volumes
+// back to the single compilation title users see in their library.
+func normalizePlaylistAlbumTitle(album string) string {
+	value := strings.TrimSpace(album)
+	if !strings.HasPrefix(value, hotSlowCompilationAlbum) {
+		return value
+	}
+	suffix := strings.TrimSpace(strings.TrimPrefix(value, hotSlowCompilationAlbum))
+	if suffix == "" {
+		return hotSlowCompilationAlbum
+	}
+	for _, r := range suffix {
+		if (r < '0' || r > '9') && (r < '０' || r > '９') {
+			return value
+		}
+	}
+	return hotSlowCompilationAlbum
+}
+
+func normalizePlaylistAlbumPlan(plan *SearchPlan) {
+	if plan == nil {
+		return
+	}
+	original := plan.ExpectedTitle
+	plan.ExpectedTitle = normalizePlaylistAlbumTitle(original)
+	if plan.ExpectedTitle == hotSlowCompilationAlbum {
+		plan.AlbumArtist = hotSlowCompilationArtist
+	}
+}
+
+func isHotSlowCompilationAlbum(album string) bool {
+	return normalizePlaylistAlbumTitle(album) == hotSlowCompilationAlbum
+}
+
 type playlistEnqueueOptions struct {
 	// AlbumCompletion groups rows by album and starts one album job per
 	// album, so a partially present album is completed rather than patched
@@ -209,7 +246,7 @@ func (a *App) enqueuePlaylistTracks(ctx context.Context, playlistJobID string, r
 			continue
 		}
 		report.Tracks++
-		album := strings.TrimSpace(row.Album)
+		album := normalizePlaylistAlbumTitle(row.Album)
 		if library.hasTrack(artist, album, title) && (!opts.AlbumCompletion || !library.hasAlbumGap(artist, album)) {
 			report.Skipped = append(report.Skipped, artist+" - "+title)
 			continue
@@ -243,7 +280,7 @@ func (a *App) enqueuePlaylistTracks(ctx context.Context, playlistJobID string, r
 // pipeline works in, so the job is named after it and the row is the evidence.
 func (a *App) startPlaylistAlbumJob(ctx context.Context, client *musicbrainz.Client, playlistJobID string, sites []string, budget int, row playlistTrack, albumCompletion, neteaseOnly bool) (string, error) {
 	artist := strings.TrimSpace(row.Artist)
-	album := strings.TrimSpace(row.Album)
+	album := normalizePlaylistAlbumTitle(row.Album)
 	title := strings.TrimSpace(row.Title)
 	expected := title
 	if album != "" {
@@ -278,6 +315,12 @@ func (a *App) startPlaylistAlbumJob(ctx context.Context, client *musicbrainz.Cli
 		Query: strings.TrimSpace(artist + " " + expected), ExpectedTitle: expected, ExpectedArtist: artist,
 		EnabledSites: sites, StreamingEnabled: true, Identity: identity, Budget: budget, PlaylistTrack: title,
 		NeteaseOnly: neteaseOnly, NeteaseTrackOnly: neteaseOnly && !albumCompletion, NeteaseSongID: row.NeteaseSongID, NeteaseAlbumID: row.NeteaseAlbumID,
+		AlbumArtist: func() string {
+			if isHotSlowCompilationAlbum(album) {
+				return hotSlowCompilationArtist
+			}
+			return ""
+		}(),
 	}
 	raw, err := json.Marshal(plan)
 	if err != nil {

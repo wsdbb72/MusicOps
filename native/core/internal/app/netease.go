@@ -352,6 +352,16 @@ func (a *App) stageNeteaseSong(ctx context.Context, plan SearchPlan, song *netea
 	if err != nil || tags.StreamInfo.SampleRate == 0 || tags.StreamInfo.TotalSamples == 0 {
 		return "", "netease 返回的 FLAC 没有可用时长", downloadpolicy.ClassNoResult, true
 	}
+	if cover := flactags.FrontCover(body); len(cover) > 0 && !imageBytes(cover) {
+		body, err = flactags.RemoveFrontCover(body)
+		if err != nil {
+			return "", "netease 封面损坏且无法清理", downloadpolicy.ClassNoResult, true
+		}
+		tags, err = flactags.ReadBytes(body)
+		if err != nil {
+			return "", "netease 清理损坏封面后无法读取音频", downloadpolicy.ClassNoResult, true
+		}
+	}
 	if plan.PlaylistTrack != "" && song.DurationMS > 0 {
 		actual := int64(tags.StreamInfo.TotalSamples) * 1000 / int64(tags.StreamInfo.SampleRate)
 		if drift := actual - int64(song.DurationMS); drift < -1500 || drift > 1500 {

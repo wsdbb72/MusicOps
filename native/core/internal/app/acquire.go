@@ -45,6 +45,7 @@ func (a *App) acquire(ctx context.Context, execution *scheduler.Execution, paylo
 	if err != nil {
 		return scheduler.Outcome{}, err
 	}
+	normalizePlaylistAlbumPlan(&plan)
 	defer a.forget(plan.RootJobID)
 	if job.Stage == "fallback" {
 		return a.acquireFallback(ctx, execution, held, *job, plan)

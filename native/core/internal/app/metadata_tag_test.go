@@ -318,7 +318,7 @@ func TestCompleteMetadataWritesCoverWhenTagsAlreadyMatch(t *testing.T) {
 		Title: "Opening", Artists: []string{"Some Artist"}, Album: "First Album", AlbumArtist: "Some Artist",
 		TrackNumber: 1, Date: "2019-01-02", Genre: "Ambient",
 	})
-	coverBody := append([]byte{0xff, 0xd8}, bytes.Repeat([]byte{0x22}, 96)...)
+	coverBody := jpegBody()
 	cover := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = w.Write(coverBody)
 	}))

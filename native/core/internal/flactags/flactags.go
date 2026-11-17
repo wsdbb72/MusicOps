@@ -619,6 +619,32 @@ func EmbedFrontCover(data, image []byte) ([]byte, error) {
 	return out.Bytes(), nil
 }
 
+// RemoveFrontCover returns a copy without any type-3 front-cover block.
+// Other pictures, comments and audio bytes stay unchanged.
+func RemoveFrontCover(data []byte) ([]byte, error) {
+	pf, err := parseFLAC(data)
+	if err != nil {
+		return nil, err
+	}
+	blocks := make([]block, 0, len(pf.blocks))
+	for _, item := range pf.blocks {
+		if item.typ == blockPicture && pictureType(item.data) == 3 {
+			continue
+		}
+		blocks = append(blocks, item)
+	}
+	var out bytes.Buffer
+	out.WriteString(flacMagic)
+	for i, item := range blocks {
+		if err := writeBlockHeader(&out, item.typ, len(item.data), i == len(blocks)-1); err != nil {
+			return nil, err
+		}
+		out.Write(item.data)
+	}
+	out.Write(pf.audio)
+	return out.Bytes(), nil
+}
+
 // FrontCover returns the type-3 picture bytes, or nil when there is none.
 func FrontCover(data []byte) []byte {
 	pf, err := parseFLAC(data)

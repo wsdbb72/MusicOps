@@ -19,7 +19,7 @@ func TestPlaylistScrapePreservesInputAndStagesReplay(t *testing.T) {
 	if err := os.WriteFile(source, original, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	newName, title, result, err := a.scrapePlaylistIncoming(context.Background(), dir, name, "Artist", "Album", "Example", 1)
+	newName, title, result, err := a.scrapePlaylistIncoming(context.Background(), dir, name, "Artist", "", "Album", "Example", 1)
 	if err != nil || newName == name || title != "Example" || result == nil {
 		t.Fatal(newName, title, result, err)
 	}
@@ -28,7 +28,7 @@ func TestPlaylistScrapePreservesInputAndStagesReplay(t *testing.T) {
 		t.Fatal(tags, err)
 	}
 	before, _ := os.ReadFile(filepath.Join(dir, newName))
-	if _, _, _, err := a.scrapePlaylistIncoming(context.Background(), dir, name, "Artist", "Album", "Example", 1); err != nil {
+	if _, _, _, err := a.scrapePlaylistIncoming(context.Background(), dir, name, "Artist", "", "Album", "Example", 1); err != nil {
 		t.Fatal(err)
 	}
 	after, _ := os.ReadFile(filepath.Join(dir, newName))
@@ -112,5 +112,28 @@ func TestPlaylistAlbumFillDoesNotConflateSameTitleDifferentPCM(t *testing.T) {
 	}
 	if !playlistSamePCM(source, []string{same}) || playlistSamePCM(source, []string{different}) {
 		t.Fatal("album completion did not distinguish different audio checksums")
+	}
+}
+func TestHotSlowCompilationRejectsProviderCoverAndWritesAlbumArtist(t *testing.T) {
+	a := newApp(t)
+	server, _ := lrcAPIFake(t, "", jpegBody(), "", "")
+	defer server.Close()
+	saveLyricsService(t, a, server.URL, "", "")
+	dir := t.TempDir()
+	name := "01 Song.flac"
+	if err := os.WriteFile(filepath.Join(dir, name), syntheticFLAC(t, false), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	staged, _, _, err := a.scrapePlaylistIncoming(context.Background(), dir, name, "Artist", hotSlowCompilationArtist, hotSlowCompilationAlbum, "Song", 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, err := os.ReadFile(filepath.Join(dir, staged))
+	tags, tagErr := flactags.ReadBytes(body)
+	if err != nil || tagErr != nil || tags.AlbumArtist != hotSlowCompilationArtist || tags.Album != hotSlowCompilationAlbum {
+		t.Fatalf("body=%v tags=%+v err=%v tagErr=%v", len(body), tags, err, tagErr)
+	}
+	if cover := flactags.FrontCover(body); len(cover) != 0 {
+		t.Fatal("an unrelated provider cover was embedded in the compilation")
 	}
 }

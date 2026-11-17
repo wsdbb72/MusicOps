@@ -7,6 +7,9 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"image"
+	_ "image/jpeg"
+	_ "image/png"
 	"io/fs"
 	"net/http"
 	"net/url"
@@ -933,13 +936,18 @@ func (a *App) fetchArtworkContext(ctx context.Context, lyricsBase, coverBase, ar
 }
 
 func imageBytes(body []byte) bool {
-	if len(body) < 32 {
+	if len(body) < 32 || len(body) > 10_000_000 {
 		return false
 	}
-	if body[0] == 0xff && body[1] == 0xd8 {
-		return true
+	config, _, err := image.DecodeConfig(bytes.NewReader(body))
+	if err != nil || config.Width < 100 || config.Height < 100 || config.Width > 12_000 || config.Height > 12_000 {
+		return false
 	}
-	return len(body) >= 8 && string(body[:8]) == "\x89PNG\r\n\x1a\n"
+	// Decode the complete image, not only its header. A truncated HTTP body can
+	// still contain a valid JPEG/PNG signature and previously reached the tag;
+	// that produced covers cut off halfway through the file.
+	_, _, err = image.Decode(bytes.NewReader(body))
+	return err == nil
 }
 
 func loopbackURL(raw string) bool {

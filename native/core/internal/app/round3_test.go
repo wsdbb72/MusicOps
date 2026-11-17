@@ -39,7 +39,7 @@ func TestMetadataWritesTagsLyricsAndCoverTogether(t *testing.T) {
 		_, _ = io.WriteString(w, `{"lyrics":"[00:01.00]hello"}`)
 	}))
 	defer lyrics.Close()
-	coverBody := append([]byte{0xff, 0xd8}, bytes.Repeat([]byte{0x11}, 64)...)
+	coverBody := jpegBody()
 	cover := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write(coverBody)
 	}))

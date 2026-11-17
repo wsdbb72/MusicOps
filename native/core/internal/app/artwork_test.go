@@ -3,6 +3,9 @@ package app
 import (
 	"bytes"
 	"encoding/json"
+	"image"
+	"image/color"
+	"image/jpeg"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -63,7 +66,27 @@ func saveLyricsService(t *testing.T, application *App, base, header, value strin
 }
 
 func jpegBody() []byte {
-	return append([]byte{0xff, 0xd8, 0xff, 0xe0}, bytes.Repeat([]byte{0x22}, 64)...)
+	img := image.NewRGBA(image.Rect(0, 0, 128, 128))
+	for y := 0; y < 128; y++ {
+		for x := 0; x < 128; x++ {
+			img.Set(x, y, color.RGBA{R: uint8(x), G: uint8(y), B: 96, A: 255})
+		}
+	}
+	var out bytes.Buffer
+	if err := jpeg.Encode(&out, img, &jpeg.Options{Quality: 85}); err != nil {
+		panic(err)
+	}
+	return out.Bytes()
+}
+
+func TestImageValidationRejectsTruncatedCover(t *testing.T) {
+	cover := jpegBody()
+	if !imageBytes(cover) {
+		t.Fatal("valid cover rejected")
+	}
+	if imageBytes(cover[:len(cover)/2]) {
+		t.Fatal("truncated cover accepted")
+	}
 }
 
 // The saved service is used without typing an address, and the saved

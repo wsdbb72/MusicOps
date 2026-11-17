@@ -36,6 +36,7 @@ type SearchPlan struct {
 	NeteaseAlbumID      int64                `json:"netease_album_id,omitempty"`
 	PlaylistTrack       string               `json:"playlist_track,omitempty"`
 	PlaylistMode        string               `json:"playlist_mode,omitempty"`
+	AlbumArtist         string               `json:"album_artist,omitempty"`
 	Query               string               `json:"query"`
 	ExpectedTitle       string               `json:"expected_title"`
 	ExpectedArtist      string               `json:"expected_artist,omitempty"`
@@ -70,6 +71,7 @@ func (a *App) identify(ctx context.Context, execution *scheduler.Execution, payl
 	if err != nil {
 		return scheduler.Outcome{}, err
 	}
+	normalizePlaylistAlbumPlan(&plan)
 	token := execution.Token()
 	// A playlist job has no album to identify: read the list it was created
 	// with, record it as evidence and park for review. Running the album
@@ -134,6 +136,7 @@ func (a *App) search(ctx context.Context, execution *scheduler.Execution, payloa
 	if err != nil {
 		return scheduler.Outcome{}, err
 	}
+	normalizePlaylistAlbumPlan(&plan)
 	token := execution.Token()
 	// A playlist job has no album to identify: read the list it was created
 	// with, record it as evidence and park for review. Running the album

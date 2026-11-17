@@ -132,7 +132,7 @@ func TestEmbeddedCoverModeSkipsTheSidecar(t *testing.T) {
 	}
 	post(t, application, "/v1/settings/library", map[string]any{"library_dir": library})
 	catalog := newFakeMusicBrainz(t, catalogSearchJSON, catalogDetailJSON, http.StatusOK)
-	coverBody := append([]byte{0xff, 0xd8}, []byte(strings.Repeat("a", 64))...)
+	coverBody := jpegBody()
 	cover := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write(coverBody)
 	}))

@@ -25,13 +25,18 @@ func (a *App) publishPlaylistStream(ctx context.Context, held taskrepo.Token, jo
 
 func (a *App) ingestPlaylistStream(ctx context.Context, job workflow.Job, plan SearchPlan, path string, position int) (publishReceipt, error) {
 	root := a.workPath("incoming")
-	name, title, scrape, err := a.scrapePlaylistIncoming(ctx, root, filepath.Base(path), plan.ExpectedArtist, plan.ExpectedTitle, plan.PlaylistTrack, position)
+	name, title, scrape, err := a.scrapePlaylistIncoming(ctx, root, filepath.Base(path), plan.ExpectedArtist, plan.AlbumArtist, plan.ExpectedTitle, plan.PlaylistTrack, position)
 	if err != nil {
 		return publishReceipt{}, fmt.Errorf("流媒体音频刮削失败，尚未入库: %w", err)
 	}
 	id := audioRequestID(job.RootID, position)
 	result, err := audiorelease.Release(ctx, a.engine, audiorelease.Request{
-		RequestID: id, RootID: job.RootID, Track: position, Artist: publishComponent(plan.ExpectedArtist), Album: publishComponent(plan.ExpectedTitle), Title: publishComponent(title),
+		RequestID: id, RootID: job.RootID, Track: position, Artist: publishComponent(plan.ExpectedArtist), FolderArtist: func() string {
+			if strings.TrimSpace(plan.AlbumArtist) == "" {
+				return ""
+			}
+			return publishComponent(plan.AlbumArtist)
+		}(), Album: publishComponent(plan.ExpectedTitle), Title: publishComponent(title),
 		SourceName: name, Incoming: root, Library: a.libraryDir(), Decoder: audiorelease.SystemDecoder(), InternalDownload: true,
 	})
 	if err != nil {

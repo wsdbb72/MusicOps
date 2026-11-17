@@ -96,3 +96,32 @@ func TestEnqueueGroupsRowsByAlbum(t *testing.T) {
 		t.Fatalf("%+v", second)
 	}
 }
+func TestHotSlowCompilationAlbumsFoldToSingleTitleAndArtist(t *testing.T) {
+	for _, input := range []string{"最新热歌慢摇19", "最新热歌慢摇 101", "最新热歌慢摇１１４", "最新热歌慢摇"} {
+		plan := SearchPlan{ExpectedTitle: input}
+		normalizePlaylistAlbumPlan(&plan)
+		if plan.ExpectedTitle != hotSlowCompilationAlbum || plan.AlbumArtist != hotSlowCompilationArtist {
+			t.Fatalf("input %q normalized to %+v", input, plan)
+		}
+	}
+	if got := normalizePlaylistAlbumTitle("最新热歌慢摇精选"); got != "最新热歌慢摇精选" {
+		t.Fatalf("unrelated suffix changed: %q", got)
+	}
+}
+func TestEnqueueNormalizesHotSlowCompilationAlbumPlan(t *testing.T) {
+	application := newApp(t)
+	rows := []playlistTrack{{Artist: "Artist", Title: "Song", Album: "最新热歌慢摇114"}}
+	report, err := application.enqueuePlaylistTracks(context.Background(), "pl-hot-slow", rows, []int{0}, playlistEnqueueOptions{AlbumCompletion: true})
+	if err != nil || len(report.Created) != 1 {
+		t.Fatal(report, err)
+	}
+	job, err := application.flows.Job(report.Created[0])
+	if err != nil || job == nil {
+		t.Fatal(job, err)
+	}
+	raw, found, err := application.tasks.Data(job.ActiveTaskID, "arguments", 0)
+	plan, decodeErr := decodePlan(raw)
+	if err != nil || !found || decodeErr != nil || plan.ExpectedTitle != hotSlowCompilationAlbum || plan.AlbumArtist != hotSlowCompilationArtist {
+		t.Fatalf("plan=%+v found=%v err=%v decode=%v", plan, found, err, decodeErr)
+	}
+}

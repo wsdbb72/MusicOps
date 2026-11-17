@@ -22,7 +22,7 @@ type playlistScrapeResult struct {
 
 // Work on a separate staging file, never on the qBittorrent payload or an
 // existing library file. Keep an identical staged file on replay.
-func (a *App) scrapePlaylistIncoming(ctx context.Context, incoming, name, artist, album, fallbackTitle string, track int) (string, string, *playlistScrapeResult, error) {
+func (a *App) scrapePlaylistIncoming(ctx context.Context, incoming, name, artist, albumArtist, album, fallbackTitle string, track int) (string, string, *playlistScrapeResult, error) {
 	key := "scraped-" + name
 	src, dest := filepath.Join(incoming, name), filepath.Join(incoming, key)
 	for _, candidate := range []string{dest, src} {
@@ -40,10 +40,17 @@ func (a *App) scrapePlaylistIncoming(ctx context.Context, incoming, name, artist
 		title := truncateName(firstNonEmpty(tags.Title, fallbackTitle))
 		lyrics := firstValue(tags.Raw["LYRICS"])
 		cover := flactags.FrontCover(body)
+		if !imageBytes(cover) {
+			cover = nil
+		}
 		result := &playlistScrapeResult{Artwork: "retained"}
 		if candidate == src {
 			updates := tags.Raw
-			for field, values := range map[string][]string{"TITLE": {title}, "ALBUM": {album}, "ARTIST": {artist}, "TRACKNUMBER": {strconv.Itoa(track)}} {
+			updatesByField := map[string][]string{"TITLE": {title}, "ALBUM": {album}, "ARTIST": {artist}, "TRACKNUMBER": {strconv.Itoa(track)}}
+			if strings.TrimSpace(albumArtist) != "" {
+				updatesByField["ALBUMARTIST"] = []string{albumArtist}
+			}
+			for field, values := range updatesByField {
 				if len(updates[field]) == 0 {
 					updates[field] = values
 				}
@@ -54,6 +61,11 @@ func (a *App) scrapePlaylistIncoming(ctx context.Context, incoming, name, artist
 				cancel()
 				if ctx.Err() != nil {
 					return "", "", nil, ctx.Err()
+				}
+				if isHotSlowCompilationAlbum(album) {
+					// Keep the source compilation art; provider lookups can map
+					// this title to an unrelated artist album.
+					fetchedCover = nil
 				}
 				switch {
 				case fetchErr != nil:
@@ -76,11 +88,15 @@ func (a *App) scrapePlaylistIncoming(ctx context.Context, incoming, name, artist
 			if err != nil {
 				return "", "", nil, err
 			}
-			if len(cover) > 0 && len(flactags.FrontCover(body)) == 0 {
+			currentCover := flactags.FrontCover(body)
+			switch {
+			case len(cover) > 0 && !imageBytes(currentCover):
 				body, err = flactags.EmbedFrontCover(body, cover)
-				if err != nil {
-					return "", "", nil, err
-				}
+			case len(currentCover) > 0 && !imageBytes(currentCover):
+				body, err = flactags.RemoveFrontCover(body)
+			}
+			if err != nil {
+				return "", "", nil, err
 			}
 			release, err := reserveAudioCache(incoming, int64(len(body)))
 			if err != nil {

@@ -1499,17 +1499,27 @@ func (a *App) ingestDownload(ctx context.Context, plan downloadPlan, meta qbitto
 				title = truncateName(compared.After.Title)
 			}
 		}
+		publishedAlbum := normalizePlaylistAlbumTitle(trackAlbum)
+		publishedAlbumArtist := ""
+		if isHotSlowCompilationAlbum(trackAlbum) {
+			publishedAlbumArtist = hotSlowCompilationArtist
+		}
 		var scrape *playlistScrapeResult
 		if plan.PlaylistBatch {
 			var err error
-			incomingName, title, scrape, err = a.scrapePlaylistIncoming(ctx, incoming, incomingName, trackArtist, trackAlbum, title, position)
+			incomingName, title, scrape, err = a.scrapePlaylistIncoming(ctx, incoming, incomingName, trackArtist, publishedAlbumArtist, publishedAlbum, title, position)
 			if err != nil {
 				return nil, downloadError("SCRAPE_FAILED", "刮削未写完："+filepath.Base(f.Path))
 			}
 		}
 		result, err := audiorelease.Release(ctx, a.engine, audiorelease.Request{
 			RequestID: audioRequestID(plan.RootJobID, position), RootID: plan.RootJobID,
-			Artist: publishComponent(trackArtist), Album: publishComponent(trackAlbum), Title: publishComponent(title), Track: position,
+			Artist: publishComponent(trackArtist), FolderArtist: func() string {
+				if strings.TrimSpace(publishedAlbumArtist) == "" {
+					return ""
+				}
+				return publishComponent(publishedAlbumArtist)
+			}(), Album: publishComponent(publishedAlbum), Title: publishComponent(title), Track: position,
 			SourceName: incomingName, Origin: "local_import",
 			Incoming: incoming, Library: library, Decoder: audiorelease.SystemDecoder(), InternalDownload: true,
 		})

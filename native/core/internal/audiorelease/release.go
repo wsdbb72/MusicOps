@@ -56,6 +56,7 @@ type Request struct {
 	RequestID        string
 	RootID           string
 	Artist           string
+	FolderArtist     string
 	Album            string
 	Title            string
 	Track            int
@@ -184,7 +185,11 @@ func Release(ctx context.Context, engine *dataengine.Engine, input Request) (Res
 		decodeState = "decoded"
 	}
 	digest := hex.EncodeToString(before[:])
-	folder := filepath.Join(library, artist, album)
+	folderArtist := artist
+	if strings.TrimSpace(input.FolderArtist) != "" {
+		folderArtist = filepath.Clean(strings.TrimSpace(input.FolderArtist))
+	}
+	folder := filepath.Join(library, folderArtist, album)
 	if err = os.MkdirAll(folder, 0o700); err != nil {
 		return empty, err
 	}

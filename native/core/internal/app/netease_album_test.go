@@ -101,6 +101,7 @@ func TestNeteaseAlbumCompletesOnlyMissingTracks(t *testing.T) {
 	if !strings.Contains(root.Job.Message, "仍缺 1 首") || !strings.Contains(root.Job.Message, "Three") {
 		t.Fatal(root.Job.Message)
 	}
+
 	files, err := os.ReadDir(folder)
 	if err != nil {
 		t.Fatal(err)
@@ -112,7 +113,7 @@ func TestNeteaseAlbumCompletesOnlyMissingTracks(t *testing.T) {
 		}
 	}
 	if count != 2 || hits.Load() != 1 || trackerHits.Load() != 0 {
-		t.Fatal(files, hits.Load())
+		t.Fatal(files, hits.Load(), root.Job.Message)
 	}
 	if _, err := os.Stat(existing); err != nil {
 		t.Fatal(err)

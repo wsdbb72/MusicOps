@@ -551,3 +551,19 @@ func TestPublishedRootsChecksOnlyTheGivenRoots(t *testing.T) {
 		t.Fatal(empty, err)
 	}
 }
+func TestFolderArtistCanGroupCompilationTracks(t *testing.T) {
+	engine, incoming, library := openRelease(t)
+	writeSource(t, incoming, "song.wav", wav(24))
+	request := sample(incoming, library, "song.wav")
+	request.FolderArtist = "群星"
+	request.Album = "最新热歌慢摇"
+	if _, err := Release(context.Background(), engine, request); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(library, "群星", "最新热歌慢摇", "01 Title.wav")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(library, "Artist", "最新热歌慢摇")); !os.IsNotExist(err) {
+		t.Fatal("track artist folder was used instead of the compilation artist")
+	}
+}

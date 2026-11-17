@@ -3,6 +3,9 @@ package app
 import (
 	"bytes"
 	"context"
+	"image"
+	"image/color"
+	"image/jpeg"
 	"os"
 	"path/filepath"
 	"testing"
@@ -121,19 +124,70 @@ func TestHotSlowCompilationRejectsProviderCoverAndWritesAlbumArtist(t *testing.T
 	saveLyricsService(t, a, server.URL, "", "")
 	dir := t.TempDir()
 	name := "01 Song.flac"
-	if err := os.WriteFile(filepath.Join(dir, name), syntheticFLAC(t, false), 0o600); err != nil {
+	wrongCover := solidJPEG(color.RGBA{R: 180, G: 20, B: 20, A: 255})
+	canonicalCover := solidJPEG(color.RGBA{R: 20, G: 40, B: 180, A: 255})
+	body, err := flactags.EmbedFrontCover(syntheticFLAC(t, false), wrongCover)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, name), body, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	albumDir := filepath.Join(a.libraryDir(), publishComponent(hotSlowCompilationArtist), publishComponent(hotSlowCompilationAlbum))
+	if err := os.MkdirAll(albumDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(albumDir, "cover.jpg"), canonicalCover, 0o600); err != nil {
 		t.Fatal(err)
 	}
 	staged, _, _, err := a.scrapePlaylistIncoming(context.Background(), dir, name, "Artist", hotSlowCompilationArtist, hotSlowCompilationAlbum, "Song", 1)
 	if err != nil {
 		t.Fatal(err)
 	}
-	body, err := os.ReadFile(filepath.Join(dir, staged))
+	body, err = os.ReadFile(filepath.Join(dir, staged))
 	tags, tagErr := flactags.ReadBytes(body)
 	if err != nil || tagErr != nil || tags.AlbumArtist != hotSlowCompilationArtist || tags.Album != hotSlowCompilationAlbum {
 		t.Fatalf("body=%v tags=%+v err=%v tagErr=%v", len(body), tags, err, tagErr)
 	}
-	if cover := flactags.FrontCover(body); len(cover) != 0 {
-		t.Fatal("an unrelated provider cover was embedded in the compilation")
+	if cover := flactags.FrontCover(body); !bytes.Equal(cover, canonicalCover) {
+		t.Fatal("the compilation did not use its canonical album cover")
 	}
+}
+
+func TestHotSlowCompilationRemovesSourceCoverWithoutCanonicalCover(t *testing.T) {
+	a := newApp(t)
+	dir := t.TempDir()
+	name := "01 Song.flac"
+	body, err := flactags.EmbedFrontCover(syntheticFLAC(t, false), solidJPEG(color.RGBA{R: 10, G: 130, B: 20, A: 255}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, name), body, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	staged, _, _, err := a.scrapePlaylistIncoming(context.Background(), dir, name, "Artist", hotSlowCompilationArtist, hotSlowCompilationAlbum, "Song", 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, err = os.ReadFile(filepath.Join(dir, staged))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cover := flactags.FrontCover(body); len(cover) != 0 {
+		t.Fatal("an unrelated per-track cover leaked into the compilation")
+	}
+}
+
+func solidJPEG(c color.RGBA) []byte {
+	img := image.NewRGBA(image.Rect(0, 0, 128, 128))
+	for y := 0; y < 128; y++ {
+		for x := 0; x < 128; x++ {
+			img.Set(x, y, c)
+		}
+	}
+	var out bytes.Buffer
+	if err := jpeg.Encode(&out, img, &jpeg.Options{Quality: 85}); err != nil {
+		panic(err)
+	}
+	return out.Bytes()
 }

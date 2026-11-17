@@ -25,6 +25,11 @@ type playlistScrapeResult struct {
 func (a *App) scrapePlaylistIncoming(ctx context.Context, incoming, name, artist, albumArtist, album, fallbackTitle string, track int) (string, string, *playlistScrapeResult, error) {
 	key := "scraped-" + name
 	src, dest := filepath.Join(incoming, name), filepath.Join(incoming, key)
+	strictCompilationCover := isHotSlowCompilationAlbum(album)
+	var canonicalCover []byte
+	if strictCompilationCover {
+		canonicalCover = a.hotSlowCompilationCover()
+	}
 	for _, candidate := range []string{dest, src} {
 		body, err := os.ReadFile(candidate)
 		if candidate == dest && os.IsNotExist(err) {
@@ -43,6 +48,11 @@ func (a *App) scrapePlaylistIncoming(ctx context.Context, incoming, name, artist
 		if !imageBytes(cover) {
 			cover = nil
 		}
+		if strictCompilationCover {
+			// Per-track source art belongs to the original single release and
+			// must not leak into the unified compilation.
+			cover = nil
+		}
 		result := &playlistScrapeResult{Artwork: "retained"}
 		if candidate == src {
 			updates := tags.Raw
@@ -55,16 +65,16 @@ func (a *App) scrapePlaylistIncoming(ctx context.Context, incoming, name, artist
 					updates[field] = values
 				}
 			}
-			if lyrics == "" || len(cover) == 0 {
+			if lyrics == "" || (!strictCompilationCover && len(cover) == 0) {
 				request, cancel := context.WithTimeout(ctx, 20*time.Second)
 				fetchedLyrics, fetchedCover, fetchErr := a.fetchArtworkContext(request, "", "", artist, album, title)
 				cancel()
 				if ctx.Err() != nil {
 					return "", "", nil, ctx.Err()
 				}
-				if isHotSlowCompilationAlbum(album) {
-					// Keep the source compilation art; provider lookups can map
-					// this title to an unrelated artist album.
+				if strictCompilationCover {
+					// Ignore provider covers; this title can map to an unrelated
+					// artist album even for an otherwise exact track match.
 					fetchedCover = nil
 				}
 				switch {
@@ -79,9 +89,12 @@ func (a *App) scrapePlaylistIncoming(ctx context.Context, incoming, name, artist
 					lyrics = fetchedLyrics
 					updates["LYRICS"] = []string{lyrics}
 				}
-				if len(cover) == 0 {
+				if !strictCompilationCover && len(cover) == 0 {
 					cover = fetchedCover
 				}
+			}
+			if strictCompilationCover {
+				cover = canonicalCover
 			}
 			tags.Raw = updates
 			body, err = flactags.WriteBytes(body, flactags.Tags{Raw: updates})
@@ -90,8 +103,10 @@ func (a *App) scrapePlaylistIncoming(ctx context.Context, incoming, name, artist
 			}
 			currentCover := flactags.FrontCover(body)
 			switch {
-			case len(cover) > 0 && !imageBytes(currentCover):
+			case len(cover) > 0:
 				body, err = flactags.EmbedFrontCover(body, cover)
+			case strictCompilationCover && len(currentCover) > 0:
+				body, err = flactags.RemoveFrontCover(body)
 			case len(currentCover) > 0 && !imageBytes(currentCover):
 				body, err = flactags.RemoveFrontCover(body)
 			}
@@ -128,6 +143,21 @@ func (a *App) scrapePlaylistIncoming(ctx context.Context, incoming, name, artist
 		return key, title, result, nil
 	}
 	return "", "", nil, os.ErrNotExist
+}
+
+// hotSlowCompilationCover returns the single approved album-level cover when
+// it already exists in the library. The numbered source releases carry their
+// own, often unrelated, artwork, so a missing canonical image intentionally
+// means no embedded cover rather than a misleading one.
+func (a *App) hotSlowCompilationCover() []byte {
+	folder := filepath.Join(a.libraryDir(), publishComponent(hotSlowCompilationArtist), publishComponent(hotSlowCompilationAlbum))
+	for _, name := range []string{"cover.jpg", "cover.jpeg", "cover.png"} {
+		body, err := os.ReadFile(filepath.Join(folder, name))
+		if err == nil && imageBytes(body) {
+			return body
+		}
+	}
+	return nil
 }
 
 func firstValue(values []string) string {

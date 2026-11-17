@@ -88,6 +88,7 @@ import (
 // in the client. Tests override these variables.
 var downloadPollTimeout = 2 * time.Hour
 var downloadPollInterval = 2 * time.Second
+var downloadStallTimeout = 10 * time.Minute
 
 // downloadArchiveSettleTimeout bounds waiting for the client to report a
 // setLocation / setDownloadPath move.
@@ -989,6 +990,8 @@ func (a *App) startIfStopped(ctx context.Context, execution *scheduler.Execution
 func (a *App) pollDownload(ctx context.Context, execution *scheduler.Execution, client *qbittorrent.Client, rec *qbittorrent.Record, evidence qbittorrent.FreeEvidence, jobID string) (scheduler.Outcome, bool, error) {
 	deadline := time.Now().Add(downloadPollTimeout)
 	observedRunning := false
+	stalledSince := time.Time{}
+	lastProgress := -1.0
 	for {
 		// A cancel is checked here as well as at the checkpoint: the control
 		// that cancels the job also removes the torrent, so a poll that read
@@ -1055,12 +1058,55 @@ func (a *App) pollDownload(ctx context.Context, execution *scheduler.Execution, 
 		default:
 			if result.Outcome == qbittorrent.OutcomeDownloading {
 				observedRunning = true
+				if result.ClientState == "stalledDL" && progress < 100 {
+					if progress <= 0 {
+						if job, jobErr := a.flows.Job(jobID); jobErr == nil && job != nil && job.StageStartedNS > 0 && time.Since(time.Unix(0, job.StageStartedNS)) >= downloadStallTimeout {
+							return a.fallbackStalledDownload(execution, jobID)
+						}
+					}
+					if stalledSince.IsZero() || progress > lastProgress {
+						stalledSince = time.Now()
+					}
+					if time.Since(stalledSince) >= downloadStallTimeout {
+						return a.fallbackStalledDownload(execution, jobID)
+					}
+				} else {
+					stalledSince = time.Time{}
+				}
+				lastProgress = progress
 			}
 			if err := a.wait(ctx, downloadPollInterval); err != nil {
 				return scheduler.Outcome{}, false, err
 			}
 		}
 	}
+}
+
+// fallbackStalledDownload releases a download slot after qBittorrent reports
+// no progress. Playlist tasks queue the durable NetEase source plan on the same
+// process job; other tasks fail explicitly so an unseeded torrent cannot block
+// the lane for the full two-hour timeout.
+func (a *App) fallbackStalledDownload(execution *scheduler.Execution, jobID string) (scheduler.Outcome, bool, error) {
+	job, err := a.flows.Job(jobID)
+	if err != nil || job == nil {
+		return a.failDownloadStep(execution, "DOWNLOAD_STALLED", "下载长时间无进度；任务信息不可读")
+	}
+	raw, found, err := a.tasks.Data(jobID, "arguments", 0)
+	if err != nil || !found {
+		return a.failDownloadStep(execution, "DOWNLOAD_STALLED", "下载长时间无进度；原检索计划不可读")
+	}
+	searchPlan, err := decodePlan(raw)
+	if err != nil || !isNeteasePlaylistFallback(job.BatchID, searchPlan) {
+		return a.failDownloadStep(execution, "DOWNLOAD_STALLED", "qBittorrent 长时间无进度；未找到可用的网易云兜底计划")
+	}
+	token := execution.Token()
+	message := "qBittorrent 长时间无进度，已自动切换网易云原曲兜底"
+	if _, err := a.flows.Complete(intentID("download-fallback", token.ID, token.Fence), token, workflow.Complete{
+		Edge: workflow.EdgeAdvance, NextStage: "fallback", TaskState: "completed", Result: raw, Message: message, NowNS: a.now().UnixNano(),
+	}); err != nil {
+		return scheduler.Outcome{}, false, err
+	}
+	return scheduler.Outcome{State: "completed", Message: message}, true, nil
 }
 
 // finishDownload records the download: the download task completes with

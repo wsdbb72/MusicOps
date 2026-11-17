@@ -69,6 +69,31 @@ func TestStartDownloadQueuesDownloadTask(t *testing.T) {
 	}
 }
 
+func TestStalledDownloadCanQueueNetEaseFallback(t *testing.T) {
+	repo, tasks := fixture(t)
+	downloadReviewJob(t, repo, tasks, "candidate", true)
+	if _, err := repo.StartDownload("start-download", "process:search:album1", downloadInput(), 7000); err != nil {
+		t.Fatal(err)
+	}
+	token := begin(t, tasks, "download:process:search:album1", "download")
+	plan := []byte(`{"root_job_id":"album1","query":"Artist Album","playlist_track":"Song","netease_only":true,"identity":{"identity_confirmed":true}}`)
+	result, err := repo.Complete("download-stalled", token, Complete{
+		JobID: "process:search:album1", Edge: edgeAdvance, NextStage: "fallback", TaskState: "completed",
+		Result: plan, Message: "qBittorrent 长时间无进度，已自动切换网易云原曲兜底", NowNS: 8000,
+	})
+	if err != nil || result.Job == nil || result.Job.Stage != "fallback" || result.Job.ActiveTaskID != "stage:process:search:album1:fallback" {
+		t.Fatalf("%+v %v", result.Job, err)
+	}
+	fallback, err := tasks.Get("stage:process:search:album1:fallback")
+	if err != nil || fallback == nil || fallback.State != "queued" || fallback.Command != cmdProcess || fallback.Lane != "aux" {
+		t.Fatalf("%+v %v", fallback, err)
+	}
+	payload, found, err := tasks.Data(fallback.ID, "arguments", 0)
+	if err != nil || !found || string(payload) != string(plan) {
+		t.Fatalf("payload=%s found=%v err=%v", payload, found, err)
+	}
+}
+
 // A token checkpoint with the torrent bytes already saved is downloadable
 // (D3 balanced): the spend was requested once, the download sends no second
 // usetoken, and reconciliation decides the final state afterwards.

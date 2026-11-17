@@ -548,7 +548,7 @@ func legalEdge(job Job, edge, next string) error {
 			if job.TaskType != "album" {
 				return ErrStale
 			}
-		case "validating>publishing", "publishing>notifying", "requesting>downloading", "requesting>validating", "downloading>validating", "fallback>validating":
+		case "validating>publishing", "publishing>notifying", "requesting>downloading", "requesting>validating", "downloading>validating", "downloading>fallback", "fallback>validating":
 		default:
 			return ErrStale
 		}
@@ -595,6 +595,8 @@ func successor(job Job, in Complete, decision *searchdecision.Decision) (id, com
 		switch in.NextStage {
 		case "validating":
 			return stageTaskID(job.ID, in.NextStage), cmdProcess, "publish", job.TaskType, job.TaskGroup, in.NextStage, false, nil
+		case "fallback":
+			return stageTaskID(job.ID, in.NextStage), cmdProcess, "aux", job.TaskType, job.TaskGroup, in.NextStage, false, nil
 		case "downloading":
 			return stageTaskID(job.ID, in.NextStage), cmdProcess, "aux", job.TaskType, job.TaskGroup, in.NextStage, false, nil
 		case "publishing", "notifying":

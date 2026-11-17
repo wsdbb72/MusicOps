@@ -155,7 +155,7 @@ func TestNeteaseAlbumFallsBackToOriginalTrackWhenAlbumIsUnconfirmed(t *testing.T
 	a.neteaseBases = map[string]string{"api": server.URL}
 	plan := SearchPlan{
 		RootJobID: "net-album-direct-fallback", Scene: "expand", Query: "Artist One", ExpectedTitle: "Album", ExpectedArtist: "Artist",
-		PlaylistTrack: "One", NeteaseSongID: 10, NeteaseAlbumID: 80, NeteaseTrackOnly: true,
+		PlaylistTrack: "One", NeteaseSongID: 10, NeteaseTrackOnly: true,
 		StreamingEnabled: true, NeteaseOnly: true, EnabledSites: []string{"dicmusic"}, Synthetic: true, BaseURL: server.URL,
 		Identity: Identity{ID: "net-direct-ident", Kind: "api", Source: "playlist", IdentityConfirmed: true, TracklistVerified: true, Payload: "fixture"},
 	}

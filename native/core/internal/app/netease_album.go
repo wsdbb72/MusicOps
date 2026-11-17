@@ -125,7 +125,7 @@ func (a *App) acquireNeteaseAlbum(ctx context.Context, execution *scheduler.Exec
 	}
 	var anchor *neteaseSong
 	var err error
-	if plan.NeteaseSongID > 0 && plan.NeteaseAlbumID > 0 {
+	if plan.NeteaseSongID > 0 {
 		anchor = &neteaseSong{ID: plan.NeteaseSongID, AlbumID: plan.NeteaseAlbumID, Name: plan.PlaylistTrack, Album: plan.ExpectedTitle, Artists: strings.Split(plan.ExpectedArtist, " / ")}
 	} else {
 		anchor, err = a.neteaseSearchSong(ctx, plan)

@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -141,7 +142,17 @@ func TestModelPassCannotOverrideMissingEvidence(t *testing.T) {
 	if unchanged.Job.Stage != "needs_review" {
 		t.Fatal(unchanged.Job)
 	}
-
+	detail := getAuth(t, application, "/v1/jobs/"+job.ID)
+	var diagnostic struct {
+		Result struct {
+			State   string `json:"state"`
+			Phase   string `json:"phase"`
+			Message string `json:"message"`
+		} `json:"result"`
+	}
+	if detail.Code != http.StatusOK || json.Unmarshal(detail.Body.Bytes(), &diagnostic) != nil || diagnostic.Result.State != "blocked" || diagnostic.Result.Phase == "" || diagnostic.Result.Message == "" {
+		t.Fatalf("blocked job diagnostic missing: %d %s", detail.Code, detail.Body.String())
+	}
 }
 
 type reviewCaller struct {

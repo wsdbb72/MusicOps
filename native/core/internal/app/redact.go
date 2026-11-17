@@ -146,11 +146,8 @@ func (a *App) publicJobWithResult(job workflow.Job) jobView {
 	if a == nil || a.tasks == nil || job.ActiveTaskID == "" {
 		return view
 	}
-	if job.Stage != "failed" && job.ReviewKind != "interrupted" && job.ReviewKind != "error" {
-		return view
-	}
 	task, err := a.tasks.Get(job.ActiveTaskID)
-	if err != nil || task == nil {
+	if err != nil || task == nil || (job.Stage == "completed" && task.State == "completed") {
 		return view
 	}
 	view.Result = &jobResultView{

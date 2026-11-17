@@ -1,8 +1,8 @@
 package app
 
 import (
+	"context"
 	"encoding/json"
-	"github.com/wsdbb72/MusicOps/native/core/internal/workflow"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -12,6 +12,8 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+
+	"github.com/wsdbb72/MusicOps/native/core/internal/workflow"
 )
 
 func TestNeteaseAlbumRejectsMissingTracksOrWrongEdition(t *testing.T) {
@@ -179,11 +181,88 @@ func TestNeteaseAlbumFallsBackToOriginalTrackWhenAlbumIsUnconfirmed(t *testing.T
 		t.Fatal("direct NetEase fallback did not publish the original track", files)
 	}
 }
+func TestNeteasePlaylistRecoversIDsFromOriginalM3UOnRetry(t *testing.T) {
+	a := newApp(t)
+	batchID := "pl-netease-recover-fixture"
+	rows := []playlistTrack{
+		{Title: "One", Artist: "Artist / Guest", Album: "Album", Duration: "180000", NeteaseSongID: 10000000001, NeteaseAlbumID: 10000000002},
+	}
+	dir := filepath.Join(a.Dir, "incoming")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, playlistFileName(batchID)), encodeM3U("Recover", rows), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	plan := SearchPlan{
+		RootJobID: "trk-net-recover", ExpectedTitle: "Album", ExpectedArtist: "Artist / Guest",
+		Identity: Identity{Payload: `{"title":"One"}`},
+	}
+	if !a.recoverNeteasePlaylistIDs(context.Background(), batchID, &plan) {
+		t.Fatal("the original playlist row was not recovered")
+	}
+	if plan.PlaylistTrack != "One" || plan.NeteaseSongID != 10000000001 || plan.NeteaseAlbumID != 10000000002 {
+		t.Fatalf("recovered plan=%+v", plan)
+	}
+	plan.ExpectedArtist = "Different Artist"
+	plan.NeteaseSongID, plan.NeteaseAlbumID = 0, 0
+	if a.recoverNeteasePlaylistIDs(context.Background(), batchID, &plan) {
+		t.Fatal("a different artist must not reuse the selected song id")
+	}
+}
+
+func TestNeteasePlaylistRefreshesLegacyM3UOnce(t *testing.T) {
+	a := newApp(t)
+	batchID := "pl-netease-590536461-refresh"
+	dir := filepath.Join(a.Dir, "incoming")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	local := []playlistTrack{{Title: "One", Artist: "Artist", Album: "Album", Duration: "180000"}}
+	if err := os.WriteFile(filepath.Join(dir, playlistFileName(batchID)), encodeM3U("Recover", local), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v3/playlist/detail" || r.URL.Query().Get("id") != "590536461" {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		io.WriteString(w, `{"code":200,"playlist":{"id":"590536461","name":"Recover","trackCount":1,"tracks":[{"id":"10000000001","name":"One","ar":[{"name":"Artist"}],"al":{"id":"10000000002","name":"Album"},"dt":180000}]}}`)
+	}))
+	defer server.Close()
+	a.playlistBases = map[string]string{"netease": server.URL}
+	plan := SearchPlan{RootJobID: "trk-refresh", ExpectedTitle: "Album", ExpectedArtist: "Artist", Identity: Identity{Payload: `{"title":"One"}`}}
+	if !a.recoverNeteasePlaylistIDs(context.Background(), batchID, &plan) || plan.NeteaseSongID != 10000000001 || plan.NeteaseAlbumID != 10000000002 {
+		t.Fatalf("plan=%+v", plan)
+	}
+	rows, _, err := a.playlistTrackRows(batchID)
+	if err != nil || len(rows) != 1 || rows[0].NeteaseSongID != 10000000001 || rows[0].NeteaseAlbumID != 10000000002 {
+		t.Fatalf("merged rows=%+v err=%v", rows, err)
+	}
+}
+
+func TestNeteasePlaylistMergesIDsIntoLegacyM3U(t *testing.T) {
+	local := []playlistTrack{{Title: "One", Artist: "Artist", Album: "Album"}}
+	remote := []playlistTrack{{Title: "One", Artist: "Artist", Album: "Album", NeteaseSongID: 10000000001, NeteaseAlbumID: 10000000002}}
+	if updated := mergeNeteasePlaylistIDs(local, remote); updated != 1 || local[0].NeteaseSongID != 10000000001 || local[0].NeteaseAlbumID != 10000000002 {
+		t.Fatalf("updated=%d local=%+v", updated, local)
+	}
+}
+
 func TestNeteasePlaylistPreservesRecordingAndAlbumIDs(t *testing.T) {
 	raw := []any{map[string]any{"id": float64(10000000001), "name": "Song", "al": map[string]any{"id": float64(10000000002), "name": "Album"}}}
 	input := neteaseArtists(raw)
 	got, _, err := parseM3U(encodeM3U("Playlist", input))
 	if err != nil || len(got) != 1 || got[0].NeteaseSongID != 10000000001 || got[0].NeteaseAlbumID != 10000000002 {
 		t.Fatal(got, err)
+	}
+	evidence := playlistRowEvidence("new-job", "pl-netease-fixture", got[0])
+	var payload struct {
+		SongID  int64 `json:"netease_song_id"`
+		AlbumID int64 `json:"netease_album_id"`
+	}
+	if json.Unmarshal(evidence.Payload, &payload) != nil || payload.SongID != 10000000001 || payload.AlbumID != 10000000002 {
+		t.Fatalf("evidence payload=%s", evidence.Payload)
 	}
 }

@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 
@@ -91,7 +93,175 @@ func decodeNeteaseAlbum(raw []byte, anchor *neteaseSong) ([]neteaseSong, error) 
 	return out, nil
 }
 
+// recoverNeteasePlaylistIDs rehydrates durable IDs for jobs created before the
+// search plan carried them. It first uses the job's persisted M3U. Older M3Us
+// predate the ID headers, so it refreshes that same ordered playlist once from
+// the user's saved NetEase credential and merges IDs by title, artist and
+// album without changing the selected track order.
+func (a *App) recoverNeteasePlaylistIDs(ctx context.Context, batchID string, plan *SearchPlan) bool {
+	if plan == nil || !strings.HasPrefix(batchID, "pl-netease-") {
+		return false
+	}
+	if plan.NeteaseSongID > 0 && plan.NeteaseAlbumID > 0 {
+		return true
+	}
+	a.neteaseRecoveryMu.Lock()
+	defer a.neteaseRecoveryMu.Unlock()
+	if plan.NeteaseSongID > 0 && plan.NeteaseAlbumID > 0 {
+		return true
+	}
+	rows, name, err := a.playlistTrackRows(batchID)
+	if err == nil && recoverIDsFromPlaylistRows(rows, plan) {
+		return true
+	}
+	remoteID := neteasePlaylistIDFromBatch(batchID)
+	if remoteID == "" {
+		return false
+	}
+	remote, err := a.fetchRemotePlaylist(ctx, "netease", remoteID, "")
+	if err != nil || len(remote.Tracks) == 0 {
+		return false
+	}
+	if len(rows) == 0 {
+		rows = remote.Tracks
+		name = remote.Name
+	} else {
+		updated := mergeNeteasePlaylistIDs(rows, remote.Tracks)
+		if updated == 0 && !recoverIDsFromPlaylistRows(rows, plan) {
+			return false
+		}
+		if name == "" {
+			name = remote.Name
+		}
+		data := encodeM3U(name, rows)
+		path := a.workPath("incoming", playlistFileName(batchID))
+		temp, createErr := os.CreateTemp(filepath.Dir(path), ".playlist-ids-*.tmp")
+		if createErr != nil {
+			return false
+		}
+		tempName := temp.Name()
+		_, writeErr := temp.Write(data)
+		closeErr := temp.Close()
+		if writeErr != nil || closeErr != nil {
+			_ = os.Remove(tempName)
+			return false
+		}
+		if renameErr := os.Rename(tempName, path); renameErr != nil {
+			_ = os.Remove(tempName)
+			return false
+		}
+	}
+	return recoverIDsFromPlaylistRows(rows, plan)
+}
+
+func recoverIDsFromPlaylistRows(rows []playlistTrack, plan *SearchPlan) bool {
+	if plan == nil || plan.NeteaseSongID > 0 && plan.NeteaseAlbumID > 0 {
+		return plan != nil && plan.NeteaseSongID > 0 && plan.NeteaseAlbumID > 0
+	}
+	title := strings.TrimSpace(neteasePlaylistTitle(*plan))
+	if title == "" {
+		return false
+	}
+	wantArtists := splitPlaylistArtists(plan.ExpectedArtist)
+	wantAlbum := normalizePlaylistAlbumTitle(plan.ExpectedTitle)
+	matches := make([]playlistTrack, 0, 1)
+	for _, row := range rows {
+		if row.NeteaseSongID <= 0 || normalizeKey(row.Title) != normalizeKey(title) {
+			continue
+		}
+		if len(wantArtists) == 0 || playlistArtistsMatch(wantArtists, splitPlaylistArtists(row.Artist)) {
+			matches = append(matches, row)
+		}
+	}
+	if len(matches) == 0 && len(wantArtists) == 0 && wantAlbum != "" {
+		for _, row := range rows {
+			if row.NeteaseSongID > 0 && normalizeKey(row.Title) == normalizeKey(title) && normalizePlaylistAlbumTitle(row.Album) == wantAlbum {
+				matches = append(matches, row)
+			}
+		}
+	}
+	if len(matches) > 1 && wantAlbum != "" {
+		filtered := matches[:0]
+		for _, row := range matches {
+			if normalizePlaylistAlbumTitle(row.Album) == wantAlbum {
+				filtered = append(filtered, row)
+			}
+		}
+		matches = filtered
+	}
+	if len(matches) == 0 {
+		return false
+	}
+	chosen := matches[0]
+	for _, row := range matches[1:] {
+		if row.NeteaseSongID != chosen.NeteaseSongID || row.NeteaseAlbumID != chosen.NeteaseAlbumID {
+			return false
+		}
+	}
+	plan.PlaylistTrack = firstNonEmpty(plan.PlaylistTrack, chosen.Title)
+	plan.NeteaseSongID = chosen.NeteaseSongID
+	if chosen.NeteaseAlbumID > 0 {
+		plan.NeteaseAlbumID = chosen.NeteaseAlbumID
+	}
+	return plan.NeteaseSongID > 0
+}
+
+func mergeNeteasePlaylistIDs(local, remote []playlistTrack) int {
+	updated := 0
+	for i := range local {
+		if local[i].NeteaseSongID > 0 && local[i].NeteaseAlbumID > 0 {
+			continue
+		}
+		var match *playlistTrack
+		for j := range remote {
+			candidate := &remote[j]
+			if candidate.NeteaseSongID <= 0 || normalizeKey(candidate.Title) != normalizeKey(local[i].Title) ||
+				!playlistArtistsMatch(splitPlaylistArtists(local[i].Artist), splitPlaylistArtists(candidate.Artist)) {
+				continue
+			}
+			if normalizePlaylistAlbumTitle(candidate.Album) != normalizePlaylistAlbumTitle(local[i].Album) {
+				continue
+			}
+			if match != nil && (match.NeteaseSongID != candidate.NeteaseSongID || match.NeteaseAlbumID != candidate.NeteaseAlbumID) {
+				match = nil
+				break
+			}
+			match = candidate
+		}
+		if match == nil {
+			continue
+		}
+		local[i].NeteaseSongID = match.NeteaseSongID
+		local[i].NeteaseAlbumID = match.NeteaseAlbumID
+		updated++
+	}
+	return updated
+}
+
+func neteasePlaylistIDFromBatch(batchID string) string {
+	slug := strings.TrimPrefix(batchID, "pl-netease-")
+	if end := strings.IndexByte(slug, '-'); end > 0 {
+		slug = slug[:end]
+	}
+	if remoteIDPatterns["netease"].MatchString(slug) {
+		return slug
+	}
+	return ""
+}
+
+func splitPlaylistArtists(raw string) []string {
+	normalized := strings.NewReplacer("／", "/", "、", "/", ",", "/").Replace(raw)
+	out := []string{}
+	for _, part := range strings.Split(normalized, "/") {
+		if part = strings.TrimSpace(part); part != "" {
+			out = append(out, part)
+		}
+	}
+	return out
+}
+
 func (a *App) acquireNeteaseAlbum(ctx context.Context, execution *scheduler.Execution, held taskrepo.Token, job workflow.Job, plan SearchPlan) (scheduler.Outcome, error) {
+	a.recoverNeteasePlaylistIDs(ctx, job.BatchID, &plan)
 	review := func(message, class string) (scheduler.Outcome, error) {
 		return a.finishAcquire(held, job, "candidate", message, class, nil)
 	}

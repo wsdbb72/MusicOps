@@ -387,7 +387,7 @@ func (a *App) playlistIdentity(client *musicbrainz.Client, jobID, artist, album,
 // playlistRowEvidence records the row a job came from when the catalogue had
 // nothing to confirm.
 func playlistRowEvidence(jobID, playlistJobID string, row playlistTrack) workflow.EvidenceInput {
-	payload, _ := json.Marshal(map[string]any{"artist": row.Artist, "title": row.Title, "album": row.Album, "playlist_job": playlistJobID})
+	payload, _ := json.Marshal(map[string]any{"artist": row.Artist, "title": row.Title, "album": row.Album, "duration_ms": row.Duration, "netease_song_id": row.NeteaseSongID, "netease_album_id": row.NeteaseAlbumID, "playlist_job": playlistJobID})
 	sum := sha256.Sum256(append([]byte(jobID+"/"), payload...))
 	return workflow.EvidenceInput{
 		ID: "plrow" + hex.EncodeToString(sum[:10]), Kind: "catalog", Source: "playlist",

@@ -65,12 +65,13 @@ type App struct {
 	// uses http.DefaultClient); tests set it to a fake server's client
 	// so a TLS test server is trusted. The same seam pattern as
 	// searcher.Now and Wait above.
-	aiHTTPClient  *http.Client
-	mu            sync.Mutex
-	duplicateMu   sync.Mutex
-	secrets       map[string]string
-	stopSubs      chan struct{}
-	stopReconcile chan struct{}
+	aiHTTPClient      *http.Client
+	mu                sync.Mutex
+	duplicateMu       sync.Mutex
+	neteaseRecoveryMu sync.Mutex
+	secrets           map[string]string
+	stopSubs          chan struct{}
+	stopReconcile     chan struct{}
 	// lastTokenRead bounds the background balance reads to one per site per
 	// minute. The ledger's read hold only exists for failures; a successful
 	// read leaves no trace there, and a 30-second ticker would otherwise read

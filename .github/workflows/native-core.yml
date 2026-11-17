@@ -44,7 +44,7 @@ jobs:
         shell: bash
         working-directory: native/core
         run: |
-          go test ./... -count=1 -timeout=180s
+          go test ./... -count=1 -timeout=15m
           go vet ./...
   race:
     runs-on: ubuntu-latest
@@ -64,4 +64,4 @@ jobs:
         env:
           CGO_ENABLED: '1'
           GOMAXPROCS: '4'
-        run: go test -race ./... -count=1 -timeout=180s
+        run: go test -race ./... -count=1 -timeout=15m

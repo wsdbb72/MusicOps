@@ -1559,7 +1559,11 @@ func (a *App) verifiedPlaylistAlbumTracks(library, artist, album, expectedAlbum 
 			continue
 		}
 		tags, err := readFLACTagsPrefix(path)
-		if err == nil && normalizeKey(tags.Album) == normalizeKey(expectedAlbum) && normalizeKey(tags.Title) != "" {
+		// The file is already inside the exact library/<artist>/<expected album>
+		// directory. Local tags often use a translated or romanised album name;
+		// title, artist and duration are verified again against the platform
+		// tracklist before this file suppresses a download.
+		if err == nil && normalizeKey(tags.Title) != "" {
 			key := normalizeKey(tags.Title)
 			titles[key] = append(titles[key], path)
 		}

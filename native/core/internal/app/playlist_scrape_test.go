@@ -67,6 +67,34 @@ func TestPlaylistAlbumFillMatchesExistingTrackByTags(t *testing.T) {
 	}
 }
 
+func TestPlaylistAlbumFillUsesExpectedFolderWhenAlbumTagIsLocalized(t *testing.T) {
+	a := newApp(t)
+	lib := t.TempDir()
+	post(t, a, "/v1/settings/library", map[string]any{"library_dir": lib})
+	expected := "Ref:rain / 眩いばかり"
+	dir := filepath.Join(lib, publishComponent("Aimer"), publishComponent(expected))
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	name := filepath.Join(dir, "01 Ref_rain.flac")
+	body, err := flactags.WriteBytes(syntheticFLAC(t, false), flactags.Tags{
+		Title: "Ref:rain", Artist: "Aimer", Album: "Ref:rain / Mabayui Bakari", TrackNumber: 1,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(name, body, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.indexReleasedPath(name); err != nil {
+		t.Fatal(err)
+	}
+	tracks := a.verifiedPlaylistAlbumTracks(lib, publishComponent("Aimer"), publishComponent(expected), expected)
+	if len(tracks[normalizeKey("Ref:rain")]) != 1 {
+		t.Fatal(tracks)
+	}
+}
+
 func TestPlaylistAlbumFillDoesNotConflateSameTitleDifferentPCM(t *testing.T) {
 	dir := t.TempDir()
 	source, same, different := filepath.Join(dir, "source.flac"), filepath.Join(dir, "same.flac"), filepath.Join(dir, "different.flac")

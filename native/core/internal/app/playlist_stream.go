@@ -37,11 +37,14 @@ func (a *App) ingestPlaylistStream(ctx context.Context, job workflow.Job, plan S
 	if err != nil {
 		return publishReceipt{}, playlistReleaseError(err, result)
 	}
+	placed, found, err := audiorelease.PathFor(a.engine, id)
+	if err != nil || !found {
+		return publishReceipt{}, fmt.Errorf("已复制音频，但无法确认发布位置: %w", err)
+	}
+	if err := a.indexReleasedPath(placed); err != nil {
+		return publishReceipt{}, fmt.Errorf("已复制音频，但无法登记本地索引: %w", err)
+	}
 	if scrape.lyrics != "" {
-		placed, found, err := audiorelease.PathFor(a.engine, id)
-		if err != nil || !found {
-			return publishReceipt{}, fmt.Errorf("已复制音频，但无法确认歌词写入位置: %w", err)
-		}
 		if !hasLyricsSidecar(placed) {
 			if err := writeLyricsSidecar(placed, scrape.lyrics); err != nil {
 				return publishReceipt{}, fmt.Errorf("已复制音频，但歌词写入失败: %w", err)
@@ -50,6 +53,21 @@ func (a *App) ingestPlaylistStream(ctx context.Context, job workflow.Job, plan S
 	}
 	removeNeteaseStaging(root, path, name)
 	return publishReceipt{TrackID: strconv.Itoa(position), RequestID: id, SHA256: result.SHA256, Format: result.Format, Origin: result.Origin, SourceName: result.SourceName, DecodeState: result.DecodeState, Scrape: scrape}, nil
+}
+
+func (a *App) indexReleasedPath(path string) error {
+	root := a.libraryDir()
+	rel, err := filepath.Rel(root, path)
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return errors.New("发布文件不在当前音乐库")
+	}
+	track := trackNumberFromName(filepath.Base(path))
+	ext := strings.ToLower(strings.TrimPrefix(filepath.Ext(path), "."))
+	_, err = audiorelease.IndexExisting(a.engine, audiorelease.Existing{
+		RequestID: libraryFileID(path), RootID: libraryRootID(filepath.Dir(path)), Track: track,
+		Path: path, Library: root, Format: ext, SourceName: "stream-release", MetadataOnly: true,
+	})
+	return err
 }
 
 func playlistReleaseError(err error, result audiorelease.Result) error {

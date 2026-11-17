@@ -115,13 +115,14 @@ func (a *App) neteaseGet(ctx context.Context, endpoint, cookie string) ([]byte, 
 
 // neteaseSong is one search hit.
 type neteaseSong struct {
-	ID         int64
-	Name       string
-	Artists    []string
-	Album      string
-	DurationMS int
-	AlbumID    int64
-	CoverURL   string
+	ID              int64
+	Name            string
+	Artists         []string
+	Album           string
+	DurationMS      int
+	AlbumID         int64
+	CoverURL        string
+	CatalogVerified bool
 }
 
 // neteaseSearchSong finds the best match for a query. A hit counts only when
@@ -209,7 +210,7 @@ func (a *App) neteaseSearchSong(ctx context.Context, plan SearchPlan) (*neteaseS
 		if !artistMatch || len(artists) == 0 {
 			continue
 		}
-		candidate := &neteaseSong{ID: item.ID, Name: item.Name, Artists: artists, Album: item.Album.Name, DurationMS: item.Duration, AlbumID: item.Album.ID, CoverURL: item.Album.PicURL}
+		candidate := &neteaseSong{ID: item.ID, Name: item.Name, Artists: artists, Album: item.Album.Name, DurationMS: item.Duration, AlbumID: item.Album.ID, CoverURL: item.Album.PicURL, CatalogVerified: true}
 		// Prefer the first exact match: the catalogue ranks by relevance and
 		// the title/artist check above already rejected the rest.
 		if plan.PlaylistTrack != "" && best != nil && (best.AlbumID != candidate.AlbumID || best.ID != candidate.ID) {
@@ -228,10 +229,16 @@ func (a *App) neteaseSearchSong(ctx context.Context, plan SearchPlan) (*neteaseS
 func (a *App) neteaseURLFor(ctx context.Context, song *neteaseSong) (string, string, error) {
 	cookie := a.neteaseCookie()
 	ids := "[" + strconv.FormatInt(song.ID, 10) + "]"
-	for _, attempt := range []struct{ path, values string }{
+	attempts := []struct{ path, values string }{
 		{"/api/song/enhance/player/url/v1", "ids=" + url.QueryEscape(ids) + "&level=lossless&encodeType=flac"},
+		{"/api/song/enhance/player/url/v1", "ids=" + url.QueryEscape(ids) + "&level=hires&encodeType=flac"},
+		{"/api/song/enhance/player/url/v1", "ids=" + url.QueryEscape(ids) + "&level=exhigh&encodeType=mp3"},
+		{"/api/song/enhance/player/url/v1", "ids=" + url.QueryEscape(ids) + "&level=higher&encodeType=mp3"},
+		{"/api/song/enhance/player/url/v1", "ids=" + url.QueryEscape(ids) + "&level=standard&encodeType=mp3"},
 		{"/api/song/enhance/player/url", "ids=" + url.QueryEscape(ids) + "&br=999000"},
-	} {
+		{"/api/song/enhance/player/url", "ids=" + url.QueryEscape(ids) + "&br=320000"},
+	}
+	for _, attempt := range attempts {
 		body, err := a.neteaseGet(ctx, a.neteaseBase()+attempt.path+"?"+attempt.values, cookie)
 		if err != nil {
 			continue
@@ -266,7 +273,15 @@ func (a *App) neteaseURLFor(ctx context.Context, song *neteaseSong) (string, str
 func (a *App) neteasePreferredCoverBytes(ctx context.Context, song *neteaseSong) ([]byte, error) {
 	if isHotSlowCompilationAlbum(song.Album) {
 		if source, err := a.neteaseOriginalCoverSong(ctx, song); err == nil && source != nil {
-			return a.neteaseCoverBytes(ctx, source)
+			if cover, fetchErr := a.neteaseCoverBytes(ctx, source); fetchErr == nil {
+				return cover, nil
+			}
+		}
+		if cover, err := a.appleOriginalCoverBytes(ctx, song); err == nil {
+			return cover, nil
+		}
+		if cover, err := a.deezerOriginalCoverBytes(ctx, song); err == nil {
+			return cover, nil
 		}
 	}
 	return a.neteaseCoverBytes(ctx, song)
@@ -337,7 +352,7 @@ func (a *App) neteaseOriginalCoverSong(ctx context.Context, song *neteaseSong) (
 			continue
 		}
 		bestDelta = delta
-		best = &neteaseSong{ID: item.ID, Name: item.Name, Artists: artists, Album: item.Album.Name, AlbumID: item.Album.ID, DurationMS: item.Duration, CoverURL: item.Album.PicURL}
+		best = &neteaseSong{ID: item.ID, Name: item.Name, Artists: artists, Album: item.Album.Name, AlbumID: item.Album.ID, DurationMS: item.Duration, CoverURL: item.Album.PicURL, CatalogVerified: true}
 	}
 	return best, nil
 }
@@ -536,8 +551,9 @@ func (a *App) stageNeteaseSong(ctx context.Context, plan SearchPlan, song *netea
 	}
 	if plan.PlaylistTrack != "" && song.DurationMS > 0 {
 		actual := int64(tags.StreamInfo.TotalSamples) * 1000 / int64(tags.StreamInfo.SampleRate)
-		if drift := actual - int64(song.DurationMS); drift < -1500 || drift > 1500 {
-			return "", "网易云无损音频时长与目录不符，未保存", downloadpolicy.ClassNoResult, true
+		drift := actual - int64(song.DurationMS)
+		if !neteaseDurationAccepted(drift, song.CatalogVerified) {
+			return "", "网易云音频时长与目录差异过大，未保存", downloadpolicy.ClassNoResult, true
 		}
 	}
 	if err := os.MkdirAll(a.workPath("incoming"), 0o700); err != nil {
@@ -601,4 +617,18 @@ func playlistArtistsMatch(want, got []string) bool {
 		}
 	}
 	return len(want) > 0
+}
+
+// A catalog-verified NetEase song id is stronger identity evidence than a
+// duration rounded by an album or compilation listing. Several legitimate
+// lossless files differ by a few seconds because of silence trimming, while a
+// 30-second preview remains unmistakably outside this window.
+func neteaseDurationAccepted(drift int64, catalogVerified bool) bool {
+	if drift < 0 {
+		drift = -drift
+	}
+	if catalogVerified {
+		return drift <= 30000
+	}
+	return drift <= 1500
 }

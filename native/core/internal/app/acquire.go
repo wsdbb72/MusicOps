@@ -142,13 +142,22 @@ func (a *App) acquireWithToken(ctx context.Context, execution *scheduler.Executi
 	// Enforce the same deadline as the background reconciler, including
 	// when it has not yet had a chance to run after startup.
 	if _, err := a.ledger.SweepExpired(a.now(), tokenledger.UnknownExpire); err != nil {
+		if plan.StreamingEnabled && isNeteasePlaylistFallback(job.BatchID, plan) {
+			return a.acquireFallback(ctx, execution, held, job, plan)
+		}
 		return a.finishAcquire(held, job, "token", "令牌账本暂时无法读取，未向站点请求；尚未下载、尚未入库", "ledger_rejected", nil)
 	}
 	observation, _, err := a.observeBalance(ctx, site, a.cookieFor(plan.RootJobID, site), plan.Synthetic, plan.BaseURL)
 	if err != nil {
+		if plan.StreamingEnabled && isNeteasePlaylistFallback(job.BatchID, plan) {
+			return a.acquireFallback(ctx, execution, held, job, plan)
+		}
 		return a.finishAcquire(held, job, "token", "余额读取失败，未发令牌请求；尚未下载、尚未入库", observation.ErrorClass, nil)
 	}
 	if bound, bindErr := a.bindPageBalance(observation, decision); bindErr != nil {
+		if plan.StreamingEnabled && isNeteasePlaylistFallback(job.BatchID, plan) {
+			return a.acquireFallback(ctx, execution, held, job, plan)
+		}
 		return a.finishAcquire(held, job, "token", "余额读取失败，未发令牌请求；尚未下载、尚未入库", "read_error", nil)
 	} else {
 		observation = bound
@@ -163,9 +172,15 @@ func (a *App) acquireWithToken(ctx context.Context, execution *scheduler.Executi
 		case "rate_limited", "auth", "network", "parse", "read_error":
 			message = "站点限制或读取失败只暂停这次账号读取，未发令牌请求；尚未下载、尚未入库"
 		}
+		if plan.StreamingEnabled && isNeteasePlaylistFallback(job.BatchID, plan) {
+			return a.acquireFallback(ctx, execution, held, job, plan)
+		}
 		return a.finishAcquire(held, job, "token", message, class, nil)
 	}
 	if decision.Balance != nil && *decision.Balance != observation.Balance {
+		if plan.StreamingEnabled && isNeteasePlaylistFallback(job.BatchID, plan) {
+			return a.acquireFallback(ctx, execution, held, job, plan)
+		}
 		return a.finishAcquire(held, job, "token", "页面令牌数与账号余额不一致，未发令牌请求；尚未下载、尚未入库", "balance_conflict", nil)
 	}
 	quote := tokenledger.Quote{
@@ -176,9 +191,12 @@ func (a *App) acquireWithToken(ctx context.Context, execution *scheduler.Executi
 	}
 	reserved, err := a.ledger.ReserveObserved(a.now(), quote, observation.AccountID)
 	if err != nil {
-		// The site has not been asked yet. A ledger rejection stays on this
-		// task for review instead of failing the executor, which would retry
-		// the same quote.
+		// The site has not been asked yet. A NetEase playlist may continue
+		// through its native streaming route when the FL-only tracker account
+		// is on hold; other scenes still wait for a human to resolve the ledger.
+		if plan.StreamingEnabled && isNeteasePlaylistFallback(job.BatchID, plan) {
+			return a.acquireFallback(ctx, execution, held, job, plan)
+		}
 		return a.finishAcquire(held, job, "token", "令牌预留没有成立，未向站点请求；尚未下载、尚未入库", "ledger_rejected", nil)
 	}
 	switch reserved.State {
@@ -199,6 +217,9 @@ func (a *App) acquireWithToken(ctx context.Context, execution *scheduler.Executi
 	if allowed, class, _ := a.ledger.ReadAllowed(site, a.now()); !allowed {
 		if _, err = a.ledger.Advance(a.now(), site, job.ID, tokenledger.StateReleased, "read-hold"); err != nil {
 			return scheduler.Outcome{}, err
+		}
+		if plan.StreamingEnabled && isNeteasePlaylistFallback(job.BatchID, plan) {
+			return a.acquireFallback(ctx, execution, held, job, plan)
 		}
 		return a.finishAcquire(held, job, "token", "站点限制了账号读取，未发令牌请求；尚未下载、尚未入库", class, nil)
 	}

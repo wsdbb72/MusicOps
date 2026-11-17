@@ -86,7 +86,7 @@ func decodeNeteaseAlbum(raw []byte, anchor *neteaseSong) ([]neteaseSong, error) 
 		if len(credited) == 0 || duration <= 0 {
 			return nil, errors.New("网易云专辑曲目缺少艺人或时长")
 		}
-		out = append(out, neteaseSong{ID: row.ID, Name: row.Name, Artists: credited, Album: data.Album.Name, AlbumID: data.Album.ID, DurationMS: duration, CoverURL: data.Album.PicURL})
+		out = append(out, neteaseSong{ID: row.ID, Name: row.Name, Artists: credited, Album: data.Album.Name, AlbumID: data.Album.ID, DurationMS: duration, CoverURL: data.Album.PicURL, CatalogVerified: true})
 	}
 	if !found {
 		return nil, errors.New("网易云专辑清单没有包含匹配的目标曲目")
@@ -297,7 +297,7 @@ func (a *App) acquireNeteaseAlbum(ctx context.Context, execution *scheduler.Exec
 	var anchor *neteaseSong
 	var err error
 	if plan.NeteaseSongID > 0 {
-		anchor = &neteaseSong{ID: plan.NeteaseSongID, AlbumID: plan.NeteaseAlbumID, Name: plan.PlaylistTrack, Album: plan.ExpectedTitle, Artists: strings.Split(plan.ExpectedArtist, " / ")}
+		anchor = &neteaseSong{ID: plan.NeteaseSongID, AlbumID: plan.NeteaseAlbumID, Name: plan.PlaylistTrack, Album: plan.ExpectedTitle, Artists: strings.Split(plan.ExpectedArtist, " / "), CatalogVerified: true}
 	} else {
 		anchor, err = a.neteaseSearchSong(ctx, plan)
 	}
@@ -314,19 +314,30 @@ func (a *App) acquireNeteaseAlbum(ctx context.Context, execution *scheduler.Exec
 	}
 	artist, album := publishComponent(plan.ExpectedArtist), publishComponent(plan.ExpectedTitle)
 	local := a.verifiedPlaylistAlbumTracks(a.libraryDir(), artist, album, plan.ExpectedTitle)
-	type staged struct {
-		path     string
-		plan     SearchPlan
-		position int
-	}
-	stagedFiles := make([]staged, 0, len(tracks))
+	receipts := make([]publishReceipt, 0, len(tracks))
 	missing := []string{}
-	for i := range tracks {
-		song := &tracks[i]
+	order := make([]int, len(tracks))
+	for i := range order {
+		order[i] = i
+	}
+	// The playlist row that created this job must be processed first. A large
+	// compilation can exceed the bounded staging cache; completing every extra
+	// album track before the requested one makes the whole job look stuck.
+	if plan.NeteaseSongID > 0 {
+		for pos, index := range order {
+			if tracks[index].ID == plan.NeteaseSongID {
+				copy(order[1:pos+1], order[:pos])
+				order[0] = index
+				break
+			}
+		}
+	}
+	for processed, index := range order {
+		song := &tracks[index]
 		if plan.NeteaseTrackOnly && song.ID != anchor.ID {
 			continue
 		}
-		if err := execution.Checkpoint(ctx, "netease_album", float64(i)*100/float64(len(tracks)), song.Name); err != nil {
+		if err := execution.Checkpoint(ctx, "netease_album", float64(processed)*100/float64(len(order)), song.Name); err != nil {
 			return scheduler.Outcome{}, err
 		}
 		present := false
@@ -352,27 +363,29 @@ func (a *App) acquireNeteaseAlbum(ctx context.Context, execution *scheduler.Exec
 			missing = append(missing, song.Name+"："+note)
 			continue
 		}
-		stagedFiles = append(stagedFiles, staged{path, trackPlan, i + 1})
+		// Ingest each staged track immediately. Holding a whole 100-track album
+		// in incoming/ exhausted the SSD cache before publication could begin.
+		item, err := a.ingestPlaylistStream(ctx, job, trackPlan, path, index+1)
+		if err != nil {
+			return review(err.Error(), "STREAM_INGEST_FAILED")
+		}
+		receipts = append(receipts, item)
 	}
-	if len(stagedFiles) == 0 {
+	if len(receipts) == 0 {
 		if len(missing) > 0 {
-			return review("没有可入库的无损缺轨："+missing[0], "NETEASE_ALBUM_INCOMPLETE")
+			// The NetEase album and selected song ids are durable catalogue
+			// evidence. Once every available quality has been tried, keep the
+			// row terminal instead of returning the same unavailable track to
+			// human review on every scheduler pass.
+			if plan.NeteaseSongID > 0 && plan.NeteaseAlbumID > 0 {
+				return a.finishSkipAcquire(held, job, "网易云已核实该发行版但未提供可用音频，已自动结束："+missing[0])
+			}
+			return review("没有可入库的可用缺轨："+missing[0], "NETEASE_ALBUM_INCOMPLETE")
 		}
 		if plan.NeteaseTrackOnly {
 			return a.finishSkipAcquire(held, job, "网易云歌单目标曲目已在库")
 		}
 		return a.finishSkipAcquire(held, job, "网易云专辑的全部曲目已在库")
-	}
-	receipts := make([]publishReceipt, 0, len(stagedFiles))
-	for _, file := range stagedFiles {
-		if err := ctx.Err(); err != nil {
-			return scheduler.Outcome{}, err
-		}
-		item, err := a.ingestPlaylistStream(ctx, job, file.plan, file.path, file.position)
-		if err != nil {
-			return review(err.Error(), "STREAM_INGEST_FAILED")
-		}
-		receipts = append(receipts, item)
 	}
 	return a.finishPlaylistStreams(held, job, receipts, fmt.Sprintf("网易云发行版共 %d 首，取到 %d 首可用音频，%d 首未取得；等待发布校验", len(tracks), len(receipts), len(missing)), missing...)
 }

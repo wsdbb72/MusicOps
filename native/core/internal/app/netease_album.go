@@ -95,6 +95,27 @@ func (a *App) acquireNeteaseAlbum(ctx context.Context, execution *scheduler.Exec
 	review := func(message, class string) (scheduler.Outcome, error) {
 		return a.finishAcquire(held, job, "candidate", message, class, nil)
 	}
+	directTrack := func(song *neteaseSong, fallbackReason string) (scheduler.Outcome, error) {
+		if plan.PlaylistTrack == "" {
+			plan.PlaylistTrack = neteasePlaylistTitle(plan)
+		}
+		if song == nil {
+			var err error
+			song, err = a.neteaseSearchSong(ctx, plan)
+			if err != nil || song == nil {
+				return review(fallbackReason, "NETEASE_ALBUM_UNCONFIRMED")
+			}
+		}
+		path, note, class, _ := a.stageNeteaseSong(ctx, plan, song)
+		if path == "" {
+			return review(note, class)
+		}
+		item, err := a.ingestPlaylistStream(ctx, job, plan, path, 1)
+		if err != nil {
+			return review(err.Error(), "STREAM_INGEST_FAILED")
+		}
+		return a.finishPlaylistStreams(held, job, []publishReceipt{item}, "网易云发行版未确认，已按原曲兜底取到可用音频；等待发布校验")
+	}
 	if plan.PlaylistTrack == "" {
 		plan.PlaylistTrack = neteasePlaylistTitle(plan)
 	}
@@ -110,15 +131,15 @@ func (a *App) acquireNeteaseAlbum(ctx context.Context, execution *scheduler.Exec
 		anchor, err = a.neteaseSearchSong(ctx, plan)
 	}
 	if err != nil || anchor == nil || anchor.AlbumID <= 0 {
-		return review("未核实到包含目标曲目的网易云发行版", "NETEASE_ALBUM_UNCONFIRMED")
+		return directTrack(anchor, "未核实到包含目标曲目的网易云发行版")
 	}
 	raw, err := a.neteaseGet(ctx, a.neteaseBase()+"/api/v1/album/"+strconv.FormatInt(anchor.AlbumID, 10), cookie)
 	if err != nil {
-		return review("无法读取网易云专辑清单", "NETEASE_ALBUM_UNAVAILABLE")
+		return directTrack(anchor, "无法读取网易云专辑清单")
 	}
 	tracks, err := decodeNeteaseAlbum(raw, anchor)
 	if err != nil {
-		return review(err.Error(), "NETEASE_ALBUM_UNCONFIRMED")
+		return directTrack(anchor, err.Error())
 	}
 	artist, album := publishComponent(plan.ExpectedArtist), publishComponent(plan.ExpectedTitle)
 	local := a.verifiedPlaylistAlbumTracks(a.libraryDir(), artist, album, plan.ExpectedTitle)

@@ -119,6 +119,65 @@ func TestNeteaseAlbumCompletesOnlyMissingTracks(t *testing.T) {
 	}
 }
 
+func TestNeteaseAlbumFallsBackToOriginalTrackWhenAlbumIsUnconfirmed(t *testing.T) {
+	ffmpeg, err := exec.LookPath("ffmpeg")
+	if err != nil {
+		t.Skip("ffmpeg unavailable")
+	}
+	vaultKey(t)
+	a := newApp(t)
+	saveNeteaseTestCookie(t, a)
+	library := t.TempDir()
+	post(t, a, "/v1/settings/library", map[string]any{"library_dir": library})
+	audio := filepath.Join(t.TempDir(), "one.flac")
+	if out, err := exec.Command(ffmpeg, "-nostdin", "-v", "error", "-f", "lavfi", "-i", "sine=frequency=440:duration=3", "-metadata", "artist=Artist", "-metadata", "album=Album", "-metadata", "title=One", audio).CombinedOutput(); err != nil {
+		t.Fatal(err, string(out))
+	}
+	media, err := os.ReadFile(audio)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mux := http.NewServeMux()
+	mux.HandleFunc("/ajax.php", func(w http.ResponseWriter, r *http.Request) { http.NotFound(w, r) })
+	mux.HandleFunc("/api/search/get/web", func(w http.ResponseWriter, r *http.Request) {
+		io.WriteString(w, `{"code":200,"result":{"songs":[{"id":10,"name":"One","artists":[{"name":"Artist"}],"album":{"id":80,"name":"Album","size":2},"duration":3000}]}}`)
+	})
+	mux.HandleFunc("/api/v1/album/80", func(w http.ResponseWriter, r *http.Request) {
+		io.WriteString(w, `{"code":200,"album":{"id":80,"name":"Album","size":2},"songs":[{"id":10,"name":"One","ar":[{"name":"Artist"}],"dt":3000}]}`)
+	})
+	var server *httptest.Server
+	mux.HandleFunc("/api/song/enhance/player/url/v1", func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{"code": 200, "data": []map[string]any{{"id": 10, "url": server.URL + "/one.flac", "type": "flac", "code": 200, "level": "lossless"}}})
+	})
+	mux.HandleFunc("/one.flac", func(w http.ResponseWriter, r *http.Request) { _, _ = w.Write(media) })
+	server = httptest.NewServer(mux)
+	defer server.Close()
+	a.neteaseBases = map[string]string{"api": server.URL}
+	plan := SearchPlan{
+		RootJobID: "net-album-direct-fallback", Scene: "expand", Query: "Artist One", ExpectedTitle: "Album", ExpectedArtist: "Artist",
+		PlaylistTrack: "One", NeteaseSongID: 10, NeteaseAlbumID: 80, NeteaseTrackOnly: true,
+		StreamingEnabled: true, NeteaseOnly: true, EnabledSites: []string{"dicmusic"}, Synthetic: true, BaseURL: server.URL,
+		Identity: Identity{ID: "net-direct-ident", Kind: "api", Source: "playlist", IdentityConfirmed: true, TracklistVerified: true, Payload: "fixture"},
+	}
+	raw, _ := json.Marshal(plan)
+	if _, err := a.flows.Start("start-net-direct-fallback", workflow.Start{JobID: plan.RootJobID, BatchID: "pl-netease-direct-fixture", Scene: "expand", Stage: "identifying", Label: "Album", Payload: raw, NowNS: a.now().UnixNano()}); err != nil {
+		t.Fatal(err)
+	}
+	waitRootPublished(t, a, plan.RootJobID)
+	files, err := os.ReadDir(filepath.Join(library, "Artist", "Album"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, file := range files {
+		if strings.EqualFold(filepath.Ext(file.Name()), ".flac") && strings.Contains(file.Name(), "One") {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("direct NetEase fallback did not publish the original track", files)
+	}
+}
 func TestNeteasePlaylistPreservesRecordingAndAlbumIDs(t *testing.T) {
 	raw := []any{map[string]any{"id": float64(10000000001), "name": "Song", "al": map[string]any{"id": float64(10000000002), "name": "Album"}}}
 	input := neteaseArtists(raw)

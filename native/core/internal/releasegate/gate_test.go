@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"testing"
+	"time"
 )
 
 // The tests build the real cmd/musicops binary once and copy it into
@@ -27,7 +28,6 @@ func TestMain(m *testing.M) {
 		fmt.Fprintln(os.Stderr, "cannot create temp dir:", err)
 		os.Exit(1)
 	}
-	defer os.RemoveAll(dir)
 	testCoreBinary = filepath.Join(dir, testCoreName())
 	cmd := exec.Command(goBin, "build", "-trimpath",
 		"-ldflags", "-X github.com/wsdbb72/MusicOps/native/core/internal/version.Version=9.9.9-gate",
@@ -48,7 +48,14 @@ func TestMain(m *testing.M) {
 		fmt.Fprintln(os.Stderr, "cannot build the test core binary:", err)
 		os.Exit(1)
 	}
-	os.Exit(m.Run())
+	code := m.Run()
+	for attempt := 0; attempt < 30; attempt++ {
+		if os.RemoveAll(dir) == nil {
+			break
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	os.Exit(code)
 }
 
 func copyCore(t *testing.T, dir string) string {

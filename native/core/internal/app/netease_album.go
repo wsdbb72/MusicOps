@@ -27,10 +27,11 @@ func decodeNeteaseAlbum(raw []byte, anchor *neteaseSong) ([]neteaseSong, error) 
 	var data struct {
 		Code  int
 		Album struct {
-			ID    int64
-			Name  string
-			Size  int
-			Songs []neteaseAlbumRow
+			ID     int64
+			Name   string
+			Size   int
+			PicURL string `json:"picUrl"`
+			Songs  []neteaseAlbumRow
 		}
 		Songs []neteaseAlbumRow
 	}
@@ -85,7 +86,7 @@ func decodeNeteaseAlbum(raw []byte, anchor *neteaseSong) ([]neteaseSong, error) 
 		if len(credited) == 0 || duration <= 0 {
 			return nil, errors.New("网易云专辑曲目缺少艺人或时长")
 		}
-		out = append(out, neteaseSong{ID: row.ID, Name: row.Name, Artists: credited, Album: data.Album.Name, AlbumID: data.Album.ID, DurationMS: duration})
+		out = append(out, neteaseSong{ID: row.ID, Name: row.Name, Artists: credited, Album: data.Album.Name, AlbumID: data.Album.ID, DurationMS: duration, CoverURL: data.Album.PicURL})
 	}
 	if !found {
 		return nil, errors.New("网易云专辑清单没有包含匹配的目标曲目")

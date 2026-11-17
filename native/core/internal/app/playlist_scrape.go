@@ -25,11 +25,7 @@ type playlistScrapeResult struct {
 func (a *App) scrapePlaylistIncoming(ctx context.Context, incoming, name, artist, albumArtist, album, fallbackTitle string, track int) (string, string, *playlistScrapeResult, error) {
 	key := "scraped-" + name
 	src, dest := filepath.Join(incoming, name), filepath.Join(incoming, key)
-	strictCompilationCover := isHotSlowCompilationAlbum(album)
-	var canonicalCover []byte
-	if strictCompilationCover {
-		canonicalCover = a.hotSlowCompilationCover()
-	}
+	hotSlowTags := isHotSlowCompilationAlbum(album)
 	for _, candidate := range []string{dest, src} {
 		body, err := os.ReadFile(candidate)
 		if candidate == dest && os.IsNotExist(err) {
@@ -48,11 +44,6 @@ func (a *App) scrapePlaylistIncoming(ctx context.Context, incoming, name, artist
 		if !imageBytes(cover) {
 			cover = nil
 		}
-		if strictCompilationCover {
-			// Per-track source art belongs to the original single release and
-			// must not leak into the unified compilation.
-			cover = nil
-		}
 		result := &playlistScrapeResult{Artwork: "retained"}
 		if candidate == src {
 			updates := tags.Raw
@@ -65,16 +56,25 @@ func (a *App) scrapePlaylistIncoming(ctx context.Context, incoming, name, artist
 					updates[field] = values
 				}
 			}
-			if lyrics == "" || (!strictCompilationCover && len(cover) == 0) {
+			if hotSlowTags {
+				// The large compilation owns its album identity, while ARTIST
+				// stays track-specific and the per-track cover remains intact.
+				updates["ALBUM"] = []string{album}
+				if strings.TrimSpace(albumArtist) != "" {
+					updates["ALBUMARTIST"] = []string{albumArtist}
+				}
+			}
+			if lyrics == "" || len(cover) == 0 {
 				request, cancel := context.WithTimeout(ctx, 20*time.Second)
 				fetchedLyrics, fetchedCover, fetchErr := a.fetchArtworkContext(request, "", "", artist, album, title)
 				cancel()
 				if ctx.Err() != nil {
 					return "", "", nil, ctx.Err()
 				}
-				if strictCompilationCover {
-					// Ignore provider covers; this title can map to an unrelated
-					// artist album even for an otherwise exact track match.
+				if hotSlowTags {
+					// The source cover came from the selected NetEase song. A
+					// provider lookup may map the compilation title to an unrelated
+					// artist album and must not replace it.
 					fetchedCover = nil
 				}
 				switch {
@@ -89,12 +89,9 @@ func (a *App) scrapePlaylistIncoming(ctx context.Context, incoming, name, artist
 					lyrics = fetchedLyrics
 					updates["LYRICS"] = []string{lyrics}
 				}
-				if !strictCompilationCover && len(cover) == 0 {
+				if len(cover) == 0 {
 					cover = fetchedCover
 				}
-			}
-			if strictCompilationCover {
-				cover = canonicalCover
 			}
 			tags.Raw = updates
 			body, err = flactags.WriteBytes(body, flactags.Tags{Raw: updates})
@@ -103,10 +100,8 @@ func (a *App) scrapePlaylistIncoming(ctx context.Context, incoming, name, artist
 			}
 			currentCover := flactags.FrontCover(body)
 			switch {
-			case len(cover) > 0:
+			case len(cover) > 0 && !imageBytes(currentCover):
 				body, err = flactags.EmbedFrontCover(body, cover)
-			case strictCompilationCover && len(currentCover) > 0:
-				body, err = flactags.RemoveFrontCover(body)
 			case len(currentCover) > 0 && !imageBytes(currentCover):
 				body, err = flactags.RemoveFrontCover(body)
 			}
@@ -143,21 +138,6 @@ func (a *App) scrapePlaylistIncoming(ctx context.Context, incoming, name, artist
 		return key, title, result, nil
 	}
 	return "", "", nil, os.ErrNotExist
-}
-
-// hotSlowCompilationCover returns the single approved album-level cover when
-// it already exists in the library. The numbered source releases carry their
-// own, often unrelated, artwork, so a missing canonical image intentionally
-// means no embedded cover rather than a misleading one.
-func (a *App) hotSlowCompilationCover() []byte {
-	folder := filepath.Join(a.libraryDir(), publishComponent(hotSlowCompilationArtist), publishComponent(hotSlowCompilationAlbum))
-	for _, name := range []string{"cover.jpg", "cover.jpeg", "cover.png"} {
-		body, err := os.ReadFile(filepath.Join(folder, name))
-		if err == nil && imageBytes(body) {
-			return body
-		}
-	}
-	return nil
 }
 
 func firstValue(values []string) string {

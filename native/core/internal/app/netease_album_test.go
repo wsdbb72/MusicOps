@@ -1,8 +1,10 @@
 package app
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"image/color"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -14,14 +16,15 @@ import (
 	"testing"
 
 	"github.com/wsdbb72/MusicOps/native/core/internal/cookies"
+	"github.com/wsdbb72/MusicOps/native/core/internal/flactags"
 	"github.com/wsdbb72/MusicOps/native/core/internal/workflow"
 )
 
 func TestNeteaseAlbumRejectsMissingTracksOrWrongEdition(t *testing.T) {
-	rip := []byte(`{"code":200,"album":{"id":81,"name":"Album","size":2},"songs":[{"id":10,"name":"One","ar":[{"name":"Artist"}],"dt":3000},{"id":11,"name":"Two","artists":[{"name":"Artist"}],"duration":4000}]}`)
+	rip := []byte(`{"code":200,"album":{"id":81,"name":"Album","size":2,"picUrl":"https://p1.music.126.net/cover.jpg"},"songs":[{"id":10,"name":"One","ar":[{"name":"Artist"}],"dt":3000},{"id":11,"name":"Two","artists":[{"name":"Artist"}],"duration":4000}]}`)
 	song := &neteaseSong{ID: 10, Name: "One", Album: "Album", AlbumID: 81}
 	tracks, err := decodeNeteaseAlbum(rip, song)
-	if err != nil || len(tracks) != 2 || tracks[1].ID != 11 || tracks[1].DurationMS != 4000 {
+	if err != nil || len(tracks) != 2 || tracks[1].ID != 11 || tracks[1].DurationMS != 4000 || tracks[0].CoverURL != "https://p1.music.126.net/cover.jpg" {
 		t.Fatal(tracks, err)
 	}
 	legacy := &neteaseSong{ID: 10, Album: "Album", AlbumID: 81}
@@ -123,7 +126,7 @@ func TestNeteaseAlbumCompletesOnlyMissingTracks(t *testing.T) {
 	}
 }
 
-func TestNeteaseAlbumFallsBackToOriginalTrackWhenAlbumIsUnconfirmed(t *testing.T) {
+func TestHotSlowFallbackPublishesOneAlbumWithTrackIdentityAndCover(t *testing.T) {
 	ffmpeg, err := exec.LookPath("ffmpeg")
 	if err != nil {
 		t.Skip("ffmpeg unavailable")
@@ -134,32 +137,35 @@ func TestNeteaseAlbumFallsBackToOriginalTrackWhenAlbumIsUnconfirmed(t *testing.T
 	library := t.TempDir()
 	post(t, a, "/v1/settings/library", map[string]any{"library_dir": library})
 	audio := filepath.Join(t.TempDir(), "one.flac")
-	if out, err := exec.Command(ffmpeg, "-nostdin", "-v", "error", "-f", "lavfi", "-i", "sine=frequency=440:duration=3", "-metadata", "artist=Artist", "-metadata", "album=Album", "-metadata", "title=One", audio).CombinedOutput(); err != nil {
+	albumName := "最新热歌慢摇90"
+	if out, err := exec.Command(ffmpeg, "-nostdin", "-v", "error", "-f", "lavfi", "-i", "sine=frequency=440:duration=3", "-metadata", "artist=Artist", "-metadata", "album="+albumName, "-metadata", "title=One", audio).CombinedOutput(); err != nil {
 		t.Fatal(err, string(out))
 	}
 	media, err := os.ReadFile(audio)
 	if err != nil {
 		t.Fatal(err)
 	}
+	cover := solidJPEG(color.RGBA{R: 20, G: 80, B: 160, A: 255})
 	mux := http.NewServeMux()
 	mux.HandleFunc("/ajax.php", func(w http.ResponseWriter, r *http.Request) { http.NotFound(w, r) })
 	mux.HandleFunc("/api/search/get/web", func(w http.ResponseWriter, r *http.Request) {
-		io.WriteString(w, `{"code":200,"result":{"songs":[{"id":10,"name":"One","artists":[{"name":"Artist"}],"album":{"id":80,"name":"Album","size":2},"duration":3000}]}}`)
-	})
-	mux.HandleFunc("/api/v1/album/80", func(w http.ResponseWriter, r *http.Request) {
-		io.WriteString(w, `{"code":200,"album":{"id":80,"name":"Album","size":2},"songs":[{"id":10,"name":"One","ar":[{"name":"Artist"}],"dt":3000}]}`)
+		_ = json.NewEncoder(w).Encode(map[string]any{"code": 200, "result": map[string]any{"songs": []map[string]any{{"id": 10, "name": "One", "artists": []map[string]any{{"name": "Artist"}}, "album": map[string]any{"id": 80, "name": albumName, "size": 2}, "duration": 3000}}}})
 	})
 	var server *httptest.Server
+	mux.HandleFunc("/api/v1/album/80", func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{"code": 200, "album": map[string]any{"id": 80, "name": albumName, "size": 2, "picUrl": server.URL + "/cover.jpg"}, "songs": []map[string]any{{"id": 10, "name": "One", "ar": []map[string]any{{"name": "Artist"}}, "dt": 3000}}})
+	})
 	mux.HandleFunc("/api/song/enhance/player/url/v1", func(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewEncoder(w).Encode(map[string]any{"code": 200, "data": []map[string]any{{"id": 10, "url": server.URL + "/one.flac", "type": "flac", "code": 200, "level": "lossless"}}})
 	})
 	mux.HandleFunc("/one.flac", func(w http.ResponseWriter, r *http.Request) { _, _ = w.Write(media) })
+	mux.HandleFunc("/cover.jpg", func(w http.ResponseWriter, r *http.Request) { _, _ = w.Write(cover) })
 	server = httptest.NewServer(mux)
 	defer server.Close()
 	a.neteaseBases = map[string]string{"api": server.URL}
 	plan := SearchPlan{
-		RootJobID: "net-album-direct-fallback", Scene: "expand", Query: "Artist One", ExpectedTitle: "Album", ExpectedArtist: "Artist",
-		PlaylistTrack: "One", NeteaseSongID: 10, NeteaseTrackOnly: true,
+		RootJobID: "net-album-direct-fallback", Scene: "expand", Query: "Artist One", ExpectedTitle: albumName, ExpectedArtist: "Artist", AlbumArtist: hotSlowCompilationArtist,
+		PlaylistTrack: "One", NeteaseSongID: 10, NeteaseAlbumID: 80, NeteaseTrackOnly: true,
 		StreamingEnabled: true, NeteaseOnly: true, EnabledSites: []string{"dicmusic"}, Synthetic: true, BaseURL: server.URL,
 		Identity: Identity{ID: "net-direct-ident", Kind: "api", Source: "playlist", IdentityConfirmed: true, TracklistVerified: true, Payload: "fixture"},
 	}
@@ -168,20 +174,49 @@ func TestNeteaseAlbumFallsBackToOriginalTrackWhenAlbumIsUnconfirmed(t *testing.T
 		t.Fatal(err)
 	}
 	waitRootPublished(t, a, plan.RootJobID)
-	files, err := os.ReadDir(filepath.Join(library, "Artist", "Album"))
+	files, err := os.ReadDir(filepath.Join(library, hotSlowCompilationArtist, hotSlowCompilationAlbum))
 	if err != nil {
 		t.Fatal(err)
 	}
-	found := false
+	found := ""
 	for _, file := range files {
 		if strings.EqualFold(filepath.Ext(file.Name()), ".flac") && strings.Contains(file.Name(), "One") {
-			found = true
+			found = filepath.Join(library, hotSlowCompilationArtist, hotSlowCompilationAlbum, file.Name())
 		}
 	}
-	if !found {
+	if found == "" {
 		t.Fatal("direct NetEase fallback did not publish the original track", files)
 	}
+	body, err := os.ReadFile(found)
+	tags, tagErr := flactags.ReadBytes(body)
+	if err != nil || tagErr != nil || tags.Album != hotSlowCompilationAlbum || tags.AlbumArtist != hotSlowCompilationArtist || tags.Artist != "Artist" {
+		t.Fatalf("body=%d tags=%+v err=%v tagErr=%v", len(body), tags, err, tagErr)
+	}
+	if got := flactags.FrontCover(body); !bytes.Equal(got, cover) {
+		t.Fatal("the selected song's per-track cover was not preserved")
+	}
 }
+func TestNeteaseCoverBytesUsesSelectedAlbumArtwork(t *testing.T) {
+	a := newApp(t)
+	cover := solidJPEG(color.RGBA{R: 12, G: 34, B: 56, A: 255})
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/v1/album/80":
+			_ = json.NewEncoder(w).Encode(map[string]any{"album": map[string]any{"id": 80, "picUrl": "http://" + r.Host + "/cover.jpg"}})
+		case "/cover.jpg":
+			_, _ = w.Write(cover)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+	a.neteaseBases = map[string]string{"api": server.URL}
+	got, err := a.neteaseCoverBytes(context.Background(), &neteaseSong{AlbumID: 80})
+	if err != nil || !bytes.Equal(got, cover) {
+		t.Fatalf("cover bytes=%d err=%v", len(got), err)
+	}
+}
+
 func TestNeteasePlaylistRecoversIDsFromOriginalM3UOnRetry(t *testing.T) {
 	a := newApp(t)
 	batchID := "pl-netease-recover-fixture"

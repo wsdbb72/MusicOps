@@ -117,27 +117,25 @@ func TestPlaylistAlbumFillDoesNotConflateSameTitleDifferentPCM(t *testing.T) {
 		t.Fatal("album completion did not distinguish different audio checksums")
 	}
 }
-func TestHotSlowCompilationRejectsProviderCoverAndWritesAlbumArtist(t *testing.T) {
+func TestHotSlowCompilationKeepsArtistAndPerTrackCover(t *testing.T) {
 	a := newApp(t)
 	server, _ := lrcAPIFake(t, "", jpegBody(), "", "")
 	defer server.Close()
 	saveLyricsService(t, a, server.URL, "", "")
 	dir := t.TempDir()
 	name := "01 Song.flac"
-	wrongCover := solidJPEG(color.RGBA{R: 180, G: 20, B: 20, A: 255})
-	canonicalCover := solidJPEG(color.RGBA{R: 20, G: 40, B: 180, A: 255})
-	body, err := flactags.EmbedFrontCover(syntheticFLAC(t, false), wrongCover)
+	trackCover := solidJPEG(color.RGBA{R: 20, G: 40, B: 180, A: 255})
+	body, err := flactags.WriteBytes(syntheticFLAC(t, false), flactags.Tags{Raw: map[string][]string{
+		"TITLE": {"Song"}, "ARTIST": {"Artist"}, "ALBUM": {"Wrong Album"}, "ALBUMARTIST": {"Wrong Album Artist"},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, err = flactags.EmbedFrontCover(body, trackCover)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(dir, name), body, 0o600); err != nil {
-		t.Fatal(err)
-	}
-	albumDir := filepath.Join(a.libraryDir(), publishComponent(hotSlowCompilationArtist), publishComponent(hotSlowCompilationAlbum))
-	if err := os.MkdirAll(albumDir, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(albumDir, "cover.jpg"), canonicalCover, 0o600); err != nil {
 		t.Fatal(err)
 	}
 	staged, _, _, err := a.scrapePlaylistIncoming(context.Background(), dir, name, "Artist", hotSlowCompilationArtist, hotSlowCompilationAlbum, "Song", 1)
@@ -146,22 +144,21 @@ func TestHotSlowCompilationRejectsProviderCoverAndWritesAlbumArtist(t *testing.T
 	}
 	body, err = os.ReadFile(filepath.Join(dir, staged))
 	tags, tagErr := flactags.ReadBytes(body)
-	if err != nil || tagErr != nil || tags.AlbumArtist != hotSlowCompilationArtist || tags.Album != hotSlowCompilationAlbum {
+	if err != nil || tagErr != nil || tags.AlbumArtist != hotSlowCompilationArtist || tags.Album != hotSlowCompilationAlbum || tags.Artist != "Artist" {
 		t.Fatalf("body=%v tags=%+v err=%v tagErr=%v", len(body), tags, err, tagErr)
 	}
-	if cover := flactags.FrontCover(body); !bytes.Equal(cover, canonicalCover) {
-		t.Fatal("the compilation did not use its canonical album cover")
+	if cover := flactags.FrontCover(body); !bytes.Equal(cover, trackCover) {
+		t.Fatal("the per-track cover was not retained")
 	}
 }
-
-func TestHotSlowCompilationRemovesSourceCoverWithoutCanonicalCover(t *testing.T) {
+func TestHotSlowCompilationDoesNotUseProviderCoverWithoutTrackCover(t *testing.T) {
 	a := newApp(t)
+	server, _ := lrcAPIFake(t, "", jpegBody(), "", "")
+	defer server.Close()
+	saveLyricsService(t, a, server.URL, "", "")
 	dir := t.TempDir()
 	name := "01 Song.flac"
-	body, err := flactags.EmbedFrontCover(syntheticFLAC(t, false), solidJPEG(color.RGBA{R: 10, G: 130, B: 20, A: 255}))
-	if err != nil {
-		t.Fatal(err)
-	}
+	body := syntheticFLAC(t, false)
 	if err := os.WriteFile(filepath.Join(dir, name), body, 0o600); err != nil {
 		t.Fatal(err)
 	}

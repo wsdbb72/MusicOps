@@ -121,6 +121,7 @@ type neteaseSong struct {
 	Album      string
 	DurationMS int
 	AlbumID    int64
+	CoverURL   string
 }
 
 // neteaseSearchSong finds the best match for a query. A hit counts only when
@@ -161,9 +162,10 @@ func (a *App) neteaseSearchSong(ctx context.Context, plan SearchPlan) (*neteaseS
 					Name string `json:"name"`
 				} `json:"artists"`
 				Album struct {
-					Name string `json:"name"`
-					ID   int64  `json:"id"`
-					Size int    `json:"size"`
+					Name   string `json:"name"`
+					ID     int64  `json:"id"`
+					Size   int    `json:"size"`
+					PicURL string `json:"picUrl"`
 				} `json:"album"`
 				Duration int `json:"duration"`
 			} `json:"songs"`
@@ -207,7 +209,7 @@ func (a *App) neteaseSearchSong(ctx context.Context, plan SearchPlan) (*neteaseS
 		if !artistMatch || len(artists) == 0 {
 			continue
 		}
-		candidate := &neteaseSong{ID: item.ID, Name: item.Name, Artists: artists, Album: item.Album.Name, DurationMS: item.Duration, AlbumID: item.Album.ID}
+		candidate := &neteaseSong{ID: item.ID, Name: item.Name, Artists: artists, Album: item.Album.Name, DurationMS: item.Duration, AlbumID: item.Album.ID, CoverURL: item.Album.PicURL}
 		// Prefer the first exact match: the catalogue ranks by relevance and
 		// the title/artist check above already rejected the rest.
 		if plan.PlaylistTrack != "" && best != nil && (best.AlbumID != candidate.AlbumID || best.ID != candidate.ID) {
@@ -255,6 +257,68 @@ func (a *App) neteaseURLFor(ctx context.Context, song *neteaseSong) (string, str
 		return item.URL, strings.ToLower(item.Type), nil
 	}
 	return "", "", errors.New("netease: 没有取到音源地址")
+}
+
+// neteaseCoverURLFor resolves the selected song's album artwork. Album
+// tracks carry the release cover from the album document; direct song
+// fallbacks recover it from the same album id.
+func (a *App) neteaseCoverURLFor(ctx context.Context, song *neteaseSong) string {
+	if song == nil {
+		return ""
+	}
+	if strings.TrimSpace(song.CoverURL) != "" {
+		return strings.TrimSpace(song.CoverURL)
+	}
+	if song.AlbumID <= 0 {
+		return ""
+	}
+	raw, err := a.neteaseGet(ctx, a.neteaseBase()+"/api/v1/album/"+strconv.FormatInt(song.AlbumID, 10), a.neteaseCookie())
+	if err != nil {
+		return ""
+	}
+	var data struct {
+		Album struct {
+			PicURL string `json:"picUrl"`
+		} `json:"album"`
+	}
+	if json.Unmarshal(raw, &data) != nil {
+		return ""
+	}
+	song.CoverURL = strings.TrimSpace(data.Album.PicURL)
+	return song.CoverURL
+}
+
+// neteaseCoverBytes downloads and fully decodes the selected track's artwork.
+// A valid image header is not enough: truncated CDN responses produced half
+// covers in older releases.
+func (a *App) neteaseCoverBytes(ctx context.Context, song *neteaseSong) ([]byte, error) {
+	rawURL := a.neteaseCoverURLFor(ctx, song)
+	if rawURL == "" || !a.neteaseMediaAllowed(rawURL) {
+		return nil, errors.New("网易云歌曲封面地址为空或不在网易云域名下")
+	}
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
+	if err != nil {
+		return nil, err
+	}
+	request.Header.Set("Referer", "https://"+neteaseHost+"/")
+	request.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36")
+	client := &http.Client{Timeout: 30 * time.Second}
+	response, err := client.Do(request)
+	if err != nil {
+		return nil, err
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		return nil, errors.New("网易云歌曲封面返回失败")
+	}
+	body, err := io.ReadAll(io.LimitReader(response.Body, (10<<20)+1))
+	if err != nil {
+		return nil, err
+	}
+	if len(body) > 10<<20 || !imageBytes(body) {
+		return nil, errors.New("网易云歌曲封面不完整")
+	}
+	return body, nil
 }
 
 // neteaseMediaAllowed keeps the download on NetEase's own CDN: the URL comes
@@ -362,6 +426,20 @@ func (a *App) stageNeteaseSong(ctx context.Context, plan SearchPlan, song *netea
 			return "", "netease 清理损坏封面后无法读取音频", downloadpolicy.ClassNoResult, true
 		}
 	}
+	if isHotSlowCompilationAlbum(song.Album) {
+		cover, coverErr := a.neteaseCoverBytes(ctx, song)
+		if coverErr != nil {
+			return "", "网易云歌曲封面不可用：" + coverErr.Error(), downloadpolicy.ClassNoResult, true
+		}
+		body, err = flactags.EmbedFrontCover(body, cover)
+		if err != nil {
+			return "", "网易云歌曲封面写入失败", downloadpolicy.ClassNoResult, true
+		}
+		tags, err = flactags.ReadBytes(body)
+		if err != nil {
+			return "", "网易云歌曲封面写入后无法读取音频", downloadpolicy.ClassNoResult, true
+		}
+	}
 	if plan.PlaylistTrack != "" && song.DurationMS > 0 {
 		actual := int64(tags.StreamInfo.TotalSamples) * 1000 / int64(tags.StreamInfo.SampleRate)
 		if drift := actual - int64(song.DurationMS); drift < -1500 || drift > 1500 {
@@ -393,8 +471,14 @@ func (a *App) stageNeteaseSong(ctx context.Context, plan SearchPlan, song *netea
 	// search confirmed so the rest of the pipeline sees a known track. The
 	// marker survives scraping and lets a later quality-upgrade pass treat a
 	// FLAC container made from an MP3 as lossy while still allowing playback.
+	albumTitle := song.Album
+	albumArtist := strings.Join(song.Artists, " / ")
+	if isHotSlowCompilationAlbum(song.Album) {
+		albumTitle = hotSlowCompilationAlbum
+		albumArtist = hotSlowCompilationArtist
+	}
 	writeTags := flactags.Tags{
-		Title: song.Name, Artists: song.Artists, Album: song.Album, AlbumArtist: strings.Join(song.Artists, " / "),
+		Title: song.Name, Artists: song.Artists, Album: albumTitle, AlbumArtist: albumArtist,
 	}
 	if lossySource {
 		writeTags.Raw = map[string][]string{"COMMENT": {"MusicOps source=netease-lossy"}}

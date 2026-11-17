@@ -212,7 +212,12 @@ func TestNeteasePlaylistRecoversIDsFromOriginalM3UOnRetry(t *testing.T) {
 }
 
 func TestNeteasePlaylistRefreshesLegacyM3UOnce(t *testing.T) {
+	vaultKey(t)
 	a := newApp(t)
+	saveNeteaseTestCookie(t, a)
+	if err := a.casSaveJSON([]byte("app/settings/playlist-sources"), []byte("{}")); err != nil {
+		t.Fatal(err)
+	}
 	batchID := "pl-netease-590536461-refresh"
 	dir := filepath.Join(a.Dir, "incoming")
 	if err := os.MkdirAll(dir, 0o700); err != nil {
@@ -223,6 +228,9 @@ func TestNeteasePlaylistRefreshesLegacyM3UOnce(t *testing.T) {
 		t.Fatal(err)
 	}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Cookie") == "" {
+			t.Error("recovery did not reuse the saved NetEase session")
+		}
 		if r.URL.Path != "/api/v3/playlist/detail" || r.URL.Query().Get("id") != "590536461" {
 			http.NotFound(w, r)
 			return

@@ -148,6 +148,12 @@ func (a *App) fetchRemotePlaylist(ctx context.Context, platform, id, base string
 	if err != nil {
 		return remotePlaylist{}, err
 	}
+	if platform == "netease" && strings.TrimSpace(header) == "" {
+		// The signed-in NetEase cookie lives under the streaming credential.
+		// Older profiles did not duplicate it into playlist-sources, so a
+		// private liked playlist otherwise looked "not public" on recovery.
+		header = a.neteaseCookie()
+	}
 	if platform == "youtube" && header == "" && bearer == "" && !loopbackURL(origin) {
 		return remotePlaylist{}, errors.New("YouTube 需要用户自己的 API Key，不会改去读取网页")
 	}

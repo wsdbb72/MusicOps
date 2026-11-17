@@ -217,6 +217,34 @@ func TestNeteaseCoverBytesUsesSelectedAlbumArtwork(t *testing.T) {
 	}
 }
 
+func TestHotSlowPrefersOriginalSongCover(t *testing.T) {
+	a := newApp(t)
+	cover := solidJPEG(color.RGBA{R: 70, G: 20, B: 90, A: 255})
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/search/get/web":
+			_ = json.NewEncoder(w).Encode(map[string]any{"code": 200, "result": map[string]any{"songs": []map[string]any{
+				{"id": 2, "name": "Song", "artists": []map[string]any{{"name": "Artist"}}, "album": map[string]any{"id": 90, "name": "最新热歌慢摇90"}, "duration": 180000},
+				{"id": 1, "name": "Song", "artists": []map[string]any{{"name": "Composer"}, {"name": "Artist"}}, "album": map[string]any{"id": 80, "name": "Original Release"}, "duration": 180500},
+			}}})
+		case "/api/v1/album/80":
+			_ = json.NewEncoder(w).Encode(map[string]any{"album": map[string]any{"id": 80, "name": "Original Release", "picUrl": "http://" + r.Host + "/cover.jpg"}})
+		case "/cover.jpg":
+			_, _ = w.Write(cover)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+	a.neteaseBases = map[string]string{"api": server.URL}
+	got, err := a.neteasePreferredCoverBytes(context.Background(), &neteaseSong{
+		ID: 2, Name: "Song", Artists: []string{"Artist"}, Album: "最新热歌慢摇90", AlbumID: 90, DurationMS: 180000,
+	})
+	if err != nil || !bytes.Equal(got, cover) {
+		t.Fatalf("cover bytes=%d err=%v", len(got), err)
+	}
+}
+
 func TestNeteasePlaylistRecoversIDsFromOriginalM3UOnRetry(t *testing.T) {
 	a := newApp(t)
 	batchID := "pl-netease-recover-fixture"

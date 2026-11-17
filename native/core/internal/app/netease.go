@@ -259,6 +259,100 @@ func (a *App) neteaseURLFor(ctx context.Context, song *neteaseSong) (string, str
 	return "", "", errors.New("netease: 没有取到音源地址")
 }
 
+// neteasePreferredCoverBytes prefers the original release artwork for a
+// compilation track. NetEase often exposes only the compilation cover on the
+// selected track; an exact title/artist search can still identify the source
+// release whose duration matches this recording.
+func (a *App) neteasePreferredCoverBytes(ctx context.Context, song *neteaseSong) ([]byte, error) {
+	if isHotSlowCompilationAlbum(song.Album) {
+		if source, err := a.neteaseOriginalCoverSong(ctx, song); err == nil && source != nil {
+			return a.neteaseCoverBytes(ctx, source)
+		}
+	}
+	return a.neteaseCoverBytes(ctx, song)
+}
+
+func (a *App) neteaseOriginalCoverSong(ctx context.Context, song *neteaseSong) (*neteaseSong, error) {
+	if song == nil || strings.TrimSpace(song.Name) == "" || len(song.Artists) == 0 {
+		return nil, errors.New("网易云歌曲缺少原发行版检索信息")
+	}
+	endpoint, err := url.Parse(a.neteaseBase() + "/api/search/get/web")
+	if err != nil {
+		return nil, err
+	}
+	values := endpoint.Query()
+	values.Set("s", strings.Join(song.Artists, " ")+" "+song.Name)
+	values.Set("type", "1")
+	values.Set("offset", "0")
+	values.Set("limit", "30")
+	endpoint.RawQuery = values.Encode()
+	body, err := a.neteaseGet(ctx, endpoint.String(), a.neteaseCookie())
+	if err != nil {
+		return nil, err
+	}
+	var decoded struct {
+		Code   int `json:"code"`
+		Result struct {
+			Songs []struct {
+				ID      int64  `json:"id"`
+				Name    string `json:"name"`
+				Artists []struct {
+					Name string `json:"name"`
+				} `json:"artists"`
+				Album struct {
+					ID     int64  `json:"id"`
+					Name   string `json:"name"`
+					PicURL string `json:"picUrl"`
+				} `json:"album"`
+				Duration int `json:"duration"`
+			} `json:"songs"`
+		} `json:"result"`
+	}
+	if json.Unmarshal(body, &decoded) != nil || decoded.Code != 200 {
+		return nil, errors.New("网易云原发行版封面检索失败")
+	}
+	var best *neteaseSong
+	bestDelta := 5001
+	for _, item := range decoded.Result.Songs {
+		if item.ID <= 0 || item.Album.ID <= 0 || normalizeKey(item.Name) != normalizeKey(song.Name) || isHotSlowCompilationAlbum(item.Album.Name) {
+			continue
+		}
+		artists := make([]string, 0, len(item.Artists))
+		for _, artist := range item.Artists {
+			if n := strings.TrimSpace(artist.Name); n != "" {
+				artists = append(artists, n)
+			}
+		}
+		if !playlistArtistsOverlap(song.Artists, artists) {
+			continue
+		}
+		delta := 5001
+		if item.Duration > 0 && song.DurationMS > 0 {
+			delta = item.Duration - song.DurationMS
+			if delta < 0 {
+				delta = -delta
+			}
+		}
+		if delta > 5000 || (best != nil && delta >= bestDelta) {
+			continue
+		}
+		bestDelta = delta
+		best = &neteaseSong{ID: item.ID, Name: item.Name, Artists: artists, Album: item.Album.Name, AlbumID: item.Album.ID, DurationMS: item.Duration, CoverURL: item.Album.PicURL}
+	}
+	return best, nil
+}
+
+func playlistArtistsOverlap(want, got []string) bool {
+	for _, expected := range want {
+		for _, actual := range got {
+			if normalizeKey(expected) != "" && normalizeKey(expected) == normalizeKey(actual) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // neteaseCoverURLFor resolves the selected song's album artwork. Album
 // tracks carry the release cover from the album document; direct song
 // fallbacks recover it from the same album id.
@@ -427,7 +521,7 @@ func (a *App) stageNeteaseSong(ctx context.Context, plan SearchPlan, song *netea
 		}
 	}
 	if isHotSlowCompilationAlbum(song.Album) {
-		cover, coverErr := a.neteaseCoverBytes(ctx, song)
+		cover, coverErr := a.neteasePreferredCoverBytes(ctx, song)
 		if coverErr != nil {
 			return "", "网易云歌曲封面不可用：" + coverErr.Error(), downloadpolicy.ClassNoResult, true
 		}

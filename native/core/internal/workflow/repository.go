@@ -803,6 +803,54 @@ func messageOr(value, fallback string) string {
 	return fallback
 }
 
+// ReconcilePublishedRoot closes a legacy root that crossed the durable
+// publication boundary but whose process follow-up was never created. The
+// caller must independently confirm that the root has a verified library
+// release and pass a cutoff old enough to rule out an in-flight follow-up.
+func (r *Repository) ReconcilePublishedRoot(rootID string, beforeNS, nowNS int64) (*Job, bool, error) {
+	if !validID(rootID) || beforeNS <= 0 || nowNS < beforeNS {
+		return nil, false, dataengine.ErrInvalidRequest
+	}
+	for attempt := 0; attempt < 8; attempt++ {
+		var current *Job
+		var raw []byte
+		err := r.engine.View(func(v *dataengine.View) error {
+			var readErr error
+			current, raw, readErr = readJob(v, rootID)
+			return readErr
+		})
+		if err != nil {
+			return nil, false, err
+		}
+		if current == nil {
+			return nil, false, ErrNotFound
+		}
+		if current.RootID != current.ID || (current.Stage != "publishing" && current.Stage != "notifying") || current.UpdatedNS > beforeNS {
+			return current, false, nil
+		}
+		next := *current
+		next.Stage = "completed"
+		next.Message = "已入库并完成发布校验"
+		next.ReviewKind = ""
+		next.ErrorClass = ""
+		updated, err := bump(next, nowNS, true)
+		if err != nil {
+			return nil, false, err
+		}
+		condition, writes, err := putJob(raw, updated)
+		if err != nil {
+			return nil, false, err
+		}
+		ok, err := r.engine.CompareAndSwap([]dataengine.Condition{condition}, writes)
+		if err != nil {
+			return nil, false, err
+		}
+		if ok {
+			return &updated, true, nil
+		}
+	}
+	return nil, false, ErrStale
+}
 func (r *Repository) Control(requestID, jobID, action string, nowNS int64) (Result, error) {
 	if !validID(jobID) || nowNS <= 0 {
 		return Result{}, dataengine.ErrInvalidRequest

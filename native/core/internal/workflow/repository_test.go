@@ -555,3 +555,29 @@ func TestRecordReleaseRejectsFailedJob(t *testing.T) {
 		t.Fatal("rejected release left a publish task", task, err)
 	}
 }
+func TestReconcilePublishedRootClosesOnlyStalePublicationBookkeeping(t *testing.T) {
+	repo, _ := fixture(t)
+	job := Job{
+		ID: "published-root", Kind: "album", Scene: "expand", Stage: "publishing",
+		TaskType: "album", TaskGroup: "process", BatchID: "batch-published", RootID: "published-root",
+		ActiveTaskID: "stage-published-root-publishing", Label: "Published",
+		Message: "awaiting follow-up", Revision: 1, CreatedNS: 1000, UpdatedNS: 2000, StageStartedNS: 2000,
+	}
+	condition, writes, err := putJob(nil, job)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ok, err := repo.engine.CompareAndSwap([]dataengine.Condition{condition}, writes); err != nil || !ok {
+		t.Fatal(ok, err)
+	}
+	if _, changed, err := repo.ReconcilePublishedRoot(job.ID, 1500, 3000); err != nil || changed {
+		t.Fatal("a recent publication was reconciled", changed, err)
+	}
+	updated, changed, err := repo.ReconcilePublishedRoot(job.ID, 2500, 3000)
+	if err != nil || !changed || updated == nil || updated.Stage != "completed" || updated.Message != "已入库并完成发布校验" {
+		t.Fatal(updated, changed, err)
+	}
+	if _, changed, err := repo.ReconcilePublishedRoot(job.ID, 3500, 4000); err != nil || changed {
+		t.Fatal("a completed root was reconciled again", changed, err)
+	}
+}

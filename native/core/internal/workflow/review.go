@@ -20,7 +20,7 @@
 //     already selected when it was queued, and accepting it would queue a
 //     second process job under it. Its way out is retry or skip.
 //
-//   - retry: a job in needs_review (ReviewKind search, candidate or token)
+//   - retry: a job in needs_review (ReviewKind search, candidate, token or metadata)
 //     or a failed job. The task goes back to queued with the taskrepo retry
 //     semantics, and the job stage is restored to the stage the task runs in
 //     (see retryStage). The search retry count is bounded at 3, matching the
@@ -77,7 +77,7 @@ type ReviewAction struct {
 // the only human decision available there is to drop the job. Confirming the
 // identity re-runs identification instead of skipping (a later batch).
 var reviewSkipKinds = map[string]bool{"search": true, "candidate": true, "token": true, "error": true, "metadata": true}
-var reviewRetryKinds = map[string]bool{"search": true, "candidate": true, "token": true}
+var reviewRetryKinds = map[string]bool{"search": true, "candidate": true, "token": true, "metadata": true}
 
 func (r *Repository) reviewTarget(jobID string) (*Job, *taskrepo.Task, error) {
 	job, err := r.Job(jobID)
@@ -138,7 +138,7 @@ func (r *Repository) retryAction(job *Job, task *taskrepo.Task) ReviewAction {
 			return ReviewAction{Action: "retry", Reason: "任务状态不允许重试"}
 		}
 		switch job.ReviewKind {
-		case "search", "candidate", "token":
+		case "search", "candidate", "token", "metadata":
 		case "error":
 			return ReviewAction{Action: "retry", Reason: "执行器尚未注册，重试也不会推进"}
 		case "interrupted":

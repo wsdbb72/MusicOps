@@ -260,3 +260,34 @@ func TestReviewFailedJobRetries(t *testing.T) {
 		t.Fatalf("%+v %v", result.Job, err)
 	}
 }
+func TestReviewMetadataRetryRunsIdentificationAgain(t *testing.T) {
+	repo, tasks := fixture(t)
+	startPlaylist(t, repo)
+	token := begin(t, tasks, "album1", "identify")
+	if _, err := repo.Complete("metadata-review", token, Complete{
+		JobID: "album1", Edge: edgeTerminal, NextStage: "needs_review", ReviewKind: "metadata",
+		TaskState: "blocked", Message: "身份证据未确认", NowNS: 3000,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	actions, err := repo.ReviewActions("album1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	allowed := false
+	for _, action := range actions {
+		if action.Action == "retry" && action.Allowed {
+			allowed = true
+		}
+	}
+	if !allowed {
+		t.Fatal("metadata retry was not offered", actions)
+	}
+	result, err := repo.Review("metadata-retry", "album1", ReviewDecision{Action: "retry"}, 4000)
+	if err != nil || result.Job == nil || result.Job.Stage != "identifying" {
+		t.Fatalf("%+v %v", result.Job, err)
+	}
+	if task, err := tasks.Get("album1"); err != nil || task == nil || task.State != "queued" {
+		t.Fatalf("%+v %v", task, err)
+	}
+}

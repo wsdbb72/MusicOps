@@ -182,5 +182,5 @@ func (a *App) acquireNeteaseAlbum(ctx context.Context, execution *scheduler.Exec
 		}
 		receipts = append(receipts, item)
 	}
-	return a.finishPlaylistStreams(held, job, receipts, fmt.Sprintf("网易云发行版共 %d 首，取到 %d 首无损，%d 首未取得；等待发布校验", len(tracks), len(receipts), len(missing)), missing...)
+	return a.finishPlaylistStreams(held, job, receipts, fmt.Sprintf("网易云发行版共 %d 首，取到 %d 首可用音频，%d 首未取得；等待发布校验", len(tracks), len(receipts), len(missing)), missing...)
 }

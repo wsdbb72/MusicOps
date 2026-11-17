@@ -473,7 +473,7 @@ const appJS = `(function () {
   }
   function neteaseCard() {
     var saved = neteaseStatus && neteaseStatus.saved;
-    return '<article><h2>内置网易云</h2><p class="meta">内置源：不需要外部引擎。保存账号 Cookie 后，流媒体回退会用它在网易云搜索并取音源；只有无损 FLAC 会被保存，账号没有无损权限时服务只返回 320k mp3，这里会如实报告而不把有损文件当无损。同一份 Cookie 也用于读取网易云歌单。</p>' +
+    return '<article><h2>内置网易云</h2><p class="meta">内置源：不需要外部引擎。保存账号 Cookie 后，网易云歌单会优先取无损 FLAC；四站等来源都没有时，账号只返回 320k MP3 也会转成带“有损来源”标记的 FLAC 完成入库，后续音质升级会继续寻找真正无损版本。同一份 Cookie 也用于读取网易云歌单。</p>' +
       '<p class="meta">当前：' + (saved ? "已保存账号 Cookie" : "未保存，内置网易云不会启用") + "</p>" +
       '<label>账号 Cookie（浏览器扩展导出的 JSON，只保存在本机加密库）<textarea id="netease-cookie" rows="3" placeholder="粘贴 Cookie-Editor 导出的 JSON"></textarea></label>' +
       '<p><button type="button" id="save-netease" class="primary">保存 Cookie</button></p><p id="netease-result" class="meta"></p></article>';

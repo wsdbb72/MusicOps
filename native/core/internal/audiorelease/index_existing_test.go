@@ -86,3 +86,39 @@ func TestSnapshotBatchUsesPrimaryTrackMapping(t *testing.T) {
 		t.Fatal("primary mapping missing", found, err)
 	}
 }
+
+func TestAPEToWAVConversionReplacesTheSameLogicalTrack(t *testing.T) {
+	engine, err := dataengine.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer engine.Close()
+	library := filepath.Join(t.TempDir(), "library")
+	if err := os.MkdirAll(library, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	ape := filepath.Join(library, "07 Same Song.ape")
+	wav := filepath.Join(library, "07 Same Song.wav")
+	if err := os.WriteFile(ape, []byte("ape"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if added, err := IndexExisting(engine, Existing{
+		RequestID: "lib-ape-source", RootID: "alb-ape-convert", Track: 7, Path: ape,
+		Library: library, SourceName: "reindex", MetadataOnly: true,
+	}); err != nil || !added {
+		t.Fatal(added, err)
+	}
+	if err := os.WriteFile(wav, []byte("wav"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if added, err := IndexExisting(engine, Existing{
+		RequestID: "lib-wav-result", RootID: "alb-ape-convert", Track: 7, Path: wav,
+		Library: library, SourceName: "reindex", MetadataOnly: true,
+	}); err != nil || !added {
+		t.Fatal(added, err)
+	}
+	entries, err := ListIndexed(engine)
+	if err != nil || len(entries) != 1 || entries[0].RequestID != "lib-wav-result" || entries[0].Format != "wav" {
+		t.Fatal(entries, err)
+	}
+}

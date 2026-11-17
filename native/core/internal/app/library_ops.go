@@ -23,7 +23,7 @@ import (
 	"github.com/wsdbb72/MusicOps/native/core/internal/workflow"
 )
 
-var audioExtensions = map[string]bool{"flac": true, "mp3": true, "wav": true, "aac": true, "alac": true, "aiff": true, "m4a": true, "ogg": true}
+var audioExtensions = map[string]bool{"flac": true, "mp3": true, "wav": true, "aac": true, "alac": true, "aiff": true, "m4a": true, "ogg": true, "ape": true}
 
 func (a *App) reindexLibrary(w http.ResponseWriter, r *http.Request) {
 	root := a.libraryDir()

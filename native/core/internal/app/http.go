@@ -462,7 +462,7 @@ func (a *App) jobs(w http.ResponseWriter, r *http.Request) {
 	jobs := make([]jobView, 0, len(collected))
 	for _, job := range collected {
 		entry := a.publicJobWithResult(job)
-		entry.AIReviewEligible = job.Stage == "needs_review" && job.TaskType == "search" && job.ReviewKind == "candidate"
+		entry.AIReviewEligible = a.aiReviewEligible(job)
 		if task, err := a.tasks.Get(job.ActiveTaskID); err == nil && task != nil {
 			entry.ExecutionState = task.State
 		}

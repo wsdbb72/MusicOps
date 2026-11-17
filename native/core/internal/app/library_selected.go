@@ -20,7 +20,7 @@ type localWorkflowTrack struct {
 
 func probeLocalWorkflowTrack(ctx context.Context, path string) (localWorkflowTrack, error) {
 	var result localWorkflowTrack
-	raw, err := exec.CommandContext(ctx, "ffprobe", "-v", "error", "-select_streams", "a:0", "-show_entries", "stream=codec_name:format=duration:format_tags=artist,albumartist,album,title", "-of", "json", path).Output()
+	raw, err := exec.CommandContext(ctx, "ffprobe", "-v", "error", "-select_streams", "a:0", "-show_entries", "stream=codec_name:format=duration:format_tags=artist,albumartist,album,title,comment", "-of", "json", path).Output()
 	if err != nil {
 		return result, err
 	}
@@ -44,12 +44,16 @@ func probeLocalWorkflowTrack(ctx context.Context, path string) (localWorkflowTra
 	if tags["artist"] == "" || tags["album"] == "" || tags["title"] == "" || !(seconds > 0 && seconds < 86400) {
 		return result, errors.New("本地文件缺少可核实的艺人、专辑、曲名或时长")
 	}
-	return localWorkflowTrack{Path: path, Artist: tags["artist"], Album: tags["album"], Title: tags["title"], Codec: strings.ToLower(data.Streams[0].Codec), Duration: seconds}, nil
+	codec := strings.ToLower(data.Streams[0].Codec)
+	if codec == "flac" && strings.Contains(strings.ToLower(tags["comment"]), "musicops source=netease-lossy") {
+		codec = "flac-lossy"
+	}
+	return localWorkflowTrack{Path: path, Artist: tags["artist"], Album: tags["album"], Title: tags["title"], Codec: codec, Duration: seconds}, nil
 }
 
 func isLossyUpgradeSource(codec string) bool {
 	switch codec {
-	case "mp3", "aac", "opus", "vorbis":
+	case "mp3", "aac", "opus", "vorbis", "flac-lossy":
 		return true
 	}
 	return false

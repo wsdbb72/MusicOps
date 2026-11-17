@@ -19,7 +19,7 @@ import (
 func (a *App) neteaseCookieView(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{
 		"ok": true, "saved": a.neteaseSaved(),
-		"note": "保存后，内置网易云会用它搜索并取无损音源；匿名请求只有 320k mp3，本程序不把有损文件当无损保存。",
+		"note": "保存后，内置网易云歌单会优先取无损音源；只有 320k mp3 时，作为网易云歌单最后兜底转换为带“有损来源”标记的 FLAC，后续可继续音质升级。",
 	})
 }
 

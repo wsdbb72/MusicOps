@@ -20,7 +20,7 @@ func (a *App) publishPlaylistStream(ctx context.Context, held taskrepo.Token, jo
 	if err != nil {
 		return a.finishAcquire(held, job, "candidate", err.Error(), "STREAM_INGEST_FAILED", nil)
 	}
-	return a.finishPlaylistStreams(held, job, []publishReceipt{item}, "已取到无损单曲并执行刮削，等待发布校验")
+	return a.finishPlaylistStreams(held, job, []publishReceipt{item}, "已取到可用音频并执行刮削，等待发布校验")
 }
 
 func (a *App) ingestPlaylistStream(ctx context.Context, job workflow.Job, plan SearchPlan, path string, position int) (publishReceipt, error) {

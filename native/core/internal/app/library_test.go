@@ -91,6 +91,14 @@ func duplicateGroups(t *testing.T, application *App) []duplicateGroup {
 	return groups
 }
 
+func TestDuplicateRankTreatsAPEAsLossless(t *testing.T) {
+	ape := duplicateRank(duplicateFile{Format: "ape", Lossless: true})
+	mp3 := duplicateRank(duplicateFile{Format: "mp3"})
+	if compareRank(ape, mp3) <= 0 {
+		t.Fatalf("APE rank %v did not beat MP3 rank %v", ape, mp3)
+	}
+}
+
 // ---------------------------------------------------------------------------
 // Duplicate scan / merge / restore
 

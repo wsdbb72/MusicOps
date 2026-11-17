@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -97,22 +98,43 @@ func TestNeteaseStreamKeepsLosslessAudio(t *testing.T) {
 	}
 }
 
-// A 320k mp3 is what an account without lossless permission gets. The library
-// is FLAC-only, so the file is reported, not stored.
-func TestNeteaseStreamRejectsLossyAudio(t *testing.T) {
+// A 320k mp3 is what an account without lossless permission gets. NetEase is
+// the final fallback for a NetEase playlist, so the source is converted into
+// the library's FLAC container and keeps explicit lossy provenance.
+func TestNeteaseStreamConvertsLossyFallback(t *testing.T) {
 	vaultKey(t)
 	application := newApp(t)
 	saveNeteaseTestCookie(t, application)
-	server := neteaseFake(t, "mp3", syntheticFLAC(t, false))
+	mp3 := filepath.Join(t.TempDir(), "fallback.mp3")
+	command := exec.Command("ffmpeg", "-nostdin", "-v", "error", "-y", "-f", "lavfi", "-i", "sine=frequency=440:duration=1", "-c:a", "libmp3lame", mp3)
+	if output, err := command.CombinedOutput(); err != nil {
+		t.Fatalf("generate mp3: %v %s", err, output)
+	}
+	audio, err := os.ReadFile(mp3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := neteaseFake(t, "mp3", audio)
 	application.neteaseBases = map[string]string{"api": server.URL}
 	path, note, class, handled := application.tryNeteaseStream(context.Background(), SearchPlan{
 		RootJobID: "root-2", ExpectedTitle: "夏恋慕", ExpectedArtist: "kobasolo",
 	})
-	if !handled || path != "" || class != downloadpolicy.ClassNoResult || !strings.Contains(note, "有损") {
+	if !handled || path == "" || class != downloadpolicy.ClassDownload || !strings.Contains(note, "有损") || !strings.Contains(note, "转换") {
 		t.Fatal(handled, path, class, note)
 	}
-	if entries, err := os.ReadDir(filepath.Join(application.Dir, "incoming")); err == nil && len(entries) != 0 {
-		t.Fatal("a lossy download was written")
+	body, err := os.ReadFile(path)
+	if err != nil || !strings.HasPrefix(string(body[:4]), "fLaC") {
+		t.Fatal(err)
+	}
+	if !strings.Contains(filepath.Base(path), "lossy-") {
+		t.Fatalf("lossy provenance missing from %s", path)
+	}
+	tags := readTags(t, path)
+	if tags.Title != "夏恋慕" || tags.Album != "夏恋慕" || len(tags.Artists) != 2 {
+		t.Fatalf("%q %q %v", tags.Title, tags.Album, tags.Artists)
+	}
+	if comment := strings.Join(tags.Raw["COMMENT"], "\n"); !strings.Contains(comment, "source=netease-lossy") {
+		t.Fatalf("lossy provenance tag missing: %q", comment)
 	}
 }
 

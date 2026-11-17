@@ -10,7 +10,29 @@ import (
 	"testing"
 
 	"github.com/wsdbb72/MusicOps/native/core/internal/reviewai"
+	"github.com/wsdbb72/MusicOps/native/core/internal/workflow"
 )
+
+func TestAIReviewEligibilityCoversNonSearchButNeverTokenHolds(t *testing.T) {
+	application := newApp(t)
+	calls := atomic.Int32{}
+	application.reviewModel = reviewCaller{calls: &calls, body: []byte(`{"decision":"review","reason":"unused"}`)}
+	application.reviews = reviewai.NewCache(1)
+	base := workflow.Job{Stage: "needs_review", TaskType: "album", ReviewKind: "candidate"}
+	if !application.aiReviewEligible(base) {
+		t.Fatal("album review was not eligible for automatic replay")
+	}
+	token := base
+	token.ReviewKind = "token"
+	if application.aiReviewEligible(token) {
+		t.Fatal("token hold became eligible without explicit FL-token approval")
+	}
+	complete := base
+	complete.Stage = "completed"
+	if application.aiReviewEligible(complete) {
+		t.Fatal("completed job became AI-review eligible")
+	}
+}
 
 func TestNormalizedAndSameReleaseCanQueueWithoutAModel(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

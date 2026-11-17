@@ -223,7 +223,7 @@ func (a *App) fingerprintGroup(ctx context.Context, rows []audiorelease.Entry, d
 		file := duplicateFile{
 			RequestID: entry.RequestID, File: entry.File, Format: entry.Format, SHA256: digest,
 			PCMSHA256: pcm, SampleRate: rate, Channels: channels, BitsPerSample: bits,
-			Lossless: entry.Format == "flac" || entry.Format == "wav", LibraryDir: entry.LibraryDir,
+			Lossless: entry.Format == "flac" || entry.Format == "wav" || entry.Format == "ape", LibraryDir: entry.LibraryDir,
 		}
 		file.Rank = duplicateRank(file)
 		byIdentity[identity] = append(byIdentity[identity], len(files))

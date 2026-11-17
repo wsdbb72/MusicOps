@@ -39,7 +39,7 @@ func IndexExisting(engine *dataengine.Engine, item Existing) (bool, error) {
 		format = item.Format
 	}
 	switch format {
-	case "flac", "mp3", "wav", "aac", "alac", "aiff", "m4a", "ogg":
+	case "flac", "mp3", "wav", "aac", "alac", "aiff", "m4a", "ogg", "ape":
 	default:
 		return false, dataengine.ErrInvalidRequest
 	}

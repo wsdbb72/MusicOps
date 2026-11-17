@@ -200,9 +200,14 @@ func isKnownAudio(body []byte) bool {
 // transcodeEngineAudio converts the engine's lossy download into FLAC with the
 // bundled ffmpeg. The bytes are validated afterwards like any other source.
 func (a *App) transcodeEngineAudio(body []byte, source string, plan SearchPlan) ([]byte, error) {
-	tools, ok := a.bundledTools()
-	if !ok {
-		return nil, errors.New("没有内置 ffmpeg")
+	ffmpeg := ""
+	if tools, ok := a.bundledTools(); ok {
+		ffmpeg = filepath.Join(tools, "ffmpeg.exe")
+	} else if resolved, err := exec.LookPath("ffmpeg"); err == nil {
+		ffmpeg = resolved
+	}
+	if ffmpeg == "" {
+		return nil, errors.New("没有可用的 ffmpeg")
 	}
 	dir := filepath.Join(a.workPath("incoming"), "engine-transcode")
 	if err := os.MkdirAll(dir, 0o700); err != nil {
@@ -220,7 +225,7 @@ func (a *App) transcodeEngineAudio(body []byte, source string, plan SearchPlan) 
 	input.Close()
 	output := input.Name() + ".flac"
 	defer os.Remove(output)
-	cmd := exec.Command(filepath.Join(tools, "ffmpeg.exe"), "-y", "-v", "error", "-i", input.Name(), "-c:a", "flac", output)
+	cmd := exec.Command(ffmpeg, "-y", "-v", "error", "-i", input.Name(), "-c:a", "flac", output)
 	prepareSolverCommand(cmd)
 	if err := cmd.Run(); err != nil {
 		return nil, err

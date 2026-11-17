@@ -1,6 +1,7 @@
 package app
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -53,6 +54,32 @@ func TestUpgradeDoesNotTreatContainerChangeAsImprovement(t *testing.T) {
 	}
 }
 
+func TestLossyNeteaseFLACContainerRemainsUpgradeEligible(t *testing.T) {
+	ffmpeg, err := exec.LookPath("ffmpeg")
+	if err != nil {
+		t.Skip("ffmpeg unavailable")
+	}
+	if _, err := exec.LookPath("ffprobe"); err != nil {
+		t.Skip("ffprobe unavailable")
+	}
+	path := filepath.Join(t.TempDir(), "song.flac")
+	command := exec.Command(ffmpeg, "-nostdin", "-v", "error", "-f", "lavfi", "-i", "sine=frequency=440:duration=1", "-metadata", "artist=Artist", "-metadata", "album=Album", "-metadata", "title=Song", path)
+	if output, err := command.CombinedOutput(); err != nil {
+		t.Fatalf("generate FLAC: %v %s", err, output)
+	}
+	tags, err := flactags.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tags.Raw["COMMENT"] = []string{"MusicOps source=netease-lossy"}
+	if err := flactags.Write(path, *tags); err != nil {
+		t.Fatal(err)
+	}
+	track, err := probeLocalWorkflowTrack(context.Background(), path)
+	if err != nil || track.Codec != "flac-lossy" || !isLossyUpgradeSource(track.Codec) {
+		t.Fatal(track, err)
+	}
+}
 func TestLibrarySelectionBuildsDurableSnapshotPlan(t *testing.T) {
 	ffmpeg, err := exec.LookPath("ffmpeg")
 	if err != nil {

@@ -306,7 +306,7 @@ func (a *App) neteaseDownload(ctx context.Context, mediaURL string) ([]byte, err
 	return body, nil
 }
 
-// tryNeteaseStream is the built-in netease step of the fallback walk. handled
+// tryNeteaseStream is the built-in NetEase step of the fallback walk. handled
 // is false when no cookie is saved, so the caller keeps the historical engine
 // path instead of reporting a failure for a source that was never configured.
 func (a *App) tryNeteaseStream(ctx context.Context, plan SearchPlan) (string, string, string, bool) {
@@ -324,21 +324,29 @@ func (a *App) tryNeteaseStream(ctx context.Context, plan SearchPlan) (string, st
 }
 
 func (a *App) stageNeteaseSong(ctx context.Context, plan SearchPlan, song *neteaseSong) (string, string, string, bool) {
-	mediaURL, kind, err := a.neteaseURLFor(ctx, song)
+	mediaURL, _, err := a.neteaseURLFor(ctx, song)
 	if err != nil {
 		return "", "netease 取不到音源地址", downloadpolicy.ClassNoResult, true
-	}
-	if kind != "flac" {
-		// A 320k mp3 is what an account without lossless permission gets.
-		// The library is FLAC-only, so it is reported rather than stored.
-		return "", "netease 只返回了有损音频（" + kind + "），未保存", downloadpolicy.ClassNoResult, true
 	}
 	body, err := a.neteaseDownload(ctx, mediaURL)
 	if err != nil {
 		return "", "netease 没有取到音频", downloadpolicy.ClassNoResult, true
 	}
-	if len(body) < 1024 || !strings.HasPrefix(string(body[:4]), "fLaC") {
-		return "", "netease 返回的内容不是 FLAC", downloadpolicy.ClassNoResult, true
+	if len(body) < 1024 || !isKnownAudio(body) {
+		return "", "netease 返回的内容不是可识别音频", downloadpolicy.ClassNoResult, true
+	}
+	lossySource := !strings.HasPrefix(string(body[:4]), "fLaC")
+	if lossySource {
+		// NetEase is the last-resort source for NetEase playlists. Accounts
+		// without lossless access receive a decodable MP3. Convert that source
+		// to the library's FLAC container while retaining the explicit lossy
+		// provenance, so the playlist can finish and a later quality-upgrade
+		// pass can still recognise the original as lossy.
+		converted, convErr := a.transcodeEngineAudio(body, "netease", plan)
+		if convErr != nil {
+			return "", "netease 有损源转换 FLAC 失败", downloadpolicy.ClassNoResult, true
+		}
+		body = converted
 	}
 	tags, err := flactags.ReadBytes(body)
 	if err != nil || tags.StreamInfo.SampleRate == 0 || tags.StreamInfo.TotalSamples == 0 {
@@ -357,7 +365,11 @@ func (a *App) stageNeteaseSong(ctx context.Context, plan SearchPlan, song *netea
 	if err != nil {
 		return "", "netease 校验通过但没有写入", downloadpolicy.ClassNoResult, true
 	}
-	name := "netease-" + safeStreamID(plan.RootJobID) + "-" + strconv.FormatInt(song.ID, 10) + ".flac"
+	quality := ""
+	if lossySource {
+		quality = "lossy-"
+	}
+	name := "netease-" + quality + safeStreamID(plan.RootJobID) + "-" + strconv.FormatInt(song.ID, 10) + ".flac"
 	path := filepath.Join(dir, name)
 	release, err := reserveAudioCache(dir, 2*int64(len(body))+65536)
 	if err != nil {
@@ -368,12 +380,21 @@ func (a *App) stageNeteaseSong(ctx context.Context, plan SearchPlan, song *netea
 		return "", "netease 校验通过但没有写入", downloadpolicy.ClassNoResult, true
 	}
 	// The media file carries NetEase's own tags; write the identity the
-	// search confirmed so the rest of the pipeline sees a known track.
-	if err := flactags.Write(path, flactags.Tags{
+	// search confirmed so the rest of the pipeline sees a known track. The
+	// marker survives scraping and lets a later quality-upgrade pass treat a
+	// FLAC container made from an MP3 as lossy while still allowing playback.
+	writeTags := flactags.Tags{
 		Title: song.Name, Artists: song.Artists, Album: song.Album, AlbumArtist: strings.Join(song.Artists, " / "),
-	}); err != nil {
+	}
+	if lossySource {
+		writeTags.Raw = map[string][]string{"COMMENT": {"MusicOps source=netease-lossy"}}
+	}
+	if err := flactags.Write(path, writeTags); err != nil {
 		_ = os.Remove(path)
 		return "", "netease 写入标签失败，文件已删除", downloadpolicy.ClassNoResult, true
+	}
+	if lossySource {
+		return path, "netease 仅提供有损音频，已转换并校验为 FLAC（来源仍有损：" + song.Name + "）", downloadpolicy.ClassDownload, true
 	}
 	return path, "netease 已取到无损音频并通过校验（" + song.Name + "）", downloadpolicy.ClassDownload, true
 }

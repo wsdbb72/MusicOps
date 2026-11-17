@@ -165,7 +165,7 @@ func (a *App) reviewData(w http.ResponseWriter, r *http.Request) {
 		"ok": true, "job": publicJob(inspection.Job), "review_kind": inspection.Job.ReviewKind,
 		"message": inspection.Job.Message, "expected_title": expectedTitle, "expected_artist": expectedArtist,
 		"sites": sites, "candidates": candidates, "actions": actions,
-		"ai_review_available": a.reviewModel != nil && len(candidates) > 0 && inspection.Job.Stage == "needs_review" && inspection.Job.TaskType == "search",
+		"ai_review_available": a.aiReviewEligible(inspection.Job),
 	})
 }
 
@@ -230,12 +230,26 @@ func (a *App) reviewWithAI(w http.ResponseWriter, r *http.Request, id, requestID
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "already_processed": true})
 		return
 	}
-	if err != nil || inspection.Task == nil || inspection.Job.Stage != "needs_review" || inspection.Job.TaskType != "search" {
+	if err != nil || inspection.Job.Stage != "needs_review" || !a.aiReviewEligible(inspection.Job) {
 		writeJSON(w, http.StatusConflict, map[string]any{"ok": false, "code": "REVIEW_UNAVAILABLE"})
 		return
 	}
 	if a.reviewModel == nil || a.reviews == nil {
 		writeJSON(w, http.StatusConflict, map[string]any{"ok": false, "code": "AI_UNAVAILABLE", "message": "请先启用 AI 并保存 API 密钥"})
+		return
+	}
+	if inspection.Job.TaskType != "search" {
+		// Album expansion, metadata and interrupted jobs do not have a tracker
+		// candidate to compare. Use the original NetEase identity and current
+		// source policy to replay the job automatically; this is the same
+		// durable retry path as the manual button, without asking the model to
+		// invent an unavailable release.
+		result, retryErr := a.flows.Review(requestID, id, workflow.ReviewDecision{Action: "retry"}, nowNS)
+		a.writeReviewResult(w, result, retryErr, "ai")
+		return
+	}
+	if inspection.Task == nil {
+		writeJSON(w, http.StatusConflict, map[string]any{"ok": false, "code": "REVIEW_UNAVAILABLE"})
 		return
 	}
 	raw, found, err := a.tasks.Data(inspection.Task.ID, "arguments", 0)
@@ -287,6 +301,17 @@ func (a *App) reviewWithAI(w http.ResponseWriter, r *http.Request, id, requestID
 		return
 	}
 	writeJSON(w, http.StatusConflict, map[string]any{"ok": false, "code": "AI_NO_CONFIRMED_MATCH", "reason": advice.Reason, "message": "AI 未能核实可下载的发行版"})
+}
+
+// aiReviewEligible keeps single and batch AI review on the same safe set.
+// Token holds require explicit human approval because retrying them may spend
+// a DicMusic or Orpheus FL token. Every other review can be replayed from its
+// durable evidence without inventing a release.
+func (a *App) aiReviewEligible(job workflow.Job) bool {
+	if a == nil || a.reviewModel == nil || a.reviews == nil || job.Stage != "needs_review" || job.ReviewKind == "token" {
+		return false
+	}
+	return true
 }
 
 func (a *App) reviewAccept(w http.ResponseWriter, id, requestID, site, candidateID string, nowNS int64) {

@@ -438,8 +438,8 @@ const appJS = `(function () {
   }
   function aiCard() {
     if (!aiSettings) return "";
-    return '<article><h2>AI 设置</h2><p class="meta">启用后，待核对的候选会再交给这里的模型看一次。模型不能单独放行，仍要通过本地的标题、艺人和版本校验。API Key 加密保存在本机，不回显。</p>' +
-      '<label><input type="checkbox" id="ai-enabled"' + (aiSettings.enabled ? " checked" : "") + '> 启用 AI 核对</label>' +
+    return '<article><h2>AI 设置</h2><p class="meta">启用后，后台会持续自动核对可安全重放的项目，并保留单项/全部按钮用于手动加跑。旧网易云任务先按持久化的歌曲与专辑 ID 自证；模型不能单独放行，仍要通过本地的标题、艺人和版本校验。DicMusic/Orpheus 的未确认令牌不会自动重试或消费，仍按 FL 规则等待明确决定。API Key 加密保存在本机，不回显。</p>' +
+      '<label><input type="checkbox" id="ai-enabled"' + (aiSettings.enabled ? " checked" : "") + '> 启用自动 AI 核对</label>' +
       '<label>AI 地址<input type="text" id="ai-base-url" value="' + escapeText(aiSettings.base_url || "") + '" placeholder="如 https://ai.example.com/v1"></label>' +
       '<label>模型<input type="text" id="ai-model" value="' + escapeText(aiSettings.model || "") + '"></label>' +
       '<label>API Key（' + escapeText(savedMark(aiSettings.key_saved, aiSettings.key_revision)) + '，留空保留）<input type="password" id="ai-key" autocomplete="off"></label>' +

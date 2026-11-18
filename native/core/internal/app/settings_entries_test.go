@@ -128,7 +128,7 @@ func TestAISettingsWireReviewModel(t *testing.T) {
 	application := newApp(t)
 	application.aiHTTPClient = server.Client()
 
-	if application.reviewModel != nil {
+	if application.reviewCompleter() != nil {
 		t.Fatal("review model must start nil")
 	}
 	post(t, application, "/v1/settings/ai", map[string]any{
@@ -145,7 +145,7 @@ func TestAISettingsWireReviewModel(t *testing.T) {
 	if dirContains(t, application.Dir, "test-key-123") {
 		t.Fatal("API key was written to the native store in plaintext")
 	}
-	if application.reviewModel == nil {
+	if application.reviewCompleter() == nil {
 		t.Fatal("saving an enabled AI model must wire the production review model")
 	}
 	tested := post(t, application, "/v1/settings/ai/test", map[string]any{})
@@ -164,7 +164,7 @@ func TestAISettingsWireReviewModel(t *testing.T) {
 	}
 	// Disabling unwires the model again.
 	post(t, application, "/v1/settings/ai", map[string]any{"enabled": false})
-	if application.reviewModel != nil {
+	if application.reviewCompleter() != nil {
 		t.Fatal("disabling AI must unwire the review model")
 	}
 }

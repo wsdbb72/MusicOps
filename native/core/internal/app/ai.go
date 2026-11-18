@@ -28,6 +28,7 @@ import (
 	"time"
 
 	"github.com/wsdbb72/MusicOps/native/core/internal/aiclient"
+	"github.com/wsdbb72/MusicOps/native/core/internal/reviewai"
 )
 
 // aiSettingsKey is the persisted AI configuration. The key itself is in the
@@ -290,32 +291,44 @@ func (a *App) testAI(w http.ResponseWriter, r *http.Request) {
 // refreshReviewModel wires (or unwires) the production review model from
 // the saved AI settings. It never fails the open: an unconfigured model
 // simply leaves reviewModel nil and search keeps local classification.
+func (a *App) reviewCompleter() reviewai.Completer {
+	a.reviewModelMu.RLock()
+	defer a.reviewModelMu.RUnlock()
+	return a.reviewModel
+}
+
+func (a *App) setReviewCompleter(model reviewai.Completer) {
+	a.reviewModelMu.Lock()
+	a.reviewModel = model
+	a.reviewModelMu.Unlock()
+}
+
 func (a *App) refreshReviewModel() {
 	settings, err := a.loadAISettings()
 	if err != nil || !settings.Enabled || settings.BaseURL == "" || settings.Model == "" || a.vault == nil {
-		a.reviewModel = nil
+		a.setReviewCompleter(nil)
 		return
 	}
 	_, host, err := cleanURL(settings.BaseURL, false)
 	if err != nil {
-		a.reviewModel = nil
+		a.setReviewCompleter(nil)
 		return
 	}
 	key, found, err := a.vault.Get(aiKeyRef, host)
 	if err != nil || !found || key == "" {
-		a.reviewModel = nil
+		a.setReviewCompleter(nil)
 		return
 	}
 	client, err := aiclient.New(settings.BaseURL, settings.Model, key)
 	if err != nil {
-		a.reviewModel = nil
+		a.setReviewCompleter(nil)
 		return
 	}
 	a.useAIHTTPClient(client)
 	client.Timeout = time.Duration(settings.Timeout) * time.Second
 	client.MaxOutputTokens = settings.MaxOutputTokens
 	client.Temperature = settings.Temperature
-	a.reviewModel = client
+	a.setReviewCompleter(client)
 }
 
 // useAIHTTPClient applies the App's aiHTTPClient seam to a freshly built

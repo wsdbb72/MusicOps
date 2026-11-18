@@ -14,6 +14,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/wsdbb72/MusicOps/native/core/internal/cookies"
 	"github.com/wsdbb72/MusicOps/native/core/internal/flactags"
@@ -348,5 +349,59 @@ func TestNeteasePlaylistPreservesRecordingAndAlbumIDs(t *testing.T) {
 	}
 	if json.Unmarshal(evidence.Payload, &payload) != nil || payload.SongID != 10000000001 || payload.AlbumID != 10000000002 {
 		t.Fatalf("evidence payload=%s", evidence.Payload)
+	}
+}
+
+func TestIdentifyRecoversLegacyNeteaseIdentityWithoutManualReview(t *testing.T) {
+	a := newApp(t)
+	batchID := "pl-netease-identity-fixture"
+	rows := []playlistTrack{{Title: "One", Artist: "Artist", Album: "Album", Duration: "180000", NeteaseSongID: 10000000001, NeteaseAlbumID: 10000000002}}
+	dir := filepath.Join(a.Dir, "incoming")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, playlistFileName(batchID)), encodeM3U("Identity", rows), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	plan := SearchPlan{
+		RootJobID: "trk-netease-identity", Scene: "expand", Query: "Artist Album",
+		ExpectedTitle: "Album", ExpectedArtist: "Artist", PlaylistTrack: "One",
+		StreamingEnabled: true, EnabledSites: []string{}, NeteaseOnly: true,
+		Identity: Identity{ID: "legacy-identity", Kind: "catalog", Source: "playlist", Payload: `{"title":"One"}`},
+	}
+	raw, _ := json.Marshal(plan)
+	if _, err := a.flows.Start("start-"+plan.RootJobID, workflow.Start{
+		JobID: plan.RootJobID, BatchID: batchID, Scene: "expand", Stage: "identifying",
+		Label: "Artist - Album", Payload: raw, NowNS: a.now().UnixNano(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(8 * time.Second)
+	var job *workflow.Job
+	for time.Now().Before(deadline) {
+		job, _ = a.flows.Job(plan.RootJobID)
+		if job != nil && job.Stage != "identifying" {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if job == nil || job.Stage == "identifying" {
+		t.Fatalf("identity job did not advance: %+v", job)
+	}
+	evidence, err := a.flows.EvidenceFor(plan.RootJobID, nil, 20)
+	confirmed := false
+	if err == nil {
+		for _, item := range evidence.Evidence {
+			if item.Source == "netease" && item.IdentityConfirmed {
+				confirmed = true
+				break
+			}
+		}
+	}
+	if !confirmed {
+		t.Fatalf("recovered NetEase identity evidence was not accepted: %+v err=%v", evidence, err)
+	}
+	if job.Stage == "needs_review" && job.ErrorClass == "IDENTITY_UNCONFIRMED" {
+		t.Fatalf("recovered identity returned to manual review: %+v", job)
 	}
 }

@@ -234,7 +234,8 @@ func (a *App) reviewWithAI(w http.ResponseWriter, r *http.Request, id, requestID
 		writeJSON(w, http.StatusConflict, map[string]any{"ok": false, "code": "REVIEW_UNAVAILABLE"})
 		return
 	}
-	if a.reviewModel == nil || a.reviews == nil {
+	model := a.reviewCompleter()
+	if model == nil || a.reviews == nil {
 		writeJSON(w, http.StatusConflict, map[string]any{"ok": false, "code": "AI_UNAVAILABLE", "message": "请先启用 AI 并保存 API 密钥"})
 		return
 	}
@@ -278,7 +279,7 @@ func (a *App) reviewWithAI(w http.ResponseWriter, r *http.Request, id, requestID
 			}
 		}
 	}
-	advice := a.reviews.Advise(r.Context(), a.reviewModel, reviewai.Request{ExpectedTitle: plan.ExpectedTitle, ExpectedArtist: plan.ExpectedArtist, Candidates: pool})
+	advice := a.reviews.Advise(r.Context(), model, reviewai.Request{ExpectedTitle: plan.ExpectedTitle, ExpectedArtist: plan.ExpectedArtist, Candidates: pool})
 	if site := sites[advice.CandidateID]; advice.Pass && site != "" && inspection.Job.ReviewKind == "candidate" {
 		a.reviewAccept(w, id, requestID, site, advice.CandidateID, nowNS)
 		return
@@ -308,7 +309,7 @@ func (a *App) reviewWithAI(w http.ResponseWriter, r *http.Request, id, requestID
 // a DicMusic or Orpheus FL token. Every other review can be replayed from its
 // durable evidence without inventing a release.
 func (a *App) aiReviewEligible(job workflow.Job) bool {
-	if a == nil || a.reviewModel == nil || a.reviews == nil || job.Stage != "needs_review" || job.ReviewKind == "token" {
+	if a == nil || a.reviewCompleter() == nil || a.reviews == nil || job.Stage != "needs_review" || job.ReviewKind == "token" {
 		return false
 	}
 	return true

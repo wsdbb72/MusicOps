@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strconv"
 	"strings"
 	"time"
@@ -85,6 +86,31 @@ func (a *App) identify(ctx context.Context, execution *scheduler.Execution, payl
 			payload, err = json.Marshal(plan)
 			if err != nil {
 				return scheduler.Outcome{}, err
+			}
+		}
+	}
+	// Old NetEase playlist rows predate the confirmed platform evidence now
+	// stored at enqueue time. Recover their durable song/album ids from the
+	// ordered M3U (or one authenticated playlist refresh) and let the search
+	// proceed automatically; media identity is still checked again at acquire.
+	if !plan.Identity.IdentityConfirmed && plan.PlaylistTrack != "" {
+		if task, taskErr := a.tasks.Get(token.ID); taskErr == nil && task != nil {
+			if job, jobErr := a.flows.Job(task.WorkflowJobID); jobErr == nil && job != nil && a.recoverNeteasePlaylistIDs(ctx, job.BatchID, &plan) {
+				identityPayload, _ := json.Marshal(map[string]any{
+					"source": "netease", "title": plan.PlaylistTrack, "artist": plan.ExpectedArtist,
+					"album": plan.ExpectedTitle, "netease_song_id": plan.NeteaseSongID,
+					"netease_album_id": plan.NeteaseAlbumID,
+				})
+				plan.Identity = Identity{
+					ID: evidenceID(token.ID, token.Fence, "playlist-identity"), Kind: "api", Source: "netease",
+					SubjectID:         fmt.Sprintf("netease:%d:%d", plan.NeteaseSongID, plan.NeteaseAlbumID),
+					TracklistVerified: plan.NeteaseAlbumID > 0, IdentityConfirmed: true,
+					Payload: string(identityPayload),
+				}
+				payload, err = json.Marshal(plan)
+				if err != nil {
+					return scheduler.Outcome{}, err
+				}
 			}
 		}
 	}
@@ -330,8 +356,9 @@ func (a *App) observe(ctx context.Context, execution *scheduler.Execution, job w
 	}
 	chosen, chosenID := selectIdentity(picks)
 	adviseClass := ""
-	if chosen == "" && a.reviewModel != nil && a.reviews != nil && len(pool) > 0 {
-		advice := a.reviews.Advise(ctx, a.reviewModel, reviewai.Request{
+	model := a.reviewCompleter()
+	if chosen == "" && model != nil && a.reviews != nil && len(pool) > 0 {
+		advice := a.reviews.Advise(ctx, model, reviewai.Request{
 			ExpectedTitle: plan.ExpectedTitle, ExpectedArtist: plan.ExpectedArtist, Candidates: pool,
 		})
 		adviseClass = advice.Class

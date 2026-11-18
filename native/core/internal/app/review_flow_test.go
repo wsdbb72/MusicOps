@@ -17,7 +17,7 @@ import (
 func TestAIReviewEligibilityCoversNonSearchButNeverTokenHolds(t *testing.T) {
 	application := newApp(t)
 	calls := atomic.Int32{}
-	application.reviewModel = reviewCaller{calls: &calls, body: []byte(`{"decision":"review","reason":"unused"}`)}
+	application.setReviewCompleter(reviewCaller{calls: &calls, body: []byte(`{"decision":"review","reason":"unused"}`)})
 	application.reviews = reviewai.NewCache(1)
 	base := workflow.Job{Stage: "needs_review", TaskType: "album", ReviewKind: "candidate"}
 	if !application.aiReviewEligible(base) {
@@ -51,7 +51,7 @@ func TestNormalizedAndSameReleaseCanQueueWithoutAModel(t *testing.T) {
 	defer server.Close()
 	application := newApp(t)
 	var calls atomic.Int32
-	application.reviewModel = reviewCaller{calls: &calls, body: []byte(`{"decision":"pass","candidate_id":"dicmusic:11","reason":"unused"}`)}
+	application.setReviewCompleter(reviewCaller{calls: &calls, body: []byte(`{"decision":"pass","candidate_id":"dicmusic:11","reason":"unused"}`)})
 	body := searchBody("album-fold", server.URL, []string{"open.cd", "dicmusic", "orpheus", "redacted"}, false)
 	post(t, application, "/v1/search", body)
 	job := waitJob(t, application, "search:album-fold", "completed")
@@ -75,7 +75,7 @@ func TestEditionArtistAndIncompleteEvidenceStayInReview(t *testing.T) {
 	defer server.Close()
 	application := newApp(t)
 	calls := atomic.Int32{}
-	application.reviewModel = reviewCaller{calls: &calls, err: context.DeadlineExceeded}
+	application.setReviewCompleter(reviewCaller{calls: &calls, err: context.DeadlineExceeded})
 	body := searchBody("album-live", server.URL, []string{"open.cd", "dicmusic", "orpheus", "redacted"}, false)
 	body["expected_artist"] = "Artist"
 	post(t, application, "/v1/search", body)
@@ -125,7 +125,7 @@ func TestModelPassCannotOverrideMissingEvidence(t *testing.T) {
 	defer server.Close()
 	application := newApp(t)
 	calls := atomic.Int32{}
-	application.reviewModel = reviewCaller{calls: &calls, body: []byte(`{"decision":"pass","candidate_id":"dicmusic:11","reason":"sounds the same"}`)}
+	application.setReviewCompleter(reviewCaller{calls: &calls, body: []byte(`{"decision":"pass","candidate_id":"dicmusic:11","reason":"sounds the same"}`)})
 	body := searchBody("album-hallucination", server.URL, []string{"open.cd", "dicmusic", "orpheus", "redacted"}, false)
 	body["expected_title"] = "Blue"
 	body["expected_artist"] = "Artist"

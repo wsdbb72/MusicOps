@@ -34,19 +34,20 @@ type StartupLogger func(stage, detail string)
 
 // App owns one native directory and its scheduler. Secrets stay in memory.
 type App struct {
-	Dir         string
-	Backup      string
-	password    string
-	paused      bool
-	engine      *dataengine.Engine
-	tasks       *taskrepo.Repository
-	flows       *workflow.Repository
-	runner      *scheduler.Coordinator
-	searcher    *trackersearch.Client
-	ledger      *tokenledger.Ledger
-	spendSource tokenledger.SpendSource
-	reviews     *reviewai.Cache
-	reviewModel reviewai.Completer
+	Dir           string
+	Backup        string
+	password      string
+	paused        bool
+	engine        *dataengine.Engine
+	tasks         *taskrepo.Repository
+	flows         *workflow.Repository
+	runner        *scheduler.Coordinator
+	searcher      *trackersearch.Client
+	ledger        *tokenledger.Ledger
+	spendSource   tokenledger.SpendSource
+	reviews       *reviewai.Cache
+	reviewModel   reviewai.Completer
+	reviewModelMu sync.RWMutex
 	// vault is the profile credential store. Its base is the profile
 	// directory: the state directory is <profile>/state/native, so the
 	// vault lives two levels up. Keys, cookies and tokens are only ever
@@ -72,6 +73,9 @@ type App struct {
 	secrets           map[string]string
 	stopSubs          chan struct{}
 	stopReconcile     chan struct{}
+	stopAutoReview    chan struct{}
+	autoReviewMu      sync.Mutex
+	autoReviewRetryAt map[string]time.Time
 	// lastTokenRead bounds the background balance reads to one per site per
 	// minute. The ledger's read hold only exists for failures; a successful
 	// read leaves no trace there, and a 30-second ticker would otherwise read
@@ -161,7 +165,7 @@ func open(dir, backup, password string, logger StartupLogger) (*App, error) {
 		return nil, fmt.Errorf("open native Pebble store: %w", err)
 	}
 	progress("native_store_ready", "Pebble opened and schema checked")
-	app := &App{Dir: dir, Backup: backup, password: password, engine: engine, tasks: taskrepo.New(engine), searcher: &trackersearch.Client{}, now: time.Now, secrets: map[string]string{}}
+	app := &App{Dir: dir, Backup: backup, password: password, engine: engine, tasks: taskrepo.New(engine), searcher: &trackersearch.Client{}, now: time.Now, secrets: map[string]string{}, autoReviewRetryAt: map[string]time.Time{}}
 	progress("vault", "opening the encrypted credential vault")
 	app.vault, err = vault.Open(filepath.Dir(filepath.Dir(absDir)))
 	if err != nil {
@@ -238,6 +242,10 @@ func open(dir, backup, password string, logger StartupLogger) (*App, error) {
 	// blocking its site on evidence, not only on a 30-minute deadline.
 	app.stopReconcile = make(chan struct{})
 	go app.runTokenReconciler(app.stopReconcile)
+	// Safe review items are retried by the core itself. Token holds remain
+	// excluded by aiReviewEligible and still require an explicit FL decision.
+	app.stopAutoReview = make(chan struct{})
+	go app.runAutoReview(app.stopAutoReview)
 	// A managed solver is started once, in the background: a slow browser
 	// start must not delay the UI, and the settings page reports the state.
 	go app.autoStartSolver()
@@ -287,14 +295,19 @@ func (a *App) Close() error {
 	a.mu.Lock()
 	stop := a.stopSubs
 	stopReconcile := a.stopReconcile
+	stopAutoReview := a.stopAutoReview
 	a.stopSubs = nil
 	a.stopReconcile = nil
+	a.stopAutoReview = nil
 	a.mu.Unlock()
 	if stop != nil {
 		close(stop)
 	}
 	if stopReconcile != nil {
 		close(stopReconcile)
+	}
+	if stopAutoReview != nil {
+		close(stopAutoReview)
 	}
 	a.stopManagedSolver()
 	a.stopEngines()

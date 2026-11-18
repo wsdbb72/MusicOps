@@ -16,17 +16,18 @@ import (
 )
 
 type genericAudioInfo struct {
-	Path     string
-	Codec    string
-	Artist   string
-	Album    string
-	Title    string
-	Date     string
-	Genre    string
-	Track    string
-	Disc     string
-	Duration float64
-	Tags     map[string]string
+	Path        string
+	Codec       string
+	Artist      string
+	AlbumArtist string
+	Album       string
+	Title       string
+	Date        string
+	Genre       string
+	Track       string
+	Disc        string
+	Duration    float64
+	Tags        map[string]string
 }
 
 func probeGenericAudio(ctx context.Context, path string) (genericAudioInfo, error) {
@@ -56,6 +57,7 @@ func probeGenericAudio(ctx context.Context, path string) (genericAudioInfo, erro
 	}
 	info.Codec = strings.ToLower(data.Streams[0].Codec)
 	info.Artist = firstNonEmpty(info.Tags["artist"], info.Tags["artists"])
+	info.AlbumArtist = firstNonEmpty(info.Tags["album_artist"], info.Tags["albumartist"])
 	info.Album = info.Tags["album"]
 	info.Title = info.Tags["title"]
 	info.Date = firstNonEmpty(info.Tags["date"], info.Tags["year"])

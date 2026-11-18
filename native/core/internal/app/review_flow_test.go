@@ -15,6 +15,16 @@ import (
 )
 
 func TestAIReviewEligibilityCoversNonSearchButNeverTokenHolds(t *testing.T) {
+	withoutAI := newApp(t)
+	neteaseSource := workflow.Job{Stage: "needs_review", TaskType: "search", ReviewKind: "candidate", BatchID: "pl-netease-fixture"}
+	if !withoutAI.aiReviewEligible(neteaseSource) {
+		t.Fatal("NetEase candidate fallback must not depend on an AI model")
+	}
+	ordinarySearch := neteaseSource
+	ordinarySearch.BatchID = "batch-1"
+	if withoutAI.aiReviewEligible(ordinarySearch) {
+		t.Fatal("ordinary search candidate became eligible without a model")
+	}
 	application := newApp(t)
 	calls := atomic.Int32{}
 	application.setReviewCompleter(reviewCaller{calls: &calls, body: []byte(`{"decision":"review","reason":"unused"}`)})

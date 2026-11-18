@@ -483,6 +483,7 @@ func TestPhase2WebUIFragments(t *testing.T) {
 		`data-view="search"`, `data-view="settings"`, `id="retry-job"`, `id="review-box"`,
 		"setStatus(", "/v1/jobs/batch", "/v1/sites/preflight", "/v1/settings/download",
 		"review-candidate", "data-batch-action", "search-form", "preflight-site",
+		"run-library-scrape-now", "scrape-whole-library", "stop-auto-maintenance", "/v1/library/scrape/whole",
 	} {
 		if !strings.Contains(page, fragment) {
 			t.Fatal("missing Phase 2 fragment", fragment)

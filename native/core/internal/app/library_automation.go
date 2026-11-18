@@ -4,11 +4,13 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 	"sync"
@@ -19,13 +21,16 @@ import (
 )
 
 var libraryAutomationSettingsKey = []byte("app/settings/library-automation")
+var libraryAutomationScanKey = []byte("app/library/automation-scan-cache")
 
 const (
 	libraryAutomationInitialDelay = 5 * time.Minute
-	libraryAutomationMaxScrape    = 200
-	libraryAutomationMaxArtwork   = 90
 	libraryAutomationMaxMerges    = 5
-	libraryAutomationMaxJobs      = 20
+	libraryAutomationMaxJobs      = 200
+	libraryAutomationScanWorkers  = 8
+	libraryAutomationCheckpoint   = 20_000
+	libraryAutomationScanVersion  = 2
+	libraryAutomationStallTimeout = 45 * time.Minute
 )
 
 type libraryAutomationSettings struct {
@@ -57,6 +62,27 @@ func (a *App) loadLibraryAutomationSettings() (libraryAutomationSettings, error)
 	return out, nil
 }
 
+func (a *App) loadLibraryAutomationScanCache(root string) libraryAutomationScanDocument {
+	empty := libraryAutomationScanDocument{Version: libraryAutomationScanVersion, Root: filepath.Clean(root), Files: map[string]cachedLibraryScan{}}
+	doc := libraryAutomationScanDocument{}
+	found, err := a.loadJSONSetting(libraryAutomationScanKey, &doc)
+	if err != nil || !found || doc.Files == nil || doc.Version != libraryAutomationScanVersion || !strings.EqualFold(filepath.Clean(doc.Root), empty.Root) {
+		return empty
+	}
+	return doc
+}
+
+func (a *App) saveLibraryAutomationScanCache(doc libraryAutomationScanDocument) error {
+	if doc.Files == nil {
+		doc.Files = map[string]cachedLibraryScan{}
+	}
+	raw, err := json.Marshal(doc)
+	if err != nil {
+		return err
+	}
+	return a.casSaveJSON(libraryAutomationScanKey, raw)
+}
+
 func (a *App) saveLibraryAutomationSettings(in libraryAutomationSettings) (libraryAutomationSettings, error) {
 	if in.IntervalHours < 1 || in.IntervalHours > 168 {
 		in.IntervalHours = 6
@@ -72,31 +98,65 @@ func (a *App) saveLibraryAutomationSettings(in libraryAutomationSettings) (libra
 	return in, nil
 }
 
+type cachedLibraryScan struct {
+	Size         int64   `json:"size"`
+	ModNS        int64   `json:"mod_ns"`
+	NeedsCatalog bool    `json:"needs_catalog"`
+	NeedsArtwork bool    `json:"needs_artwork"`
+	Codec        string  `json:"codec,omitempty"`
+	Duration     float64 `json:"duration,omitempty"`
+	Artist       string  `json:"artist,omitempty"`
+	Album        string  `json:"album,omitempty"`
+	Title        string  `json:"title,omitempty"`
+}
+
+type libraryAutomationScanDocument struct {
+	Version int                          `json:"version"`
+	Root    string                       `json:"root"`
+	Files   map[string]cachedLibraryScan `json:"files"`
+}
+
 type libraryAutomationReport struct {
-	Running          bool     `json:"running"`
-	Phase            string   `json:"phase,omitempty"`
-	Started          string   `json:"started,omitempty"`
-	Finished         string   `json:"finished,omitempty"`
-	IndexedAdded     int      `json:"indexed_added"`
-	IndexedPruned    int      `json:"indexed_pruned"`
-	ScrapeCandidates int      `json:"scrape_candidates"`
-	ScrapeWritten    int      `json:"scrape_written"`
-	ArtworkWritten   int      `json:"artwork_written"`
-	ScrapeFailed     int      `json:"scrape_failed"`
-	DuplicateGroups  int      `json:"duplicate_groups"`
-	Deduplicated     int      `json:"deduplicated"`
-	UpgradeJobs      int      `json:"upgrade_jobs"`
-	ExpandJobs       int      `json:"expand_jobs"`
-	Errors           []string `json:"errors,omitempty"`
-	Note             string   `json:"note,omitempty"`
+	Running           bool     `json:"running"`
+	Phase             string   `json:"phase,omitempty"`
+	Started           string   `json:"started,omitempty"`
+	Finished          string   `json:"finished,omitempty"`
+	LastProgress      string   `json:"last_progress,omitempty"`
+	Current           string   `json:"current,omitempty"`
+	Cancelled         bool     `json:"cancelled,omitempty"`
+	IndexedAdded      int      `json:"indexed_added"`
+	IndexedPruned     int      `json:"indexed_pruned"`
+	ScanTotal         int      `json:"scan_total"`
+	ScanChecked       int      `json:"scan_checked"`
+	ScanReused        int      `json:"scan_reused"`
+	ScanFailed        int      `json:"scan_failed"`
+	ScrapeCandidates  int      `json:"scrape_candidates"`
+	ArtworkCandidates int      `json:"artwork_candidates"`
+	ScrapeProcessed   int      `json:"scrape_processed"`
+	ScrapeSkipped     int      `json:"scrape_skipped"`
+	ArtworkProcessed  int      `json:"artwork_processed"`
+	ArtworkSkipped    int      `json:"artwork_skipped"`
+	ScrapeWritten     int      `json:"scrape_written"`
+	ArtworkWritten    int      `json:"artwork_written"`
+	ArtworkFailed     int      `json:"artwork_failed"`
+	Backlog           bool     `json:"backlog,omitempty"`
+	ScrapeFailed      int      `json:"scrape_failed"`
+	DuplicateGroups   int      `json:"duplicate_groups"`
+	Deduplicated      int      `json:"deduplicated"`
+	UpgradeJobs       int      `json:"upgrade_jobs"`
+	ExpandJobs        int      `json:"expand_jobs"`
+	Errors            []string `json:"errors,omitempty"`
+	Note              string   `json:"note,omitempty"`
 }
 
 type libraryAutomationState struct {
-	mu       sync.Mutex
-	running  bool
-	report   libraryAutomationReport
-	cancel   context.CancelFunc
-	attempts map[string]time.Time
+	mu           sync.Mutex
+	running      bool
+	report       libraryAutomationReport
+	cancel       context.CancelFunc
+	done         chan struct{}
+	attempts     map[string]time.Time
+	lastProgress time.Time
 }
 
 func (s *libraryAutomationState) snapshot() (bool, libraryAutomationReport) {
@@ -108,8 +168,23 @@ func (s *libraryAutomationState) snapshot() (bool, libraryAutomationReport) {
 }
 
 func (s *libraryAutomationState) setPhase(phase string) {
+	now := time.Now()
 	s.mu.Lock()
 	s.report.Phase = phase
+	s.report.LastProgress = now.Format(time.RFC3339)
+	s.lastProgress = now
+	s.mu.Unlock()
+}
+
+func (s *libraryAutomationState) touch(phase, current string) {
+	now := time.Now()
+	s.mu.Lock()
+	if phase != "" {
+		s.report.Phase = phase
+	}
+	s.report.Current = scrub(current)
+	s.report.LastProgress = now.Format(time.RFC3339)
+	s.lastProgress = now
 	s.mu.Unlock()
 }
 
@@ -149,16 +224,21 @@ func (s *libraryAutomationState) begin() (context.Context, bool) {
 	if s.running {
 		return nil, false
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Hour)
+	ctx, cancel := context.WithCancel(context.Background())
 	s.running = true
 	s.cancel = cancel
-	s.report = libraryAutomationReport{Running: true, Started: time.Now().Format(time.RFC3339), Phase: "queued"}
+	s.done = make(chan struct{})
+	started := time.Now()
+	s.lastProgress = started
+	s.report = libraryAutomationReport{Running: true, Started: started.Format(time.RFC3339), LastProgress: started.Format(time.RFC3339), Phase: "queued"}
 	return ctx, true
 }
 
 func (s *libraryAutomationState) finish(err error, note string) {
 	s.mu.Lock()
-	if err != nil && len(s.report.Errors) < 20 {
+	if errors.Is(err, context.Canceled) {
+		s.report.Cancelled = true
+	} else if err != nil && len(s.report.Errors) < 20 {
 		s.report.Errors = append(s.report.Errors, scrub(err.Error()))
 	}
 	s.report.Running = false
@@ -168,40 +248,96 @@ func (s *libraryAutomationState) finish(err error, note string) {
 		s.cancel()
 		s.cancel = nil
 	}
+	if s.done != nil {
+		close(s.done)
+		s.done = nil
+	}
 	s.running = false
 	s.mu.Unlock()
 }
 
+func (s *libraryAutomationState) wait(ctx context.Context) bool {
+	s.mu.Lock()
+	done := s.done
+	running := s.running
+	s.mu.Unlock()
+	if !running || done == nil {
+		return true
+	}
+	select {
+	case <-ctx.Done():
+		return false
+	case <-done:
+		return true
+	}
+}
+
 func (s *libraryAutomationState) stop() {
 	s.mu.Lock()
+	if s.running {
+		s.report.Note = "正在停止；当前网络请求或文件操作结束后退出"
+	}
 	if s.cancel != nil {
 		s.cancel()
 	}
 	s.mu.Unlock()
 }
 
-func (a *App) runLibraryAutomationScheduler(stop <-chan struct{}) {
-	timer := time.NewTimer(libraryAutomationInitialDelay)
-	defer timer.Stop()
-	select {
-	case <-stop:
-		return
-	case <-timer.C:
+func (s *libraryAutomationState) stopIfStalled(now time.Time) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !s.running || s.lastProgress.IsZero() || now.Sub(s.lastProgress) < libraryAutomationStallTimeout {
+		return false
 	}
+	if len(s.report.Errors) < 20 {
+		s.report.Errors = append(s.report.Errors, scrub(fmt.Sprintf("自动维护超过 %s 没有进度，已安全停止并保留已完成结果", libraryAutomationStallTimeout)))
+	}
+	if s.cancel != nil {
+		s.cancel()
+	}
+	return true
+}
+
+func (a *App) runLibraryAutomationScheduler(stop <-chan struct{}) {
+	nextRun := time.Now().Add(libraryAutomationInitialDelay)
+	lastBacklogFinished := ""
+	ticker := time.NewTicker(30 * time.Second)
+	defer ticker.Stop()
 	for {
-		settings, err := a.loadLibraryAutomationSettings()
-		if err == nil && settings.Enabled {
-			a.startLibraryAutomationRun("scheduled")
-		}
-		delay := 6 * time.Hour
-		if err == nil {
-			delay = time.Duration(settings.IntervalHours) * time.Hour
-		}
-		timer.Reset(delay)
 		select {
 		case <-stop:
 			return
-		case <-timer.C:
+		case now := <-ticker.C:
+			settings, err := a.loadLibraryAutomationSettings()
+			if err != nil {
+				nextRun = now.Add(5 * time.Minute)
+				continue
+			}
+			delay := time.Duration(settings.IntervalHours) * time.Hour
+			if delay <= 0 {
+				delay = 6 * time.Hour
+			}
+			if !settings.Enabled {
+				nextRun = now.Add(delay)
+				continue
+			}
+			running, report := a.libraryAutomation.snapshot()
+			if !running && report.Backlog && report.Finished != "" && report.Finished != lastBacklogFinished {
+				soon := now.Add(time.Minute)
+				if soon.Before(nextRun) {
+					nextRun = soon
+				}
+				lastBacklogFinished = report.Finished
+			}
+			if now.Before(nextRun) {
+				continue
+			}
+			if a.startLibraryAutomationRun("scheduled") {
+				nextRun = now.Add(delay)
+			} else {
+				// A manual or long-running pass may still be active. Recheck soon after it ends.
+				nextRun = now.Add(time.Minute)
+			}
 		}
 	}
 }
@@ -210,20 +346,57 @@ func (a *App) startLibraryAutomationRun(reason string) bool {
 	if a == nil || a.libraryAutomation == nil {
 		return false
 	}
+	settings, err := a.loadLibraryAutomationSettings()
+	if err != nil {
+		return false
+	}
+	return a.startLibraryAutomationRunWithSettings(reason, settings)
+}
+
+func (a *App) startLibraryScrapeRun(reason string) bool {
+	settings, err := a.loadLibraryAutomationSettings()
+	if err != nil {
+		return false
+	}
+	settings.Scrape = true
+	settings.Dedupe = false
+	settings.Upgrade = false
+	settings.Expand = false
+	return a.startLibraryAutomationRunWithSettings(reason, settings)
+}
+
+func (a *App) startLibraryAutomationRunWithSettings(reason string, settings libraryAutomationSettings) bool {
 	ctx, started := a.libraryAutomation.begin()
 	if !started {
 		return false
 	}
-	settings, err := a.loadLibraryAutomationSettings()
-	if err != nil {
-		a.libraryAutomation.finish(err, "自动维护设置读取失败")
-		return false
-	}
+	go a.watchLibraryAutomationRun(ctx)
 	go func() {
-		err := a.runLibraryAutomationPass(ctx, settings)
-		a.libraryAutomation.finish(err, "本轮自动维护由"+reason+"触发")
+		var runErr error
+		defer func() {
+			if recovered := recover(); recovered != nil {
+				runErr = fmt.Errorf("自动维护内部异常: %v", recovered)
+			}
+			a.libraryAutomation.finish(runErr, "本轮自动维护由"+reason+"触发")
+		}()
+		runErr = a.runLibraryAutomationPass(ctx, settings)
 	}()
 	return true
+}
+
+func (a *App) watchLibraryAutomationRun(ctx context.Context) {
+	ticker := time.NewTicker(time.Minute)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case now := <-ticker.C:
+			if a.libraryAutomation.stopIfStalled(now) {
+				return
+			}
+		}
+	}
 }
 
 func (a *App) runLibraryAutomationPass(ctx context.Context, settings libraryAutomationSettings) error {
@@ -249,14 +422,16 @@ func (a *App) runLibraryAutomationPass(ctx context.Context, settings libraryAuto
 	}
 	if settings.Scrape {
 		state.setPhase("scrape")
-		a.runAutomatedScrape(ctx, paths, byDir)
+		a.runAutomatedScrape(ctx, root, paths)
 	}
 	if ctx.Err() != nil {
 		return ctx.Err()
 	}
 	if settings.Dedupe {
 		state.setPhase("dedupe")
-		a.runAutomatedDeduplication(ctx)
+		if a.runAutomatedDeduplication(ctx) {
+			state.update(func(report *libraryAutomationReport) { report.Backlog = true })
+		}
 	}
 	if ctx.Err() != nil {
 		return ctx.Err()
@@ -294,75 +469,258 @@ func listLibraryAudio(root string) ([]string, map[string][]string, error) {
 	return paths, byDir, err
 }
 
-func (a *App) runAutomatedScrape(ctx context.Context, paths []string, byDir map[string][]string) {
+type libraryAutomationScanInput struct {
+	path     string
+	key      string
+	cached   cachedLibraryScan
+	hasCache bool
+}
+
+type libraryAutomationScanResult struct {
+	input  libraryAutomationScanInput
+	entry  cachedLibraryScan
+	ok     bool
+	reused bool
+	err    error
+}
+
+func scanAutomationFile(ctx context.Context, input libraryAutomationScanInput) libraryAutomationScanResult {
+	result := libraryAutomationScanResult{input: input}
+	if ctx.Err() != nil {
+		result.err = ctx.Err()
+		return result
+	}
+	info, err := os.Stat(input.path)
+	if err != nil {
+		result.err = fmt.Errorf("%s: 文件状态读取失败: %w", filepath.Base(input.path), err)
+		return result
+	}
+	if input.hasCache && input.cached.Size == info.Size() && input.cached.ModNS == info.ModTime().UnixNano() {
+		result.entry = input.cached
+		result.ok = true
+		result.reused = true
+		return result
+	}
+	entry := cachedLibraryScan{Size: info.Size(), ModNS: info.ModTime().UnixNano()}
+	if strings.EqualFold(filepath.Ext(input.path), ".flac") {
+		tags, readErr := readFLACTagsPrefix(input.path)
+		if readErr != nil {
+			result.err = fmt.Errorf("%s: 标签读取失败: %w", filepath.Base(input.path), readErr)
+			return result
+		}
+		entry.NeedsCatalog = maintenanceNeedsCatalogTags(tags)
+		entry.NeedsArtwork = maintenanceMissingArtwork(input.path, tags)
+		entry.Codec = "flac"
+		if strings.Contains(strings.ToLower(firstTagValue(tags.Raw, "COMMENT")), "musicops source=netease-lossy") {
+			entry.Codec = "flac-lossy"
+		}
+		entry.Duration, _ = flacDuration(tags.StreamInfo)
+		entry.Artist = strings.TrimSpace(tags.Artist)
+		entry.Album = strings.TrimSpace(tags.Album)
+		entry.Title = strings.TrimSpace(tags.Title)
+	} else {
+		genericInfo, probeErr := probeGenericAudio(ctx, input.path)
+		if probeErr != nil {
+			result.err = fmt.Errorf("%s: 音频探测失败: %w", filepath.Base(input.path), probeErr)
+			return result
+		}
+		entry.NeedsCatalog = maintenanceNeedsGenericTags(genericInfo)
+		entry.NeedsArtwork = maintenanceMissingSidecars(input.path)
+		entry.Codec = genericInfo.Codec
+		entry.Duration = genericInfo.Duration
+		entry.Artist = genericInfo.Artist
+		entry.Album = genericInfo.Album
+		entry.Title = genericInfo.Title
+	}
+	result.entry = entry
+	result.ok = true
+	return result
+}
+
+func automationCacheKey(root, path string) string {
+	rel, err := filepath.Rel(root, path)
+	if err != nil {
+		rel = path
+	}
+	return filepath.ToSlash(rel)
+}
+
+func (a *App) runAutomatedScrape(ctx context.Context, root string, paths []string) {
 	state := a.libraryAutomation
+	cache := a.loadLibraryAutomationScanCache(root)
+	nextCache := libraryAutomationScanDocument{Version: libraryAutomationScanVersion, Root: filepath.Clean(root), Files: make(map[string]cachedLibraryScan, len(cache.Files))}
+	for key, entry := range cache.Files {
+		nextCache.Files[key] = entry
+	}
+	inputs := make([]libraryAutomationScanInput, 0, len(paths))
+	for _, path := range paths {
+		key := automationCacheKey(root, path)
+		entry, ok := cache.Files[key]
+		inputs = append(inputs, libraryAutomationScanInput{path: path, key: key, cached: entry, hasCache: ok})
+	}
+	state.update(func(report *libraryAutomationReport) {
+		report.ScanTotal = len(inputs)
+		report.ScanChecked = 0
+		report.ScanReused = 0
+		report.ScanFailed = 0
+	})
+	state.touch("scrape", "正在扫描音乐库")
+
+	workers := libraryAutomationScanWorkers
+	if runtime.GOMAXPROCS(0) < workers {
+		workers = runtime.GOMAXPROCS(0)
+	}
+	if workers < 1 {
+		workers = 1
+	}
+	jobs := make(chan libraryAutomationScanInput)
+	results := make(chan libraryAutomationScanResult, workers*2)
+	var workersWG sync.WaitGroup
+	for i := 0; i < workers; i++ {
+		workersWG.Add(1)
+		go func() {
+			defer workersWG.Done()
+			for input := range jobs {
+				results <- scanAutomationFile(ctx, input)
+			}
+		}()
+	}
+	go func() {
+		defer close(jobs)
+		for _, input := range inputs {
+			select {
+			case <-ctx.Done():
+				return
+			case jobs <- input:
+			}
+		}
+	}()
+	go func() {
+		workersWG.Wait()
+		close(results)
+	}()
+
+	seen := make(map[string]bool, len(inputs))
+	checked, reused, failed := 0, 0, 0
+	for result := range results {
+		checked++
+		seen[result.input.key] = true
+		if result.ok {
+			nextCache.Files[result.input.key] = result.entry
+			if result.reused {
+				reused++
+			}
+		} else {
+			delete(nextCache.Files, result.input.key)
+			failed++
+			state.addError(result.err)
+		}
+		if checked%100 == 0 || checked == len(inputs) {
+			state.update(func(report *libraryAutomationReport) {
+				report.ScanChecked = checked
+				report.ScanReused = reused
+				report.ScanFailed = failed
+			})
+			state.touch("scrape", result.input.path)
+		}
+		if checked%libraryAutomationCheckpoint == 0 {
+			if err := a.saveLibraryAutomationScanCache(nextCache); err != nil {
+				state.addError(fmt.Errorf("扫描缓存检查点保存失败: %w", err))
+			}
+		}
+	}
+	if checked == len(inputs) && ctx.Err() == nil {
+		for key := range nextCache.Files {
+			if !seen[key] {
+				delete(nextCache.Files, key)
+			}
+		}
+	}
+	if err := a.saveLibraryAutomationScanCache(nextCache); err != nil {
+		state.addError(fmt.Errorf("扫描缓存保存失败: %w", err))
+	}
+	if ctx.Err() != nil {
+		return
+	}
+
 	catalogByDir := map[string][]string{}
 	genericByDir := map[string][]string{}
 	artworkFLACByDir := map[string][]string{}
 	artworkOther := []string{}
 	candidateCount := 0
-	for _, path := range paths {
-		if ctx.Err() != nil {
-			return
-		}
-		if !strings.EqualFold(filepath.Ext(path), ".flac") {
-			if info, err := probeGenericAudio(ctx, path); err == nil && maintenanceNeedsGenericTags(info) {
-				genericByDir[filepath.Dir(path)] = append(genericByDir[filepath.Dir(path)], path)
-				candidateCount++
-			}
-			if maintenanceMissingSidecars(path) {
-				artworkOther = append(artworkOther, path)
-			}
+	artworkCount := 0
+	for _, input := range inputs {
+		entry, ok := nextCache.Files[input.key]
+		if !ok {
 			continue
 		}
-		tags, err := readFLACTagsPrefix(path)
-		if err != nil {
-			state.addError(fmt.Errorf("%s: 标签读取失败", filepath.Base(path)))
-			continue
-		}
-		if maintenanceNeedsCatalogTags(tags) {
-			catalogByDir[filepath.Dir(path)] = append(catalogByDir[filepath.Dir(path)], path)
+		if entry.NeedsCatalog {
+			if strings.EqualFold(filepath.Ext(input.path), ".flac") {
+				catalogByDir[filepath.Dir(input.path)] = append(catalogByDir[filepath.Dir(input.path)], input.path)
+			} else {
+				genericByDir[filepath.Dir(input.path)] = append(genericByDir[filepath.Dir(input.path)], input.path)
+			}
 			candidateCount++
 		}
-		if maintenanceMissingArtwork(path, tags) {
-			artworkFLACByDir[filepath.Dir(path)] = append(artworkFLACByDir[filepath.Dir(path)], path)
+		if entry.NeedsArtwork {
+			if strings.EqualFold(filepath.Ext(input.path), ".flac") {
+				artworkFLACByDir[filepath.Dir(input.path)] = append(artworkFLACByDir[filepath.Dir(input.path)], input.path)
+			} else {
+				artworkOther = append(artworkOther, input.path)
+			}
+			artworkCount++
 		}
 	}
-	state.update(func(report *libraryAutomationReport) { report.ScrapeCandidates = candidateCount })
+	state.update(func(report *libraryAutomationReport) {
+		report.ScrapeCandidates = candidateCount
+		report.ArtworkCandidates = artworkCount
+	})
+	state.touch("scrape", fmt.Sprintf("扫描完成：待补标签 %d，待补歌词封面 %d", candidateCount, artworkCount))
 
-	processed := 0
+	invalidated := map[string]bool{}
+	processed, skipped := 0, 0
 	dirs := make([]string, 0, len(catalogByDir))
 	for dir := range catalogByDir {
 		dirs = append(dirs, dir)
 	}
 	sort.Strings(dirs)
 	for _, dir := range dirs {
-		if ctx.Err() != nil || processed >= libraryAutomationMaxScrape {
+		if ctx.Err() != nil {
 			break
 		}
 		eligible := make([]string, 0, len(catalogByDir[dir]))
 		for _, path := range catalogByDir[dir] {
-			if processed+len(eligible) >= libraryAutomationMaxScrape {
-				break
-			}
 			if state.claimAttempt("catalog|"+path, time.Now()) {
 				eligible = append(eligible, path)
+			} else {
+				skipped++
 			}
 		}
-		files := eligible
-		if len(files) == 0 {
-			continue
+		for start := 0; start < len(eligible); start += scrapeBatchMaxFiles {
+			if ctx.Err() != nil {
+				break
+			}
+			end := start + scrapeBatchMaxFiles
+			if end > len(eligible) {
+				end = len(eligible)
+			}
+			chunk := eligible[start:end]
+			for _, path := range chunk {
+				invalidated[automationCacheKey(root, path)] = true
+			}
+			counts, err := a.runAutomatedScrapeChunk(ctx, chunk, false)
+			processed += len(chunk)
+			state.update(func(report *libraryAutomationReport) {
+				report.ScrapeProcessed = processed
+				report.ScrapeSkipped = skipped
+				report.ScrapeWritten += counts.Written
+				report.ScrapeFailed += counts.Failed
+			})
+			state.touch("scrape", dir)
+			if err != nil {
+				state.addError(fmt.Errorf("%s: 整库刮削失败: %w", filepath.Base(dir), err))
+			}
 		}
-		counts, err := a.runScrapeBatch(ctx, files, false)
-		if err != nil {
-			state.addError(fmt.Errorf("%s: 整库刮削失败: %w", filepath.Base(dir), err))
-			continue
-		}
-		processed += len(files)
-		state.update(func(report *libraryAutomationReport) {
-			report.ScrapeWritten += counts.Written
-			report.ScrapeFailed += counts.Failed
-		})
 	}
 
 	genericDirs := make([]string, 0, len(genericByDir))
@@ -371,145 +729,242 @@ func (a *App) runAutomatedScrape(ctx context.Context, paths []string, byDir map[
 	}
 	sort.Strings(genericDirs)
 	for _, dir := range genericDirs {
-		if ctx.Err() != nil || processed >= libraryAutomationMaxScrape {
+		if ctx.Err() != nil {
 			break
 		}
-		files := make([]string, 0, len(genericByDir[dir]))
+		eligible := make([]string, 0, len(genericByDir[dir]))
 		for _, path := range genericByDir[dir] {
-			if processed+len(files) >= libraryAutomationMaxScrape {
+			if state.claimAttempt("catalog-generic|"+path, time.Now()) {
+				eligible = append(eligible, path)
+			} else {
+				skipped++
+			}
+		}
+		for start := 0; start < len(eligible); start += scrapeBatchMaxFiles {
+			if ctx.Err() != nil {
 				break
 			}
-			if state.claimAttempt("catalog-generic|"+path, time.Now()) {
-				files = append(files, path)
+			end := start + scrapeBatchMaxFiles
+			if end > len(eligible) {
+				end = len(eligible)
+			}
+			chunk := eligible[start:end]
+			for _, path := range chunk {
+				invalidated[automationCacheKey(root, path)] = true
+			}
+			counts, err := a.runAutomatedGenericScrapeDir(ctx, dir, chunk)
+			processed += len(chunk)
+			state.update(func(report *libraryAutomationReport) {
+				report.ScrapeProcessed = processed
+				report.ScrapeSkipped = skipped
+				report.ScrapeWritten += counts.Written
+				report.ScrapeFailed += counts.Failed
+			})
+			state.touch("scrape", dir)
+			if err != nil {
+				state.addError(fmt.Errorf("%s: 通用格式刮削失败: %w", filepath.Base(dir), err))
 			}
 		}
-		if len(files) == 0 {
-			continue
-		}
-		counts, err := a.runAutomatedGenericScrapeDir(ctx, dir, files)
-		if err != nil {
-			state.addError(fmt.Errorf("%s: 通用格式刮削失败: %w", filepath.Base(dir), err))
-		}
-		processed += len(files)
-		state.update(func(report *libraryAutomationReport) {
-			report.ScrapeWritten += counts.Written
-			report.ScrapeFailed += counts.Failed
-		})
 	}
+	state.update(func(report *libraryAutomationReport) { report.ScrapeSkipped = skipped })
 
-	artworkProcessed := 0
+	artworkProcessed, artworkSkipped, artworkFailed := 0, 0, 0
 	flacDirs := make([]string, 0, len(artworkFLACByDir))
 	for dir := range artworkFLACByDir {
 		flacDirs = append(flacDirs, dir)
 	}
 	sort.Strings(flacDirs)
 	for _, dir := range flacDirs {
-		files := artworkFLACByDir[dir]
-		for start := 0; start < len(files) && artworkProcessed < libraryAutomationMaxArtwork; start += scrapeArtworkMaxFiles {
+		if ctx.Err() != nil {
+			break
+		}
+		for start := 0; start < len(artworkFLACByDir[dir]); start += scrapeArtworkMaxFiles {
 			if ctx.Err() != nil {
-				return
+				break
 			}
 			end := start + scrapeArtworkMaxFiles
-			if end > len(files) {
-				end = len(files)
-			}
-			if end > libraryAutomationMaxArtwork-artworkProcessed {
-				end = start + libraryAutomationMaxArtwork - artworkProcessed
+			if end > len(artworkFLACByDir[dir]) {
+				end = len(artworkFLACByDir[dir])
 			}
 			claimed := make([]string, 0, end-start)
-			for _, path := range files[start:end] {
+			for _, path := range artworkFLACByDir[dir][start:end] {
 				if state.claimAttempt("artwork-flac|"+path, time.Now()) {
 					claimed = append(claimed, path)
+					invalidated[automationCacheKey(root, path)] = true
+				} else {
+					artworkSkipped++
 				}
 			}
 			if len(claimed) == 0 {
 				continue
 			}
-			counts, err := a.runScrapeBatch(ctx, claimed, true)
-			if err != nil {
-				state.addError(fmt.Errorf("%s: 歌词封面刮削失败: %w", filepath.Base(dir), err))
-				continue
-			}
+			counts, err := a.runAutomatedScrapeChunk(ctx, claimed, true)
 			artworkProcessed += len(claimed)
+			if err != nil {
+				artworkFailed += len(claimed)
+				state.addError(fmt.Errorf("%s: 歌词封面刮削失败: %w", filepath.Base(dir), err))
+			}
 			state.update(func(report *libraryAutomationReport) {
+				report.ArtworkProcessed = artworkProcessed
+				report.ArtworkSkipped = artworkSkipped
+				report.ArtworkFailed = artworkFailed
 				report.ScrapeWritten += counts.Written
 				report.ArtworkWritten += counts.CoverWritten + counts.LyricsWritten
 				report.ScrapeFailed += counts.Failed
 			})
+			state.touch("scrape", dir)
 		}
 	}
-	for _, path := range artworkOther {
-		if ctx.Err() != nil || artworkProcessed >= libraryAutomationMaxArtwork {
+	for index, path := range artworkOther {
+		if ctx.Err() != nil {
 			break
 		}
 		if !state.claimAttempt("artwork-other|"+path, time.Now()) {
+			artworkSkipped++
 			continue
 		}
+		invalidated[automationCacheKey(root, path)] = true
 		if a.writeAutomationArtwork(ctx, path) {
-			artworkProcessed++
 			state.update(func(report *libraryAutomationReport) { report.ArtworkWritten++ })
+		} else {
+			artworkFailed++
+		}
+		artworkProcessed++
+		if artworkProcessed%20 == 0 || index == len(artworkOther)-1 {
+			state.update(func(report *libraryAutomationReport) {
+				report.ArtworkProcessed = artworkProcessed
+				report.ArtworkSkipped = artworkSkipped
+				report.ArtworkFailed = artworkFailed
+			})
+			state.touch("scrape", path)
 		}
 	}
+	state.update(func(report *libraryAutomationReport) {
+		report.ArtworkProcessed = artworkProcessed
+		report.ArtworkSkipped = artworkSkipped
+		report.ArtworkFailed = artworkFailed
+	})
+	for key := range invalidated {
+		delete(nextCache.Files, key)
+	}
+	if err := a.saveLibraryAutomationScanCache(nextCache); err != nil {
+		state.addError(fmt.Errorf("扫描缓存更新失败: %w", err))
+	}
+}
+
+func (entry cachedLibraryScan) localWorkflowTrack(path string) (localWorkflowTrack, bool) {
+	if entry.Codec == "" || entry.Duration <= 0 || entry.Duration >= 86400 || strings.TrimSpace(entry.Artist) == "" || strings.TrimSpace(entry.Album) == "" || strings.TrimSpace(entry.Title) == "" {
+		return localWorkflowTrack{}, false
+	}
+	return localWorkflowTrack{Path: path, Artist: entry.Artist, Album: entry.Album, Title: entry.Title, Codec: entry.Codec, Duration: entry.Duration}, true
+}
+
+func (a *App) runAutomatedScrapeChunk(ctx context.Context, paths []string, withArtwork bool) (automationScrapeCounts, error) {
+	counts, err := a.runScrapeBatch(ctx, paths, withArtwork)
+	if err == nil || len(paths) <= 1 || !strings.Contains(err.Error(), "BATCH_TOO_LARGE") {
+		return counts, err
+	}
+	middle := len(paths) / 2
+	left, leftErr := a.runAutomatedScrapeChunk(ctx, paths[:middle], withArtwork)
+	counts.Written += left.Written
+	counts.Failed += left.Failed
+	counts.LyricsWritten += left.LyricsWritten
+	counts.CoverWritten += left.CoverWritten
+	if leftErr != nil {
+		return counts, leftErr
+	}
+	right, rightErr := a.runAutomatedScrapeChunk(ctx, paths[middle:], withArtwork)
+	counts.Written += right.Written
+	counts.Failed += right.Failed
+	counts.LyricsWritten += right.LyricsWritten
+	counts.CoverWritten += right.CoverWritten
+	return counts, rightErr
 }
 
 func (a *App) runAutomatedGenericScrapeDir(ctx context.Context, dir string, paths []string) (automationScrapeCounts, error) {
 	counts := automationScrapeCounts{}
-	infos := make([]genericAudioInfo, 0, len(paths))
+	groups := map[string][]genericAudioInfo{}
+	order := []string{}
 	for _, path := range paths {
+		if ctx.Err() != nil {
+			return counts, ctx.Err()
+		}
 		info, err := probeGenericAudio(ctx, path)
+		if err != nil || info.Artist == "" || info.Album == "" || info.Title == "" {
+			counts.Failed++
+			continue
+		}
+		albumArtist := firstNonEmpty(info.AlbumArtist, info.Artist)
+		key := foldTagText(albumArtist) + "\x00" + foldTagText(info.Album)
+		if _, exists := groups[key]; !exists {
+			order = append(order, key)
+		}
+		groups[key] = append(groups[key], info)
+	}
+	sort.Strings(order)
+	var firstErr error
+	for _, key := range order {
+		if ctx.Err() != nil {
+			return counts, ctx.Err()
+		}
+		infos := groups[key]
+		if len(infos) == 0 {
+			continue
+		}
+		artist := firstNonEmpty(infos[0].AlbumArtist, infos[0].Artist)
+		album := infos[0].Album
+		tracks := make([]catalogTrackRequest, 0, len(infos))
+		for _, info := range infos {
+			duration := info.Duration
+			tracks = append(tracks, catalogTrackRequest{Title: info.Title, Artists: []string{info.Artist}, Duration: &duration})
+		}
+		lookup, err := identifyCatalogLookup(musicbrainz.NewClient(), a.engine, catalogIdentifyRequest{
+			Artist: artist, Album: album, Tracks: tracks,
+		}, catalogBudget, catalogTTL)
 		if err != nil {
-			counts.Failed++
-			continue
-		}
-		infos = append(infos, info)
-	}
-	if len(infos) == 0 {
-		return counts, nil
-	}
-	artist, album := infos[0].Artist, infos[0].Album
-	tracks := make([]catalogTrackRequest, 0, len(infos))
-	for _, info := range infos {
-		duration := info.Duration
-		tracks = append(tracks, catalogTrackRequest{Title: info.Title, Artists: []string{info.Artist}, Duration: &duration})
-	}
-	lookup, err := identifyCatalogLookup(musicbrainz.NewClient(), a.engine, catalogIdentifyRequest{
-		Artist: artist, Album: album, Tracks: tracks,
-	}, catalogBudget, catalogTTL)
-	if err != nil {
-		return counts, err
-	}
-	if lookup.MusicBrainz == nil {
-		return counts, fmt.Errorf("目录没有确认发行版")
-	}
-	for i, info := range infos {
-		if i < len(lookup.Results) && !lookup.Results[i].IdentityConfirmed {
-			counts.Failed++
-			continue
-		}
-		track, found := matchCatalogTrack(lookup.MusicBrainz, info.Title, info.Duration)
-		if !found {
-			counts.Failed++
-			continue
-		}
-		desired := desiredTags(lookup.MusicBrainz, track)
-		missing := genericMissingFields(info)
-		updates := map[string][]string{}
-		for field, value := range desired {
-			if missing[field] {
-				updates[field] = value
+			counts.Failed += len(infos)
+			if firstErr == nil {
+				firstErr = err
 			}
-		}
-		updates, _ = a.applyFieldLocks(dir, updates)
-		if len(updates) == 0 {
 			continue
 		}
-		if _, err := writeGenericTags(ctx, info.Path, updates); err != nil {
-			counts.Failed++
+		if lookup.MusicBrainz == nil {
+			counts.Failed += len(infos)
+			if firstErr == nil {
+				firstErr = fmt.Errorf("%s — %s：目录没有确认发行版", artist, album)
+			}
 			continue
 		}
-		counts.Written++
+		for i, info := range infos {
+			if i < len(lookup.Results) && !lookup.Results[i].IdentityConfirmed {
+				counts.Failed++
+				continue
+			}
+			track, found := matchCatalogTrack(lookup.MusicBrainz, info.Title, info.Duration)
+			if !found {
+				counts.Failed++
+				continue
+			}
+			desired := desiredTags(lookup.MusicBrainz, track)
+			missing := genericMissingFields(info)
+			updates := map[string][]string{}
+			for field, value := range desired {
+				if missing[field] {
+					updates[field] = value
+				}
+			}
+			updates, _ = a.applyFieldLocks(dir, updates)
+			if len(updates) == 0 {
+				continue
+			}
+			if _, err := writeGenericTags(ctx, info.Path, updates); err != nil {
+				counts.Failed++
+				continue
+			}
+			counts.Written++
+		}
 	}
-	return counts, nil
+	return counts, firstErr
 }
 
 type automationScrapeCounts struct {
@@ -570,7 +1025,7 @@ func maintenanceMissingArtwork(path string, tags *flactags.Tags) bool {
 	if !hasLyricsSidecar(path) {
 		return true
 	}
-	if body, err := os.ReadFile(path); err == nil && len(flactags.FrontCover(body)) == 0 {
+	if !tags.HasFrontCover {
 		sidecar := strings.TrimSuffix(path, filepath.Ext(path)) + ".jpg"
 		if _, err := os.Stat(sidecar); os.IsNotExist(err) {
 			return true
@@ -644,16 +1099,16 @@ func writeAutomationSidecar(path string, body []byte) error {
 	return os.Rename(name, path)
 }
 
-func (a *App) runAutomatedDeduplication(ctx context.Context) {
+func (a *App) runAutomatedDeduplication(ctx context.Context) bool {
 	state := a.libraryAutomation
 	for merged := 0; merged < libraryAutomationMaxMerges; merged++ {
 		if ctx.Err() != nil {
-			return
+			return false
 		}
 		groups, _, _, err := a.scanDuplicates(ctx)
 		if err != nil {
 			state.addError(fmt.Errorf("重复扫描失败: %w", err))
-			return
+			return false
 		}
 		groupID := ""
 		readyCount := 0
@@ -671,19 +1126,22 @@ func (a *App) runAutomatedDeduplication(ctx context.Context) {
 			}
 		})
 		if groupID == "" {
-			return
+			return false
 		}
 		status, raw, mergeErr := a.libraryMaintenancePost(ctx, "/v1/library/duplicates/merge", a.duplicateMerge, map[string]any{"group_id": groupID})
 		if mergeErr != nil || status < 200 || status >= 300 {
 			state.addError(fmt.Errorf("自动去重 %s 失败: %v %s", groupID, mergeErr, strings.TrimSpace(string(raw))))
-			return
+			return false
 		}
 		state.update(func(report *libraryAutomationReport) { report.Deduplicated++ })
 	}
+	return true
 }
 
 func (a *App) enqueueLibraryMaintenanceWorkflows(ctx context.Context, byDir map[string][]string, settings libraryAutomationSettings) {
 	state := a.libraryAutomation
+	root := a.libraryDir()
+	cache := a.loadLibraryAutomationScanCache(root)
 	dirs := make([]string, 0, len(byDir))
 	for dir := range byDir {
 		dirs = append(dirs, dir)
@@ -697,6 +1155,12 @@ func (a *App) enqueueLibraryMaintenanceWorkflows(ctx context.Context, byDir map[
 		files := byDir[dir]
 		tracks := make([]localWorkflowTrack, 0, len(files))
 		for _, path := range files {
+			if entry, ok := cache.Files[automationCacheKey(root, path)]; ok {
+				if track, valid := entry.localWorkflowTrack(path); valid {
+					tracks = append(tracks, track)
+					continue
+				}
+			}
 			track, err := probeLocalWorkflowTrack(ctx, path)
 			if err == nil {
 				tracks = append(tracks, track)
@@ -729,6 +1193,9 @@ func (a *App) enqueueLibraryMaintenanceWorkflows(ctx context.Context, byDir map[
 				state.update(func(report *libraryAutomationReport) { report.ExpandJobs++ })
 			}
 		}
+	}
+	if jobs >= libraryAutomationMaxJobs {
+		state.update(func(report *libraryAutomationReport) { report.Backlog = true })
 	}
 }
 
@@ -834,4 +1301,20 @@ func (a *App) runLibraryAutomationHandler(w http.ResponseWriter, r *http.Request
 	}
 	running, report := a.libraryAutomation.snapshot()
 	writeJSON(w, http.StatusAccepted, map[string]any{"ok": true, "started": true, "running": running, "report": report})
+}
+
+func (a *App) runLibraryScrapeHandler(w http.ResponseWriter, r *http.Request) {
+	if !a.startLibraryScrapeRun("whole-library-scrape") {
+		running, report := a.libraryAutomation.snapshot()
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "started": false, "running": running, "report": report})
+		return
+	}
+	running, report := a.libraryAutomation.snapshot()
+	writeJSON(w, http.StatusAccepted, map[string]any{"ok": true, "started": true, "running": running, "report": report})
+}
+
+func (a *App) stopLibraryAutomationHandler(w http.ResponseWriter, r *http.Request) {
+	a.libraryAutomation.stop()
+	running, report := a.libraryAutomation.snapshot()
+	writeJSON(w, http.StatusAccepted, map[string]any{"ok": true, "running": running, "stopping": running, "report": report})
 }

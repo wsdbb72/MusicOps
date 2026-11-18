@@ -7,6 +7,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 func TestLibraryAutomationSettingsCanBeConfigured(t *testing.T) {
@@ -100,6 +101,64 @@ func TestGenericTagWriterPreservesMP3AudioStream(t *testing.T) {
 	info, err := probeGenericAudio(context.Background(), path)
 	if err != nil || firstNonEmpty(info.Tags["album_artist"], info.Tags["albumartist"]) != "Various Artists" || info.Date != "2026" || info.Genre != "Pop" {
 		t.Fatalf("info=%+v err=%v", info, err)
+	}
+}
+
+func TestLibraryAutomationReusesUnchangedScanCache(t *testing.T) {
+	application := newApp(t)
+	library := t.TempDir()
+	post(t, application, "/v1/settings/library", map[string]any{"library_dir": library})
+	path := filepath.Join(library, "Artist", "Album", "cached.mp3")
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte("not-real-audio"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	stamp := time.Now().Add(-time.Minute).Truncate(time.Second)
+	if err := os.Chtimes(path, stamp, stamp); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cache := libraryAutomationScanDocument{Version: libraryAutomationScanVersion, Root: library, Files: map[string]cachedLibraryScan{
+		"Artist/Album/cached.mp3": {
+			Size: info.Size(), ModNS: info.ModTime().UnixNano(), NeedsCatalog: false, NeedsArtwork: false,
+		},
+	}}
+	if err := application.saveLibraryAutomationScanCache(cache); err != nil {
+		t.Fatal(err)
+	}
+	application.libraryAutomation.update(func(report *libraryAutomationReport) { *report = libraryAutomationReport{} })
+	application.runAutomatedScrape(context.Background(), library, []string{path})
+	_, report := application.libraryAutomation.snapshot()
+	if report.ScanChecked != 1 || report.ScanReused != 1 || report.ScanFailed != 0 || len(report.Errors) != 0 {
+		t.Fatalf("unchanged cached file was probed or failed: %+v", report)
+	}
+
+	if err := os.WriteFile(path, []byte("changed-and-still-not-audio"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	application.libraryAutomation.update(func(report *libraryAutomationReport) { *report = libraryAutomationReport{} })
+	application.runAutomatedScrape(context.Background(), library, []string{path})
+	_, changed := application.libraryAutomation.snapshot()
+	if changed.ScanChecked != 1 || changed.ScanFailed != 1 || changed.ScanReused != 0 {
+		t.Fatalf("changed file was not re-probed: %+v", changed)
+	}
+}
+
+func TestLibraryWholeScrapeAndStopEndpoints(t *testing.T) {
+	application := newApp(t)
+	post(t, application, "/v1/settings/library", map[string]any{"library_dir": t.TempDir()})
+	start := postCode(t, application, "/v1/library/scrape/whole", map[string]any{})
+	if start.Code != http.StatusAccepted && start.Code != http.StatusOK {
+		t.Fatalf("start status=%d body=%s", start.Code, start.Body.String())
+	}
+	stop := postCode(t, application, "/v1/library/automation/stop", map[string]any{})
+	if stop.Code != http.StatusAccepted {
+		t.Fatalf("stop status=%d body=%s", stop.Code, stop.Body.String())
 	}
 }
 

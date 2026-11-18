@@ -104,12 +104,12 @@ func (a *App) recoverNeteasePlaylistIDs(ctx context.Context, batchID string, pla
 	if plan == nil || !strings.HasPrefix(batchID, "pl-netease-") {
 		return false
 	}
-	if plan.NeteaseSongID > 0 && plan.NeteaseAlbumID > 0 {
+	if plan.NeteaseSongID > 0 {
 		return true
 	}
 	a.neteaseRecoveryMu.Lock()
 	defer a.neteaseRecoveryMu.Unlock()
-	if plan.NeteaseSongID > 0 && plan.NeteaseAlbumID > 0 {
+	if plan.NeteaseSongID > 0 {
 		return true
 	}
 	rows, name, err := a.playlistTrackRows(batchID)
@@ -157,8 +157,11 @@ func (a *App) recoverNeteasePlaylistIDs(ctx context.Context, batchID string, pla
 }
 
 func recoverIDsFromPlaylistRows(rows []playlistTrack, plan *SearchPlan) bool {
-	if plan == nil || plan.NeteaseSongID > 0 && plan.NeteaseAlbumID > 0 {
-		return plan != nil && plan.NeteaseSongID > 0 && plan.NeteaseAlbumID > 0
+	if plan == nil {
+		return false
+	}
+	if plan.NeteaseSongID > 0 {
+		return true
 	}
 	title := strings.TrimSpace(neteasePlaylistTitle(*plan))
 	if title == "" {

@@ -242,11 +242,6 @@ func (a *App) reviewWithAI(w http.ResponseWriter, r *http.Request, id, requestID
 		a.writeReviewResult(w, result, retryErr, "ai")
 		return
 	}
-	model := a.reviewCompleter()
-	if model == nil || a.reviews == nil {
-		writeJSON(w, http.StatusConflict, map[string]any{"ok": false, "code": "AI_UNAVAILABLE", "message": "请先启用 AI 并保存 API 密钥"})
-		return
-	}
 	if inspection.Task == nil {
 		writeJSON(w, http.StatusConflict, map[string]any{"ok": false, "code": "REVIEW_UNAVAILABLE"})
 		return
@@ -260,6 +255,15 @@ func (a *App) reviewWithAI(w http.ResponseWriter, r *http.Request, id, requestID
 	observations, _, _, err := a.reviewObservations(inspection, plan)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "code": "REVIEW_UNAVAILABLE"})
+		return
+	}
+	model := a.reviewCompleter()
+	if model == nil || a.reviews == nil {
+		if inspection.Job.ReviewKind == "candidate" && isNeteasePlaylistFallback(inspection.Job.BatchID, plan) {
+			a.acceptNeteasePlaylistFallback(w, id, requestID, nowNS, inspection.Job, plan, observations)
+			return
+		}
+		writeJSON(w, http.StatusConflict, map[string]any{"ok": false, "code": "AI_UNAVAILABLE", "message": "请先启用 AI 并保存 API 密钥"})
 		return
 	}
 	pool := []reviewai.Candidate{}
@@ -283,16 +287,7 @@ func (a *App) reviewWithAI(w http.ResponseWriter, r *http.Request, id, requestID
 		return
 	}
 	if inspection.Job.ReviewKind == "candidate" && isNeteasePlaylistFallback(inspection.Job.BatchID, plan) {
-		report := a.rebuildReviewReport(inspection.Job, plan, observations, "", "")
-		markNeteaseSourceFallback(&report)
-		plan.SelectedSite, plan.SelectedCandidateID = "", ""
-		encoded, err := json.Marshal(plan)
-		if err != nil {
-			writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "code": "REVIEW_UNAVAILABLE"})
-			return
-		}
-		result, err := a.flows.Review(requestID, id, workflow.ReviewDecision{Action: "accept", Search: &report, Plan: encoded}, nowNS)
-		a.writeReviewResult(w, result, err, "ai")
+		a.acceptNeteasePlaylistFallback(w, id, requestID, nowNS, inspection.Job, plan, observations)
 		return
 	}
 	if advice.Class == "infrastructure" {
@@ -300,6 +295,19 @@ func (a *App) reviewWithAI(w http.ResponseWriter, r *http.Request, id, requestID
 		return
 	}
 	writeJSON(w, http.StatusConflict, map[string]any{"ok": false, "code": "AI_NO_CONFIRMED_MATCH", "reason": advice.Reason, "message": "AI 未能核实可下载的发行版"})
+}
+
+func (a *App) acceptNeteasePlaylistFallback(w http.ResponseWriter, id, requestID string, nowNS int64, job workflow.Job, plan SearchPlan, observations map[string]trackersearch.Observation) {
+	report := a.rebuildReviewReport(job, plan, observations, "", "")
+	markNeteaseSourceFallback(&report)
+	plan.SelectedSite, plan.SelectedCandidateID = "", ""
+	encoded, err := json.Marshal(plan)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "code": "REVIEW_UNAVAILABLE"})
+		return
+	}
+	result, err := a.flows.Review(requestID, id, workflow.ReviewDecision{Action: "accept", Search: &report, Plan: encoded}, nowNS)
+	a.writeReviewResult(w, result, err, "ai")
 }
 
 // aiReviewEligible keeps single and batch AI review on the same safe set.
@@ -318,8 +326,9 @@ func (a *App) aiReviewEligible(job workflow.Job) bool {
 		return job.ErrorClass == "account_token_hold" && strings.HasPrefix(job.BatchID, "pl-netease-")
 	}
 	// Metadata, album and interrupted jobs use the durable retry path and do
-	// not require a model.
-	if job.TaskType != "search" {
+	// not require a model. A NetEase playlist candidate can safely fall back
+	// to its source platform after the tracker observations are exhausted.
+	if job.TaskType != "search" || job.ReviewKind == "candidate" && strings.HasPrefix(job.BatchID, "pl-netease-") {
 		return true
 	}
 	return a.reviewCompleter() != nil && a.reviews != nil

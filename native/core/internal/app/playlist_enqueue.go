@@ -231,7 +231,7 @@ func (a *App) enqueuePlaylistTracks(ctx context.Context, playlistJobID string, r
 		client = musicbrainz.NewClient()
 		client.BaseURL = opts.CatalogBaseURL
 	}
-	seenAlbums := map[[2]string]bool{}
+	seenAlbums := map[string]bool{}
 	for _, index := range indices {
 		if err := ctx.Err(); err != nil {
 			return report, err
@@ -252,7 +252,7 @@ func (a *App) enqueuePlaylistTracks(ctx context.Context, playlistJobID string, r
 			continue
 		}
 		if opts.AlbumCompletion && album != "" {
-			key := [2]string{normalizeKey(artist), normalizeKey(album)}
+			key := playlistAlbumGroupKey(row, album)
 			if seenAlbums[key] {
 				continue
 			}
@@ -274,6 +274,16 @@ func (a *App) enqueuePlaylistTracks(ctx context.Context, playlistJobID string, r
 		report.Created = append(report.Created, jobID)
 	}
 	return report, nil
+}
+
+func playlistAlbumGroupKey(row playlistTrack, album string) string {
+	if row.NeteaseAlbumID > 0 {
+		return "netease-album:" + strconv.FormatInt(row.NeteaseAlbumID, 10)
+	}
+	if isHotSlowCompilationAlbum(album) {
+		return "compilation:" + normalizeKey(album)
+	}
+	return "artist-album:" + normalizeKey(row.Artist) + "\x00" + normalizeKey(album)
 }
 
 // startPlaylistAlbumJob creates one expand job. The album is the unit the

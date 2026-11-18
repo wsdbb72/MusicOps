@@ -1365,17 +1365,22 @@ const appJS = `(function () {
     var autoReport = libraryAutomation && libraryAutomation.report ? libraryAutomation.report : {};
     var autoRunning = !!(libraryAutomation && libraryAutomation.running);
     var phaseNames = {queued:"排队", reindex:"索引", scrape:"刮削", dedupe:"去重", library_workflows:"升级/补专", done:"完成"};
-    var autoText = autoRunning ? ("正在运行 · " + escapeText(phaseNames[autoReport.phase] || autoReport.phase || "处理中")) : (autoReport.finished ? ("上次完成 " + escapeText(autoReport.finished)) : "尚未运行");
-    autoText += " · 索引新增 " + (autoReport.indexed_added || 0) + "，刮削写入 " + (autoReport.scrape_written || 0) + "，去重 " + (autoReport.deduplicated || 0) + "，升级任务 " + (autoReport.upgrade_jobs || 0) + "，补专任务 " + (autoReport.expand_jobs || 0);
+    var autoText = autoRunning ? ("正在运行 · " + escapeText(phaseNames[autoReport.phase] || autoReport.phase || "处理中")) : (autoReport.cancelled ? "上次已停止" : (autoReport.finished ? ("上次完成 " + escapeText(autoReport.finished)) : "尚未运行"));
+    if (autoReport.last_progress) autoText += " · 最近进度 " + escapeText(autoReport.last_progress);
+    if (autoReport.current) autoText += " · " + escapeText(autoReport.current);
+    if (autoReport.scan_total) autoText += " · 扫描 " + (autoReport.scan_checked || 0) + "/" + autoReport.scan_total + "（缓存复用 " + (autoReport.scan_reused || 0) + "）";
+    if (autoReport.scrape_candidates) autoText += " · 标签 " + (autoReport.scrape_processed || 0) + "/" + autoReport.scrape_candidates;
+    if (autoReport.artwork_candidates) autoText += " · 歌词封面 " + (autoReport.artwork_processed || 0) + "/" + autoReport.artwork_candidates;
+    autoText += " · 索引新增 " + (autoReport.indexed_added || 0) + "，标签写入 " + (autoReport.scrape_written || 0) + "，歌词封面 " + (autoReport.artwork_written || 0) + "，去重 " + (autoReport.deduplicated || 0) + "，升级任务 " + (autoReport.upgrade_jobs || 0) + "，补专任务 " + (autoReport.expand_jobs || 0);
     if (autoReport.errors && autoReport.errors.length) autoText += "；问题 " + escapeText(autoReport.errors.slice(0, 2).join(" | "));
-    var automationCard = '<article><h2>全库自动维护</h2><p class="meta">启用后，程序会周期性增量索引，自动补齐缺失标签、歌词和封面，合并已验证的 PCM 重复项，并为有损曲目和单曲专辑创建升级或补全任务。' + escapeText(autoText) + '</p>' +
+    var automationCard = '<article><h2>全库自动维护</h2><p class="meta">启用后，程序会持续扫描整个音乐库，可断点续跑地补齐标签、歌词和封面，合并已验证的 PCM 重复项，并为有损曲目和单曲专辑创建升级或补全任务。' + escapeText(autoText) + '</p>' +
       '<label><input type="checkbox" id="auto-maintenance-enabled"' + (auto.enabled ? " checked" : "") + '> 持续自动维护</label>' +
       '<label><input type="checkbox" id="auto-maintenance-scrape"' + (auto.scrape ? " checked" : "") + '> 刮削补齐</label>' +
       '<label><input type="checkbox" id="auto-maintenance-dedupe"' + (auto.dedupe ? " checked" : "") + '> 安全去重</label>' +
       '<label><input type="checkbox" id="auto-maintenance-upgrade"' + (auto.upgrade ? " checked" : "") + '> 音质升级</label>' +
       '<label><input type="checkbox" id="auto-maintenance-expand"' + (auto.expand ? " checked" : "") + '> 单曲补整专</label>' +
       '<label>周期（小时）<input type="text" id="auto-maintenance-hours" value="' + escapeText(auto.interval_hours || 6) + '"></label>' +
-      '<p><button type="button" id="save-auto-maintenance" class="primary">保存自动维护</button> <button type="button" id="run-auto-maintenance">立即整库维护</button></p><p id="auto-maintenance-result" class="meta"></p></article>';
+      '<p><button type="button" id="save-auto-maintenance" class="primary">保存自动维护</button> <button type="button" id="run-auto-maintenance">立即整库维护</button> <button type="button" id="run-library-scrape-now">仅异步整库刮削</button> <button type="button" id="stop-auto-maintenance">停止当前维护</button></p><p id="auto-maintenance-result" class="meta"></p></article>';
     var duplicateHtml = "";
     if (duplicateRows.length) {
       duplicateRows.forEach(function (group) {
@@ -1406,7 +1411,7 @@ const appJS = `(function () {
       '<p id="backfill-lrc-result" class="meta">扫描整个音乐库：已有歌词标签但没有 .lrc 的补写，旧命名（xxx.flac.lrc）改成 xxx.lrc，已存在的同名 .lrc 不动。</p>' +
       '<p class="meta">批量刮削按专辑一次查询目录，写标签（含分类）。勾选下面的歌词封面后，会再用设置里的歌词服务为每首取一次歌词和封面（一次最多 30 首）。先勾选曲目，再预演或应用。</p>' +
       '<label><input type="checkbox" id="scrape-artwork"> 同时取歌词与封面（≤30 首，用设置里的歌词服务）</label>' +
-      '<p><button type="button" id="scrape-preview">预演批量刮削</button> <button type="button" id="scrape-apply" class="primary">批量刮削所选</button></p></article>' +
+      '<p><button type="button" id="scrape-preview">预演批量刮削</button> <button type="button" id="scrape-apply" class="primary">批量刮削所选</button> <button type="button" id="scrape-whole-library">异步整库刮削</button></p></article>' +
       '<article><h2>合辑</h2><p class="meta">预览不会移动文件。合并只把名称里带“合辑”或 Various Artists 的文件夹移进音乐库的 Compilations。</p>' +
       '<p><button type="button" id="preview-compilations">预览合辑</button> <button type="button" id="merge-compilations">合并合辑</button></p><p id="compilation-result" class="meta"></p></article>' +
       '<article><h2>艺人目录与 NCM</h2><p class="meta">艺人目录把专辑文件夹整理成“艺人/专辑”。NCM 解密不改源文件。</p>' +
@@ -1460,6 +1465,12 @@ const appJS = `(function () {
     if (saveAuto) saveAuto.addEventListener("click", saveLibraryAutomation);
     var runAuto = document.getElementById("run-auto-maintenance");
     if (runAuto) runAuto.addEventListener("click", runLibraryAutomationNow);
+    var runScrape = document.getElementById("run-library-scrape-now");
+    if (runScrape) runScrape.addEventListener("click", runWholeLibraryScrape);
+    var wholeScrape = document.getElementById("scrape-whole-library");
+    if (wholeScrape) wholeScrape.addEventListener("click", runWholeLibraryScrape);
+    var stopAuto = document.getElementById("stop-auto-maintenance");
+    if (stopAuto) stopAuto.addEventListener("click", stopLibraryAutomationNow);
     var reindex = document.getElementById("reindex-library");
     if (reindex) reindex.addEventListener("click", function () { libraryAction("/v1/library/reindex", {}, "library-ops-result"); });
     var gaps = document.getElementById("list-gaps");
@@ -1750,6 +1761,38 @@ const appJS = `(function () {
       await load(true);
     } catch (err) {
       if (result) result.textContent = "启动失败：" + err.message;
+    }
+  }
+  async function runWholeLibraryScrape() {
+    var result = document.getElementById("auto-maintenance-result");
+    setStatus("info", "正在启动异步整库刮削…");
+    try {
+      var response = await fetch("/v1/library/scrape/whole", {method:"POST", headers:{"Content-Type":"application/json", Accept:"application/json"}, body:"{}"});
+      var body = await response.json();
+      if (!response.ok || !body.ok) throw new Error(body.error || body.code || "没有启动");
+      var message = body.started ? "整库刮削已启动；将并行扫描全部格式并持续补齐标签、歌词和封面。" : "已有维护正在运行，未重复启动。";
+      if (result) result.textContent = message;
+      setStatus(body.started ? "ok" : "review", message);
+      await load(true);
+    } catch (err) {
+      if (result) result.textContent = "启动失败：" + err.message;
+      setStatus("fail", "整库刮削没有启动。" + err.message);
+    }
+  }
+  async function stopLibraryAutomationNow() {
+    var result = document.getElementById("auto-maintenance-result");
+    setStatus("info", "正在安全停止当前整库维护…");
+    try {
+      var response = await fetch("/v1/library/automation/stop", {method:"POST", headers:{"Content-Type":"application/json", Accept:"application/json"}, body:"{}"});
+      var body = await response.json();
+      if (!response.ok || !body.ok) throw new Error(body.error || body.code || "没有停止");
+      var message = body.stopping ? "停止请求已发送；当前网络请求或文件操作结束后退出，已完成结果会保留。" : "当前没有正在运行的整库维护。";
+      if (result) result.textContent = message;
+      setStatus("review", message);
+      await load(true);
+    } catch (err) {
+      if (result) result.textContent = "停止失败：" + err.message;
+      setStatus("fail", "停止请求失败。" + err.message);
     }
   }
   async function scrapeSelected(dryRun) {

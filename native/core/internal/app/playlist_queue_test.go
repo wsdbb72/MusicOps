@@ -55,6 +55,24 @@ func TestPlaylistFetchEnqueuesAJob(t *testing.T) {
 	}
 }
 
+func TestPlaylistAlbumGroupingUsesSourceAlbumIDAndCompilationKey(t *testing.T) {
+	first := playlistTrack{Artist: "Artist One", Album: "Shared Album", NeteaseAlbumID: 99}
+	second := playlistTrack{Artist: "Artist Two", Album: "Shared Album", NeteaseAlbumID: 99}
+	if playlistAlbumGroupKey(first, first.Album) != playlistAlbumGroupKey(second, second.Album) {
+		t.Fatal("tracks from one NetEase album were split by their per-track artists")
+	}
+	hotOne := playlistTrack{Artist: "Artist One"}
+	hotTwo := playlistTrack{Artist: "Artist Two"}
+	album := hotSlowCompilationAlbum + " 24"
+	if playlistAlbumGroupKey(hotOne, album) != playlistAlbumGroupKey(hotTwo, album) {
+		t.Fatal("compilation tracks were split into different album jobs")
+	}
+	other := playlistTrack{Artist: "Artist One", Album: "Shared Album"}
+	if playlistAlbumGroupKey(first, first.Album) == playlistAlbumGroupKey(other, other.Album) {
+		t.Fatal("album ID grouping collided with an unrelated album")
+	}
+}
+
 // A share link is accepted in the same field as a bare id.
 func TestPlaylistFetchAcceptsAShareLink(t *testing.T) {
 	application := newApp(t)

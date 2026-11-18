@@ -71,15 +71,16 @@ type StreamInfo struct {
 // leave the corresponding field empty. When Raw is nil, the named fields
 // alone define the written comment block.
 type Tags struct {
-	Title       string
-	Artist      string   // first ARTIST value; use Artists for multi-value
-	Artists     []string // all ARTIST values; overrides Artist on Write when non-empty
-	Album       string
-	AlbumArtist string
-	TrackNumber int // 0 means absent
-	Date        string
-	Genre       string
-	Lyrics      string
+	Title         string
+	Artist        string   // first ARTIST value; use Artists for multi-value
+	Artists       []string // all ARTIST values; overrides Artist on Write when non-empty
+	Album         string
+	AlbumArtist   string
+	TrackNumber   int // 0 means absent
+	Date          string
+	Genre         string
+	Lyrics        string
+	HasFrontCover bool
 
 	StreamInfo StreamInfo
 
@@ -113,6 +114,104 @@ func ReadFile(path string) (*Tags, error) {
 		return nil, fmt.Errorf("flactags: read %s: %w", path, err)
 	}
 	return ReadBytes(data)
+}
+
+// ReadMetadata reads only the FLAC metadata block chain. PICTURE payloads are
+// detected and skipped with Seek, so embedded covers do not force the audio
+// frames or image bytes into memory.
+func ReadMetadata(path string) (*Tags, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, fmt.Errorf("flactags: read %s: %w", path, err)
+	}
+	defer file.Close()
+	var magic [4]byte
+	if _, err := io.ReadFull(file, magic[:]); err != nil || string(magic[:]) != flacMagic {
+		return nil, fmt.Errorf("flactags: %s is not a FLAC file", path)
+	}
+	var streamInfo StreamInfo
+	haveStreamInfo := false
+	var entries map[string][]string
+	haveComment := false
+	hasFrontCover := false
+	terminated := false
+	for blockIndex := 0; ; blockIndex++ {
+		var header [4]byte
+		if _, err := io.ReadFull(file, header[:]); err != nil {
+			return nil, fmt.Errorf("flactags: read metadata header in %s: %w", path, err)
+		}
+		last := header[0]&0x80 != 0
+		typ := header[0] & 0x7f
+		length := int(header[1])<<16 | int(header[2])<<8 | int(header[3])
+		if typ == blockInvalid || (typ >= blockReservedMin && typ <= blockReservedMax) {
+			return nil, fmt.Errorf("flactags: invalid or reserved metadata block type %d", typ)
+		}
+		if blockIndex == 0 && typ != blockStreamInfo {
+			return nil, fmt.Errorf("flactags: first metadata block is type %d, want STREAMINFO (0)", typ)
+		}
+		switch typ {
+		case blockStreamInfo:
+			if length != streamInfoSize {
+				return nil, fmt.Errorf("flactags: STREAMINFO block is %d bytes, want %d", length, streamInfoSize)
+			}
+			payload := make([]byte, length)
+			if _, err := io.ReadFull(file, payload); err != nil {
+				return nil, fmt.Errorf("flactags: read STREAMINFO in %s: %w", path, err)
+			}
+			decoded, err := decodeStreamInfo(payload)
+			if err != nil {
+				return nil, err
+			}
+			streamInfo = decoded
+			haveStreamInfo = true
+		case blockVorbisComment:
+			if haveComment {
+				return nil, errors.New("flactags: duplicate VORBIS_COMMENT block")
+			}
+			payload := make([]byte, length)
+			if _, err := io.ReadFull(file, payload); err != nil {
+				return nil, fmt.Errorf("flactags: read VORBIS_COMMENT in %s: %w", path, err)
+			}
+			_, decoded, err := DecodeVorbisComment(payload)
+			if err != nil {
+				return nil, fmt.Errorf("flactags: invalid VORBIS_COMMENT block: %w", err)
+			}
+			entries = decoded
+			haveComment = true
+		case blockPicture:
+			peek := length
+			if peek > 4 {
+				peek = 4
+			}
+			prefix := make([]byte, peek)
+			if _, err := io.ReadFull(file, prefix); err != nil {
+				return nil, fmt.Errorf("flactags: read PICTURE in %s: %w", path, err)
+			}
+			if pictureType(prefix) == 3 {
+				hasFrontCover = true
+			}
+			if remaining := int64(length - peek); remaining > 0 {
+				if _, err := file.Seek(remaining, io.SeekCurrent); err != nil {
+					return nil, fmt.Errorf("flactags: skip PICTURE in %s: %w", path, err)
+				}
+			}
+		default:
+			if _, err := file.Seek(int64(length), io.SeekCurrent); err != nil {
+				return nil, fmt.Errorf("flactags: skip metadata block %d in %s: %w", typ, path, err)
+			}
+		}
+		if last {
+			terminated = true
+			break
+		}
+	}
+	if !haveStreamInfo {
+		return nil, errors.New("flactags: no STREAMINFO block")
+	}
+	if !terminated {
+		return nil, errors.New("flactags: metadata block chain never terminated")
+	}
+	return tagsFromEntries(entries, streamInfo, hasFrontCover), nil
 }
 
 // ReadBytes decodes the tags of an in-memory FLAC file.
@@ -277,8 +376,19 @@ func parseFLAC(data []byte) (*parsedFile, error) {
 
 // tags builds the public Tags view of a parsed file.
 func (pf *parsedFile) tags() *Tags {
-	t := &Tags{StreamInfo: pf.streamInfo, Raw: map[string][]string{}}
-	for k, v := range pf.entries {
+	hasFrontCover := false
+	for _, item := range pf.blocks {
+		if item.typ == blockPicture && pictureType(item.data) == 3 {
+			hasFrontCover = true
+			break
+		}
+	}
+	return tagsFromEntries(pf.entries, pf.streamInfo, hasFrontCover)
+}
+
+func tagsFromEntries(entries map[string][]string, streamInfo StreamInfo, hasFrontCover bool) *Tags {
+	t := &Tags{StreamInfo: streamInfo, HasFrontCover: hasFrontCover, Raw: map[string][]string{}}
+	for k, v := range entries {
 		cp := make([]string, len(v))
 		copy(cp, v)
 		t.Raw[k] = cp

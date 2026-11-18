@@ -92,8 +92,11 @@ func parseM3U(data []byte) ([]playlistTrack, string, error) {
 				track.Artist = parts[0]
 			}
 			track.Album = album
-			if neteaseSong > 0 && neteaseAlbum > 0 {
-				track.NeteaseSongID, track.NeteaseAlbumID = neteaseSong, neteaseAlbum
+			if neteaseSong > 0 {
+				track.NeteaseSongID = neteaseSong
+				if neteaseAlbum > 0 {
+					track.NeteaseAlbumID = neteaseAlbum
+				}
 			}
 			neteaseSong, neteaseAlbum = 0, 0
 			album = ""

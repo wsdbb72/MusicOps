@@ -355,7 +355,7 @@ func TestNeteasePlaylistPreservesRecordingAndAlbumIDs(t *testing.T) {
 func TestIdentifyRecoversLegacyNeteaseIdentityWithoutManualReview(t *testing.T) {
 	a := newApp(t)
 	batchID := "pl-netease-identity-fixture"
-	rows := []playlistTrack{{Title: "One", Artist: "Artist", Album: "Album", Duration: "180000", NeteaseSongID: 10000000001, NeteaseAlbumID: 10000000002}}
+	rows := []playlistTrack{{Title: "One", Artist: "Artist", Album: "Album", Duration: "180000", NeteaseSongID: 10000000001}}
 	dir := filepath.Join(a.Dir, "incoming")
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		t.Fatal(err)

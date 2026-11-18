@@ -320,6 +320,9 @@ func (a *App) Close() error {
 	}
 	if a.libraryAutomation != nil {
 		a.libraryAutomation.stop()
+		waitCtx, cancelWait := context.WithTimeout(context.Background(), 15*time.Second)
+		a.libraryAutomation.wait(waitCtx)
+		cancelWait()
 	}
 	a.stopManagedSolver()
 	a.stopEngines()

@@ -381,6 +381,43 @@ func TestWritePreservesPictureBlock(t *testing.T) {
 	}
 }
 
+func TestReadMetadataReportsCoverWithoutLoadingAudio(t *testing.T) {
+	requireFFmpeg(t)
+	dir := t.TempDir()
+	base := genFLAC(t, dir, "metadata-base.flac")
+	body, err := os.ReadFile(base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cover := filepath.Join(dir, "cover.png")
+	cmd := exec.Command("ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-f", "lavfi", "-i", "color=c=red:s=512x512", "-frames:v", "1", cover)
+	if output, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("ffmpeg cover: %v %s", err, output)
+	}
+	coverBody, err := os.ReadFile(cover)
+	if err != nil {
+		t.Fatal(err)
+	}
+	withCover, err := EmbedFrontCover(body, coverBody)
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, "large-cover.flac")
+	if err := os.WriteFile(path, withCover, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	tags, err := ReadMetadata(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !tags.HasFrontCover {
+		t.Fatal("front cover was not detected")
+	}
+	if tags.StreamInfo.SampleRate <= 0 || len(tags.Raw) == 0 {
+		t.Fatalf("metadata was not decoded: %+v", tags)
+	}
+}
+
 func TestWriteToRefusesExistingDestination(t *testing.T) {
 	requireFFmpeg(t)
 	dir := t.TempDir()

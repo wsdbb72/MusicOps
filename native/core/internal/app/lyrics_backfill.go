@@ -16,7 +16,6 @@ package app
 // running returns the running state instead of starting a competing walk.
 
 import (
-	"io"
 	"io/fs"
 	"net/http"
 	"os"
@@ -167,11 +166,7 @@ func (a *App) backfillLyricsSidecars(root string, dryRun bool) {
 	lyricsBackfill.mu.Unlock()
 }
 
-// lyricsTagOf reads the LYRICS tag without loading the audio. FLAC metadata
-// sits at the start of the file, so a 1 MiB prefix is enough for the usual
-// case (a truncated prefix that cuts a metadata block fails to parse, and the
-// full read is the fallback). On a library of 30 MB tracks this is the
-// difference between minutes and an hour.
+// lyricsTagOf reads the LYRICS tag without loading audio or embedded artwork.
 func lyricsTagOf(path string) string {
 	tags, err := readFLACTagsPrefix(path)
 	if err != nil {
@@ -181,17 +176,7 @@ func lyricsTagOf(path string) string {
 }
 
 func readFLACTagsPrefix(path string) (*flactags.Tags, error) {
-	file, err := os.Open(path)
-	if err != nil {
-		return nil, err
-	}
-	defer file.Close()
-	prefix := make([]byte, 1<<20)
-	n, _ := io.ReadFull(file, prefix)
-	if tags, parseErr := flactags.ReadBytes(prefix[:n]); parseErr == nil {
-		return tags, nil
-	}
-	return flactags.ReadFile(path)
+	return flactags.ReadMetadata(path)
 }
 
 func (report *lyricsBackfillReport) remember(line string) {

@@ -95,7 +95,7 @@ func (a *App) identify(ctx context.Context, execution *scheduler.Execution, payl
 	// proceed automatically; media identity is still checked again at acquire.
 	if !plan.Identity.IdentityConfirmed && plan.PlaylistTrack != "" {
 		if task, taskErr := a.tasks.Get(token.ID); taskErr == nil && task != nil {
-			if job, jobErr := a.flows.Job(task.WorkflowJobID); jobErr == nil && job != nil && a.recoverNeteasePlaylistIDs(ctx, job.BatchID, &plan) && plan.NeteaseAlbumID > 0 {
+			if job, jobErr := a.flows.Job(task.WorkflowJobID); jobErr == nil && job != nil && a.recoverNeteasePlaylistIDs(ctx, job.BatchID, &plan) {
 				identityPayload, _ := json.Marshal(map[string]any{
 					"source": "netease", "title": plan.PlaylistTrack, "artist": plan.ExpectedArtist,
 					"album": plan.ExpectedTitle, "netease_song_id": plan.NeteaseSongID,
@@ -104,7 +104,7 @@ func (a *App) identify(ctx context.Context, execution *scheduler.Execution, payl
 				plan.Identity = Identity{
 					ID: evidenceID(token.ID, token.Fence, "playlist-identity"), Kind: "api", Source: "netease",
 					SubjectID:         fmt.Sprintf("netease:%d:%d", plan.NeteaseSongID, plan.NeteaseAlbumID),
-					TracklistVerified: plan.NeteaseAlbumID > 0, IdentityConfirmed: true,
+					TracklistVerified: true, IdentityConfirmed: true,
 					Payload: string(identityPayload),
 				}
 				payload, err = json.Marshal(plan)

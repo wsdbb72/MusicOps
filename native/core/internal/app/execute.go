@@ -95,7 +95,7 @@ func (a *App) identify(ctx context.Context, execution *scheduler.Execution, payl
 	// proceed automatically; media identity is still checked again at acquire.
 	if !plan.Identity.IdentityConfirmed && plan.PlaylistTrack != "" {
 		if task, taskErr := a.tasks.Get(token.ID); taskErr == nil && task != nil {
-			if job, jobErr := a.flows.Job(task.WorkflowJobID); jobErr == nil && job != nil && a.recoverNeteasePlaylistIDs(ctx, job.BatchID, &plan) {
+			if job, jobErr := a.flows.Job(task.WorkflowJobID); jobErr == nil && job != nil && a.recoverNeteasePlaylistIDs(ctx, job.BatchID, &plan) && plan.NeteaseAlbumID > 0 {
 				identityPayload, _ := json.Marshal(map[string]any{
 					"source": "netease", "title": plan.PlaylistTrack, "artist": plan.ExpectedArtist,
 					"album": plan.ExpectedTitle, "netease_song_id": plan.NeteaseSongID,

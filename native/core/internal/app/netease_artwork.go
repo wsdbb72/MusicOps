@@ -129,10 +129,7 @@ func downloadBestCover(ctx context.Context, song *neteaseSong, candidates []exte
 			}
 		}
 		artist := playlistArtistsOverlap(song.Artists, splitPlaylistArtists(candidate.Artist))
-		if !artist && delta > 3000 {
-			continue
-		}
-		if artist && delta > 10000 {
+		if !artist || delta > 5000 {
 			continue
 		}
 		matches = append(matches, scored{candidate: candidate, delta: delta, artist: artist})

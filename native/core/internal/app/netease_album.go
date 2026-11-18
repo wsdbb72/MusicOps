@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/wsdbb72/MusicOps/native/core/internal/audiorelease"
 	"github.com/wsdbb72/MusicOps/native/core/internal/scheduler"
 	"github.com/wsdbb72/MusicOps/native/core/internal/taskrepo"
 	"github.com/wsdbb72/MusicOps/native/core/internal/workflow"
@@ -316,6 +317,7 @@ func (a *App) acquireNeteaseAlbum(ctx context.Context, execution *scheduler.Exec
 	local := a.verifiedPlaylistAlbumTracks(a.libraryDir(), artist, album, plan.ExpectedTitle)
 	receipts := make([]publishReceipt, 0, len(tracks))
 	missing := []string{}
+	var ingestFailure error
 	order := make([]int, len(tracks))
 	for i := range order {
 		order[i] = i
@@ -367,11 +369,22 @@ func (a *App) acquireNeteaseAlbum(ctx context.Context, execution *scheduler.Exec
 		// in incoming/ exhausted the SSD cache before publication could begin.
 		item, err := a.ingestPlaylistStream(ctx, job, trackPlan, path, index+1)
 		if err != nil {
-			return review(err.Error(), "STREAM_INGEST_FAILED")
+			if !errors.Is(err, audiorelease.ErrConflict) && !errors.Is(err, audiorelease.ErrRejected) {
+				return review(err.Error(), "STREAM_INGEST_FAILED")
+			}
+			ingestFailure = err
+			// One rejected track must not discard the verified tracks that
+			// already published. Record it as missing and let the release advance;
+			// retain the publication error if no track was published.
+			missing = append(missing, song.Name+"："+err.Error())
+			continue
 		}
 		receipts = append(receipts, item)
 	}
 	if len(receipts) == 0 {
+		if ingestFailure != nil {
+			return review(ingestFailure.Error(), "STREAM_INGEST_FAILED")
+		}
 		if len(missing) > 0 {
 			// The NetEase album and selected song ids are durable catalogue
 			// evidence. Once every available quality has been tried, keep the

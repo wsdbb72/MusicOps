@@ -51,8 +51,13 @@ func (a *App) indexLibraryTree(ctx context.Context, root string) (added, kept, p
 		return 0, 0, 0, err
 	}
 	seen := map[string]bool{}
+	seenPaths := map[string]bool{}
 	for _, entry := range existing {
 		seen[entry.RequestID] = true
+		if entry.FilePresent {
+			path := filepath.Clean(a.entryFilePath(entry))
+			seenPaths[strings.ToLower(path)] = true
+		}
 	}
 	const indexBatchSize = 128
 	batch := make([]audiorelease.Existing, 0, indexBatchSize)
@@ -89,7 +94,7 @@ func (a *App) indexLibraryTree(ctx context.Context, root string) (added, kept, p
 		}
 		track := trackNumberFromName(filepath.Base(path))
 		requestID := libraryFileID(abs)
-		if seen[requestID] {
+		if seen[requestID] || seenPaths[strings.ToLower(filepath.Clean(abs))] {
 			kept++
 			return nil
 		}
@@ -167,6 +172,7 @@ func (a *App) libraryWorkflow(w http.ResponseWriter, r *http.Request) {
 		Path      string   `json:"path"`
 		Paths     []string `json:"paths"`
 		Confirmed bool     `json:"confirmed"`
+		Key       string   `json:"key,omitempty"`
 	}
 	if err := decode(r, &body); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "code": "INVALID_REQUEST"})
@@ -247,8 +253,19 @@ func (a *App) libraryWorkflow(w http.ResponseWriter, r *http.Request) {
 	first := tracks[0]
 	label := first.Artist + " — " + first.Album
 	id := libraryFileID(body.Scene + "|" + label + "|" + strconv.FormatInt(a.now().UnixNano(), 10))
+	if strings.TrimSpace(body.Key) != "" {
+		id = libraryFileID(body.Scene + "|automation|" + strings.TrimSpace(body.Key))
+	}
+	if existing, err := a.flows.Job(id); err == nil && existing != nil {
+		writeJSON(w, http.StatusOK, map[string]any{
+			"ok": true, "started": false, "job_id": id, "scene": body.Scene, "path": chosen[0], "paths": chosen,
+			"downloaded": false, "imported": false,
+			"note": "这项自动任务已存在，未重复创建。",
+		})
+		return
+	}
 	settings, _ := a.loadDownloadSettings()
-	plan := SearchPlan{RootJobID: id, Scene: body.Scene, Query: first.Artist + " " + first.Album, ExpectedTitle: first.Album, ExpectedArtist: first.Artist, Budget: settings.TokenBudget, LibraryTracks: tracks}
+	plan := SearchPlan{RootJobID: id, Scene: body.Scene, Query: first.Artist + " " + first.Album, ExpectedTitle: first.Album, ExpectedArtist: first.Artist, PlaylistTrack: first.Title, Budget: settings.TokenBudget, StreamingEnabled: true, LibraryTracks: tracks}
 	raw, err := json.Marshal(plan)
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "code": "INVALID_REQUEST"})

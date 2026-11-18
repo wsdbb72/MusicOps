@@ -1505,7 +1505,7 @@ func (a *App) ingestDownload(ctx context.Context, plan downloadPlan, meta qbitto
 			publishedAlbumArtist = hotSlowCompilationArtist
 		}
 		var scrape *playlistScrapeResult
-		if plan.PlaylistBatch {
+		if plan.PlaylistBatch || ext == ".flac" {
 			var err error
 			incomingName, title, scrape, err = a.scrapePlaylistIncoming(ctx, incoming, incomingName, trackArtist, publishedAlbumArtist, publishedAlbum, title, position)
 			if err != nil {

@@ -11,10 +11,12 @@ import (
 	"github.com/wsdbb72/MusicOps/native/core/internal/musicbrainz"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/wsdbb72/MusicOps/native/core/internal/flactags"
 	"github.com/wsdbb72/MusicOps/native/core/internal/qbittorrent"
 	"github.com/wsdbb72/MusicOps/native/core/internal/reviewmatch"
+	"github.com/wsdbb72/MusicOps/native/core/internal/workflow"
 )
 
 func TestUpgradeSelectsOnlyMatchingRealFLAC(t *testing.T) {
@@ -105,10 +107,24 @@ func TestLibrarySelectionBuildsDurableSnapshotPlan(t *testing.T) {
 	if id == "" || r["started"] != true || r["downloaded"] != false {
 		t.Fatal(r)
 	}
-	job := waitJob(t, application, id, "needs_review")
-	raw, found, err := application.tasks.Data(job.ActiveTaskID, "arguments", 0)
+	deadline := time.Now().Add(8 * time.Second)
+	var job *workflow.Job
+	for time.Now().Before(deadline) {
+		job, _ = application.flows.Job(id)
+		if job != nil && job.SearchJobID != "" {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if job == nil || job.SearchJobID == "" {
+		t.Fatalf("local identity did not advance to search: %+v", job)
+	}
+	raw, found, err := application.tasks.Data(job.SearchJobID, "arguments", 0)
 	var plan SearchPlan
 	if err != nil || !found || json.Unmarshal(raw, &plan) != nil || len(plan.LibraryTracks) != 1 || plan.ExpectedTitle != "Example Album" {
 		t.Fatal(plan, found, err)
+	}
+	if !plan.Identity.IdentityConfirmed || plan.Identity.Source != "local-library" || !plan.StreamingEnabled {
+		t.Fatalf("local identity plan=%+v", plan.Identity)
 	}
 }

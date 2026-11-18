@@ -25,8 +25,15 @@ func TestAIReviewEligibilityCoversNonSearchButNeverTokenHolds(t *testing.T) {
 	}
 	token := base
 	token.ReviewKind = "token"
-	if application.aiReviewEligible(token) {
-		t.Fatal("token hold became eligible without explicit FL-token approval")
+	token.ErrorClass = "account_token_hold"
+	token.BatchID = "pl-netease-fixture"
+	if !application.aiReviewEligible(token) {
+		t.Fatal("proven zero-spend token hold should retry through the safe fallback")
+	}
+	spent := token
+	spent.ErrorClass = "token_spent"
+	if application.aiReviewEligible(spent) {
+		t.Fatal("consumed token hold became eligible for automatic retry")
 	}
 	complete := base
 	complete.Stage = "completed"

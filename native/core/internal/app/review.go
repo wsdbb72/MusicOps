@@ -234,19 +234,17 @@ func (a *App) reviewWithAI(w http.ResponseWriter, r *http.Request, id, requestID
 		writeJSON(w, http.StatusConflict, map[string]any{"ok": false, "code": "REVIEW_UNAVAILABLE"})
 		return
 	}
+	if inspection.Job.TaskType != "search" {
+		// Album expansion, metadata and interrupted jobs do not have a tracker
+		// candidate to compare. Use the original identity and current source
+		// policy to replay the job automatically.
+		result, retryErr := a.flows.Review(requestID, id, workflow.ReviewDecision{Action: "retry"}, nowNS)
+		a.writeReviewResult(w, result, retryErr, "ai")
+		return
+	}
 	model := a.reviewCompleter()
 	if model == nil || a.reviews == nil {
 		writeJSON(w, http.StatusConflict, map[string]any{"ok": false, "code": "AI_UNAVAILABLE", "message": "请先启用 AI 并保存 API 密钥"})
-		return
-	}
-	if inspection.Job.TaskType != "search" {
-		// Album expansion, metadata and interrupted jobs do not have a tracker
-		// candidate to compare. Use the original NetEase identity and current
-		// source policy to replay the job automatically; this is the same
-		// durable retry path as the manual button, without asking the model to
-		// invent an unavailable release.
-		result, retryErr := a.flows.Review(requestID, id, workflow.ReviewDecision{Action: "retry"}, nowNS)
-		a.writeReviewResult(w, result, retryErr, "ai")
 		return
 	}
 	if inspection.Task == nil {
@@ -305,14 +303,26 @@ func (a *App) reviewWithAI(w http.ResponseWriter, r *http.Request, id, requestID
 }
 
 // aiReviewEligible keeps single and batch AI review on the same safe set.
-// Token holds require explicit human approval because retrying them may spend
-// a DicMusic or Orpheus FL token. Every other review can be replayed from its
+// A ledger-proven account hold sent no token request and may safely retry into
+// the source-platform fallback. Consumed, uncertain and pending token actions
+// still require explicit review. Every other review can be replayed from its
 // durable evidence without inventing a release.
 func (a *App) aiReviewEligible(job workflow.Job) bool {
-	if a == nil || a.reviewCompleter() == nil || a.reviews == nil || job.Stage != "needs_review" || job.ReviewKind == "token" {
+	if a == nil || job.Stage != "needs_review" {
 		return false
 	}
-	return true
+	if job.ReviewKind == "token" {
+		// A confirmed ledger hold sent no request. Replaying it is safe: acquire
+		// re-checks the ledger and falls back to the source platform when the FL
+		// hold is still active. Consumed or uncertain tokens remain explicit.
+		return job.ErrorClass == "account_token_hold" && strings.HasPrefix(job.BatchID, "pl-netease-")
+	}
+	// Metadata, album and interrupted jobs use the durable retry path and do
+	// not require a model.
+	if job.TaskType != "search" {
+		return true
+	}
+	return a.reviewCompleter() != nil && a.reviews != nil
 }
 
 func (a *App) reviewAccept(w http.ResponseWriter, id, requestID, site, candidateID string, nowNS int64) {

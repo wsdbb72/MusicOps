@@ -47,7 +47,7 @@ func (a *App) runAutoReview(stop <-chan struct{}) {
 
 func (a *App) autoReviewPass(ctx context.Context) autoReviewStats {
 	stats := autoReviewStats{}
-	if a == nil || a.reviewCompleter() == nil || a.reviews == nil || a.flows == nil {
+	if a == nil || a.flows == nil {
 		return stats
 	}
 	var cursor []byte

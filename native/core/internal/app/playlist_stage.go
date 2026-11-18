@@ -73,14 +73,15 @@ func (a *App) identifyPlaylist(ctx context.Context, execution *scheduler.Executi
 		complete.NextStage = "completed"
 		complete.ReviewKind = ""
 		complete.TaskState = "completed"
-		complete.Message = fmt.Sprintf("歌单%s共 %d 首：库内已核验 %d 首，已创建 %d 个任务，%d 项未能创建。子任务还需要检索和验证下载条件。",
+		complete.Message = fmt.Sprintf("歌单%s共 %d 首：库内已核验 %d 首，已创建 %d 个任务，%d 项无法创建。无法创建的明细已保存，子任务继续自动检索、下载、刮削和入库。",
 			playlistSuffix(name), len(rows), len(report.Skipped), len(report.Created), len(report.Unmatched))
-		if len(report.Unmatched) > 0 {
-			complete.NextStage, complete.ReviewKind, complete.TaskState = "needs_review", "candidate", "blocked"
+		if reportJSON, marshalErr := json.Marshal(report); marshalErr == nil {
+			complete.Result = reportJSON
 		}
 		if _, err := a.flows.Complete(intentID("playlist", token.ID, token.Fence), token, complete); err != nil {
 			return scheduler.Outcome{}, err
 		}
+		a.startLibraryAutomationRun("after-playlist")
 		return scheduler.Outcome{State: complete.TaskState, Message: complete.Message}, nil
 	}
 	complete.Message = fmt.Sprintf("歌单已读取 %d 首%s，请选择要入库的曲目；尚未下载、尚未入库", len(rows), playlistSuffix(name))

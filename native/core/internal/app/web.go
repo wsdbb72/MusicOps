@@ -1361,6 +1361,21 @@ const appJS = `(function () {
     }
   }
   function renderLibrary() {
+    var auto = libraryAutomation && libraryAutomation.settings ? libraryAutomation.settings : {enabled:true, scrape:true, dedupe:true, upgrade:true, expand:true, interval_hours:6};
+    var autoReport = libraryAutomation && libraryAutomation.report ? libraryAutomation.report : {};
+    var autoRunning = !!(libraryAutomation && libraryAutomation.running);
+    var phaseNames = {queued:"排队", reindex:"索引", scrape:"刮削", dedupe:"去重", library_workflows:"升级/补专", done:"完成"};
+    var autoText = autoRunning ? ("正在运行 · " + escapeText(phaseNames[autoReport.phase] || autoReport.phase || "处理中")) : (autoReport.finished ? ("上次完成 " + escapeText(autoReport.finished)) : "尚未运行");
+    autoText += " · 索引新增 " + (autoReport.indexed_added || 0) + "，刮削写入 " + (autoReport.scrape_written || 0) + "，去重 " + (autoReport.deduplicated || 0) + "，升级任务 " + (autoReport.upgrade_jobs || 0) + "，补专任务 " + (autoReport.expand_jobs || 0);
+    if (autoReport.errors && autoReport.errors.length) autoText += "；问题 " + escapeText(autoReport.errors.slice(0, 2).join(" | "));
+    var automationCard = '<article><h2>全库自动维护</h2><p class="meta">启用后，程序会周期性增量索引，自动补齐缺失标签、歌词和封面，合并已验证的 PCM 重复项，并为有损曲目和单曲专辑创建升级或补全任务。' + escapeText(autoText) + '</p>' +
+      '<label><input type="checkbox" id="auto-maintenance-enabled"' + (auto.enabled ? " checked" : "") + '> 持续自动维护</label>' +
+      '<label><input type="checkbox" id="auto-maintenance-scrape"' + (auto.scrape ? " checked" : "") + '> 刮削补齐</label>' +
+      '<label><input type="checkbox" id="auto-maintenance-dedupe"' + (auto.dedupe ? " checked" : "") + '> 安全去重</label>' +
+      '<label><input type="checkbox" id="auto-maintenance-upgrade"' + (auto.upgrade ? " checked" : "") + '> 音质升级</label>' +
+      '<label><input type="checkbox" id="auto-maintenance-expand"' + (auto.expand ? " checked" : "") + '> 单曲补整专</label>' +
+      '<label>周期（小时）<input type="text" id="auto-maintenance-hours" value="' + escapeText(auto.interval_hours || 6) + '"></label>' +
+      '<p><button type="button" id="save-auto-maintenance" class="primary">保存自动维护</button> <button type="button" id="run-auto-maintenance">立即整库维护</button></p><p id="auto-maintenance-result" class="meta"></p></article>';
     var duplicateHtml = "";
     if (duplicateRows.length) {
       duplicateRows.forEach(function (group) {
@@ -1370,7 +1385,7 @@ const appJS = `(function () {
     } else {
       duplicateHtml = '<p class="meta">尚未扫描，或没有可合并的重复项。</p>';
     }
-    var html = '<div class="cards"><article><h2>本地资料库</h2><p class="meta">重新索引只补充新文件，不删除磁盘上的音乐。先逐页勾选曲目，确认后才进入检索。下载仍受令牌规则约束，这一步不会扣费，也不会入库。</p>' +
+    var html = '<div class="cards">' + automationCard + '<article><h2>本地资料库</h2><p class="meta">重新索引只补充新文件，不删除磁盘上的音乐。先逐页勾选曲目，确认后才进入检索。下载仍受令牌规则约束，这一步不会扣费，也不会入库。</p>' +
       '<p><button type="button" id="reindex-library" class="primary">重新索引</button> <button type="button" id="list-gaps">列出缺失曲目</button></p>' +
       '<p><button type="button" id="library-page-prev">上一页</button> <button type="button" id="library-page-next">下一页</button> <span id="library-page-label" class="meta"></span></p>' +
       '<div id="library-file"></div>' +
@@ -1441,6 +1456,10 @@ const appJS = `(function () {
     var cancelWav = document.getElementById("transcode-cancel");
     if (cancelWav) cancelWav.addEventListener("click", function () { controlTranscode("cancel"); });
     loadWAVSettings();
+    var saveAuto = document.getElementById("save-auto-maintenance");
+    if (saveAuto) saveAuto.addEventListener("click", saveLibraryAutomation);
+    var runAuto = document.getElementById("run-auto-maintenance");
+    if (runAuto) runAuto.addEventListener("click", runLibraryAutomationNow);
     var reindex = document.getElementById("reindex-library");
     if (reindex) reindex.addEventListener("click", function () { libraryAction("/v1/library/reindex", {}, "library-ops-result"); });
     var gaps = document.getElementById("list-gaps");
@@ -1701,6 +1720,37 @@ const appJS = `(function () {
       cover_mode: document.getElementById("meta-cover-mode").value,
       overwrite: document.getElementById("meta-overwrite").checked
     }, "metadata-result");
+  }
+  async function saveLibraryAutomation() {
+    var result = document.getElementById("auto-maintenance-result");
+    try {
+      var response = await fetch("/v1/library/automation", {method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify({
+        enabled: document.getElementById("auto-maintenance-enabled").checked,
+        scrape: document.getElementById("auto-maintenance-scrape").checked,
+        dedupe: document.getElementById("auto-maintenance-dedupe").checked,
+        upgrade: document.getElementById("auto-maintenance-upgrade").checked,
+        expand: document.getElementById("auto-maintenance-expand").checked,
+        interval_hours: parseInt(document.getElementById("auto-maintenance-hours").value, 10) || 6
+      })});
+      var body = await response.json();
+      if (!response.ok || !body.ok) throw new Error(body.error || body.code || "没有保存");
+      if (result) result.textContent = "自动维护设置已保存。";
+      await load(true);
+    } catch (err) {
+      if (result) result.textContent = "保存失败：" + err.message;
+    }
+  }
+  async function runLibraryAutomationNow() {
+    var result = document.getElementById("auto-maintenance-result");
+    try {
+      var response = await fetch("/v1/library/automation/run", {method:"POST", headers:{"Content-Type":"application/json"}, body:"{}"});
+      var body = await response.json();
+      if (!response.ok || !body.ok) throw new Error(body.error || body.code || "没有启动");
+      if (result) result.textContent = body.started ? "整库自动维护已启动，可在页面查看进度。" : "已有一轮自动维护正在运行。";
+      await load(true);
+    } catch (err) {
+      if (result) result.textContent = "启动失败：" + err.message;
+    }
   }
   async function scrapeSelected(dryRun) {
     if (loading) return;
@@ -2190,6 +2240,9 @@ const appJS = `(function () {
         var migrationBody = await migrationResponse.json();
         migrationReport = migrationBody && migrationBody.ok ? migrationBody : null;
       } else if (view === "library") {
+        var automationResponse = await fetch("/v1/library/automation", {headers: {Accept: "application/json"}});
+        var automationBody = await automationResponse.json();
+        libraryAutomation = automationBody && automationBody.ok ? automationBody : null;
         var libraryResponse = await fetch("/v1/library", {headers: {Accept: "application/json"}});
         var libraryBody = await libraryResponse.json();
         libraryRows = libraryBody && Array.isArray(libraryBody.entries) ? libraryBody.entries : [];

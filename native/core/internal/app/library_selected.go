@@ -73,19 +73,39 @@ func (a *App) confirmSelectedLibrary(ctx context.Context, plan *SearchPlan) erro
 		req.Tracks = append(req.Tracks, catalogTrackRequest{Title: track.Title, Artists: []string{track.Artist}, Duration: &duration})
 	}
 	resolved, err := identifyCatalogLookup(catalogClient, a.engine, req, catalogBudget, catalogTTL)
-	if err != nil || resolved.MusicBrainz == nil || len(resolved.Results) != len(req.Tracks) {
-		return errors.New("在线目录未确认所选曲目所属发行版")
-	}
-	for _, row := range resolved.Results {
-		if !row.IdentityConfirmed {
-			return errors.New("在线目录未确认所有所选曲目")
+	confirmed := err == nil && resolved.MusicBrainz != nil && len(resolved.Results) == len(req.Tracks)
+	if confirmed {
+		for _, row := range resolved.Results {
+			if !row.IdentityConfirmed {
+				confirmed = false
+				break
+			}
 		}
 	}
-	raw, err := json.Marshal(resolved.MusicBrainz)
+	if confirmed {
+		raw, marshalErr := json.Marshal(resolved.MusicBrainz)
+		if marshalErr != nil {
+			return marshalErr
+		}
+		plan.Identity = Identity{ID: "catalog-" + plan.RootJobID, Kind: "catalog", Source: "musicbrainz", SubjectID: resolved.MusicBrainz.ReleaseID, TracklistVerified: true, IdentityConfirmed: true, Payload: string(raw)}
+		return nil
+	}
+	// Library maintenance must still work for private, regional and doujin
+	// releases that MusicBrainz does not list. The files were already re-read
+	// above, so use their local album, artist, title and duration as a
+	// searchable platform identity. Tracker/streaming candidates still undergo
+	// the normal title, artist, edition and duration checks before download.
+	localPayload, err := json.Marshal(map[string]any{
+		"source": "local-library", "artist": plan.ExpectedArtist, "album": plan.ExpectedTitle,
+		"tracks": plan.LibraryTracks,
+	})
 	if err != nil {
 		return err
 	}
-	plan.Identity = Identity{ID: "catalog-" + plan.RootJobID, Kind: "catalog", Source: "musicbrainz", SubjectID: resolved.MusicBrainz.ReleaseID, TracklistVerified: true, IdentityConfirmed: true, Payload: string(raw)}
+	plan.Identity = Identity{
+		ID: "local-" + libraryFileID(plan.RootJobID), Kind: "catalog", Source: "local-library",
+		SubjectID: plan.RootJobID, TracklistVerified: true, IdentityConfirmed: true, Payload: string(localPayload),
+	}
 	return nil
 }
 

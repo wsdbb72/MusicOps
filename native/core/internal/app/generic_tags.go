@@ -1,0 +1,313 @@
+package app
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strconv"
+	"strings"
+	"time"
+
+	"github.com/wsdbb72/MusicOps/native/core/internal/musicbrainz"
+)
+
+type genericAudioInfo struct {
+	Path     string
+	Codec    string
+	Artist   string
+	Album    string
+	Title    string
+	Date     string
+	Genre    string
+	Track    string
+	Disc     string
+	Duration float64
+	Tags     map[string]string
+}
+
+func probeGenericAudio(ctx context.Context, path string) (genericAudioInfo, error) {
+	info := genericAudioInfo{Path: path, Tags: map[string]string{}}
+	raw, err := exec.CommandContext(ctx, "ffprobe", "-v", "error",
+		"-show_entries", "stream=codec_name:format=duration:format_tags", "-of", "json", path).Output()
+	if err != nil {
+		return info, err
+	}
+	var data struct {
+		Streams []struct {
+			Codec string `json:"codec_name"`
+		} `json:"streams"`
+		Format struct {
+			Duration string            `json:"duration"`
+			Tags     map[string]string `json:"tags"`
+		} `json:"format"`
+	}
+	if err := json.Unmarshal(raw, &data); err != nil {
+		return info, err
+	}
+	if len(data.Streams) == 0 || strings.TrimSpace(data.Streams[0].Codec) == "" {
+		return info, errors.New("音频流无法识别")
+	}
+	for key, value := range data.Format.Tags {
+		info.Tags[strings.ToLower(strings.TrimSpace(key))] = strings.TrimSpace(value)
+	}
+	info.Codec = strings.ToLower(data.Streams[0].Codec)
+	info.Artist = firstNonEmpty(info.Tags["artist"], info.Tags["artists"])
+	info.Album = info.Tags["album"]
+	info.Title = info.Tags["title"]
+	info.Date = firstNonEmpty(info.Tags["date"], info.Tags["year"])
+	info.Genre = info.Tags["genre"]
+	info.Track = firstNonEmpty(info.Tags["track"], info.Tags["tracknumber"])
+	info.Disc = firstNonEmpty(info.Tags["disc"], info.Tags["discnumber"])
+	info.Duration, _ = strconv.ParseFloat(data.Format.Duration, 64)
+	inferredArtist, inferredAlbum, inferredTitle := scrapeIdentityFromPath(path)
+	info.Artist = firstNonEmpty(info.Artist, inferredArtist)
+	info.Album = firstNonEmpty(info.Album, inferredAlbum)
+	info.Title = firstNonEmpty(info.Title, inferredTitle)
+	if info.Duration <= 0 {
+		return info, errors.New("音频时长无法读取")
+	}
+	return info, nil
+}
+
+func maintenanceNeedsGenericTags(info genericAudioInfo) bool {
+	if info.Tags["album_artist"] == "" && info.Tags["albumartist"] == "" {
+		return true
+	}
+	if info.Track == "" || info.Date == "" || info.Genre == "" {
+		return true
+	}
+	return info.Artist == "" || info.Album == "" || info.Title == ""
+}
+
+func genericMissingFields(info genericAudioInfo) map[string]bool {
+	out := map[string]bool{}
+	if strings.TrimSpace(info.Title) == "" {
+		out["TITLE"] = true
+	}
+	if strings.TrimSpace(info.Artist) == "" {
+		out["ARTIST"] = true
+	}
+	if strings.TrimSpace(info.Album) == "" {
+		out["ALBUM"] = true
+	}
+	if strings.TrimSpace(firstNonEmpty(info.Tags["album_artist"], info.Tags["albumartist"])) == "" {
+		out["ALBUMARTIST"] = true
+	}
+	if strings.TrimSpace(info.Date) == "" {
+		out["DATE"] = true
+	}
+	if strings.TrimSpace(info.Genre) == "" {
+		out["GENRE"] = true
+	}
+	if strings.TrimSpace(info.Track) == "" {
+		out["TRACKNUMBER"] = true
+	}
+	if strings.TrimSpace(info.Disc) == "" {
+		out["DISCNUMBER"] = true
+	}
+	return out
+}
+
+func writeGenericTags(ctx context.Context, path string, updates map[string][]string) ([]string, error) {
+	if len(updates) == 0 {
+		return nil, nil
+	}
+	beforeHash, err := genericAudioHash(ctx, path)
+	if err != nil {
+		return nil, err
+	}
+	ext := filepath.Ext(path)
+	temp, err := os.CreateTemp(filepath.Dir(path), ".musicops-tags-*"+ext)
+	if err != nil {
+		return nil, err
+	}
+	tempPath := temp.Name()
+	if err := temp.Close(); err != nil {
+		os.Remove(tempPath)
+		return nil, err
+	}
+	defer os.Remove(tempPath)
+	args := []string{"-hide_banner", "-loglevel", "error", "-y", "-i", path, "-map", "0:a:0", "-map", "0:v?", "-map_metadata", "0", "-c", "copy"}
+	for field, values := range updates {
+		if len(values) == 0 {
+			continue
+		}
+		key := strings.ToLower(field)
+		value := strings.Join(values, " / ")
+		args = append(args, "-metadata", key+"="+value)
+	}
+	if strings.EqualFold(ext, ".mp3") {
+		args = append(args, "-id3v2_version", "3", "-write_id3v1", "1")
+	}
+	args = append(args, tempPath)
+	output, err := exec.CommandContext(ctx, "ffmpeg", args...).CombinedOutput()
+	if err != nil {
+		return nil, fmt.Errorf("ffmpeg: %w: %s", err, strings.TrimSpace(string(output)))
+	}
+	afterHash, err := genericAudioHash(ctx, tempPath)
+	if err != nil || afterHash != beforeHash {
+		return nil, errors.New("写标签后音频流发生变化")
+	}
+	backup, err := backupFile(path)
+	if err != nil {
+		return nil, err
+	}
+	if err := os.Rename(tempPath, path); err != nil {
+		restoreBackup(path, backup)
+		_ = os.Remove(backup)
+		return nil, err
+	}
+	_ = os.Remove(backup)
+	fields := make([]string, 0, len(updates))
+	for field := range updates {
+		fields = append(fields, strings.ToLower(field))
+	}
+	return fields, nil
+}
+
+func genericAudioHash(ctx context.Context, path string) (string, error) {
+	raw, err := exec.CommandContext(ctx, "ffmpeg", "-hide_banner", "-loglevel", "error", "-i", path, "-map", "0:a:0", "-f", "streamhash", "-hash", "sha256", "-").Output()
+	if err != nil {
+		return "", err
+	}
+	for _, line := range strings.Split(string(raw), "\n") {
+		if _, value, found := strings.Cut(line, "="); found && strings.TrimSpace(value) != "" {
+			return strings.TrimSpace(value), nil
+		}
+	}
+	return "", errors.New("无法计算音频流指纹")
+}
+
+type genericScrapeGroup struct {
+	artist, album string
+	files         []genericAudioInfo
+}
+
+func (a *App) scrapeGenericFiles(ctx context.Context, paths []string, client *musicbrainz.Client, overwrite, dryRun, withArtwork bool) map[string]*scrapeFileResult {
+	results := map[string]*scrapeFileResult{}
+	groups := []*genericScrapeGroup{}
+	byAlbum := map[string]*genericScrapeGroup{}
+	for _, path := range paths {
+		results[path] = &scrapeFileResult{Path: path}
+		info, err := probeGenericAudio(ctx, path)
+		if err != nil {
+			results[path].Status, results[path].Code, results[path].Note = "skipped", "TAG_READ_FAILED", "标签或时长读不出来"
+			continue
+		}
+		if info.Artist == "" || info.Album == "" || info.Title == "" {
+			results[path].Status, results[path].Code, results[path].Note = "skipped", "NO_TAGS", "缺艺人、专辑或曲名，且路径不足以推断"
+			continue
+		}
+		key := foldTagText(info.Artist) + "\x00" + foldTagText(info.Album)
+		group := byAlbum[key]
+		if group == nil {
+			group = &genericScrapeGroup{artist: info.Artist, album: info.Album}
+			byAlbum[key] = group
+			groups = append(groups, group)
+		}
+		group.files = append(group.files, info)
+	}
+	for _, group := range groups {
+		tracks := make([]catalogTrackRequest, 0, len(group.files))
+		for _, info := range group.files {
+			duration := info.Duration
+			tracks = append(tracks, catalogTrackRequest{Title: info.Title, Artists: []string{info.Artist}, Duration: &duration})
+		}
+		lookup, err := identifyCatalogLookup(client, a.engine, catalogIdentifyRequest{Artist: group.artist, Album: group.album, Tracks: tracks}, catalogBudget, catalogTTL)
+		if err != nil || lookup.MusicBrainz == nil {
+			for _, info := range group.files {
+				results[info.Path].Status, results[info.Path].Code = "failed", "CATALOG_UNCONFIRMED"
+				results[info.Path].Note = "目录没有确认这张专辑，文件没有改"
+			}
+			continue
+		}
+		for i, info := range group.files {
+			result := results[info.Path]
+			if i < len(lookup.Results) && !lookup.Results[i].IdentityConfirmed {
+				result.Status, result.Code, result.Note = "failed", "CATALOG_UNCONFIRMED", "目录没有确认这首曲目"
+				continue
+			}
+			track, found := matchCatalogTrack(lookup.MusicBrainz, info.Title, info.Duration)
+			if !found {
+				result.Status, result.Code, result.Note = "failed", "TRACK_NOT_FOUND", "目录里没有找到对应曲目"
+				continue
+			}
+			desired := desiredTags(lookup.MusicBrainz, track)
+			updates := map[string][]string{}
+			for field, value := range desired {
+				if overwrite || genericFieldEmpty(info, field) {
+					updates[field] = value
+				}
+			}
+			updates, locked := a.applyFieldLocks(filepath.Dir(info.Path), updates)
+			result.LockedFields = locked
+			if dryRun {
+				for field := range updates {
+					result.WrittenFields = append(result.WrittenFields, strings.ToLower(field))
+				}
+				result.Status = "planned"
+				if len(updates) == 0 {
+					result.Status = "unchanged"
+				}
+				continue
+			}
+			written, err := writeGenericTags(ctx, info.Path, updates)
+			if err != nil {
+				result.Status, result.Code, result.Note = "failed", "TAG_WRITE_FAILED", err.Error()
+				continue
+			}
+			result.WrittenFields = written
+			if withArtwork {
+				request, cancel := context.WithTimeout(ctx, 20*time.Second)
+				lyrics, cover, artErr := a.fetchArtworkContext(request, "", "", info.Artist, info.Album, info.Title)
+				cancel()
+				if artErr != nil {
+					result.Note = "标签已写入，但歌词封面服务不可用"
+				} else {
+					if lyrics != "" && !hasLyricsSidecar(info.Path) && writeLyricsSidecar(info.Path, lyrics) == nil {
+						result.Lyrics, result.LyricsSidecar = true, true
+					}
+					if len(cover) > 0 {
+						sidecar := strings.TrimSuffix(info.Path, filepath.Ext(info.Path)) + ".jpg"
+						if _, statErr := os.Stat(sidecar); os.IsNotExist(statErr) && writeAutomationSidecar(sidecar, cover) == nil {
+							result.Cover = true
+						}
+					}
+				}
+			}
+			if len(result.WrittenFields) > 0 || result.Cover || result.Lyrics {
+				result.Status = "written"
+			} else {
+				result.Status = "unchanged"
+			}
+		}
+	}
+	return results
+}
+
+func genericFieldEmpty(info genericAudioInfo, field string) bool {
+	switch field {
+	case "TITLE":
+		return info.Title == ""
+	case "ARTIST":
+		return info.Artist == ""
+	case "ALBUM":
+		return info.Album == ""
+	case "ALBUMARTIST":
+		return firstNonEmpty(info.Tags["album_artist"], info.Tags["albumartist"]) == ""
+	case "DATE":
+		return info.Date == ""
+	case "GENRE":
+		return info.Genre == ""
+	case "TRACKNUMBER":
+		return info.Track == ""
+	case "DISCNUMBER":
+		return info.Disc == ""
+	default:
+		return false
+	}
+}

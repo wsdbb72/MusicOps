@@ -311,6 +311,7 @@ func TestMetadataWriteRequiresAConfirmedMatch(t *testing.T) {
 func TestRestoredControlsAreInThePage(t *testing.T) {
 	for _, id := range []string{
 		"pipeline-pause", "pipeline-resume", "reindex-library", "list-gaps", "fill-gaps",
+		"save-auto-maintenance", "run-auto-maintenance", "auto-maintenance-enabled", "auto-maintenance-scrape",
 		"upgrade-album", "expand-album", "preview-compilations", "merge-compilations",
 		"plan-artist-folders", "apply-artist-folders", "decrypt-ncm", "unify-qbt-tags", "fetch-playlist",
 		"review-download", "review-more", "scrape-preview", "scrape-apply",

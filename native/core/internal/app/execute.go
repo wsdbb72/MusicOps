@@ -218,7 +218,8 @@ func (a *App) search(ctx context.Context, execution *scheduler.Execution, payloa
 		evidence = append(evidence, workflow.EvidenceInput{
 			ID: evidenceID(token.ID, token.Fence, "netease"), Kind: "api", Source: "netease", SubjectID: plan.RootJobID, Payload: []byte(plan.Identity.Payload),
 		})
-	} else if plan.PlaylistTrack != "" && plan.StreamingEnabled && report.SelectedSite == "" && normalizeKey(plan.PlaylistTrack) == normalizeKey(plan.ExpectedTitle) {
+	} else if plan.StreamingEnabled && report.SelectedSite == "" && (len(plan.LibraryTracks) > 0 ||
+		plan.PlaylistTrack != "" && normalizeKey(plan.PlaylistTrack) == normalizeKey(plan.ExpectedTitle)) {
 		report.ExplicitFallback = true
 	}
 	decision, err := searchdecision.Decide(report)

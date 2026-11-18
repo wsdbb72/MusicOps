@@ -74,6 +74,8 @@ type App struct {
 	stopSubs          chan struct{}
 	stopReconcile     chan struct{}
 	stopAutoReview    chan struct{}
+	stopLibraryAuto   chan struct{}
+	libraryAutomation *libraryAutomationState
 	autoReviewMu      sync.Mutex
 	autoReviewRetryAt map[string]time.Time
 	// lastTokenRead bounds the background balance reads to one per site per
@@ -165,7 +167,7 @@ func open(dir, backup, password string, logger StartupLogger) (*App, error) {
 		return nil, fmt.Errorf("open native Pebble store: %w", err)
 	}
 	progress("native_store_ready", "Pebble opened and schema checked")
-	app := &App{Dir: dir, Backup: backup, password: password, engine: engine, tasks: taskrepo.New(engine), searcher: &trackersearch.Client{}, now: time.Now, secrets: map[string]string{}, autoReviewRetryAt: map[string]time.Time{}}
+	app := &App{Dir: dir, Backup: backup, password: password, engine: engine, tasks: taskrepo.New(engine), searcher: &trackersearch.Client{}, now: time.Now, secrets: map[string]string{}, autoReviewRetryAt: map[string]time.Time{}, libraryAutomation: &libraryAutomationState{}}
 	progress("vault", "opening the encrypted credential vault")
 	app.vault, err = vault.Open(filepath.Dir(filepath.Dir(absDir)))
 	if err != nil {
@@ -246,6 +248,8 @@ func open(dir, backup, password string, logger StartupLogger) (*App, error) {
 	// excluded by aiReviewEligible and still require an explicit FL decision.
 	app.stopAutoReview = make(chan struct{})
 	go app.runAutoReview(app.stopAutoReview)
+	app.stopLibraryAuto = make(chan struct{})
+	go app.runLibraryAutomationScheduler(app.stopLibraryAuto)
 	// A managed solver is started once, in the background: a slow browser
 	// start must not delay the UI, and the settings page reports the state.
 	go app.autoStartSolver()
@@ -296,9 +300,11 @@ func (a *App) Close() error {
 	stop := a.stopSubs
 	stopReconcile := a.stopReconcile
 	stopAutoReview := a.stopAutoReview
+	stopLibraryAuto := a.stopLibraryAuto
 	a.stopSubs = nil
 	a.stopReconcile = nil
 	a.stopAutoReview = nil
+	a.stopLibraryAuto = nil
 	a.mu.Unlock()
 	if stop != nil {
 		close(stop)
@@ -308,6 +314,12 @@ func (a *App) Close() error {
 	}
 	if stopAutoReview != nil {
 		close(stopAutoReview)
+	}
+	if stopLibraryAuto != nil {
+		close(stopLibraryAuto)
+	}
+	if a.libraryAutomation != nil {
+		a.libraryAutomation.stop()
 	}
 	a.stopManagedSolver()
 	a.stopEngines()

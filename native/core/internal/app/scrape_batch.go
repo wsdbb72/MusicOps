@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -112,6 +113,8 @@ func (a *App) scrapeLibrary(w http.ResponseWriter, r *http.Request) {
 		client.BaseURL = body.CatalogBaseURL
 	}
 	results := map[string]*scrapeFileResult{}
+	genericPaths := []string{}
+	genericRaw := map[string]string{}
 	ordered := make([]string, 0, len(paths))
 	groups := []*scrapeAlbumGroup{}
 	index := map[string]*scrapeAlbumGroup{}
@@ -120,8 +123,13 @@ func (a *App) scrapeLibrary(w http.ResponseWriter, r *http.Request) {
 		result := &scrapeFileResult{Path: raw}
 		results[raw] = result
 		full, err := a.resolveLibraryPath(raw)
-		if err != nil || !strings.EqualFold(filepath.Ext(full), ".flac") {
-			result.Status, result.Code, result.Note = "skipped", "UNSUPPORTED", "只处理音乐库里的 FLAC"
+		if err != nil {
+			result.Status, result.Code, result.Note = "skipped", "UNSUPPORTED", "只处理音乐库里的音频文件"
+			continue
+		}
+		if !strings.EqualFold(filepath.Ext(full), ".flac") {
+			genericPaths = append(genericPaths, full)
+			genericRaw[full] = raw
 			continue
 		}
 		tags, err := flactags.ReadFile(full)
@@ -137,8 +145,12 @@ func (a *App) scrapeLibrary(w http.ResponseWriter, r *http.Request) {
 		artist := strings.TrimSpace(firstNonEmpty(tags.Artist, strings.Join(tags.Artists, "")))
 		album := strings.TrimSpace(tags.Album)
 		title := strings.TrimSpace(tags.Title)
+		inferredArtist, inferredAlbum, inferredTitle := scrapeIdentityFromPath(full)
+		artist = firstNonEmpty(artist, inferredArtist)
+		album = firstNonEmpty(album, inferredAlbum)
+		title = firstNonEmpty(title, inferredTitle)
 		if artist == "" || album == "" || title == "" {
-			result.Status, result.Code, result.Note = "skipped", "NO_TAGS", "缺艺人、专辑或曲名，无法查询目录"
+			result.Status, result.Code, result.Note = "skipped", "NO_TAGS", "缺艺人、专辑或曲名，且路径不足以推断"
 			continue
 		}
 		key := foldTagText(artist) + "\x00" + foldTagText(album)
@@ -350,6 +362,23 @@ func (a *App) scrapeLibrary(w http.ResponseWriter, r *http.Request) {
 		}
 		summary = append(summary, albumRow)
 	}
+	for path, result := range a.scrapeGenericFiles(r.Context(), genericPaths, client, body.Overwrite, body.DryRun, body.WithArtwork) {
+		raw := genericRaw[path]
+		result.Path = raw
+		results[raw] = result
+		for _, field := range result.WrittenFields {
+			if field == "genre" {
+				genreWritten++
+			}
+		}
+		if result.Lyrics {
+			lyricsWritten++
+		}
+		if result.Cover {
+			coverWritten++
+		}
+	}
+
 	files := make([]scrapeFileResult, 0, len(ordered))
 	counts := map[string]int{"written": 0, "planned": 0, "unchanged": 0, "skipped": 0, "failed": 0}
 	for _, raw := range ordered {
@@ -368,4 +397,19 @@ func (a *App) scrapeLibrary(w http.ResponseWriter, r *http.Request) {
 		"with_artwork": body.WithArtwork, "lyrics_written": lyricsWritten, "cover_written": coverWritten,
 		"note": note,
 	})
+}
+
+func scrapeIdentityFromPath(path string) (artist, album, title string) {
+	dir := filepath.Dir(path)
+	album = strings.TrimSpace(filepath.Base(dir))
+	artist = strings.TrimSpace(filepath.Base(filepath.Dir(dir)))
+	title = strings.TrimSpace(strings.TrimSuffix(filepath.Base(path), filepath.Ext(path)))
+	if fields := strings.Fields(title); len(fields) > 1 {
+		head := strings.TrimRight(fields[0], ".-_")
+		if _, err := strconv.Atoi(head); err == nil {
+			title = strings.TrimSpace(strings.Join(fields[1:], " "))
+		}
+	}
+	title = strings.TrimLeft(title, "-_. ")
+	return artist, album, title
 }

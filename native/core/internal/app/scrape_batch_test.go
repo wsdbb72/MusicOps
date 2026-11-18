@@ -2,8 +2,10 @@ package app
 
 import (
 	"bytes"
+	"context"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -131,14 +133,14 @@ func TestScrapeBatchDryRunDoesNotWrite(t *testing.T) {
 }
 
 // Files that cannot be scraped are reported per file, never silently dropped.
-func TestScrapeBatchReportsSkippedFiles(t *testing.T) {
+func TestScrapeBatchInfersUntaggedPathAndReportsUnsupportedFiles(t *testing.T) {
 	application := newApp(t)
 	fake := newFakeMusicBrainz(t, catalogCompletionSearch, scrapeDetailJSON, http.StatusOK)
 	untaggedPath, _ := writeScrapeFLAC(t, application, "untagged.flac", 240.25, flactags.Tags{})
 	code, decoded := scrapePost(t, application, map[string]any{
 		"paths": []string{untaggedPath, "incoming/missing.flac"}, "catalog_base_url": fake.server.URL,
 	})
-	if code != http.StatusOK || decoded["skipped"] != float64(2) {
+	if code != http.StatusOK || decoded["skipped"] != float64(1) || decoded["failed"] != float64(1) {
 		t.Fatal(code, decoded)
 	}
 	files, _ := decoded["files"].([]any)
@@ -150,7 +152,7 @@ func TestScrapeBatchReportsSkippedFiles(t *testing.T) {
 		entry, _ := item.(map[string]any)
 		codes[entry["code"].(string)] = true
 	}
-	if !codes["NO_TAGS"] || !codes["UNSUPPORTED"] {
+	if !codes["CATALOG_UNCONFIRMED"] || !codes["UNSUPPORTED"] {
 		t.Fatal(codes)
 	}
 }
@@ -161,5 +163,43 @@ func TestScrapeBatchRejectsAnEmptySelection(t *testing.T) {
 	recorder := postRaw(t, application, "/v1/library/scrape", map[string]any{"paths": []string{"  "}})
 	if recorder.Code != http.StatusBadRequest || !strings.Contains(recorder.Body.String(), "请先勾选") {
 		t.Fatal(recorder.Code, recorder.Body.String())
+	}
+}
+
+func TestScrapeBatchWritesNonFLACTagsWithoutChangingAudio(t *testing.T) {
+	ffmpeg, err := exec.LookPath("ffmpeg")
+	if err != nil {
+		t.Skip("ffmpeg unavailable")
+	}
+	application := newApp(t)
+	dir := filepath.Join(application.Dir, "incoming")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	full := filepath.Join(dir, "opening.mp3")
+	command := exec.Command(ffmpeg, "-nostdin", "-v", "error", "-y", "-f", "lavfi", "-i", "sine=frequency=440:duration=1",
+		"-metadata", "artist=Some Artist", "-metadata", "album=First Album", "-metadata", "title=Opening", full)
+	if output, err := command.CombinedOutput(); err != nil {
+		t.Fatal(err, string(output))
+	}
+	before, err := genericAudioHash(context.Background(), full)
+	if err != nil {
+		t.Fatal(err)
+	}
+	detail := `{"id":"aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee","title":"First Album","date":"2019-01-02","artist-credit":[{"artist":{"name":"Some Artist"},"name":"Some Artist"}],"release-group":{"id":"bbbbbbbb-cccc-dddd-eeee-ffffffffffff"},"genres":[{"name":"Ambient","count":4}],"media":[{"position":1,"track-count":1,"tracks":[{"id":"t1","title":"Opening","position":1,"length":1000,"artist-credit":[{"artist":{"name":"Some Artist"},"name":"Some Artist"}]}]}]}`
+	fake := newFakeMusicBrainz(t, catalogCompletionSearch, detail, http.StatusOK)
+	code, decoded := scrapePost(t, application, map[string]any{
+		"paths": []string{"incoming/opening.mp3"}, "catalog_base_url": fake.server.URL,
+	})
+	if code != http.StatusOK || decoded["written"] != float64(1) || decoded["failed"] != float64(0) {
+		t.Fatal(code, decoded)
+	}
+	after, err := genericAudioHash(context.Background(), full)
+	if err != nil || after != before {
+		t.Fatalf("audio stream changed: %s %s %v", before, after, err)
+	}
+	info, err := probeGenericAudio(context.Background(), full)
+	if err != nil || firstNonEmpty(info.Tags["album_artist"], info.Tags["albumartist"]) != "Some Artist" || info.Genre != "Ambient" || info.Date != "2019-01-02" || info.Track != "1" {
+		t.Fatalf("info=%+v err=%v", info, err)
 	}
 }

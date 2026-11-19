@@ -54,6 +54,7 @@ func TestDownloadExternalCoverRejectsArbitraryHosts(t *testing.T) {
 }
 
 func TestNeteaseMediaQualityLadderFallsBackPastUnavailableLossless(t *testing.T) {
+	vaultKey(t)
 	var levels []string
 	var server *httptest.Server
 	server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

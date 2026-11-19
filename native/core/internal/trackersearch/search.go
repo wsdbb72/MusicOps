@@ -450,6 +450,9 @@ func (c *Client) preflightBody(base Observation, q Query, body []byte) Observati
 		failed.Status = status
 		failed.ErrorClass = status
 		failed.Reason = "只读预检未通过"
+		if reason := gazelleFailureReason(body); reason != "" {
+			failed.Reason = reason
+		}
 		return failed
 	}
 	if stringValue(payload["id"]) == "" || stringValue(payload["username"]) == "" {
@@ -494,8 +497,15 @@ func tokenBalance(payload map[string]any) (int, bool) {
 func (c *Client) gazelle(base Observation, q Query, body []byte) Observation {
 	payload, status := gazelleObject(body)
 	if status != "" {
-		failed := c.finish(q, Observation{Status: status, Reason: "API失败或响应结构改变"})
-		return failed
+		reason := "API失败或响应结构改变"
+		if safe := gazelleFailureReason(body); safe != "" {
+			reason = safe
+		}
+		if status == "API_CONTRACT_ERROR" && transientSearchFailure(reason) {
+			c.block(q.Site, 60)
+			return c.finish(q, Observation{Status: "RATE_LIMITED", Reason: "站点返回限流：" + reason})
+		}
+		return c.finish(q, Observation{Status: status, Reason: reason})
 	}
 	results, ok := payload["results"].([]any)
 	if !ok {
@@ -539,6 +549,48 @@ func gazelleObject(body []byte) (map[string]any, string) {
 		return nil, "API_CONTRACT_ERROR"
 	}
 	return payload, ""
+}
+
+func gazelleFailureReason(body []byte) string {
+	decoder := json.NewDecoder(strings.NewReader(string(body)))
+	decoder.UseNumber()
+	var data map[string]any
+	if decoder.Decode(&data) != nil {
+		return ""
+	}
+	candidates := []any{data["error"], data["message"]}
+	if response, ok := data["response"].(map[string]any); ok {
+		candidates = append(candidates, response["error"], response["message"])
+	}
+	for _, raw := range candidates {
+		value := strings.TrimSpace(stringValue(raw))
+		if value == "" {
+			continue
+		}
+		value = strings.Map(func(r rune) rune {
+			if r < 0x20 || r == 0x7f {
+				return ' '
+			}
+			return r
+		}, value)
+		value = strings.Join(strings.Fields(value), " ")
+		runes := []rune(value)
+		if len(runes) > 180 {
+			value = string(runes[:180])
+		}
+		return value
+	}
+	return ""
+}
+
+func transientSearchFailure(reason string) bool {
+	reason = strings.ToLower(reason)
+	for _, marker := range []string{"rate limit", "too many", "try again", "temporar", "slow down", "busy", "请稍后", "稍后重试", "频繁"} {
+		if strings.Contains(reason, marker) {
+			return true
+		}
+	}
+	return false
 }
 
 func gazellePages(payload map[string]any, requested int, empty bool) (int, *int, bool, bool) {

@@ -37,6 +37,47 @@ func TestTrackerSitesMatchTheConfiguredOrder(t *testing.T) {
 	}
 }
 
+func TestNeteaseSourceFallbackWaitsUntilSitesAreExhausted(t *testing.T) {
+	contract := base()
+	contract.Scene = "expand"
+	contract.SourceFallback = true
+	contract.Sites = sites(map[string]SiteReport{"dicmusic": {Status: "API_CONTRACT_ERROR", Attempted: true}})
+	if decision, err := Decide(contract); err != nil || decision.Action != ActionRetry || decision.Reason != "transient_retry" {
+		t.Fatalf("contract decision=%+v err=%v", decision, err)
+	}
+
+	candidate := base()
+	candidate.Scene = "expand"
+	candidate.SourceFallback = true
+	candidate.Sites = sites(map[string]SiteReport{"dicmusic": exact("dicmusic", 3, true)})
+	if decision, err := Decide(candidate); err != nil || decision.Action != ActionReviewCandidate || decision.Reason != "selection_required" {
+		t.Fatalf("candidate decision=%+v err=%v", decision, err)
+	}
+
+	authAndEmpty := base()
+	authAndEmpty.Scene = "expand"
+	authAndEmpty.SourceFallback = true
+	authAndEmpty.Sites = sites(map[string]SiteReport{
+		"open.cd":  {Status: "AUTH_FAILED", Attempted: true},
+		"redacted": {Status: "DISABLED"},
+	})
+	if decision, err := Decide(authAndEmpty); err != nil || decision.Action != ActionFallback || decision.Reason != "sites_exhausted" {
+		t.Fatalf("auth decision=%+v err=%v", decision, err)
+	}
+
+	contractExhausted := base()
+	contractExhausted.Scene = "expand"
+	contractExhausted.SourceFallback = true
+	contractExhausted.RetryCount = 3
+	contractExhausted.Sites = sites(map[string]SiteReport{
+		"dicmusic": {Status: "API_CONTRACT_ERROR", Attempted: true},
+		"redacted": {Status: "DISABLED"},
+	})
+	if decision, err := Decide(contractExhausted); err != nil || decision.Action != ActionFallback || decision.Reason != "transient_recovered" {
+		t.Fatalf("contract exhausted decision=%+v err=%v", decision, err)
+	}
+}
+
 func TestOfflineSamplesCoverSearchClassesWithoutClaimingDownloads(t *testing.T) {
 	type sample struct {
 		name        string
@@ -156,12 +197,12 @@ func TestOfflineSamplesCoverSearchClassesWithoutClaimingDownloads(t *testing.T) 
 			r := base()
 			r.Sites = sites(map[string]SiteReport{"open.cd": {Status: "PARSE_ERROR", Attempted: true}})
 			return r
-		}(), action: ActionReviewSearch, reason: "contract_error", deferStream: true},
+		}(), action: ActionRetry, reason: "transient_retry", delay: 600, deferStream: true},
 		{name: "api-contract", report: func() Report {
 			r := base()
 			r.Sites = sites(map[string]SiteReport{"dicmusic": {Status: "API_CONTRACT_ERROR", Attempted: true}})
 			return r
-		}(), action: ActionReviewSearch, reason: "contract_error", deferStream: true},
+		}(), action: ActionRetry, reason: "transient_retry", delay: 600, deferStream: true},
 		{name: "disabled-sites-do-not-stream", report: func() Report {
 			r := base()
 			r.Sites = sites(map[string]SiteReport{"open.cd": {Status: "DISABLED"}, "dicmusic": {Status: "DISABLED"}, "orpheus": {Status: "DISABLED"}, "redacted": {Status: "DISABLED"}})

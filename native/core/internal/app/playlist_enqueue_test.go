@@ -88,6 +88,11 @@ func TestEnqueueGroupsRowsByAlbum(t *testing.T) {
 	if first.Scene != "expand" || first.Stage != "identifying" || first.Label != "Artist A - Album X" {
 		t.Fatalf("%+v", first)
 	}
+	raw, found, dataErr := application.tasks.Data(first.ActiveTaskID, "arguments", 0)
+	plan, decodeErr := decodePlan(raw)
+	if dataErr != nil || !found || decodeErr != nil || plan.Query != "Artist A Song One" {
+		t.Fatalf("query plan=%+v found=%v dataErr=%v decodeErr=%v", plan, found, dataErr, decodeErr)
+	}
 	second, err := application.flows.Job(report.Created[1])
 	if err != nil {
 		t.Fatal(err)

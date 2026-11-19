@@ -88,6 +88,20 @@ func TestAuthAndContractFailuresAreNotEmptyResults(t *testing.T) {
 	}
 }
 
+func TestGazelleJSONRateLimitIsRemembered(t *testing.T) {
+	body := `{"status":"failure","error":"Too many requests. Please try again later."}`
+	doer := &recordDoer{next: jsonResponse(body)}
+	client := &Client{Doer: doer}
+	first, err := client.Search(context.Background(), Query{Site: "dicmusic", Text: "Artist", Cookie: "session=virtual"})
+	if err != nil || first.Status != "RATE_LIMITED" || !strings.Contains(first.Reason, "Too many requests") {
+		t.Fatalf("first=%+v err=%v", first, err)
+	}
+	second, err := client.Search(context.Background(), Query{Site: "dicmusic", Text: "Artist", Cookie: "session=virtual"})
+	if err != nil || second.Status != "RATE_LIMITED" || len(doer.urls) != 1 {
+		t.Fatalf("second=%+v urls=%d err=%v", second, len(doer.urls), err)
+	}
+}
+
 func TestPreflightOmitsSecretsAndDoesNotSpend(t *testing.T) {
 	body := `{"status":"success","response":{"id":1,"username":"private-name","authkey":"private-key","passkey":"private-pass","userstats":{"tokens":12}}}`
 	out, err := (&Client{Doer: &recordDoer{next: jsonResponse(body)}}).Preflight(context.Background(), Query{Site: "dicmusic", Cookie: "session=virtual"})

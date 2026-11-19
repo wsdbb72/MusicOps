@@ -418,6 +418,45 @@ func TestReadMetadataReportsCoverWithoutLoadingAudio(t *testing.T) {
 	}
 }
 
+func TestID3PrefixedFLACReadsAndWritesWithoutLosingPrefix(t *testing.T) {
+	requireFFmpeg(t)
+	dir := t.TempDir()
+	base := genFLAC(t, dir, "id3-base.flac")
+	body, err := os.ReadFile(base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	prefix := []byte{'I', 'D', '3', 4, 0, 0, 0, 0, 0, 0}
+	path := filepath.Join(dir, "id3-prefixed.flac")
+	if err := os.WriteFile(path, append(append([]byte(nil), prefix...), body...), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if tags, err := ReadMetadata(path); err != nil || tags.StreamInfo.SampleRate <= 0 {
+		t.Fatalf("metadata read tags=%+v err=%v", tags, err)
+	}
+	if tags, err := ReadFile(path); err != nil || tags.StreamInfo.SampleRate <= 0 {
+		t.Fatalf("full read tags=%+v err=%v", tags, err)
+	}
+	beforeHash := pcmHash(t, path)
+	if err := Write(path, Tags{Title: "Prefixed", Artist: "Artist", Album: "Album"}); err != nil {
+		t.Fatal(err)
+	}
+	after, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.HasPrefix(after, prefix) {
+		t.Fatal("ID3v2 prefix was not preserved")
+	}
+	tags, err := ReadMetadata(path)
+	if err != nil || tags.Title != "Prefixed" {
+		t.Fatalf("tags=%+v err=%v", tags, err)
+	}
+	if afterHash := pcmHash(t, path); afterHash != beforeHash {
+		t.Fatalf("PCM changed: %s -> %s", beforeHash, afterHash)
+	}
+}
+
 func TestWriteToRefusesExistingDestination(t *testing.T) {
 	requireFFmpeg(t)
 	dir := t.TempDir()

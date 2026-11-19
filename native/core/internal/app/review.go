@@ -33,6 +33,7 @@ type reviewCandidateView struct {
 type reviewSiteView struct {
 	Site           string `json:"site"`
 	Status         string `json:"status"`
+	Reason         string `json:"reason,omitempty"`
 	CandidateCount int    `json:"candidate_count"`
 	Exact          bool   `json:"exact"`
 	Limited        bool   `json:"limited"`
@@ -87,7 +88,7 @@ func (a *App) reviewObservations(inspection workflow.Inspection, plan SearchPlan
 			continue
 		}
 		row, _, _ := summarizeSite(plan, site, observation)
-		sites = append(sites, reviewSiteView{Site: site, Status: row.Status, CandidateCount: row.CandidateCount, Exact: row.Exact, Limited: row.Limited})
+		sites = append(sites, reviewSiteView{Site: site, Status: row.Status, Reason: observation.Reason, CandidateCount: row.CandidateCount, Exact: row.Exact, Limited: row.Limited})
 		for _, candidate := range observation.Candidates {
 			hit := releaseHit(candidate)
 			if hit.Title == "" {

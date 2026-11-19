@@ -191,9 +191,6 @@ func decide(in classified) Decision {
 	if !report.IdentityConfirmed {
 		return Decision{Action: ActionReviewSearch, Reason: "unknown_release"}
 	}
-	if report.SourceFallback && report.Scene == "expand" && report.StreamingEnabled && report.SelectedSite == "" {
-		return Decision{Action: ActionFallback, Reason: "original_playlist_source"}
-	}
 	if report.VersionChoice && (len(in.qualified) > 0 || in.mismatch || in.held) {
 		return Decision{Action: ActionReviewCandidate, Reason: "version_choice"}
 	}
@@ -278,7 +275,7 @@ func retryable(in classified) bool {
 	saw := false
 	for _, site := range TrackerSites {
 		switch in.classes[site] {
-		case ClassRateLimited, ClassNetwork, ClassTransient:
+		case ClassRateLimited, ClassNetwork, ClassTransient, ClassContract:
 			saw = true
 		case ClassNoResult, ClassDisabled, ClassMismatch, ClassMatched:
 		default:
@@ -297,10 +294,19 @@ func blocked(in classified) (string, string, bool) {
 		case ClassNotSearched:
 			return ActionReviewSearch, "incomplete_search", true
 		case ClassAuth:
+			if in.report.SourceFallback {
+				continue
+			}
 			return ActionReviewSearch, "auth_blocked", true
 		case ClassForbidden:
+			if in.report.SourceFallback {
+				continue
+			}
 			return ActionReviewSearch, "access_blocked", true
 		case ClassContract:
+			if recoverableTransient(in) {
+				return ActionFallback, "transient_recovered", true
+			}
 			return ActionReviewSearch, "contract_error", true
 		case ClassRateLimited, ClassNetwork, ClassTransient:
 			if recoverableTransient(in) {
@@ -318,19 +324,22 @@ func blocked(in classified) (string, string, bool) {
 		return ActionReviewSearch, "limited_results", true
 	}
 	if disabled == len(TrackerSites) {
+		if in.report.SourceFallback && in.report.StreamingEnabled && fallbackAllowed(in.report) {
+			return ActionFallback, "source_platform_explicit", true
+		}
 		return ActionReviewSearch, "no_sites_enabled", true
 	}
 	return "", "", false
 }
 
 func recoverableTransient(in classified) bool {
-	if !in.report.IdentityConfirmed || !in.report.StreamingEnabled || !fallbackScene(in.report.Scene) || in.report.RetryCount < 3 {
+	if !in.report.IdentityConfirmed || !in.report.StreamingEnabled || !fallbackAllowed(in.report) || in.report.RetryCount < 3 {
 		return false
 	}
 	saw := false
 	for _, site := range TrackerSites {
 		switch in.classes[site] {
-		case ClassRateLimited, ClassNetwork, ClassTransient:
+		case ClassRateLimited, ClassNetwork, ClassTransient, ClassContract:
 			saw = true
 		case ClassNoResult, ClassDisabled:
 		default:
@@ -341,7 +350,7 @@ func recoverableTransient(in classified) bool {
 }
 
 func autoFallback(in classified) bool {
-	if !in.report.IdentityConfirmed || !in.report.StreamingEnabled || !fallbackScene(in.report.Scene) || in.limited {
+	if !in.report.IdentityConfirmed || !in.report.StreamingEnabled || !fallbackAllowed(in.report) || in.limited {
 		return false
 	}
 	enabled := 0
@@ -350,6 +359,10 @@ func autoFallback(in classified) bool {
 		case ClassDisabled:
 		case ClassNoResult:
 			enabled++
+		case ClassAuth, ClassForbidden:
+			if !in.report.SourceFallback {
+				return false
+			}
 		default:
 			return false
 		}
@@ -452,6 +465,10 @@ func knownScene(scene string) bool {
 
 func fallbackScene(scene string) bool {
 	return scene == "playlist" || scene == "fill"
+}
+
+func fallbackAllowed(report Report) bool {
+	return fallbackScene(report.Scene) || report.SourceFallback && report.Scene == "expand"
 }
 
 func trackerSite(site string) bool {

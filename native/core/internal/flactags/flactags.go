@@ -99,6 +99,7 @@ type block struct {
 // parsedFile is a fully parsed FLAC file: metadata blocks plus the
 // untouched audio bytes that follow them.
 type parsedFile struct {
+	prefix     []byte // optional ID3v2 prefix before the fLaC stream
 	blocks     []block
 	commentIdx int // index into blocks of the VORBIS_COMMENT block, or -1
 	vendor     string
@@ -126,7 +127,31 @@ func ReadMetadata(path string) (*Tags, error) {
 	}
 	defer file.Close()
 	var magic [4]byte
-	if _, err := io.ReadFull(file, magic[:]); err != nil || string(magic[:]) != flacMagic {
+	if _, err := io.ReadFull(file, magic[:]); err != nil {
+		return nil, fmt.Errorf("flactags: read %s: %w", path, err)
+	}
+	if string(magic[:3]) == "ID3" {
+		var header [10]byte
+		copy(header[:4], magic[:])
+		if _, err := io.ReadFull(file, header[4:]); err != nil {
+			return nil, fmt.Errorf("flactags: read ID3 header in %s: %w", path, err)
+		}
+		tagSize, ok := id3v2Size(header[:])
+		if !ok {
+			return nil, fmt.Errorf("flactags: invalid ID3v2 header in %s", path)
+		}
+		if header[5]&0x10 != 0 {
+			tagSize += 10
+		}
+		if remaining := int64(tagSize - 10); remaining > 0 {
+			if _, err := file.Seek(remaining, io.SeekCurrent); err != nil {
+				return nil, fmt.Errorf("flactags: skip ID3 tag in %s: %w", path, err)
+			}
+		}
+		if _, err := io.ReadFull(file, magic[:]); err != nil || string(magic[:]) != flacMagic {
+			return nil, fmt.Errorf("flactags: %s has an ID3v2 tag but no FLAC stream", path)
+		}
+	} else if string(magic[:]) != flacMagic {
 		return nil, fmt.Errorf("flactags: %s is not a FLAC file", path)
 	}
 	var streamInfo StreamInfo
@@ -289,6 +314,7 @@ func WriteBytes(data []byte, tags Tags) ([]byte, error) {
 	}
 
 	var out bytes.Buffer
+	out.Write(pf.prefix)
 	out.WriteString(flacMagic)
 	for i, b := range blocks {
 		last := i == len(blocks)-1
@@ -301,17 +327,52 @@ func WriteBytes(data []byte, tags Tags) ([]byte, error) {
 	return out.Bytes(), nil
 }
 
+func id3v2Size(header []byte) (int, bool) {
+	if len(header) < 10 || string(header[:3]) != "ID3" {
+		return 0, false
+	}
+	size := 0
+	for _, value := range header[6:10] {
+		if value&0x80 != 0 {
+			return 0, false
+		}
+		size = size<<7 | int(value)
+	}
+	return 10 + size, true
+}
+
+func splitID3v2Prefix(data []byte) ([]byte, []byte, error) {
+	if len(data) >= len(flacMagic) && string(data[:len(flacMagic)]) == flacMagic {
+		return nil, data, nil
+	}
+	if len(data) < 10 || string(data[:3]) != "ID3" {
+		return nil, nil, errors.New("flactags: not a FLAC file (missing fLaC magic)")
+	}
+	total, ok := id3v2Size(data[:10])
+	if !ok {
+		return nil, nil, errors.New("flactags: invalid ID3v2 header")
+	}
+	if data[5]&0x10 != 0 {
+		total += 10
+	}
+	if total < 10 || total > len(data)-len(flacMagic) || string(data[total:total+len(flacMagic)]) != flacMagic {
+		return nil, nil, errors.New("flactags: ID3v2 prefix contains no complete FLAC stream")
+	}
+	return data[:total], data[total:], nil
+}
+
 // parseFLAC parses the FLAC magic, the metadata block chain and the audio
 // tail. It validates the structure strictly: bad magic, a truncated block,
 // a first block that is not STREAMINFO, a STREAMINFO of the wrong size, a
 // reserved/invalid block type, a chain that never terminates, or an
 // invalid Vorbis comment block are all errors.
 func parseFLAC(data []byte) (*parsedFile, error) {
-	if len(data) < len(flacMagic) || string(data[:len(flacMagic)]) != flacMagic {
-		return nil, errors.New("flactags: not a FLAC file (missing fLaC magic)")
+	prefix, flac, err := splitID3v2Prefix(data)
+	if err != nil {
+		return nil, err
 	}
-	pf := &parsedFile{commentIdx: -1}
-	rest := data[len(flacMagic):]
+	pf := &parsedFile{prefix: append([]byte(nil), prefix...), commentIdx: -1}
+	rest := flac[len(flacMagic):]
 	terminated := false
 	for len(rest) > 0 {
 		if len(rest) < 4 {
@@ -718,6 +779,7 @@ func EmbedFrontCover(data, image []byte) ([]byte, error) {
 	}
 	blocks = append(blocks, block{typ: blockPicture, data: payload})
 	var out bytes.Buffer
+	out.Write(pf.prefix)
 	out.WriteString(flacMagic)
 	for i, item := range blocks {
 		if err := writeBlockHeader(&out, item.typ, len(item.data), i == len(blocks)-1); err != nil {
@@ -744,6 +806,7 @@ func RemoveFrontCover(data []byte) ([]byte, error) {
 		blocks = append(blocks, item)
 	}
 	var out bytes.Buffer
+	out.Write(pf.prefix)
 	out.WriteString(flacMagic)
 	for i, item := range blocks {
 		if err := writeBlockHeader(&out, item.typ, len(item.data), i == len(blocks)-1); err != nil {

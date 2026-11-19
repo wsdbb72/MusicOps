@@ -2082,7 +2082,7 @@ const appJS = `(function () {
         return;
       }
       var html = "<h3>待核对</h3><p>" + escapeText(body.message || "") + "</p><p class=\"meta\">期望：" + escapeText(body.expected_title || "") + (body.expected_artist ? " · " + escapeText(body.expected_artist) : "") + "</p>";
-      html += "<p class=\"meta\">" + (body.sites || []).map(function (site) { return escapeText(site.site) + "：" + escapeText(site.status) + "（" + site.candidate_count + " 个结果" + (site.exact ? "，有精确匹配" : "") + (site.limited ? "，未搜全" : "") + ")"; }).join("<br>") + "</p>";
+      html += "<p class=\"meta\">" + (body.sites || []).map(function (site) { return escapeText(site.site) + "：" + escapeText(site.status) + "（" + site.candidate_count + " 个结果" + (site.exact ? "，有精确匹配" : "") + (site.limited ? "，未搜全" : "") + (site.reason ? "，" + escapeText(site.reason) : "") + ")"; }).join("<br>") + "</p>";
       var candidates = body.candidates || [];
       if (candidates.length) {
         html += "<p>候选（只列出已观测到的结果）：</p>";

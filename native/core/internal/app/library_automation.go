@@ -142,6 +142,7 @@ type libraryAutomationReport struct {
 	ArtworkFailed     int      `json:"artwork_failed"`
 	Backlog           bool     `json:"backlog,omitempty"`
 	ScrapeFailed      int      `json:"scrape_failed"`
+	RetryAfterSec     int      `json:"retry_after_sec,omitempty"`
 	DuplicateGroups   int      `json:"duplicate_groups"`
 	Deduplicated      int      `json:"deduplicated"`
 	UpgradeJobs       int      `json:"upgrade_jobs"`
@@ -324,7 +325,11 @@ func (a *App) runLibraryAutomationScheduler(stop <-chan struct{}) {
 			}
 			running, report := a.libraryAutomation.snapshot()
 			if !running && report.Backlog && report.Finished != "" && report.Finished != lastBacklogFinished {
-				soon := now.Add(time.Minute)
+				delay := time.Minute
+				if report.RetryAfterSec > int(delay/time.Second) {
+					delay = time.Duration(report.RetryAfterSec) * time.Second
+				}
+				soon := now.Add(delay)
 				if soon.Before(nextRun) {
 					nextRun = soon
 				}
@@ -684,13 +689,27 @@ func (a *App) runAutomatedScrape(ctx context.Context, root string, paths []strin
 
 	invalidated := map[string]bool{}
 	processed, skipped := 0, 0
+	catalogPaused := false
+	recordCatalogPause := func(err error) bool {
+		var backoff *catalogBackoffError
+		if !errors.As(err, &backoff) {
+			return false
+		}
+		delaySec := int(backoff.delay / time.Second)
+		state.update(func(report *libraryAutomationReport) {
+			report.Backlog = true
+			report.RetryAfterSec = delaySec
+			report.Note = fmt.Sprintf("目录服务暂不可用，%d 分钟后自动继续刮削", (delaySec+59)/60)
+		})
+		return true
+	}
 	dirs := make([]string, 0, len(catalogByDir))
 	for dir := range catalogByDir {
 		dirs = append(dirs, dir)
 	}
 	sort.Strings(dirs)
 	for _, dir := range dirs {
-		if ctx.Err() != nil {
+		if ctx.Err() != nil || catalogPaused {
 			break
 		}
 		eligible := make([]string, 0, len(catalogByDir[dir]))
@@ -724,6 +743,10 @@ func (a *App) runAutomatedScrape(ctx context.Context, root string, paths []strin
 			state.touch("scrape", dir)
 			if err != nil {
 				state.addError(fmt.Errorf("%s: 整库刮削失败: %w", filepath.Base(dir), err))
+				catalogPaused = recordCatalogPause(err)
+				if catalogPaused {
+					break
+				}
 			}
 		}
 	}
@@ -734,7 +757,7 @@ func (a *App) runAutomatedScrape(ctx context.Context, root string, paths []strin
 	}
 	sort.Strings(genericDirs)
 	for _, dir := range genericDirs {
-		if ctx.Err() != nil {
+		if ctx.Err() != nil || catalogPaused {
 			break
 		}
 		eligible := make([]string, 0, len(genericByDir[dir]))
@@ -768,6 +791,10 @@ func (a *App) runAutomatedScrape(ctx context.Context, root string, paths []strin
 			state.touch("scrape", dir)
 			if err != nil {
 				state.addError(fmt.Errorf("%s: 通用格式刮削失败: %w", filepath.Base(dir), err))
+				catalogPaused = recordCatalogPause(err)
+				if catalogPaused {
+					break
+				}
 			}
 		}
 	}
@@ -780,7 +807,7 @@ func (a *App) runAutomatedScrape(ctx context.Context, root string, paths []strin
 	}
 	sort.Strings(flacDirs)
 	for _, dir := range flacDirs {
-		if ctx.Err() != nil {
+		if ctx.Err() != nil || catalogPaused {
 			break
 		}
 		for start := 0; start < len(artworkFLACByDir[dir]); start += scrapeArtworkMaxFiles {
@@ -808,6 +835,10 @@ func (a *App) runAutomatedScrape(ctx context.Context, root string, paths []strin
 			if err != nil {
 				artworkFailed += len(claimed)
 				state.addError(fmt.Errorf("%s: 歌词封面刮削失败: %w", filepath.Base(dir), err))
+				catalogPaused = recordCatalogPause(err)
+				if catalogPaused {
+					break
+				}
 			}
 			state.update(func(report *libraryAutomationReport) {
 				report.ArtworkProcessed = artworkProcessed
@@ -923,11 +954,14 @@ func (a *App) runAutomatedGenericScrapeDir(ctx context.Context, dir string, path
 			duration := info.Duration
 			tracks = append(tracks, catalogTrackRequest{Title: info.Title, Artists: []string{info.Artist}, Duration: &duration})
 		}
-		lookup, err := identifyCatalogLookup(musicbrainz.NewClient(), a.engine, catalogIdentifyRequest{
+		lookup, err := identifyCatalogLookup(catalogClient, a.engine, catalogIdentifyRequest{
 			Artist: artist, Album: album, Tracks: tracks,
 		}, catalogBudget, catalogTTL)
 		if err != nil {
 			counts.Failed += len(infos)
+			if delay, backoff := catalogBackoffDelay(err); backoff {
+				return counts, &catalogBackoffError{cause: err, delay: delay}
+			}
 			if firstErr == nil {
 				firstErr = err
 			}
@@ -969,6 +1003,51 @@ func (a *App) runAutomatedGenericScrapeDir(ctx context.Context, dir string, path
 	return counts, firstErr
 }
 
+type catalogBackoffError struct {
+	cause error
+	delay time.Duration
+}
+
+func (e *catalogBackoffError) Error() string {
+	if e == nil || e.cause == nil {
+		return "catalog service temporarily unavailable"
+	}
+	return e.cause.Error()
+}
+
+func (e *catalogBackoffError) Unwrap() error {
+	if e == nil {
+		return nil
+	}
+	return e.cause
+}
+
+func catalogBackoffDelay(err error) (time.Duration, bool) {
+	var rateErr *musicbrainz.RateLimitError
+	if errors.As(err, &rateErr) {
+		delay := rateErr.RetryAfter
+		if delay < time.Minute {
+			delay = time.Minute
+		}
+		if delay > 30*time.Minute {
+			delay = 30 * time.Minute
+		}
+		return delay, true
+	}
+	var serverErr *musicbrainz.ServerError
+	if errors.As(err, &serverErr) {
+		return 15 * time.Minute, true
+	}
+	return 0, false
+}
+
+func wrapCatalogBackoff(err error) error {
+	if delay, ok := catalogBackoffDelay(err); ok {
+		return &catalogBackoffError{cause: err, delay: delay}
+	}
+	return err
+}
+
 type automationScrapeCounts struct {
 	Written       int
 	Failed        int
@@ -984,6 +1063,18 @@ func (a *App) runScrapeBatch(ctx context.Context, paths []string, withArtwork bo
 		return automationScrapeCounts{}, err
 	}
 	if status < 200 || status >= 300 {
+		var failure struct {
+			Code          string `json:"code"`
+			RetryAfterSec int    `json:"retry_after_sec"`
+		}
+		_ = json.Unmarshal(raw, &failure)
+		if failure.Code == "CATALOG_TEMPORARILY_UNAVAILABLE" {
+			delay := time.Duration(failure.RetryAfterSec) * time.Second
+			if delay <= 0 {
+				delay = 15 * time.Minute
+			}
+			return automationScrapeCounts{}, &catalogBackoffError{cause: fmt.Errorf("HTTP %d: %s", status, strings.TrimSpace(string(raw))), delay: delay}
+		}
 		return automationScrapeCounts{}, fmt.Errorf("HTTP %d: %s", status, strings.TrimSpace(string(raw)))
 	}
 	var decoded struct {

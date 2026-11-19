@@ -259,26 +259,24 @@ func TestAliasResearchDefersAndDoesNotConfirmANewIdentity(t *testing.T) {
 	}
 }
 
-func TestExhaustedTransientSearchRecoversWithoutADownload(t *testing.T) {
-	repo, tasks, token := openSearch(t)
+func TestExhaustedTransientSearchRequiresReviewInsteadOfStreaming(t *testing.T) {
+	repo, _, token := openSearch(t)
 	report := searchdecision.Report{
 		Scene: "playlist", IdentityConfirmed: true, StreamingEnabled: true, RetryCount: 3,
 		Sites: fourSites(map[string]searchdecision.SiteReport{"redacted": {Status: "RATE_LIMITED", Attempted: true}}),
 	}
-	early := report
-	early.RetryCount = 2
-	if _, err := repo.Complete("too-soon", token, Complete{JobID: "search:album1", Edge: edgeQueueProcess, NextStage: "fallback", TaskState: "completed", NowNS: 4000, Evidence: searchEvidence(), Search: &early}); !errors.Is(err, dataengine.ErrInvalidRequest) {
-		t.Fatal(err)
+	fallback := Complete{JobID: "search:album1", Edge: edgeQueueProcess, NextStage: "fallback", TaskState: "completed", NowNS: 4000, Evidence: searchEvidence(), Search: &report}
+	if _, err := repo.Complete("exhausted-fallback", token, fallback); !errors.Is(err, dataengine.ErrInvalidRequest) {
+		t.Fatalf("exhausted transient search was allowed to stream: %v", err)
 	}
-	result, err := repo.Complete("recover", token, Complete{JobID: "search:album1", Edge: edgeQueueProcess, NextStage: "fallback", TaskState: "completed", NowNS: 4000, Evidence: searchEvidence(), Search: &report})
-	if err != nil || len(result.Children) != 1 || result.Children[0].Stage != "fallback" || result.Children[0].SearchAction != searchdecision.ActionFallback {
+	result, err := repo.Complete("review", token, Complete{
+		JobID: "search:album1", Edge: edgeTerminal, NextStage: "needs_review", ReviewKind: "search",
+		TaskState: "blocked", NowNS: 4000, Evidence: searchEvidence(), Search: &report,
+	})
+	if err != nil || result.Job.Stage != "needs_review" || result.Job.ReviewKind != "search" || result.Job.SearchAction != searchdecision.ActionReviewSearch || len(result.Children) != 0 {
 		t.Fatal(result, err)
 	}
-	if result.Children[0].Message != "已排队流媒体回退；尚未下载、尚未入库" || result.Search == nil || result.Search.Reason != "transient_recovered" {
-		t.Fatal(result.Children[0].Message, result.Search)
-	}
-	task, err := tasks.Get(result.Children[0].ID)
-	if err != nil || task == nil || task.State != "queued" {
-		t.Fatal(task, err)
+	if result.Search == nil || result.Search.Reason != "transient_exhausted" || result.Search.StreamingDeferred != true {
+		t.Fatal(result.Search)
 	}
 }

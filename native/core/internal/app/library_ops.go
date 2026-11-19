@@ -366,12 +366,13 @@ func (a *App) completeMetadata(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "code": "INVALID_REQUEST", "written": false, "error": "艺人、专辑、曲名至少要从文件标签或请求里得到一项"})
 		return
 	}
-	client := musicbrainz.NewClient()
+	client := catalogClient
 	if strings.TrimSpace(body.CatalogBaseURL) != "" {
 		if !loopbackURL(body.CatalogBaseURL) {
 			writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "code": "INVALID_REQUEST"})
 			return
 		}
+		client = musicbrainz.NewClient()
 		client.BaseURL = body.CatalogBaseURL
 	}
 	lookup, err := identifyCatalogLookup(client, a.engine, catalogIdentifyRequest{

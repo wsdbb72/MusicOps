@@ -4,11 +4,13 @@ import (
 	"bytes"
 	"context"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/wsdbb72/MusicOps/native/core/internal/flactags"
 )
@@ -101,6 +103,41 @@ func TestScrapeBatchWritesEverySelectedTrack(t *testing.T) {
 }
 
 // A dry run reports the plan and leaves every byte alone.
+func TestScrapeBatchStopsOnCatalogServiceOutage(t *testing.T) {
+	application := newApp(t)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, `{"error":"The MusicBrainz web server is currently busy."}`, http.StatusServiceUnavailable)
+	}))
+	defer server.Close()
+	path, _ := writeScrapeFLAC(t, application, "outage.flac", 200, flactags.Tags{
+		Title: "Song", Artist: "Artist", Album: "Album", TrackNumber: 1,
+	})
+	code, decoded := scrapePost(t, application, map[string]any{
+		"paths": []string{path}, "catalog_base_url": server.URL, "dry_run": false,
+	})
+	if code != http.StatusServiceUnavailable || decoded["code"] != "CATALOG_TEMPORARILY_UNAVAILABLE" || decoded["retry_after_sec"] == nil {
+		t.Fatalf("code=%d body=%+v", code, decoded)
+	}
+}
+
+func TestScrapeBatchUsesTheSharedCatalogClientByDefault(t *testing.T) {
+	application := newApp(t)
+	fake := newFakeMusicBrainz(t, catalogCompletionSearch, scrapeDetailJSON, http.StatusOK)
+	clock := &catalogFakeClock{t: time.Now()}
+	withCatalogClient(t, newCatalogTestClient(t, fake, clock.Now))
+	apiPath, _ := writeScrapeFLAC(t, application, "shared-client.flac", 240.25, flactags.Tags{
+		Title: "Opening", Artists: []string{"Some Artist"}, Album: "First Album", TrackNumber: 1,
+	})
+	code, decoded := scrapePost(t, application, map[string]any{
+		"paths": []string{apiPath}, "dry_run": true,
+	})
+	if code != http.StatusOK || decoded["planned"] != float64(1) {
+		t.Fatal(code, decoded)
+	}
+	if fake.searches.Load() != 1 || fake.details.Load() != 1 {
+		t.Fatalf("shared client was not used: searches=%d details=%d", fake.searches.Load(), fake.details.Load())
+	}
+}
 func TestScrapeBatchDryRunDoesNotWrite(t *testing.T) {
 	application := newApp(t)
 	fake := newFakeMusicBrainz(t, catalogCompletionSearch, scrapeDetailJSON, http.StatusOK)

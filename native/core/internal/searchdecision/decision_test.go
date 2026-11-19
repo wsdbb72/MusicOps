@@ -61,7 +61,7 @@ func TestNeteaseSourceFallbackWaitsUntilSitesAreExhausted(t *testing.T) {
 		"open.cd":  {Status: "AUTH_FAILED", Attempted: true},
 		"redacted": {Status: "DISABLED"},
 	})
-	if decision, err := Decide(authAndEmpty); err != nil || decision.Action != ActionFallback || decision.Reason != "sites_exhausted" {
+	if decision, err := Decide(authAndEmpty); err != nil || decision.Action != ActionReviewSearch || decision.Reason != "auth_blocked" {
 		t.Fatalf("auth decision=%+v err=%v", decision, err)
 	}
 
@@ -73,8 +73,16 @@ func TestNeteaseSourceFallbackWaitsUntilSitesAreExhausted(t *testing.T) {
 		"dicmusic": {Status: "API_CONTRACT_ERROR", Attempted: true},
 		"redacted": {Status: "DISABLED"},
 	})
-	if decision, err := Decide(contractExhausted); err != nil || decision.Action != ActionFallback || decision.Reason != "transient_recovered" {
+	if decision, err := Decide(contractExhausted); err != nil || decision.Action != ActionReviewSearch || decision.Reason != "contract_error" {
 		t.Fatalf("contract exhausted decision=%+v err=%v", decision, err)
+	}
+
+	genuinelyEmpty := base()
+	genuinelyEmpty.Scene = "expand"
+	genuinelyEmpty.SourceFallback = true
+	genuinelyEmpty.Sites = sites(map[string]SiteReport{"redacted": {Status: "DISABLED"}})
+	if decision, err := Decide(genuinelyEmpty); err != nil || decision.Action != ActionFallback || decision.Reason != "sites_exhausted" {
+		t.Fatalf("genuine empty decision=%+v err=%v", decision, err)
 	}
 }
 
@@ -159,7 +167,7 @@ func TestOfflineSamplesCoverSearchClassesWithoutClaimingDownloads(t *testing.T) 
 			r.RetryCount = 3
 			r.Sites = sites(map[string]SiteReport{"redacted": {Status: "RATE_LIMITED", Attempted: true}})
 			return r
-		}(), action: ActionFallback, reason: "transient_recovered"},
+		}(), action: ActionReviewSearch, reason: "transient_exhausted", deferStream: true},
 		{name: "transient-exhausted-outside-fallback-scene", report: func() Report {
 			r := base()
 			r.Scene = "complete"

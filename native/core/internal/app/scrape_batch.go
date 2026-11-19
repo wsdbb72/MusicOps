@@ -104,12 +104,13 @@ func (a *App) scrapeLibrary(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusUnprocessableEntity, map[string]any{"ok": false, "code": "ARTWORK_BATCH_TOO_LARGE", "error": "同时取歌词和封面时一次最多 30 首，请分批勾选"})
 		return
 	}
-	client := musicbrainz.NewClient()
+	client := catalogClient
 	if strings.TrimSpace(body.CatalogBaseURL) != "" {
 		if !loopbackURL(body.CatalogBaseURL) {
 			writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "code": "INVALID_REQUEST", "error": "目录地址只接受本机"})
 			return
 		}
+		client = musicbrainz.NewClient()
 		client.BaseURL = body.CatalogBaseURL
 	}
 	results := map[string]*scrapeFileResult{}
@@ -183,6 +184,13 @@ func (a *App) scrapeLibrary(w http.ResponseWriter, r *http.Request) {
 			Artist: group.artist, Album: group.album, Tracks: tracks,
 		}, catalogBudget, catalogTTL)
 		if err != nil {
+			if delay, backoff := catalogBackoffDelay(err); backoff {
+				writeJSON(w, http.StatusServiceUnavailable, map[string]any{
+					"ok": false, "code": "CATALOG_TEMPORARILY_UNAVAILABLE",
+					"retry_after_sec": int(delay / time.Second), "error": "音乐目录服务暂时不可用，未写标签",
+				})
+				return
+			}
 			for _, entry := range group.entries {
 				results[entry.apiPath].Status, results[entry.apiPath].Code = "failed", "CATALOG_UNAVAILABLE"
 				results[entry.apiPath].Note = "目录查询失败，文件没有改"

@@ -28,6 +28,10 @@ type genericAudioInfo struct {
 	Disc        string
 	Duration    float64
 	Tags        map[string]string
+	// Legacy APE 4.11 carries complete metadata but the bundled FFmpeg cannot
+	// rewrite it. Such files remain indexable and matchable without a doomed
+	// tag rewrite on every maintenance pass.
+	TagWriteUnsupported bool
 }
 
 func probeGenericAudio(ctx context.Context, path string) (genericAudioInfo, error) {
@@ -35,6 +39,24 @@ func probeGenericAudio(ctx context.Context, path string) (genericAudioInfo, erro
 	raw, err := exec.CommandContext(ctx, "ffprobe", "-v", "error",
 		"-show_entries", "stream=codec_name:format=duration:format_tags", "-of", "json", path).Output()
 	if err != nil {
+		if ctx.Err() != nil {
+			return info, ctx.Err()
+		}
+		if strings.EqualFold(filepath.Ext(path), ".ape") {
+			metadata, fallbackErr := probeAPEAudio(path)
+			if fallbackErr == nil {
+				info.Codec = "ape"
+				info.Duration = metadata.Duration
+				info.Tags = metadata.Tags
+				info.TagWriteUnsupported = true
+				if finalizeErr := finalizeGenericAudioInfo(&info, path); finalizeErr == nil {
+					return info, nil
+				}
+			}
+			if fallbackErr != nil {
+				return info, fmt.Errorf("ffprobe: %w; APE 元数据兜底: %v", err, fallbackErr)
+			}
+		}
 		return info, err
 	}
 	var data struct {
@@ -56,33 +78,46 @@ func probeGenericAudio(ctx context.Context, path string) (genericAudioInfo, erro
 		info.Tags[strings.ToLower(strings.TrimSpace(key))] = strings.TrimSpace(value)
 	}
 	info.Codec = strings.ToLower(data.Streams[0].Codec)
+	info.Duration, _ = strconv.ParseFloat(data.Format.Duration, 64)
+	if err := finalizeGenericAudioInfo(&info, path); err != nil {
+		return info, err
+	}
+	return info, nil
+}
+
+func finalizeGenericAudioInfo(info *genericAudioInfo, path string) error {
 	info.Artist = firstNonEmpty(info.Tags["artist"], info.Tags["artists"])
-	info.AlbumArtist = firstNonEmpty(info.Tags["album_artist"], info.Tags["albumartist"])
+	info.AlbumArtist = firstNonEmpty(info.Tags["album_artist"], info.Tags["albumartist"], info.Tags["album artist"])
 	info.Album = info.Tags["album"]
 	info.Title = info.Tags["title"]
 	info.Date = firstNonEmpty(info.Tags["date"], info.Tags["year"])
 	info.Genre = info.Tags["genre"]
 	info.Track = firstNonEmpty(info.Tags["track"], info.Tags["tracknumber"])
 	info.Disc = firstNonEmpty(info.Tags["disc"], info.Tags["discnumber"])
-	info.Duration, _ = strconv.ParseFloat(data.Format.Duration, 64)
 	inferredArtist, inferredAlbum, inferredTitle := scrapeIdentityFromPath(path)
 	info.Artist = firstNonEmpty(info.Artist, inferredArtist)
 	info.Album = firstNonEmpty(info.Album, inferredAlbum)
 	info.Title = firstNonEmpty(info.Title, inferredTitle)
 	if info.Duration <= 0 {
-		return info, errors.New("音频时长无法读取")
+		return errors.New("音频时长无法读取")
 	}
-	return info, nil
+	return nil
 }
 
 func maintenanceNeedsGenericTags(info genericAudioInfo) bool {
-	if info.Tags["album_artist"] == "" && info.Tags["albumartist"] == "" {
+	if info.Artist == "" || info.Album == "" || info.Title == "" {
+		return true
+	}
+	if info.TagWriteUnsupported {
+		return false
+	}
+	if info.Tags["album_artist"] == "" && info.Tags["albumartist"] == "" && info.Tags["album artist"] == "" {
 		return true
 	}
 	if info.Track == "" || info.Date == "" || info.Genre == "" {
 		return true
 	}
-	return info.Artist == "" || info.Album == "" || info.Title == ""
+	return false
 }
 
 func genericMissingFields(info genericAudioInfo) map[string]bool {
@@ -96,7 +131,10 @@ func genericMissingFields(info genericAudioInfo) map[string]bool {
 	if strings.TrimSpace(info.Album) == "" {
 		out["ALBUM"] = true
 	}
-	if strings.TrimSpace(firstNonEmpty(info.Tags["album_artist"], info.Tags["albumartist"])) == "" {
+	if info.TagWriteUnsupported {
+		return out
+	}
+	if strings.TrimSpace(firstNonEmpty(info.Tags["album_artist"], info.Tags["albumartist"], info.Tags["album artist"])) == "" {
 		out["ALBUMARTIST"] = true
 	}
 	if strings.TrimSpace(info.Date) == "" {
@@ -297,14 +335,29 @@ func genericFieldEmpty(info genericAudioInfo, field string) bool {
 	case "ALBUM":
 		return info.Album == ""
 	case "ALBUMARTIST":
-		return firstNonEmpty(info.Tags["album_artist"], info.Tags["albumartist"]) == ""
+		if info.TagWriteUnsupported {
+			return false
+		}
+		return firstNonEmpty(info.Tags["album_artist"], info.Tags["albumartist"], info.Tags["album artist"]) == ""
 	case "DATE":
+		if info.TagWriteUnsupported {
+			return false
+		}
 		return info.Date == ""
 	case "GENRE":
+		if info.TagWriteUnsupported {
+			return false
+		}
 		return info.Genre == ""
 	case "TRACKNUMBER":
+		if info.TagWriteUnsupported {
+			return false
+		}
 		return info.Track == ""
 	case "DISCNUMBER":
+		if info.TagWriteUnsupported {
+			return false
+		}
 		return info.Disc == ""
 	default:
 		return false

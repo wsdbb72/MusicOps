@@ -200,6 +200,14 @@ func identifyCatalogLookup(client *musicbrainz.Client, engine *dataengine.Engine
 	if err != nil {
 		return catalogIdentifyResponse{}, err
 	}
+	// A search can succeed while every release-detail request fails. Do not
+	// turn a transient catalogue outage into thousands of isolated track
+	// failures; propagate it so batch callers can pause and retry the backlog.
+	if detail == nil && fallback == nil {
+		if _, transient := catalogBackoffDelay(lookupErr); transient {
+			return catalogIdentifyResponse{}, lookupErr
+		}
+	}
 	observation := catalogObservation(detail, fallback, lookupErr)
 	items := make([]releaseidentity.Item, len(tracks))
 	for i, query := range tracks {

@@ -9,6 +9,8 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/wsdbb72/MusicOps/native/core/internal/musicbrainz"
 )
 
 func TestLibraryAutomationSettingsCanBeConfigured(t *testing.T) {
@@ -187,6 +189,17 @@ func TestLibraryIndexReportsIncrementalProgress(t *testing.T) {
 	}
 	if updates < 2 || lastCurrent != "索引完成" {
 		t.Fatalf("updates=%d current=%q", updates, lastCurrent)
+	}
+}
+
+func TestCatalogBackoffUsesRateLimitOrServerDefaults(t *testing.T) {
+	rateDelay, ok := catalogBackoffDelay(&musicbrainz.RateLimitError{RetryAfter: 3 * time.Minute, StatusCode: http.StatusTooManyRequests})
+	if !ok || rateDelay != 3*time.Minute {
+		t.Fatalf("rate delay=%s ok=%v", rateDelay, ok)
+	}
+	serverDelay, ok := catalogBackoffDelay(&musicbrainz.ServerError{StatusCode: http.StatusServiceUnavailable})
+	if !ok || serverDelay != 15*time.Minute {
+		t.Fatalf("server delay=%s ok=%v", serverDelay, ok)
 	}
 }
 

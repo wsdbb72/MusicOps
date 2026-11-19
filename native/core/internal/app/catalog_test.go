@@ -364,6 +364,17 @@ func TestIdentifyCatalogDetailFailureIsAnIsolatedFailure(t *testing.T) {
 	}
 }
 
+func TestIdentifyCatalogTransientDetailFailureIs502(t *testing.T) {
+	application := newApp(t)
+	fake := newFakeMusicBrainz(t, catalogSearchJSON, `{"error":"busy"}`, http.StatusServiceUnavailable)
+	clock := &catalogFakeClock{t: time.Date(2026, 11, 9, 5, 0, 0, 0, time.UTC)}
+	withCatalogClient(t, newCatalogTestClient(t, fake, clock.Now))
+
+	status, decoded := callIdentify(t, application, catalogBody(catalogTrack("Opening", 200)))
+	if status != http.StatusBadGateway || decoded["code"] != "CATALOG_UNAVAILABLE" {
+		t.Fatal(status, decoded)
+	}
+}
 func TestIdentifyCatalogSearchFailureIs502(t *testing.T) {
 	application := newApp(t)
 	fake := newFakeMusicBrainz(t, `{"releases": []}`, catalogDetailJSON, http.StatusOK)

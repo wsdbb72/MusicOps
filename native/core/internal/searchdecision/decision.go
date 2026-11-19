@@ -294,24 +294,12 @@ func blocked(in classified) (string, string, bool) {
 		case ClassNotSearched:
 			return ActionReviewSearch, "incomplete_search", true
 		case ClassAuth:
-			if in.report.SourceFallback {
-				continue
-			}
 			return ActionReviewSearch, "auth_blocked", true
 		case ClassForbidden:
-			if in.report.SourceFallback {
-				continue
-			}
 			return ActionReviewSearch, "access_blocked", true
 		case ClassContract:
-			if recoverableTransient(in) {
-				return ActionFallback, "transient_recovered", true
-			}
 			return ActionReviewSearch, "contract_error", true
 		case ClassRateLimited, ClassNetwork, ClassTransient:
-			if recoverableTransient(in) {
-				return ActionFallback, "transient_recovered", true
-			}
 			return ActionReviewSearch, "transient_exhausted", true
 		case ClassNoResult:
 		case ClassMatched, ClassMismatch:
@@ -332,23 +320,6 @@ func blocked(in classified) (string, string, bool) {
 	return "", "", false
 }
 
-func recoverableTransient(in classified) bool {
-	if !in.report.IdentityConfirmed || !in.report.StreamingEnabled || !fallbackAllowed(in.report) || in.report.RetryCount < 3 {
-		return false
-	}
-	saw := false
-	for _, site := range TrackerSites {
-		switch in.classes[site] {
-		case ClassRateLimited, ClassNetwork, ClassTransient, ClassContract:
-			saw = true
-		case ClassNoResult, ClassDisabled:
-		default:
-			return false
-		}
-	}
-	return saw
-}
-
 func autoFallback(in classified) bool {
 	if !in.report.IdentityConfirmed || !in.report.StreamingEnabled || !fallbackAllowed(in.report) || in.limited {
 		return false
@@ -359,10 +330,6 @@ func autoFallback(in classified) bool {
 		case ClassDisabled:
 		case ClassNoResult:
 			enabled++
-		case ClassAuth, ClassForbidden:
-			if !in.report.SourceFallback {
-				return false
-			}
 		default:
 			return false
 		}

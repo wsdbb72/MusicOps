@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"os"
 	"os/exec"
@@ -159,6 +160,33 @@ func TestLibraryWholeScrapeAndStopEndpoints(t *testing.T) {
 	stop := postCode(t, application, "/v1/library/automation/stop", map[string]any{})
 	if stop.Code != http.StatusAccepted {
 		t.Fatalf("stop status=%d body=%s", stop.Code, stop.Body.String())
+	}
+}
+
+func TestLibraryIndexReportsIncrementalProgress(t *testing.T) {
+	application := newApp(t)
+	library := t.TempDir()
+	folder := filepath.Join(library, "Artist", "Album")
+	if err := os.MkdirAll(folder, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	for i := 1; i <= 251; i++ {
+		path := filepath.Join(folder, fmt.Sprintf("%03d Track.flac", i))
+		if err := os.WriteFile(path, []byte("metadata-only"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	updates := 0
+	lastCurrent := ""
+	_, _, _, err := application.indexLibraryTreeWithProgress(context.Background(), library, func(checked int, current string) {
+		updates++
+		lastCurrent = current
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updates < 2 || lastCurrent != "索引完成" {
+		t.Fatalf("updates=%d current=%q", updates, lastCurrent)
 	}
 }
 

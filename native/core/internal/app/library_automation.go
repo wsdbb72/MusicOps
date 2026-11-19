@@ -126,6 +126,7 @@ type libraryAutomationReport struct {
 	Cancelled         bool     `json:"cancelled,omitempty"`
 	IndexedAdded      int      `json:"indexed_added"`
 	IndexedPruned     int      `json:"indexed_pruned"`
+	IndexChecked      int      `json:"index_checked"`
 	ScanTotal         int      `json:"scan_total"`
 	ScanChecked       int      `json:"scan_checked"`
 	ScanReused        int      `json:"scan_reused"`
@@ -407,9 +408,13 @@ func (a *App) runLibraryAutomationPass(ctx context.Context, settings libraryAuto
 	}
 
 	state.setPhase("reindex")
-	added, _, pruned, err := a.indexLibraryTree(ctx, root)
+	state.touch("reindex", "正在读取现有索引")
+	added, _, pruned, err := a.indexLibraryTreeWithProgress(ctx, root, func(checked int, current string) {
+		state.update(func(report *libraryAutomationReport) { report.IndexChecked = checked })
+		state.touch("reindex", current)
+	})
 	if err != nil {
-		return err
+		return fmt.Errorf("增量索引失败: %w", err)
 	}
 	state.update(func(report *libraryAutomationReport) {
 		report.IndexedAdded = added

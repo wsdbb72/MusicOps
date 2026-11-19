@@ -1368,6 +1368,7 @@ const appJS = `(function () {
     var autoText = autoRunning ? ("正在运行 · " + escapeText(phaseNames[autoReport.phase] || autoReport.phase || "处理中")) : (autoReport.cancelled ? "上次已停止" : (autoReport.finished ? ("上次完成 " + escapeText(autoReport.finished)) : "尚未运行"));
     if (autoReport.last_progress) autoText += " · 最近进度 " + escapeText(autoReport.last_progress);
     if (autoReport.current) autoText += " · " + escapeText(autoReport.current);
+    if (autoReport.phase === "reindex") autoText += " · 已检查 " + (autoReport.index_checked || 0) + " 个索引项";
     if (autoReport.scan_total) autoText += " · 扫描 " + (autoReport.scan_checked || 0) + "/" + autoReport.scan_total + "（缓存复用 " + (autoReport.scan_reused || 0) + "）";
     if (autoReport.scrape_candidates) autoText += " · 标签 " + (autoReport.scrape_processed || 0) + "/" + autoReport.scrape_candidates;
     if (autoReport.artwork_candidates) autoText += " · 歌词封面 " + (autoReport.artwork_processed || 0) + "/" + autoReport.artwork_candidates;

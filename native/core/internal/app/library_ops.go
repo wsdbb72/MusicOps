@@ -42,6 +42,10 @@ func (a *App) reindexLibrary(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *App) indexLibraryTree(ctx context.Context, root string) (added, kept, pruned int, err error) {
+	return a.indexLibraryTreeWithProgress(ctx, root, nil)
+}
+
+func (a *App) indexLibraryTreeWithProgress(ctx context.Context, root string, progress func(int, string)) (added, kept, pruned int, err error) {
 	info, err := os.Stat(root)
 	if err != nil {
 		return 0, 0, 0, err
@@ -62,7 +66,11 @@ func (a *App) indexLibraryTree(ctx context.Context, root string) (added, kept, p
 			seenPaths[strings.ToLower(path)] = true
 		}
 	}
+	if progress != nil {
+		progress(0, "正在读取现有索引")
+	}
 	const indexBatchSize = 128
+	checked := 0
 	batch := make([]audiorelease.Existing, 0, indexBatchSize)
 	flush := func() error {
 		wrote, err := audiorelease.IndexSnapshots(a.engine, batch)
@@ -91,6 +99,10 @@ func (a *App) indexLibraryTree(ctx context.Context, root string) (added, kept, p
 		if !entry.Type().IsRegular() {
 			return nil
 		}
+		checked++
+		if progress != nil && checked%250 == 0 {
+			progress(checked, path)
+		}
 		abs, err := filepath.Abs(path)
 		if err != nil || abs != filepath.Clean(abs) {
 			return nil
@@ -113,8 +125,14 @@ func (a *App) indexLibraryTree(ctx context.Context, root string) (added, kept, p
 	if err == nil {
 		err = flush()
 	}
+	if err == nil && progress != nil {
+		progress(checked, "正在清理已不存在的索引")
+	}
 	if err == nil {
 		pruned, err = audiorelease.PruneMissingIndexed(a.engine, filepath.Clean(root))
+	}
+	if err == nil && progress != nil {
+		progress(checked, "索引完成")
 	}
 	return added, kept, pruned, err
 }

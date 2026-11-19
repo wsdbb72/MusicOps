@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -25,6 +26,15 @@ type Existing struct {
 	MetadataOnly bool
 }
 
+func supportedIndexFormat(format string) bool {
+	switch strings.ToLower(strings.TrimSpace(format)) {
+	case "flac", "mp3", "wav", "aac", "alac", "aiff", "m4a", "ogg", "opus", "ape", "wv", "wma", "mka", "dsf", "dff":
+		return true
+	default:
+		return false
+	}
+}
+
 // IndexExisting writes a library record that points at an existing file.
 // A second call for the same request id does nothing. Downloaded stays false.
 func IndexExisting(engine *dataengine.Engine, item Existing) (bool, error) {
@@ -36,12 +46,10 @@ func IndexExisting(engine *dataengine.Engine, item Existing) (bool, error) {
 	}
 	format := strings.ToLower(strings.TrimPrefix(filepath.Ext(item.Path), "."))
 	if item.Format != "" {
-		format = item.Format
+		format = strings.ToLower(strings.TrimSpace(item.Format))
 	}
-	switch format {
-	case "flac", "mp3", "wav", "aac", "alac", "aiff", "m4a", "ogg", "ape":
-	default:
-		return false, dataengine.ErrInvalidRequest
+	if !supportedIndexFormat(format) {
+		return false, fmt.Errorf("unsupported indexed audio format %q for %s: %w", format, item.Path, dataengine.ErrInvalidRequest)
 	}
 	sum := ""
 	var snapshot *indexedStat
@@ -236,7 +244,14 @@ func IndexSnapshots(engine *dataengine.Engine, items []Existing) (int, error) {
 	for _, item := range items {
 		if !validID(item.RequestID) || !validID(item.RootID) || item.Track < 1 || item.Track > 999 ||
 			!filepath.IsAbs(item.Path) || item.Path != filepath.Clean(item.Path) {
-			return 0, dataengine.ErrInvalidRequest
+			return 0, fmt.Errorf("invalid indexed path or identity %q (%s): %w", item.Path, item.RequestID, dataengine.ErrInvalidRequest)
+		}
+		format := strings.ToLower(strings.TrimPrefix(filepath.Ext(item.Path), "."))
+		if item.Format != "" {
+			format = strings.ToLower(strings.TrimSpace(item.Format))
+		}
+		if !supportedIndexFormat(format) {
+			return 0, fmt.Errorf("unsupported indexed audio format %q for %s: %w", format, item.Path, dataengine.ErrInvalidRequest)
 		}
 		info, err := os.Lstat(item.Path)
 		if err != nil {

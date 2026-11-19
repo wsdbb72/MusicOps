@@ -60,6 +60,37 @@ func TestMetadataIndexReplacesFormatVersionAndPrunesMissingPath(t *testing.T) {
 	}
 }
 
+func TestSnapshotBatchAcceptsEveryIndexedAudioExtension(t *testing.T) {
+	engine, err := dataengine.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer engine.Close()
+	library := filepath.Join(t.TempDir(), "library")
+	if err := os.MkdirAll(library, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	formats := []string{"flac", "mp3", "wav", "aac", "alac", "aiff", "m4a", "ogg", "opus", "ape", "wv", "wma", "mka", "dsf", "dff"}
+	items := make([]Existing, 0, len(formats))
+	for _, format := range formats {
+		path := filepath.Join(library, "01 Track."+format)
+		if err := os.WriteFile(path, []byte(format), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		items = append(items, Existing{
+			RequestID: "lib-index-" + format, RootID: "alb-index-" + format, Track: 1, Path: path,
+			Library: library, Format: format, SourceName: "reindex", MetadataOnly: true,
+		})
+	}
+	if added, err := IndexSnapshots(engine, items); err != nil || added != len(items) {
+		t.Fatalf("added=%d err=%v", added, err)
+	}
+	entries, err := ListIndexed(engine)
+	if err != nil || len(entries) != len(items) {
+		t.Fatalf("entries=%d err=%v", len(entries), err)
+	}
+}
+
 func TestSnapshotBatchUsesPrimaryTrackMapping(t *testing.T) {
 	engine, err := dataengine.Open(t.TempDir())
 	if err != nil {

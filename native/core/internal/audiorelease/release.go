@@ -688,6 +688,27 @@ type Entry struct {
 	// under, empty for records written before it was stored. Library
 	// maintenance resolves File against it.
 	LibraryDir string `json:"library_dir,omitempty"`
+
+	// The fields below stay inside the process. They let a caller that already
+	// listed the record verify presence without opening another Pebble read.
+	fullPath          string
+	indexedSize       int64
+	indexedModifiedNS int64
+	hasIndexedStat    bool
+}
+
+// PresenceUnchanged verifies this already-listed entry against the file state
+// captured by List/ListIndexed. It avoids a second per-track database lookup
+// when checking a large playlist.
+func (e Entry) PresenceUnchanged() bool {
+	if e.fullPath == "" {
+		return false
+	}
+	if e.hasIndexedStat {
+		info, err := os.Lstat(e.fullPath)
+		return err == nil && info.Mode().IsRegular() && info.Size() == e.indexedSize && info.ModTime().UnixNano() == e.indexedModifiedNS
+	}
+	return e.SHA256 != "" && sameFile(e.fullPath, e.SHA256) == nil
 }
 
 // List returns every verified library record, ordered by album root and track
@@ -738,12 +759,18 @@ func list(engine *dataengine.Engine, checkPresence bool) ([]Entry, error) {
 				_, statErr := os.Stat(rec.Path)
 				present = statErr == nil
 			}
-			entries = append(entries, Entry{
+			entry := Entry{
 				RequestID: rec.RequestID, RootID: rec.RootID, Track: track,
 				File: libraryFileFor(rec.Path, rec.Library), Format: rec.Format, DecodeState: rec.DecodeState,
 				SHA256: rec.SHA256, Origin: rec.Origin, SourceName: rec.SourceName,
-				FilePresent: present, LibraryDir: rec.Library,
-			})
+				FilePresent: present, LibraryDir: rec.Library, fullPath: rec.Path,
+			}
+			if rec.IndexedStat != nil {
+				entry.indexedSize = rec.IndexedStat.Size
+				entry.indexedModifiedNS = rec.IndexedStat.ModifiedNS
+				entry.hasIndexedStat = true
+			}
+			entries = append(entries, entry)
 		}
 		if len(page.Next) == 0 {
 			break

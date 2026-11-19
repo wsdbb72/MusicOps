@@ -92,6 +92,7 @@ type playlistLibraryIndex struct {
 	albums    map[[2]string][]string
 	verified  map[string]bool
 	tagTitles map[[2]string]map[string]bool
+	records   map[string]audiorelease.Entry
 }
 
 func normalizeKey(s string) string {
@@ -125,11 +126,12 @@ func (a *App) playlistLibrary() playlistLibraryIndex {
 }
 
 func indexPlaylistLibrary(engine *dataengine.Engine, entries []audiorelease.Entry) playlistLibraryIndex {
-	index := playlistLibraryIndex{engine: engine, tracks: map[[3]string][]string{}, albums: map[[2]string][]string{}, verified: map[string]bool{}, tagTitles: map[[2]string]map[string]bool{}}
+	index := playlistLibraryIndex{engine: engine, tracks: map[[3]string][]string{}, albums: map[[2]string][]string{}, verified: map[string]bool{}, tagTitles: map[[2]string]map[string]bool{}, records: map[string]audiorelease.Entry{}}
 	for _, entry := range entries {
 		if !entry.FilePresent {
 			continue
 		}
+		index.records[entry.RequestID] = entry
 		artist, album, title := trackKeyOfPath(entry.File)
 		if artist != "" && artist != "." && album != "" && album != "." && title != "" {
 			key := [3]string{artist, album, title}
@@ -176,7 +178,11 @@ func (index playlistLibraryIndex) hasTrack(artist, album, title string) bool {
 func (index playlistLibraryIndex) isUnchanged(id string) bool {
 	ok, checked := index.verified[id]
 	if !checked {
-		ok = audiorelease.PresenceUnchanged(index.engine, id)
+		if entry, found := index.records[id]; found {
+			ok = entry.PresenceUnchanged()
+		} else {
+			ok = audiorelease.PresenceUnchanged(index.engine, id)
+		}
 		index.verified[id] = ok
 	}
 	return ok

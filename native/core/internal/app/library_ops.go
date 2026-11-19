@@ -593,6 +593,29 @@ func matchCatalogTrack(view *catalogReleaseView, title string, duration float64)
 	return best, true
 }
 
+func matchCatalogTrackForResult(view *catalogReleaseView, title string, duration float64, confirmed bool) (catalogReleaseTrack, bool) {
+	if confirmed {
+		return matchCatalogTrack(view, title, duration)
+	}
+	want := foldTagText(title)
+	pool := []catalogReleaseTrack{}
+	for _, track := range view.Tracks {
+		if foldTagText(track.Title) == want {
+			pool = append(pool, track)
+		}
+	}
+	if len(pool) == 0 {
+		return catalogReleaseTrack{}, false
+	}
+	best := pool[0]
+	for _, track := range pool[1:] {
+		if track.Duration > 0 && absFloat(track.Duration-duration) < absFloat(best.Duration-duration) {
+			best = track
+		}
+	}
+	return best, true
+}
+
 func absFloat(value float64) float64 {
 	if value < 0 {
 		return -value

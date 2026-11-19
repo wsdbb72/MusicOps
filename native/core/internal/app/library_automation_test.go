@@ -190,6 +190,20 @@ func TestLibraryIndexReportsIncrementalProgress(t *testing.T) {
 	}
 }
 
+func TestUnconfirmedTrackMatchStillRequiresAnExactTitle(t *testing.T) {
+	view := &catalogReleaseView{Tracks: []catalogReleaseTrack{{Title: "Other Song", Duration: 10}}}
+	if _, found := matchCatalogTrackForResult(view, "Wanted Song", 10, false); found {
+		t.Fatal("an unconfirmed row matched by duration alone")
+	}
+	if _, found := matchCatalogTrackForResult(view, "Wanted Song", 10, true); !found {
+		t.Fatal("confirmed duration-only identity was not retained")
+	}
+	view.Tracks = append(view.Tracks, catalogReleaseTrack{Title: "Wanted Song", Duration: 42})
+	if track, found := matchCatalogTrackForResult(view, "Wanted Song", 40, false); !found || track.Title != "Wanted Song" {
+		t.Fatalf("exact unconfirmed title not matched: %+v found=%v", track, found)
+	}
+}
+
 func TestLibraryAutomationMergesOnlyReadyPCMDuplicates(t *testing.T) {
 	application := newApp(t)
 	firstDir := t.TempDir()

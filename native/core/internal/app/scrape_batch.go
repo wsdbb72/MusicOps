@@ -206,11 +206,8 @@ func (a *App) scrapeLibrary(w http.ResponseWriter, r *http.Request) {
 		}
 		for i, entry := range group.entries {
 			result := results[entry.apiPath]
-			if i < len(lookup.Results) && !lookup.Results[i].IdentityConfirmed {
-				result.Status, result.Code, result.Note = "failed", "CATALOG_UNCONFIRMED", "目录没有确认这首曲目"
-				continue
-			}
-			track, found := matchCatalogTrack(view, entry.title, entry.duration)
+			confirmedTrack := i >= len(lookup.Results) || lookup.Results[i].IdentityConfirmed
+			track, found := matchCatalogTrackForResult(view, entry.title, entry.duration, confirmedTrack)
 			if !found {
 				result.Status, result.Code, result.Note = "failed", "TRACK_NOT_FOUND", "目录里没有找到对应曲目"
 				continue

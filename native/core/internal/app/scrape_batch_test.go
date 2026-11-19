@@ -152,7 +152,7 @@ func TestScrapeBatchInfersUntaggedPathAndReportsUnsupportedFiles(t *testing.T) {
 		entry, _ := item.(map[string]any)
 		codes[entry["code"].(string)] = true
 	}
-	if !codes["CATALOG_UNCONFIRMED"] || !codes["UNSUPPORTED"] {
+	if !codes["TRACK_NOT_FOUND"] || !codes["UNSUPPORTED"] {
 		t.Fatal(codes)
 	}
 }

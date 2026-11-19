@@ -229,11 +229,8 @@ func (a *App) scrapeGenericFiles(ctx context.Context, paths []string, client *mu
 		}
 		for i, info := range group.files {
 			result := results[info.Path]
-			if i < len(lookup.Results) && !lookup.Results[i].IdentityConfirmed {
-				result.Status, result.Code, result.Note = "failed", "CATALOG_UNCONFIRMED", "目录没有确认这首曲目"
-				continue
-			}
-			track, found := matchCatalogTrack(lookup.MusicBrainz, info.Title, info.Duration)
+			confirmedTrack := i >= len(lookup.Results) || lookup.Results[i].IdentityConfirmed
+			track, found := matchCatalogTrackForResult(lookup.MusicBrainz, info.Title, info.Duration, confirmedTrack)
 			if !found {
 				result.Status, result.Code, result.Note = "failed", "TRACK_NOT_FOUND", "目录里没有找到对应曲目"
 				continue

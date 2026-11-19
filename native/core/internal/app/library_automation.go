@@ -941,11 +941,8 @@ func (a *App) runAutomatedGenericScrapeDir(ctx context.Context, dir string, path
 			continue
 		}
 		for i, info := range infos {
-			if i < len(lookup.Results) && !lookup.Results[i].IdentityConfirmed {
-				counts.Failed++
-				continue
-			}
-			track, found := matchCatalogTrack(lookup.MusicBrainz, info.Title, info.Duration)
+			confirmedTrack := i >= len(lookup.Results) || lookup.Results[i].IdentityConfirmed
+			track, found := matchCatalogTrackForResult(lookup.MusicBrainz, info.Title, info.Duration, confirmedTrack)
 			if !found {
 				counts.Failed++
 				continue

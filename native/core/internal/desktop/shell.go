@@ -14,7 +14,9 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"os"
@@ -28,6 +30,7 @@ import (
 	wailsruntime "github.com/wailsapp/wails/v2/pkg/runtime"
 
 	"github.com/wsdbb72/MusicOps/native/core/internal/configmigrate"
+	"github.com/wsdbb72/MusicOps/native/core/internal/netproxy"
 	"github.com/wsdbb72/MusicOps/native/core/internal/updater"
 	"github.com/wsdbb72/MusicOps/native/core/internal/version"
 )
@@ -73,6 +76,9 @@ func Run(opts Options) error {
 		return fmt.Errorf("core started but no handle is available")
 	}
 	proxy := NewProxy(handle.URL, handle.Password)
+	if err := syncDesktopProxy(context.Background(), handle); err != nil {
+		logger.Printf("core proxy settings unavailable at startup: %v", err)
+	}
 
 	var appCtx context.Context
 	app := &options.App{
@@ -102,7 +108,7 @@ func Run(opts Options) error {
 				OpenInBrowser: func() {
 					wailsruntime.BrowserOpenURL(ctx, handle.URL)
 				},
-				CheckUpdates: func() { checkForUpdates(ctx, logger) },
+				CheckUpdates: func() { checkForUpdates(ctx, logger, handle) },
 				Quit:         func() { wailsruntime.Quit(ctx) },
 			})
 		},
@@ -133,10 +139,59 @@ func singleInstanceKey() string {
 	return "musicops-desktop-" + hex.EncodeToString(sum[:8])
 }
 
+// syncDesktopProxy mirrors the core's persisted outbound proxy into the
+// desktop process. The Wails shell is separate from the core child process,
+// so a default transport installed in the core does not cover update checks.
+func syncDesktopProxy(ctx context.Context, handle *CoreHandle) error {
+	netproxy.Install()
+	if handle == nil || strings.TrimSpace(handle.URL) == "" {
+		return fmt.Errorf("core handle is unavailable")
+	}
+	callCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(callCtx, http.MethodGet, strings.TrimSuffix(handle.URL, "/")+"/v1/settings/proxy", nil)
+	if err != nil {
+		return err
+	}
+	req.SetBasicAuth("musicops", handle.Password)
+	response, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		return fmt.Errorf("core returned HTTP %d", response.StatusCode)
+	}
+	var body struct {
+		OK    bool `json:"ok"`
+		Proxy struct {
+			URL string `json:"url"`
+		} `json:"proxy"`
+	}
+	if err := json.NewDecoder(io.LimitReader(response.Body, 1<<20)).Decode(&body); err != nil {
+		return err
+	}
+	if !body.OK {
+		return fmt.Errorf("core rejected the proxy settings response")
+	}
+	_, err = netproxy.Configure(body.Proxy.URL)
+	return err
+}
+
 // checkForUpdates runs one manual update check: Check, ask the user, then
 // Stage (with progress in the log), Verify, Launch (waiting for this
 // process), and quit so the installer can take over.
-func checkForUpdates(ctx context.Context, logger *log.Logger) {
+func checkForUpdates(ctx context.Context, logger *log.Logger, handle *CoreHandle) {
+	if err := syncDesktopProxy(ctx, handle); err != nil {
+		logger.Printf("update proxy settings unavailable: %v", err)
+		_, _ = wailsruntime.MessageDialog(ctx, wailsruntime.MessageDialogOptions{
+			Type:    wailsruntime.ErrorDialog,
+			Title:   "MusicOps 更新",
+			Message: fmt.Sprintf("读取出站代理设置失败：%v", err),
+			Buttons: []string{"确定"},
+		})
+		return
+	}
 	u := &updater.Updater{
 		HTTP:      &http.Client{Timeout: 30 * time.Second},
 		Directory: filepath.Join(UserDataRoot(), "MusicOps", "updates"),

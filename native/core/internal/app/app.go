@@ -78,6 +78,7 @@ type App struct {
 	duplicateMu       sync.Mutex
 	neteaseRecoveryMu sync.Mutex
 	secrets           map[string]string
+	proxyConfigErr    string
 	stopSubs          chan struct{}
 	stopReconcile     chan struct{}
 	stopAutoReview    chan struct{}
@@ -175,6 +176,10 @@ func open(dir, backup, password string, logger StartupLogger) (*App, error) {
 	}
 	progress("native_store_ready", "Pebble opened and schema checked")
 	app := &App{Dir: dir, Backup: backup, password: password, engine: engine, tasks: taskrepo.New(engine), searcher: &trackersearch.Client{}, now: time.Now, secrets: map[string]string{}, autoReviewRetryAt: map[string]time.Time{}, libraryAutomation: &libraryAutomationState{}}
+	progress("outbound_proxy", "loading saved proxy before the scheduler starts")
+	if proxyErr := app.restoreOutboundProxy(); proxyErr != nil {
+		progress("outbound_proxy", "saved proxy could not be applied; local services remain available")
+	}
 	progress("vault", "opening the encrypted credential vault")
 	app.vault, err = vault.Open(filepath.Dir(filepath.Dir(absDir)))
 	if err != nil {

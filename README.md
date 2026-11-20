@@ -78,6 +78,7 @@ docker run -d --name musicops -p 8080:8080 \
 3. 连接 qBittorrent（地址、用户名、密码），设置分类与标签。
 4. 需要歌词封面时填 LrcApi 地址与鉴权；需要目录候选时填 Discogs Token。
 5. 可选：Roon 主机与端口（同机 `127.0.0.1:9330`）、Navidrome、Plex。
+6. 需要统一出口时，在设置页填写 HTTP/HTTPS 代理，例如 `192.168.31.11:7890`；保存会规范化为完整 URL 并立即测试。qBittorrent、FlareSolverr 与本机 API 的回环地址始终直连。
 
 运行档案在 `profile/`：`state/` 是 Pebble 数据库，`state/native/vault` 是加密凭据，`backup/` 是备份。**密码不在任何地方明文保存**，忘记只能靠备份恢复。
 

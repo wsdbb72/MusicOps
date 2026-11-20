@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/wsdbb72/MusicOps/native/core/internal/dataengine"
+	"github.com/wsdbb72/MusicOps/native/core/internal/netproxy"
 	"github.com/wsdbb72/MusicOps/native/core/internal/trackersearch"
 )
 
@@ -87,7 +88,7 @@ func Fetch(ctx context.Context, req Request) (Receipt, error) {
 			return http.ErrUseLastResponse
 		},
 		// A dropped keep-alive connection must not make the HTTP stack send usetoken twice.
-		Transport: &http.Transport{DisableKeepAlives: true},
+		Transport: netproxy.Transport(&http.Transport{DisableKeepAlives: true}),
 	}
 	if transport, ok := client.Transport.(*http.Transport); ok {
 		defer transport.CloseIdleConnections()

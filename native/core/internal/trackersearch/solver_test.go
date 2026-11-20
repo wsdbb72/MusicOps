@@ -8,6 +8,8 @@ import (
 	"net/url"
 	"strings"
 	"testing"
+
+	"github.com/wsdbb72/MusicOps/native/core/internal/netproxy"
 )
 
 // scriptDoer answers from a function so a test can model a tracker and a
@@ -154,6 +156,36 @@ func TestSolverGetsTheSiteCookieScopedToItsHost(t *testing.T) {
 
 // A solved page that is still an interstitial is refused: parsing it would
 // report an empty result set as if the site had no matches.
+func TestSolverUsesTheConfiguredOutboundProxy(t *testing.T) {
+	if _, err := netproxy.Configure("http://192.168.31.11:7890"); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _, _ = netproxy.Configure("") })
+	doer := &scriptDoer{answer: func(req *http.Request, body string) *http.Response {
+		if !isSolverCall(req.URL.String()) {
+			return reply(403, challenge)
+		}
+		var payload struct {
+			Proxy struct {
+				URL string `json:"url"`
+			} `json:"proxy"`
+		}
+		if err := json.Unmarshal([]byte(body), &payload); err != nil {
+			t.Fatal(err)
+		}
+		if payload.Proxy.URL != "http://192.168.31.11:7890" {
+			t.Fatalf("solver proxy = %q; payload=%s", payload.Proxy.URL, body)
+		}
+		return solverReply(t, gazellePage)
+	}}
+	out, err := (&Client{Doer: doer}).Search(context.Background(), Query{
+		Site: "dicmusic", Text: "Example", Cookie: "session=virtual", SolverURL: "http://127.0.0.1:8191",
+	})
+	if err != nil || out.Status != "OK" || !out.SolverUsed {
+		t.Fatalf("%+v %v", out, err)
+	}
+}
+
 func TestSolvedPageThatIsStillAChallengeIsRefused(t *testing.T) {
 	doer := &scriptDoer{answer: func(req *http.Request, body string) *http.Response {
 		if isSolverCall(req.URL.String()) {

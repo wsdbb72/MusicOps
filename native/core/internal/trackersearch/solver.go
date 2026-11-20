@@ -9,6 +9,8 @@ import (
 	"net/url"
 	"strings"
 	"time"
+
+	"github.com/wsdbb72/MusicOps/native/core/internal/netproxy"
 )
 
 // The browser solver is a fallback, not a transport. A site that answers
@@ -157,6 +159,13 @@ func (c *Client) solverGet(ctx context.Context, q Query, pageURL string) ([]byte
 		"cmd":        "request.get",
 		"url":        pageURL,
 		"maxTimeout": solverTimeoutMS(q),
+	}
+	// A challenge is still an internet request. Use the same outbound proxy
+	// as the direct tracker read so FlareSolverr's browser does not retry from
+	// the original blocked address. The solver endpoint itself remains loopback
+	// and is never sent through the proxy.
+	if configured, enabled := netproxy.Current(); enabled {
+		payload["proxy"] = map[string]string{"url": configured}
 	}
 	if cookies := solverCookies(q.Site, q.Cookie); len(cookies) > 0 {
 		payload["cookies"] = cookies

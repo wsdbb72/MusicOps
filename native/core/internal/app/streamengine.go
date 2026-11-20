@@ -256,7 +256,7 @@ func (a *App) streamSearch(ctx context.Context, base, service string, plan Searc
 	values.Set("sources", service)
 	values.Set("type", "song")
 	endpoint.RawQuery = values.Encode()
-	body, class, err := engineGET(ctx, endpoint.String(), token)
+	body, class, err := a.engineGET(ctx, base, endpoint.String(), token)
 	if err != nil {
 		return nil, class, err
 	}
@@ -354,10 +354,12 @@ func (a *App) streamDownload(ctx context.Context, base string, song *streamSong,
 	values.Set("artist", song.Artist)
 	values.Set("album", song.Album)
 	endpoint.RawQuery = values.Encode()
-	return engineGET(ctx, endpoint.String(), token)
+	return a.engineGET(ctx, base, endpoint.String(), token)
 }
 
-func engineGET(ctx context.Context, endpoint, token string) ([]byte, string, error) {
+func (a *App) engineGET(ctx context.Context, base, endpoint, token string) ([]byte, string, error) {
+	finish := a.beginEngineRequest(base)
+	defer finish()
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
 	if err != nil {
 		return nil, downloadpolicy.ClassNoResult, err

@@ -23,6 +23,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/wsdbb72/MusicOps/native/core/internal/netproxy"
 )
 
 // engineName identifies one bundled service.
@@ -37,11 +39,13 @@ const (
 
 // engineProcess is one running managed engine.
 type engineProcess struct {
-	cmd   *exec.Cmd
-	base  string
-	token string
-	state string
-	note  string
+	cmd    *exec.Cmd
+	base   string
+	token  string
+	state  string
+	note   string
+	proxy  string
+	active int
 }
 
 // servicesRoot is the directory the installer put the engines in. A test or a
@@ -102,9 +106,20 @@ func (a *App) ensureEngine(name engineName) (string, string, error) {
 	}
 	if running := a.engines[name]; running != nil && running.cmd != nil && running.cmd.Process != nil {
 		if running.cmd.ProcessState == nil {
-			return running.base, running.token, nil
+			current, _ := netproxy.Current()
+			if name != engineStreaming || running.proxy == current {
+				return running.base, running.token, nil
+			}
+			if running.active > 0 {
+				// Keep the current download alive on its old transport. The
+				// request completion hook retires it as soon as the child is idle.
+				return running.base, running.token, nil
+			}
+			delete(a.engines, name)
+			_ = running.cmd.Process.Kill()
+		} else {
+			delete(a.engines, name)
 		}
-		delete(a.engines, name)
 	}
 	binary, ok := a.engineBinary(name)
 	if !ok {
@@ -128,7 +143,14 @@ func (a *App) ensureEngine(name engineName) (string, string, error) {
 	}
 	cmd := exec.Command(binary, args...)
 	cmd.Dir = dir
-	cmd.Env = append(os.Environ(),
+	baseEnv := netproxy.ChildEnvironment(os.Environ())
+	if name == engineSolver {
+		// FlareSolverr receives the proxy on each request. A process-level
+		// PROXY_URL would survive a later settings change and silently override
+		// a request that intentionally disables the proxy.
+		baseEnv = netproxy.SanitizedEnvironment(os.Environ())
+	}
+	cmd.Env = append(baseEnv,
 		"HOST=127.0.0.1",
 		"PORT="+fmt.Sprint(port),
 		"MUSICOPS_SERVICE_TOKEN="+token,
@@ -154,7 +176,8 @@ func (a *App) ensureEngine(name engineName) (string, string, error) {
 	if name == engineStreaming {
 		base += "/music"
 	}
-	entry := &engineProcess{cmd: cmd, base: base, token: token, state: "starting"}
+	proxy, _ := netproxy.Current()
+	entry := &engineProcess{cmd: cmd, base: base, token: token, state: "starting", proxy: proxy}
 	a.engines[name] = entry
 	// Reap the child so a stopped engine does not linger as a zombie.
 	go func() { _ = cmd.Wait() }()
@@ -198,15 +221,78 @@ func engineHealthy(base, token string) bool {
 	return response.StatusCode == http.StatusOK
 }
 
+// retireStreamingEngineForProxyChange stops an idle downloader so its next
+// launch inherits the new outbound environment. An active request is left
+// alone; finishEngineRequest performs the same retirement when it completes.
+func (a *App) retireStreamingEngineForProxyChange() {
+	current, _ := netproxy.Current()
+	a.engineMu.Lock()
+	entry := a.engines[engineStreaming]
+	if entry == nil || entry.proxy == current || entry.active > 0 {
+		a.engineMu.Unlock()
+		return
+	}
+	delete(a.engines, engineStreaming)
+	a.engineMu.Unlock()
+	killEngineProcess(entry)
+}
+
+// beginEngineRequest counts one managed-engine call. The returned function
+// retires the process after both the request and the old proxy generation have
+// finished. External engines are not in the map and no tracking is performed.
+func (a *App) beginEngineRequest(base string) func() {
+	a.engineMu.Lock()
+	var entry *engineProcess
+	for _, candidate := range a.engines {
+		if candidate != nil && candidate.base == base {
+			entry = candidate
+			entry.active++
+			break
+		}
+	}
+	a.engineMu.Unlock()
+	if entry == nil {
+		return func() {}
+	}
+	return func() {
+		current, _ := netproxy.Current()
+		a.engineMu.Lock()
+		entry.active--
+		retire := entry.active == 0 && entry.proxy != current
+		if retire {
+			for name, candidate := range a.engines {
+				if candidate == entry {
+					delete(a.engines, name)
+					break
+				}
+			}
+		}
+		a.engineMu.Unlock()
+		if retire {
+			killEngineProcess(entry)
+		}
+	}
+}
+
+func killEngineProcess(entry *engineProcess) {
+	if entry != nil && entry.cmd != nil && entry.cmd.Process != nil {
+		_ = entry.cmd.Process.Kill()
+	}
+}
+
 // stopEngines terminates only the processes this app started.
 func (a *App) stopEngines() {
 	a.engineMu.Lock()
-	defer a.engineMu.Unlock()
+	entries := make([]*engineProcess, 0, len(a.engines))
 	for name, entry := range a.engines {
+		entries = append(entries, entry)
+		delete(a.engines, name)
+	}
+	a.engineMu.Unlock()
+	for _, entry := range entries {
 		if entry != nil && entry.cmd != nil && entry.cmd.Process != nil {
 			_ = entry.cmd.Process.Kill()
 		}
-		delete(a.engines, name)
 	}
 }
 

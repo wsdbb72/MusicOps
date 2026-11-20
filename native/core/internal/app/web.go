@@ -9,6 +9,7 @@ const appJS = `(function () {
   var currentJob = null;
   var siteRows = [];
   var downloadSettings = null;
+  var outboundProxy = null;
   var cookieSettings = [];
   var aiSettings = null;
   var qbtSettings = null;
@@ -436,6 +437,15 @@ const appJS = `(function () {
     }).join("");
     return '<article><h2>站点 Cookie</h2><p class="meta">每站的 Cookie 加密保存在本机，只显示“已保存”，不回显内容。搜索、登录检查和下载优先用这里保存的 Cookie；检索时临时填写的 Cookie 只用于那一次。</p>' + rows + '<p><button type="button" id="check-cookies">检查登录状态</button></p><p id="cookie-check-result" class="meta"></p></article>';
   }
+  function proxyCard() {
+    if (!outboundProxy) return "";
+    var current = outboundProxy.enabled ? ("已启用：" + escapeText(outboundProxy.active_url || outboundProxy.url)) : "未配置代理，外部请求直连";
+    return '<article><h2>出站代理</h2><p class="meta">核心、流媒体引擎、FlareSolverr 和桌面更新检查的外部 HTTP/HTTPS 请求统一走这里，保存后立即生效。访问 qBittorrent、FlareSolverr、内置引擎和本机 API 的 localhost、127.0.0.0/8、::1 地址仍会直连。可填完整地址，也可直接填“主机:端口”。</p>' +
+      '<p class="meta">当前：' + current + '</p>' +
+      '<label>代理地址<input type="text" id="proxy-url" value="' + escapeText(outboundProxy.url || "") + '" placeholder="192.168.31.11:7890" autocomplete="off"></label>' +
+      '<p><button type="button" id="save-proxy" class="primary">保存并切换</button> <button type="button" id="test-proxy">测试连接</button></p>' +
+      '<p class="meta">留空并保存会关闭代理。地址不得包含用户名、密码、路径或查询参数。</p><p id="proxy-test-result" class="meta">' + escapeText(outboundProxy.config_error || "") + '</p></article>';
+  }
   function aiCard() {
     if (!aiSettings) return "";
     return '<article><h2>AI 设置</h2><p class="meta">启用后，后台会持续自动核对可安全重放的项目，并保留单项/全部按钮用于手动加跑。旧网易云任务先按持久化的歌曲与专辑 ID 自证；模型不能单独放行，仍要通过本地的标题、艺人和版本校验。DicMusic/Orpheus 的未确认令牌不会自动重试或消费，仍按 FL 规则等待明确决定。API Key 加密保存在本机，不回显。</p>' +
@@ -590,13 +600,13 @@ const appJS = `(function () {
       '<p><button type="button" id="rollback-migration">回退迁入的索引</button></p><p id="migration-result" class="meta"></p></article>';
   }
   function renderSettings() {
-    if (!downloadSettings && !cookieSettings.length && !aiSettings && !qbtSettings && !solverSettings && !lyricsSettings && !discogsSettings && !librarySettings && !serverSettings) {
+    if (!downloadSettings && !outboundProxy && !cookieSettings.length && !aiSettings && !qbtSettings && !solverSettings && !lyricsSettings && !discogsSettings && !librarySettings && !serverSettings) {
       setStatus("", "设置没有读到。");
       list.innerHTML = "";
       return;
     }
     setStatus("", "");
-    var html = '<div class="cards">' + migrationCard() + aiCard() + qbtCard() + solverCard() + lyricsCard() + discogsCard() + libraryCard() + serversCard() +
+    var html = '<div class="cards">' + migrationCard() + proxyCard() + aiCard() + qbtCard() + solverCard() + lyricsCard() + discogsCard() + libraryCard() + serversCard() +
       '<article><h2>站点登录检查</h2><p class="meta">只读检查：只验证登录和余额，不下载，也不消耗令牌。Cookie 留空则用已保存的；填写的只用于这次检查，不保存。</p>' +
       '<label>站点<select id="preflight-site">' + siteRows.map(function (site) { return '<option value="' + escapeText(site.name) + '">' + escapeText(site.name) + "</option>"; }).join("") + '</select></label>' +
       '<label>Cookie<input type="password" id="preflight-cookie" autocomplete="off"></label>' +
@@ -604,6 +614,10 @@ const appJS = `(function () {
     list.innerHTML = html;
     var save = document.getElementById("save-download");
     if (save) save.addEventListener("click", saveDownload);
+    var saveProxyButton = document.getElementById("save-proxy");
+    if (saveProxyButton) saveProxyButton.addEventListener("click", saveProxy);
+    var testProxyButton = document.getElementById("test-proxy");
+    if (testProxyButton) testProxyButton.addEventListener("click", testProxy);
     document.querySelectorAll("[data-order-move]").forEach(function (button) {
       button.addEventListener("click", function () {
         var parts = button.getAttribute("data-order-move").split(":");
@@ -687,6 +701,48 @@ const appJS = `(function () {
       var button = document.getElementById("fetch-playlist");
       if (button) button.textContent = enqueueHint.checked ? "拉取并创建入库任务" : "只拉取曲目名单";
     });
+  }
+  async function saveProxy() {
+    if (loading) return;
+    var field = document.getElementById("proxy-url");
+    setBusy(true);
+    setStatus("info", "正在保存并验证出站代理");
+    try {
+      var body = await postSetting("/v1/settings/proxy", {url: field ? field.value.trim() : ""});
+      outboundProxy = body.proxy || null;
+      renderSettings();
+      if (!body.reachable && body.probe) {
+        setStatus("review", "代理已保存并切换，但连接探测失败：" + (body.probe.error || "未知错误"));
+      } else if (outboundProxy && outboundProxy.enabled) {
+        setStatus("ok", "代理已保存并切换，外部连接探测成功。");
+      } else {
+        setStatus("ok", "出站代理已关闭。");
+      }
+    } catch (err) {
+      setStatus("fail", "保存失败。" + (err && err.message ? "（" + err.message + "）" : ""));
+    } finally {
+      setBusy(false);
+    }
+  }
+  async function testProxy() {
+    if (loading) return;
+    var field = document.getElementById("proxy-url");
+    var result = document.getElementById("proxy-test-result");
+    setBusy(true);
+    setStatus("info", "正在测试出站代理");
+    try {
+      var body = await postSetting("/v1/settings/proxy/test", {url: field ? field.value.trim() : ""});
+      var text = body.message || "代理连接成功。";
+      if (body.probe && body.probe.latency_ms != null) text += "耗时 " + body.probe.latency_ms + " ms。";
+      if (result) result.textContent = text;
+      setStatus("ok", text);
+    } catch (err) {
+      var failed = "测试失败。" + (err && err.message ? "（" + err.message + "）" : "");
+      if (result) result.textContent = failed;
+      setStatus("fail", failed);
+    } finally {
+      setBusy(false);
+    }
   }
   async function saveDownload() {
     if (loading) return;
@@ -2241,6 +2297,9 @@ const appJS = `(function () {
         playlistRows = playlistBody && Array.isArray(playlistBody.playlists) ? playlistBody.playlists : [];
       }
       if (view === "settings") {
+        var proxyResponse = await fetch("/v1/settings/proxy", {headers: {Accept: "application/json"}});
+        var proxyBody = await proxyResponse.json();
+        outboundProxy = proxyBody && proxyBody.ok ? proxyBody.proxy : null;
         var downloadResponse = await fetch("/v1/settings/download", {headers: {Accept: "application/json"}});
         var downloadBody = await downloadResponse.json();
         downloadSettings = downloadBody && downloadBody.ok ? downloadBody : null;

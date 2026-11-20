@@ -359,6 +359,7 @@ func (a *App) acceptNeteasePlaylistFallback(w http.ResponseWriter, id, requestID
 	report := a.rebuildReviewReport(job, plan, observations, "", "")
 	markNeteaseSourceFallback(&report)
 	report.ExplicitFallback = true
+	report.SourceFallbackConfirmed = true
 	decision, err := searchdecision.Decide(report)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "code": "REVIEW_UNAVAILABLE"})

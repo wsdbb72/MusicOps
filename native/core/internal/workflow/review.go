@@ -135,6 +135,15 @@ func (r *Repository) retryAction(job *Job, task *taskrepo.Task) ReviewAction {
 	}
 	switch job.Stage {
 	case "needs_review":
+		if job.ReviewKind == "interrupted" {
+			if task.State != "recovery_required" {
+				return ReviewAction{Action: "retry", Reason: "任务状态不允许重试"}
+			}
+			if _, err := r.interruptedRecoveryStage(*job, task); err != nil {
+				return ReviewAction{Action: "retry", Reason: "已中断；该阶段可能产生外部影响，需先核对"}
+			}
+			return ReviewAction{Action: "retry", Allowed: true}
+		}
 		if task.State != "blocked" {
 			return ReviewAction{Action: "retry", Reason: "任务状态不允许重试"}
 		}
@@ -142,8 +151,6 @@ func (r *Repository) retryAction(job *Job, task *taskrepo.Task) ReviewAction {
 		case "search", "candidate", "token", "metadata":
 		case "error":
 			return ReviewAction{Action: "retry", Reason: "执行器尚未注册，重试也不会推进"}
-		case "interrupted":
-			return ReviewAction{Action: "retry", Reason: "已中断；只读检索和可续传下载会在启动时自动恢复，其他任务需先核对外部影响"}
 		default:
 			return ReviewAction{Action: "retry", Reason: "这次核对不能重试"}
 		}
@@ -202,6 +209,9 @@ func (r *Repository) Review(requestID, jobID string, in ReviewDecision, nowNS in
 	case "skip":
 		return r.reviewSkip(requestID, *job, task, in, nowNS)
 	default:
+		if job.ReviewKind == "interrupted" {
+			return r.recoverInterruptedExplicit(requestID, job.ID, nowNS)
+		}
 		return r.reviewRetry(requestID, *job, task, nowNS)
 	}
 }
@@ -215,6 +225,14 @@ func (r *Repository) Review(requestID, jobID string, in ReviewDecision, nowNS in
 // spends no FL token, skips tracks already verified in the library, and can
 // resume after a cancelled NetEase request.
 func (r *Repository) RecoverInterrupted(requestID, jobID string, nowNS int64) (Result, error) {
+	return r.recoverInterrupted(requestID, jobID, nowNS, false)
+}
+
+func (r *Repository) recoverInterruptedExplicit(requestID, jobID string, nowNS int64) (Result, error) {
+	return r.recoverInterrupted(requestID, jobID, nowNS, true)
+}
+
+func (r *Repository) recoverInterrupted(requestID, jobID string, nowNS int64, explicit bool) (Result, error) {
 	if !validID(jobID) || requestID == "" || len(requestID) > 128 || nowNS <= 0 {
 		return Result{}, dataengine.ErrInvalidRequest
 	}
@@ -231,37 +249,22 @@ func (r *Repository) RecoverInterrupted(requestID, jobID string, nowNS int64) (R
 	if job.CancelRequested || task.CancelRequested {
 		return Result{}, ErrStale
 	}
-	switch task.Command {
-	case cmdSearch, cmdDownload, cmdIdentify, cmdSnapshot, cmdPublish:
-	case cmdProcess:
-		if !strings.HasPrefix(job.BatchID, "pl-netease-") {
-			return Result{}, ErrStale
-		}
-		stage, err := r.retryStage(*job, task)
-		if err != nil || (stage != "fallback" && !(stage == "requesting" && task.Phase == "netease_album")) {
-			return Result{}, ErrStale
-		}
-	default:
-		return Result{}, ErrStale
+	stage, err := r.interruptedRecoveryStage(*job, task)
+	if err != nil {
+		return Result{}, err
 	}
-	if task.Command == cmdSearch && job.SearchRetryCount >= 3 {
+	// Automatic recovery has its own consecutive-attempt budget. It never
+	// consumes the search decision's external retry budget, because a worker
+	// interruption is not a tracker response. A human retry starts this budget
+	// again and is the explicit escape hatch after three interrupted attempts.
+	if task.Command == cmdSearch && !explicit && job.RecoveryRetryCount >= 3 {
 		return Result{}, ErrStale
 	}
 	// 0.4.90 stored the retry deadline only on the job and then slept inside
 	// a scheduler worker. Do not auto-recover one of those legacy tasks into
-	// the same blocking behaviour. An explicit review retry clears the old
-	// deadline and creates a 0.4.91 task with its own persisted NotBeforeNS.
-	if task.Command == cmdSearch && job.SearchRetryAfterSec > 0 && task.NotBeforeNS == 0 {
+	// the same blocking behaviour. A manual review retry clears that deadline.
+	if task.Command == cmdSearch && job.SearchRetryAfterSec > 0 && task.NotBeforeNS == 0 && !explicit {
 		return Result{}, ErrStale
-	}
-	stage, err := r.retryStage(*job, task)
-	if err != nil {
-		return Result{}, err
-	}
-	if task.Command == cmdProcess && task.Phase == "netease_album" {
-		// The interrupted attempt had already reached the NetEase album
-		// walk. Resuming that walk cannot spend another tracker FL token.
-		stage = "fallback"
 	}
 	extra, _ := json.Marshal(struct{ JobID, Action string }{job.ID, "recover"})
 	result, err := r.tasks.ControlOwned(requestID, task.ID, "recover", nowNS, extra, func(v *dataengine.View, _, after *taskrepo.Task, _ []taskrepo.Task) ([]dataengine.Condition, []dataengine.Mutation, json.RawMessage, error) {
@@ -284,8 +287,14 @@ func (r *Repository) RecoverInterrupted(requestID, jobID string, nowNS int64) (R
 		next.ReviewKind = ""
 		next.ErrorClass = ""
 		next.Message = "旧进程遗留任务已自动恢复"
-		if task.Command == cmdSearch {
-			next.SearchRetryCount = live.SearchRetryCount + 1
+		if explicit {
+			next.Message = "已手动恢复中断任务"
+			next.RecoveryRetryCount = 0
+			if task.Command == cmdSearch {
+				next.SearchRetryAfterSec = 0
+			}
+		} else if task.Command == cmdSearch {
+			next.RecoveryRetryCount = live.RecoveryRetryCount + 1
 		}
 		updated, err := bump(next, nowNS, next.Stage != live.Stage)
 		if err != nil {
@@ -299,6 +308,26 @@ func (r *Repository) RecoverInterrupted(requestID, jobID string, nowNS int64) (R
 		return []dataengine.Condition{condition}, writes, attached, err
 	})
 	return decode(result, err)
+}
+
+func (r *Repository) interruptedRecoveryStage(job Job, task *taskrepo.Task) (string, error) {
+	switch task.Command {
+	case cmdSearch, cmdDownload, cmdIdentify, cmdSnapshot, cmdPublish:
+	case cmdProcess:
+		if !strings.HasPrefix(job.BatchID, "pl-netease-") {
+			return "", ErrStale
+		}
+		stage, err := r.retryStage(job, task)
+		if err != nil || (stage != "fallback" && !(stage == "requesting" && task.Phase == "netease_album")) {
+			return "", ErrStale
+		}
+		if task.Phase == "netease_album" {
+			return "fallback", nil
+		}
+	default:
+		return "", ErrStale
+	}
+	return r.retryStage(job, task)
 }
 
 func (r *Repository) reviewAccept(requestID string, job Job, task *taskrepo.Task, in ReviewDecision, nowNS int64) (Result, error) {
@@ -356,6 +385,7 @@ func (r *Repository) reviewAccept(requestID string, job Job, task *taskrepo.Task
 	child.ProcessingJobID = ""
 	child.IdentificationJobID = job.IdentificationJobID
 	child.SearchRetryCount = 0
+	child.RecoveryRetryCount = 0
 	child.AIResearchCount = 0
 	child.SearchRetryAfterSec = 0
 	child.SearchAction = decision.Action
@@ -490,6 +520,7 @@ func (r *Repository) reviewRetry(requestID string, job Job, task *taskrepo.Task,
 		next.SearchAction = ""
 		next.SearchRetryAfterSec = 0
 		if task.Command == cmdSearch {
+			next.RecoveryRetryCount = 0
 			// Three scheduler retries form one bounded cycle. A reviewed retry
 			// starts a fresh cycle only after the user or the evidence-driven
 			// auto reviewer has seen the latest site state; otherwise a stale

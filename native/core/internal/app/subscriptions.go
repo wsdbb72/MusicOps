@@ -499,7 +499,9 @@ func (a *App) runSubscriptions(stop <-chan struct{}) {
 		case <-stop:
 			return
 		case <-ticker.C:
-			a.runDueSubscriptions()
+			if !a.pipelinePaused() {
+				a.runDueSubscriptions()
+			}
 		}
 	}
 }

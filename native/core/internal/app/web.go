@@ -152,9 +152,9 @@ const appJS = `(function () {
       return;
     }
     setStatus("", "");
-    var html = '<p class="meta">后台调度 ' + (pipelinePaused ? "已暂停" : "已开启") + " · 正在执行 " + activeCount + " 项</p>";
+    var html = '<p class="meta" id="pipeline-status">后台调度 ' + (pipelinePaused ? "已暂停" : "已开启") + " · 正在执行 " + activeCount + " 项</p>";
     if (view === "tasks") {
-      html += '<p class="meta" id="job-counts">共 ' + (counts.running + counts.review + counts.finished) + ' 个任务：进行中 ' + counts.running + ' · 待处理 ' + counts.review + ' · 已结束 ' + counts.finished + '。点任务查看详情。</p>';
+      html += '<p class="meta" id="job-counts">共 ' + counts.total + ' 个任务：执行中 ' + counts.running + ' · 待执行 ' + (counts.queued || 0) + ' · 待核对 ' + counts.review + ' · 已完成 ' + counts.finished + '。点任务查看详情。</p>';
       html += newTaskCard() + pipelineBar() + batchBar();
     } else if (view === "queue") {
       html += '<p class="meta">队列只显示正在识别、检索、下载、校验或入库的任务，每 3 秒刷新。待核对的任务在「任务」里处理。</p>';
@@ -193,7 +193,11 @@ const appJS = `(function () {
             var label = document.getElementById("job-counts");
             if (counts && label) {
               globalJobCounts = counts;
-              label.textContent = "共 " + counts.total + " 个任务，进行中 " + counts.running + "，待处理 " + counts.review + "，已结束 " + counts.finished + "。点任务查看详情。";
+              activeCount = body.active_count || 0;
+              pipelinePaused = !!body.pipeline_paused;
+              label.textContent = "共 " + counts.total + " 个任务，执行中 " + counts.running + "，待执行 " + (counts.queued || 0) + "，待核对 " + counts.review + "，已完成 " + counts.finished + "。点任务查看详情。";
+              var pipelineStatus = document.getElementById("pipeline-status");
+              if (pipelineStatus) pipelineStatus.textContent = "后台调度 " + (pipelinePaused ? "已暂停" : "已开启") + " · 正在执行 " + activeCount + " 项";
             }
           }
         } catch (err) { /* The next refresh retries a transient connection failure. */ }
@@ -212,8 +216,8 @@ const appJS = `(function () {
   function bindPipeline() {
     var pause = document.getElementById("pipeline-pause");
     var resume = document.getElementById("pipeline-resume");
-    if (pause) pause.addEventListener("click", function () { postSetting("/v1/control", {action: "pause"}).then(function () { setStatus("ok", "后台已暂停。正在跑的检索会停在下一步，不会新扣令牌。"); }); });
-    if (resume) resume.addEventListener("click", function () { postSetting("/v1/control", {action: "resume"}).then(function () { setStatus("ok", "后台已继续。"); }); });
+    if (pause) pause.addEventListener("click", function () { postSetting("/v1/control", {action: "pause"}).then(function () { return reloadThen("ok", "后台已暂停。未开始的任务保持排队，不会新扣令牌。"); }).catch(function () { setStatus("fail", "暂停失败。"); }); });
+    if (resume) resume.addEventListener("click", function () { postSetting("/v1/control", {action: "resume"}).then(function () { return reloadThen("ok", "后台已继续。"); }).catch(function () { setStatus("fail", "继续失败。"); }); });
   }
   function selectedCount() {
     var count = 0;
@@ -1429,6 +1433,7 @@ const appJS = `(function () {
     if (autoReport.scan_total) autoText += " · 扫描 " + (autoReport.scan_checked || 0) + "/" + autoReport.scan_total + "（缓存复用 " + (autoReport.scan_reused || 0) + "）";
     if (autoReport.scrape_candidates) autoText += " · 标签 " + (autoReport.scrape_processed || 0) + "/" + autoReport.scrape_candidates;
     if (autoReport.artwork_candidates) autoText += " · 歌词封面 " + (autoReport.artwork_processed || 0) + "/" + autoReport.artwork_candidates;
+    if (autoReport.duplicate_candidates) autoText += " · 去重比对 " + (autoReport.duplicate_checked || 0) + "/" + autoReport.duplicate_candidates;
     autoText += " · 索引新增 " + (autoReport.indexed_added || 0) + "，标签写入 " + (autoReport.scrape_written || 0) + "，歌词封面 " + (autoReport.artwork_written || 0) + "，去重 " + (autoReport.deduplicated || 0) + "，升级任务 " + (autoReport.upgrade_jobs || 0) + "，补专任务 " + (autoReport.expand_jobs || 0);
     if (autoReport.errors && autoReport.errors.length) autoText += "；问题 " + escapeText(autoReport.errors.slice(0, 2).join(" | "));
     var automationCard = '<article><h2>全库自动维护</h2><p class="meta">启用后，程序会持续扫描整个音乐库，可断点续跑地补齐标签、歌词和封面，合并已验证的 PCM 重复项，并为有损曲目和单曲专辑创建升级或补全任务。' + escapeText(autoText) + '</p>' +

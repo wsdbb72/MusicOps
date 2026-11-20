@@ -435,3 +435,20 @@ func TestRejectedReportsDoNotBecomeEmptyResults(t *testing.T) {
 		}
 	}
 }
+
+func TestConfirmedSourceFallbackResolvesImperfectCandidatesPastRateLimits(t *testing.T) {
+	report := base()
+	report.Scene = "expand"
+	report.SourceFallback = true
+	report.SourceFallbackConfirmed = true
+	report.ExplicitFallback = true
+	report.Sites = sites(map[string]SiteReport{
+		"open.cd":  {Status: "OK", Attempted: true, CandidateCount: 1, ObservedTitle: "Different Edition", ExpectedTitle: "Kind of Blue"},
+		"dicmusic": {Status: "RATE_LIMITED", Attempted: true},
+		"redacted": {Status: "DISABLED"},
+	})
+	decision, err := Decide(report)
+	if err != nil || decision.Action != ActionFallback || decision.Reason != "review_confirmed_fallback" {
+		t.Fatalf("decision=%+v err=%v", decision, err)
+	}
+}

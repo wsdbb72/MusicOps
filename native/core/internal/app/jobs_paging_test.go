@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"net/http"
 	"testing"
+
+	"github.com/wsdbb72/MusicOps/native/core/internal/workflow"
 )
 
 // The review view used to fetch the newest 100 jobs and filter in the browser,
@@ -69,5 +71,41 @@ func TestJobsRejectsAMalformedCursor(t *testing.T) {
 	recorder := getAuth(t, application, "/v1/jobs?review=1&after=@@@")
 	if recorder.Code != http.StatusBadRequest {
 		t.Fatal(recorder.Code, recorder.Body.String())
+	}
+}
+
+func TestClassifyJobCountsSeparatesWorkersFromRetryBacklog(t *testing.T) {
+	jobs := []workflow.Job{
+		{ID: "run-root", RootID: "run-root", Stage: "completed", ActiveTaskID: "run-search"},
+		{ID: "run-search", RootID: "run-root", ParentJobID: "run-root", Stage: "searching", ActiveTaskID: "run-task"},
+		{ID: "wait-root", RootID: "wait-root", Stage: "completed", ActiveTaskID: "wait-search"},
+		{ID: "wait-search", RootID: "wait-root", ParentJobID: "wait-root", Stage: "searching", ActiveTaskID: "wait-task"},
+		{ID: "review-root", RootID: "review-root", Stage: "needs_review", ActiveTaskID: "review-task"},
+		{ID: "done-root", RootID: "done-root", Stage: "completed"},
+	}
+	counts := classifyJobCounts(jobs, map[string]bool{"run-task": true})
+	want := map[string]int{"total": 4, "running": 1, "executing": 1, "queued": 1, "review": 1, "finished": 1}
+	for key, value := range want {
+		if counts[key] != value {
+			t.Fatalf("%s=%d want=%d all=%v", key, counts[key], value, counts)
+		}
+	}
+}
+
+func TestJobsCountsOnlyIncludesLiveRuntimeState(t *testing.T) {
+	application := newApp(t)
+	recorder := getAuth(t, application, "/v1/jobs?counts=only")
+	if recorder.Code != http.StatusOK {
+		t.Fatal(recorder.Code, recorder.Body.String())
+	}
+	var body map[string]any
+	if err := json.Unmarshal(recorder.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := body["active_count"]; !ok {
+		t.Fatalf("counts-only response has no active_count: %s", recorder.Body.String())
+	}
+	if _, ok := body["pipeline_paused"]; !ok {
+		t.Fatalf("counts-only response has no pipeline_paused: %s", recorder.Body.String())
 	}
 }

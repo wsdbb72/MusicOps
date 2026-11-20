@@ -85,23 +85,24 @@ type SiteReport struct {
 // IdentityConfirmed must already be true from catalogue evidence. An AI alias
 // cannot set it.
 type Report struct {
-	Scene               string       `json:"scene"`
-	IdentityConfirmed   bool         `json:"identity_confirmed"`
-	StreamingEnabled    bool         `json:"streaming_enabled"`
-	SourceFallback      bool         `json:"source_fallback,omitempty"`
-	ExplicitFallback    bool         `json:"explicit_fallback"`
-	QualityImproved     bool         `json:"quality_improved"`
-	VersionChoice       bool         `json:"version_choice"`
-	RetryCount          uint8        `json:"retry_count"`
-	AIResearchCount     uint8        `json:"ai_research_count"`
-	AIEnabled           bool         `json:"ai_enabled"`
-	AIGrounded          bool         `json:"ai_grounded"`
-	AICandidates        int          `json:"ai_candidates"`
-	Query               string       `json:"query,omitempty"`
-	AIProposedQuery     string       `json:"ai_proposed_query,omitempty"`
-	SelectedSite        string       `json:"selected_site,omitempty"`
-	SelectedCandidateID string       `json:"selected_candidate_id,omitempty"`
-	Sites               []SiteReport `json:"sites"`
+	Scene                   string       `json:"scene"`
+	IdentityConfirmed       bool         `json:"identity_confirmed"`
+	StreamingEnabled        bool         `json:"streaming_enabled"`
+	SourceFallback          bool         `json:"source_fallback,omitempty"`
+	SourceFallbackConfirmed bool         `json:"source_fallback_confirmed,omitempty"`
+	ExplicitFallback        bool         `json:"explicit_fallback"`
+	QualityImproved         bool         `json:"quality_improved"`
+	VersionChoice           bool         `json:"version_choice"`
+	RetryCount              uint8        `json:"retry_count"`
+	AIResearchCount         uint8        `json:"ai_research_count"`
+	AIEnabled               bool         `json:"ai_enabled"`
+	AIGrounded              bool         `json:"ai_grounded"`
+	AICandidates            int          `json:"ai_candidates"`
+	Query                   string       `json:"query,omitempty"`
+	AIProposedQuery         string       `json:"ai_proposed_query,omitempty"`
+	SelectedSite            string       `json:"selected_site,omitempty"`
+	SelectedCandidateID     string       `json:"selected_candidate_id,omitempty"`
+	Sites                   []SiteReport `json:"sites"`
 }
 
 // Decision is a classification, not a measured download or a live success rate.
@@ -270,8 +271,17 @@ func override(report Report, decision Decision) Decision {
 
 func explicitFallbackReady(report Report, in classified) bool {
 	if !report.ExplicitFallback || !report.IdentityConfirmed || !report.StreamingEnabled ||
-		!fallbackAllowed(report) || in.limited || len(in.qualified) > 0 || in.held ||
-		report.SelectedSite != "" || report.SelectedCandidateID != "" {
+		!fallbackAllowed(report) || report.SelectedSite != "" || report.SelectedCandidateID != "" {
+		return false
+	}
+	// An evidence reviewer may explicitly confirm the catalogue-owned source
+	// after it could not safely choose between imperfect tracker releases. This
+	// flag is set only by the review path, after the source identity is known;
+	// normal search still waits through retries and rate limits as before.
+	if report.SourceFallbackConfirmed && report.SourceFallback {
+		return true
+	}
+	if in.limited || len(in.qualified) > 0 || in.held {
 		return false
 	}
 	searched := false

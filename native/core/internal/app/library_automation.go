@@ -117,38 +117,40 @@ type libraryAutomationScanDocument struct {
 }
 
 type libraryAutomationReport struct {
-	Running           bool     `json:"running"`
-	Phase             string   `json:"phase,omitempty"`
-	Started           string   `json:"started,omitempty"`
-	Finished          string   `json:"finished,omitempty"`
-	LastProgress      string   `json:"last_progress,omitempty"`
-	Current           string   `json:"current,omitempty"`
-	Cancelled         bool     `json:"cancelled,omitempty"`
-	IndexedAdded      int      `json:"indexed_added"`
-	IndexedPruned     int      `json:"indexed_pruned"`
-	IndexChecked      int      `json:"index_checked"`
-	ScanTotal         int      `json:"scan_total"`
-	ScanChecked       int      `json:"scan_checked"`
-	ScanReused        int      `json:"scan_reused"`
-	ScanFailed        int      `json:"scan_failed"`
-	ScrapeCandidates  int      `json:"scrape_candidates"`
-	ArtworkCandidates int      `json:"artwork_candidates"`
-	ScrapeProcessed   int      `json:"scrape_processed"`
-	ScrapeSkipped     int      `json:"scrape_skipped"`
-	ArtworkProcessed  int      `json:"artwork_processed"`
-	ArtworkSkipped    int      `json:"artwork_skipped"`
-	ScrapeWritten     int      `json:"scrape_written"`
-	ArtworkWritten    int      `json:"artwork_written"`
-	ArtworkFailed     int      `json:"artwork_failed"`
-	Backlog           bool     `json:"backlog,omitempty"`
-	ScrapeFailed      int      `json:"scrape_failed"`
-	RetryAfterSec     int      `json:"retry_after_sec,omitempty"`
-	DuplicateGroups   int      `json:"duplicate_groups"`
-	Deduplicated      int      `json:"deduplicated"`
-	UpgradeJobs       int      `json:"upgrade_jobs"`
-	ExpandJobs        int      `json:"expand_jobs"`
-	Errors            []string `json:"errors,omitempty"`
-	Note              string   `json:"note,omitempty"`
+	Running             bool     `json:"running"`
+	Phase               string   `json:"phase,omitempty"`
+	Started             string   `json:"started,omitempty"`
+	Finished            string   `json:"finished,omitempty"`
+	LastProgress        string   `json:"last_progress,omitempty"`
+	Current             string   `json:"current,omitempty"`
+	Cancelled           bool     `json:"cancelled,omitempty"`
+	IndexedAdded        int      `json:"indexed_added"`
+	IndexedPruned       int      `json:"indexed_pruned"`
+	IndexChecked        int      `json:"index_checked"`
+	ScanTotal           int      `json:"scan_total"`
+	ScanChecked         int      `json:"scan_checked"`
+	ScanReused          int      `json:"scan_reused"`
+	ScanFailed          int      `json:"scan_failed"`
+	ScrapeCandidates    int      `json:"scrape_candidates"`
+	ArtworkCandidates   int      `json:"artwork_candidates"`
+	ScrapeProcessed     int      `json:"scrape_processed"`
+	ScrapeSkipped       int      `json:"scrape_skipped"`
+	ArtworkProcessed    int      `json:"artwork_processed"`
+	ArtworkSkipped      int      `json:"artwork_skipped"`
+	ScrapeWritten       int      `json:"scrape_written"`
+	ArtworkWritten      int      `json:"artwork_written"`
+	ArtworkFailed       int      `json:"artwork_failed"`
+	Backlog             bool     `json:"backlog,omitempty"`
+	ScrapeFailed        int      `json:"scrape_failed"`
+	RetryAfterSec       int      `json:"retry_after_sec,omitempty"`
+	DuplicateCandidates int      `json:"duplicate_candidates"`
+	DuplicateChecked    int      `json:"duplicate_checked"`
+	DuplicateGroups     int      `json:"duplicate_groups"`
+	Deduplicated        int      `json:"deduplicated"`
+	UpgradeJobs         int      `json:"upgrade_jobs"`
+	ExpandJobs          int      `json:"expand_jobs"`
+	Errors              []string `json:"errors,omitempty"`
+	Note                string   `json:"note,omitempty"`
 }
 
 type libraryAutomationState struct {
@@ -310,6 +312,9 @@ func (a *App) runLibraryAutomationScheduler(stop <-chan struct{}) {
 		case <-stop:
 			return
 		case now := <-ticker.C:
+			if a.pipelinePaused() {
+				continue
+			}
 			settings, err := a.loadLibraryAutomationSettings()
 			if err != nil {
 				nextRun = now.Add(5 * time.Minute)
@@ -1194,41 +1199,59 @@ func writeAutomationSidecar(path string, body []byte) error {
 
 func (a *App) runAutomatedDeduplication(ctx context.Context) bool {
 	state := a.libraryAutomation
-	for merged := 0; merged < libraryAutomationMaxMerges; merged++ {
-		if ctx.Err() != nil {
-			return false
-		}
-		groups, _, _, err := a.scanDuplicates(ctx)
-		if err != nil {
-			state.addError(fmt.Errorf("重复扫描失败: %w", err))
-			return false
-		}
-		groupID := ""
-		readyCount := 0
-		for i := range groups {
-			if groups[i].State == "ready" && !a.groupSuppressed(&groups[i]) {
-				readyCount++
-				if groupID == "" {
-					groupID = groups[i].GroupID
-				}
-			}
-		}
+	state.touch("dedupe", "正在扫描重复项")
+	groups, _, _, err := a.scanDuplicatesWithProgress(ctx, func(checked, total int, current string) {
 		state.update(func(report *libraryAutomationReport) {
-			if readyCount > report.DuplicateGroups {
-				report.DuplicateGroups = readyCount
-			}
+			report.DuplicateCandidates = total
+			report.DuplicateChecked = checked
 		})
-		if groupID == "" {
-			return false
+		label := current
+		if parts := strings.Split(current, "\x00"); len(parts) >= 2 {
+			label = parts[0] + " - " + parts[1]
 		}
-		status, raw, mergeErr := a.libraryMaintenancePost(ctx, "/v1/library/duplicates/merge", a.duplicateMerge, map[string]any{"group_id": groupID})
-		if mergeErr != nil || status < 200 || status >= 300 {
-			state.addError(fmt.Errorf("自动去重 %s 失败: %v %s", groupID, mergeErr, strings.TrimSpace(string(raw))))
-			return false
-		}
-		state.update(func(report *libraryAutomationReport) { report.Deduplicated++ })
+		state.touch("dedupe", fmt.Sprintf("正在比对重复项 %d/%d · %s", checked, total, label))
+	})
+	if err != nil {
+		state.addError(fmt.Errorf("重复扫描失败: %w", err))
+		return true
 	}
-	return true
+	candidates := make([]duplicateGroup, 0, len(groups))
+	for i := range groups {
+		if groups[i].State == "ready" && !a.groupSuppressed(&groups[i]) {
+			candidates = append(candidates, groups[i])
+		}
+	}
+	state.update(func(report *libraryAutomationReport) {
+		report.DuplicateGroups = len(candidates)
+		report.DuplicateChecked = report.DuplicateCandidates
+	})
+	merged := 0
+	for i := range candidates {
+		if ctx.Err() != nil || merged >= libraryAutomationMaxMerges {
+			break
+		}
+		group := candidates[i]
+		state.touch("dedupe", group.Album)
+		mergeCtx := context.WithValue(ctx, automationDuplicateGroupKey{}, &group)
+		status, raw, mergeErr := a.libraryMaintenancePost(mergeCtx, "/v1/library/duplicates/merge", a.duplicateMerge, map[string]any{"group_id": group.GroupID})
+		if mergeErr == nil && status >= 200 && status < 300 {
+			merged++
+			state.update(func(report *libraryAutomationReport) { report.Deduplicated++ })
+			continue
+		}
+		var failure struct {
+			Code  string `json:"code"`
+			Error string `json:"error"`
+		}
+		_ = json.Unmarshal(raw, &failure)
+		state.addError(fmt.Errorf("自动去重 %s 跳过: %v %s", group.GroupID, mergeErr, strings.TrimSpace(string(raw))))
+		if failure.Code == "MERGE_QBITTORRENT_UNAVAILABLE" {
+			// The client state is unknown. Do not try every candidate while the
+			// seeding guard cannot answer; retry the whole pass later.
+			return true
+		}
+	}
+	return ctx.Err() == nil && len(candidates) > merged
 }
 
 func (a *App) enqueueLibraryMaintenanceWorkflows(ctx context.Context, byDir map[string][]string, settings libraryAutomationSettings) {

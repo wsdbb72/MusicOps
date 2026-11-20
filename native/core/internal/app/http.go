@@ -370,41 +370,79 @@ func acceptsGzip(header string) bool {
 	return false
 }
 
-// jobCounts rolls up the entire catalogue by root, including pending children.
+// jobCounts rolls up the entire catalogue by root, including pending
+// children. "running" means a root has a task currently claimed by this
+// scheduler; active workflow stages that are waiting for a future retry or a
+// free lane are counted separately as "queued". This distinction prevents a
+// large retry backlog from looking like hundreds of concurrent workers.
 func (a *App) jobCounts() (map[string]int, error) {
-	states := map[string]int{}
+	jobs := []workflow.Job{}
 	var cursor []byte
 	for {
 		page, err := a.flows.List(cursor, 200)
 		if err != nil {
 			return nil, err
 		}
-		for _, job := range page.Jobs {
-			root := job.RootID
-			if root == "" {
-				root = job.ID
-			}
-			state := 1
-			switch job.Stage {
-			case "needs_review", "failed":
-				state = 2
-			case "preparing", "identifying", "snapshotting", "metadata", "searching", "fallback", "requesting", "downloading", "validating", "publishing", "notifying":
-				state = 3
-			}
-			if state > states[root] {
-				states[root] = state
-			}
-		}
+		jobs = append(jobs, page.Jobs...)
 		if len(page.Next) == 0 {
 			break
 		}
 		cursor = page.Next
 	}
-	counts := map[string]int{"total": len(states), "running": 0, "review": 0, "finished": 0}
-	for _, state := range states {
-		counts[[]string{"", "finished", "review", "running"}[state]]++
+	active := map[string]bool{}
+	if a.runner != nil {
+		for taskID := range a.runner.Health().Active {
+			active[taskID] = true
+		}
 	}
-	return counts, nil
+	return classifyJobCounts(jobs, active), nil
+}
+
+type rootJobState uint8
+
+const (
+	rootFinished rootJobState = iota
+	rootQueued
+	rootRunning
+	rootReview
+)
+
+func classifyJobCounts(jobs []workflow.Job, active map[string]bool) map[string]int {
+	states := map[string]rootJobState{}
+	for _, job := range jobs {
+		root := job.RootID
+		if root == "" {
+			root = job.ID
+		}
+		state := rootFinished
+		switch job.Stage {
+		case "needs_review", "failed":
+			state = rootReview
+		case "preparing", "identifying", "snapshotting", "metadata", "searching", "fallback", "requesting", "downloading", "validating", "publishing", "notifying":
+			state = rootQueued
+			if job.ActiveTaskID != "" && active[job.ActiveTaskID] {
+				state = rootRunning
+			}
+		}
+		if current, ok := states[root]; !ok || state > current {
+			states[root] = state
+		}
+	}
+	counts := map[string]int{"total": len(states), "running": 0, "executing": 0, "queued": 0, "review": 0, "finished": 0}
+	for _, state := range states {
+		switch state {
+		case rootReview:
+			counts["review"]++
+		case rootRunning:
+			counts["running"]++
+			counts["executing"]++
+		case rootQueued:
+			counts["queued"]++
+		default:
+			counts["finished"]++
+		}
+	}
+	return counts
 }
 
 func (a *App) jobs(w http.ResponseWriter, r *http.Request) {
@@ -435,7 +473,11 @@ func (a *App) jobs(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if countsMode == "only" {
-		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "counts": counts})
+		activeCount := 0
+		if a.runner != nil {
+			activeCount = len(a.runner.Health().Active)
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "counts": counts, "active_count": activeCount, "pipeline_paused": a.pipelinePaused()})
 		return
 	}
 

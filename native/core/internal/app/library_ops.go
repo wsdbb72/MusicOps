@@ -274,14 +274,20 @@ func (a *App) libraryWorkflow(w http.ResponseWriter, r *http.Request) {
 	first := tracks[0]
 	label := first.Artist + " — " + first.Album
 	id := libraryFileID(body.Scene + "|" + label + "|" + strconv.FormatInt(a.now().UnixNano(), 10))
+	var existing *workflow.Job
 	if strings.TrimSpace(body.Key) != "" {
-		id = libraryFileID(body.Scene + "|automation|" + strings.TrimSpace(body.Key))
+		var lookupErr error
+		id, existing, lookupErr = a.automationWorkflowID(body.Scene, strings.TrimSpace(body.Key))
+		if lookupErr != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "code": "JOBS_UNAVAILABLE"})
+			return
+		}
 	}
-	if existing, err := a.flows.Job(id); err == nil && existing != nil {
+	if existing != nil {
 		writeJSON(w, http.StatusOK, map[string]any{
 			"ok": true, "started": false, "job_id": id, "scene": body.Scene, "path": chosen[0], "paths": chosen,
 			"downloaded": false, "imported": false,
-			"note": "这项自动任务已存在，未重复创建。",
+			"note": "这项自动任务仍在运行、待核对或已经完成，未重复创建。",
 		})
 		return
 	}
@@ -855,6 +861,81 @@ func (a *App) compilationMoves(apply bool) ([]compilationMove, error) {
 	encoded, _ := json.Marshal(map[string]any{"moves": moves, "at": time.Now().UTC().Format(time.RFC3339)})
 	_ = a.casSaveJSON([]byte("app/library/compilation-last"), encoded)
 	return moves, nil
+}
+
+// automationWorkflowID preserves the stable idempotency key while allowing
+// a new attempt after a terminal failure. A root marked completed can still
+// own a failed search/process descendant, so the whole durable child chain is
+// inspected instead of trusting only the root's stage.
+func (a *App) automationWorkflowID(scene, key string) (string, *workflow.Job, error) {
+	seed := scene + "|automation|" + key
+	candidate := libraryFileID(seed)
+	current, err := a.flows.Job(candidate)
+	if err != nil {
+		return "", nil, err
+	}
+	for attempt := 0; attempt < 32; attempt++ {
+		if current == nil {
+			return candidate, nil, nil
+		}
+		latest, retry, err := maintenanceRetryPoint(*current, a.flows.Job)
+		if err != nil {
+			return "", nil, err
+		}
+		if !retry {
+			return candidate, current, nil
+		}
+		candidate = libraryFileID(seed + "|retry|" + latest.ID + "|" + strconv.FormatInt(latest.UpdatedNS, 10))
+		current, err = a.flows.Job(candidate)
+		if err != nil {
+			return "", nil, err
+		}
+	}
+	return "", nil, errors.New("自动维护任务重试链异常")
+}
+
+// maintenanceRetryPoint walks the durable search/processing links. Any live
+// or reviewable descendant keeps the task deduplicated. Only a fully settled
+// chain containing a failed/cancelled/skipped edge is retryable.
+func maintenanceRetryPoint(root workflow.Job, lookup func(string) (*workflow.Job, error)) (workflow.Job, bool, error) {
+	queue := []string{root.ID}
+	seen := map[string]bool{}
+	var latestFailure workflow.Job
+	for len(queue) > 0 {
+		id := queue[0]
+		queue = queue[1:]
+		if id == "" || seen[id] || len(seen) >= 64 {
+			continue
+		}
+		seen[id] = true
+		job, err := lookup(id)
+		if err != nil {
+			return root, false, err
+		}
+		if job == nil {
+			// A broken durable reference is not proof that replay is safe.
+			return root, false, nil
+		}
+		switch job.Stage {
+		case "completed":
+			for _, child := range []string{job.SearchJobID, job.ProcessingJobID} {
+				if child != "" {
+					queue = append(queue, child)
+				}
+			}
+		case "failed", "cancelled", "skipped":
+			if latestFailure.ID == "" || job.UpdatedNS >= latestFailure.UpdatedNS {
+				latestFailure = *job
+			}
+		default:
+			// Active stages and needs_review both need the existing workflow.
+			return *job, false, nil
+		}
+	}
+	if latestFailure.ID == "" {
+		return root, false, nil
+	}
+	return latestFailure, true, nil
 }
 
 func libraryFileID(value string) string {

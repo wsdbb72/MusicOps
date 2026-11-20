@@ -65,6 +65,12 @@ func (a *App) uploadIncoming(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "code": "LIBRARY_UNAVAILABLE"})
 		return
 	}
+	release, err := reserveAudioCache(incoming, header.Size)
+	if err != nil {
+		writeJSON(w, http.StatusInsufficientStorage, map[string]any{"ok": false, "code": "CACHE_LIMIT", "error": err.Error()})
+		return
+	}
+	defer release()
 	// The name is a validated basename, so the destination is always inside
 	// incoming/. O_EXCL keeps an existing delivery from being overwritten.
 	out, err := os.OpenFile(filepath.Join(incoming, name), os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)

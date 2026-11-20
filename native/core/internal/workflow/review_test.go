@@ -208,7 +208,7 @@ func TestReviewRetryStartsAFreshCycleAfterThreeSearchRetries(t *testing.T) {
 	}
 }
 
-func TestReviewInterruptedCannotRetry(t *testing.T) {
+func TestReviewInterruptedSearchCanRetry(t *testing.T) {
 	repo, tasks := fixture(t)
 	startPlaylist(t, repo)
 	token := begin(t, tasks, "album1", "identify")
@@ -227,13 +227,20 @@ func TestReviewInterruptedCannotRetry(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	retryAllowed := false
 	for _, action := range actions {
-		if action.Allowed {
-			t.Fatal(action)
+		if action.Action == "retry" {
+			retryAllowed = action.Allowed
+		} else if action.Allowed {
+			t.Fatalf("unsafe interrupted action was allowed: %+v", action)
 		}
 	}
-	if _, err := repo.Review("review-interrupted", "search:album1", ReviewDecision{Action: "retry"}, 5000); err == nil {
-		t.Fatal("an interrupted job needs reconciliation before it can run again")
+	if !retryAllowed {
+		t.Fatalf("read-only search has no recovery action: %+v", actions)
+	}
+	result, err := repo.Review("review-interrupted", "search:album1", ReviewDecision{Action: "retry"}, 5000)
+	if err != nil || result.Job == nil || result.Job.Stage != "searching" || result.Job.RecoveryRetryCount != 0 {
+		t.Fatalf("manual recovery failed: %+v %v", result, err)
 	}
 	if _, err := repo.Review("review-interrupted-skip", "search:album1", ReviewDecision{Action: "skip"}, 5000); err == nil {
 		t.Fatal("an interrupted job cannot be skipped without reconciliation")

@@ -117,6 +117,10 @@ func (a *App) duplicateScan(w http.ResponseWriter, r *http.Request) {
 // method is "pcm" when ffmpeg decoded every candidate, "structural"
 // when any fingerprint fell back to the file hash.
 func (a *App) scanDuplicates(ctx context.Context) ([]duplicateGroup, string, bool, error) {
+	return a.scanDuplicatesWithProgress(ctx, nil)
+}
+
+func (a *App) scanDuplicatesWithProgress(ctx context.Context, progress func(checked, total int, current string)) ([]duplicateGroup, string, bool, error) {
 	entries, err := audiorelease.List(a.engine)
 	if err != nil {
 		return nil, "", false, err
@@ -158,12 +162,25 @@ func (a *App) scanDuplicates(ctx context.Context) ([]duplicateGroup, string, boo
 		}
 
 	}
+	candidateKeys := make([]string, 0, len(bySlot))
+	for key, rows := range bySlot {
+		if len(rows) >= 2 {
+			candidateKeys = append(candidateKeys, key)
+		}
+	}
+	sort.Strings(candidateKeys)
 	groups := []duplicateGroup{}
 	seenGroups := map[string]bool{}
 	truncated := false
-	for _, rows := range bySlot {
-		if len(rows) < 2 {
-			continue
+	checkedCount := 0
+	for checked, key := range candidateKeys {
+		checkedCount = checked
+		rows := bySlot[key]
+		if progress != nil {
+			if err := ctx.Err(); err != nil {
+				return nil, "", false, err
+			}
+			progress(checked, len(candidateKeys), key)
 		}
 		if len(groups) >= 1000 {
 			truncated = true
@@ -181,6 +198,10 @@ func (a *App) scanDuplicates(ctx context.Context) ([]duplicateGroup, string, boo
 		if group != nil {
 			groups = append(groups, *group)
 		}
+		checkedCount = checked + 1
+	}
+	if progress != nil {
+		progress(checkedCount, len(candidateKeys), "scan complete")
 	}
 	sort.Slice(groups, func(i, j int) bool { return groups[i].GroupID < groups[j].GroupID })
 	return groups, method, truncated, nil
@@ -380,6 +401,11 @@ type mergeMove struct {
 
 func mergeReceiptKey(id string) []byte { return []byte("library/merge/" + id) }
 
+// automationDuplicateGroupKey carries a verified scan result only between the
+// in-process automation pass and duplicateMerge. It is never accepted from an
+// HTTP request, so external callers still trigger a fresh scan.
+type automationDuplicateGroupKey struct{}
+
 func (a *App) duplicateMerge(w http.ResponseWriter, r *http.Request) {
 	a.duplicateMu.Lock()
 	defer a.duplicateMu.Unlock()
@@ -390,16 +416,21 @@ func (a *App) duplicateMerge(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "code": "INVALID_REQUEST"})
 		return
 	}
-	groups, _, _, err := a.scanDuplicates(r.Context())
-	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "code": "LIBRARY_UNAVAILABLE"})
-		return
-	}
 	var group *duplicateGroup
-	for i := range groups {
-		if groups[i].GroupID == body.GroupID {
-			group = &groups[i]
-			break
+	if trusted, ok := r.Context().Value(automationDuplicateGroupKey{}).(*duplicateGroup); ok && trusted != nil && trusted.GroupID == body.GroupID {
+		group = trusted
+	}
+	if group == nil {
+		groups, _, _, err := a.scanDuplicates(r.Context())
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "code": "LIBRARY_UNAVAILABLE"})
+			return
+		}
+		for i := range groups {
+			if groups[i].GroupID == body.GroupID {
+				group = &groups[i]
+				break
+			}
 		}
 	}
 	if group == nil {

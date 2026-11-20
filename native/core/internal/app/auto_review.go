@@ -32,6 +32,16 @@ func (a *App) runAutoReview(stop <-chan struct{}) {
 	case <-timer.C:
 	}
 	for {
+		if a.pipelinePaused() {
+			timer := time.NewTimer(time.Second)
+			select {
+			case <-stop:
+				timer.Stop()
+				return
+			case <-timer.C:
+			}
+			continue
+		}
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
 		_ = a.autoReviewPass(ctx)
 		cancel()

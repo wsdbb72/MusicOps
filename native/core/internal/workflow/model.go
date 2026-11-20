@@ -107,6 +107,7 @@ type Job struct {
 	ErrorClass          string `json:"error_class,omitempty"`
 	SearchAction        string `json:"search_action,omitempty"`
 	SearchRetryCount    uint8  `json:"search_retry_count,omitempty"`
+	RecoveryRetryCount  uint8  `json:"recovery_retry_count,omitempty"`
 	AIResearchCount     uint8  `json:"ai_research_count,omitempty"`
 	SearchRetryAfterSec int    `json:"search_retry_after_sec,omitempty"`
 	Revision            uint64 `json:"revision"`
@@ -328,7 +329,7 @@ func validJob(job Job) bool {
 	default:
 		return false
 	}
-	if job.SearchRetryCount > 3 || job.AIResearchCount > 1 {
+	if job.SearchRetryCount > 3 || job.RecoveryRetryCount > 3 || job.AIResearchCount > 1 {
 		return false
 	}
 	switch job.SearchRetryAfterSec {

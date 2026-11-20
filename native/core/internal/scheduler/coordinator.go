@@ -72,6 +72,10 @@ type Config struct {
 	// message only ever carries the first frame; the stack belongs in a log
 	// the operator can read, not in a task row that is shown in the UI.
 	OnPanic func(value, stack string)
+	// BeforeClaim lets the application stop new ownership when a global
+	// control (for example the maintenance pause switch) is active. Tasks
+	// stay queued instead of appearing as claimed workers.
+	BeforeClaim func(context.Context) error
 }
 
 func DefaultConfig() Config {
@@ -266,6 +270,18 @@ func wait(ctx context.Context, duration time.Duration) bool {
 }
 func (c *Coordinator) worker(ctx context.Context, lane string) {
 	for ctx.Err() == nil {
+		if c.config.BeforeClaim != nil {
+			if err := c.config.BeforeClaim(ctx); err != nil {
+				if ctx.Err() != nil {
+					return
+				}
+				c.failure(lane, err)
+				if !wait(ctx, 100*time.Millisecond) {
+					return
+				}
+				continue
+			}
+		}
 		changed := c.repo.Changes()
 		requestID := "claim-" + nonce()
 		var result taskrepo.Result

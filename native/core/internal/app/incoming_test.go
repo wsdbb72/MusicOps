@@ -119,3 +119,15 @@ func TestUploadIncomingRejectsOversized(t *testing.T) {
 		t.Fatal("oversized file written")
 	}
 }
+
+func TestUploadIncomingHonorsAudioCacheLimit(t *testing.T) {
+	application := newApp(t)
+	t.Setenv("MUSICOPS_AUDIO_CACHE_BYTES", "100")
+	recorder := uploadFile(t, application, "too-big.wav", bytes.Repeat([]byte{1}, 200), "manual")
+	if recorder.Code != http.StatusInsufficientStorage || !strings.Contains(recorder.Body.String(), "CACHE_LIMIT") {
+		t.Fatal(recorder.Code, recorder.Body.String())
+	}
+	if _, err := os.Stat(filepath.Join(application.Dir, "incoming", "too-big.wav")); !os.IsNotExist(err) {
+		t.Fatal("upload over the cache limit wrote a file", err)
+	}
+}

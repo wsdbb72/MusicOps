@@ -212,6 +212,9 @@ func open(dir, backup, password string, logger StartupLogger) (*App, error) {
 	// A recovered panic keeps its first frame in the task row; the whole
 	// stack goes to panic.log, redacted the same way.
 	runnerConfig.OnPanic = app.recordPanic
+	// The global pause must stop every lane before it claims more work. A
+	// handler-level wait alone still showed queued jobs as running workers.
+	runnerConfig.BeforeClaim = app.waitIfPaused
 	progress("scheduler_init", "creating bounded workflow queues")
 	runner, err := scheduler.New(app.tasks, app.handlers(), runnerConfig)
 	if err != nil {
@@ -241,16 +244,21 @@ func open(dir, backup, password string, logger StartupLogger) (*App, error) {
 		return nil, fmt.Errorf("install workflow hooks: %w", err)
 	}
 	app.normalizeLegacyRetrySchedules(progress)
+	// Recovery must finish before workers can claim. Starting both at once let
+	// the scheduler execute an old queued retry while startup recovery was
+	// changing the same workflow, producing hundreds of false
+	// RECOVERY_REQUIRED reviews. Reconciling superseded queued tasks before
+	// Start also prevents them from being claimed at all.
+	progress("task_recovery", "recovering orphaned tasks before starting scheduler workers")
+	app.recoverOrphanedTasks(runner.Owner(), progress)
+	app.reconcileSupersededQueuedTasks(progress)
 	progress("scheduler_start", "starting scheduler workers")
 	if err = runner.Start(context.Background()); err != nil {
 		engine.Close()
 		return nil, fmt.Errorf("start scheduler: %w", err)
 	}
 	app.runner = runner
-	go func() {
-		app.recoverOrphanedTasks(runner.Owner(), progress)
-		app.reconcilePublishedRoots(time.Now(), progress)
-	}()
+	go app.reconcilePublishedRoots(time.Now(), progress)
 	app.stopSubs = make(chan struct{})
 	go app.runSubscriptions(app.stopSubs)
 	// Token reconciliation runs with the app: an unanswered spend must stop
@@ -294,13 +302,26 @@ func (a *App) backupBeforeLiveMigration() error {
 // fixture must not be registered as an audio download.
 func (a *App) handlers() map[string]scheduler.Handler {
 	return map[string]scheduler.Handler{
-		workflow.CommandIdentify: a.identify,
-		workflow.CommandSnapshot: a.identify,
-		workflow.CommandSearch:   a.search,
-		workflow.CommandProcess:  a.acquire,
-		workflow.CommandDownload: a.download,
-		workflow.CommandPublish:  a.publish,
-		transcodeCommand:         a.transcode,
+		workflow.CommandIdentify: a.whenPipelineRunning(a.identify),
+		workflow.CommandSnapshot: a.whenPipelineRunning(a.identify),
+		workflow.CommandSearch:   a.whenPipelineRunning(a.search),
+		workflow.CommandProcess:  a.whenPipelineRunning(a.acquire),
+		workflow.CommandDownload: a.whenPipelineRunning(a.download),
+		workflow.CommandPublish:  a.whenPipelineRunning(a.publish),
+		transcodeCommand:         a.whenPipelineRunning(a.transcode),
+	}
+}
+
+// whenPipelineRunning closes the small race between claiming a task and a
+// pause arriving just before its executor starts. Existing work is allowed to
+// reach its next safe checkpoint; the executor itself starts only while the
+// global pipeline is running.
+func (a *App) whenPipelineRunning(handler scheduler.Handler) scheduler.Handler {
+	return func(ctx context.Context, execution *scheduler.Execution, payload []byte) (scheduler.Outcome, error) {
+		if err := a.waitIfPaused(ctx); err != nil {
+			return scheduler.Outcome{}, err
+		}
+		return handler(ctx, execution, payload)
 	}
 }
 

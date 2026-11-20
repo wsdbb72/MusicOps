@@ -7,12 +7,39 @@ import (
 	"time"
 )
 
-func TestPruneStaleAudioCacheOnlyRemovesOldNeteaseStaging(t *testing.T) {
+func TestAudioCacheUsageCountsAudioStagingButNotManifests(t *testing.T) {
+	dir := t.TempDir()
+	write := func(rel string, size int) {
+		t.Helper()
+		path := filepath.Join(dir, rel)
+		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, make([]byte, size), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write("user-upload.flac", 5000)
+	write("playlist-test.m3u", 1000)
+	write("dl-fixture.flac", 100)
+	write("netease-fixture.flac", 200)
+	write(filepath.Join("engine-transcode", "engine-fixture.audio"), 300)
+	write(filepath.Join("engine-transcode", "engine-fixture.audio.flac"), 150)
+	got, err := audioCacheUsage(dir)
+	if err != nil || got != 5750 {
+		t.Fatalf("usage=%d err=%v; want all audio staging (5750) without the manifest", got, err)
+	}
+}
+
+func TestPruneStaleAudioCacheOnlyRemovesManagedStaging(t *testing.T) {
 	dir := t.TempDir()
 	now := time.Now()
-	write := func(name string, size int, mod time.Time) string {
+	write := func(rel string, size int, mod time.Time) string {
 		t.Helper()
-		path := filepath.Join(dir, name)
+		path := filepath.Join(dir, rel)
+		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+			t.Fatal(err)
+		}
 		if err := os.WriteFile(path, make([]byte, size), 0o600); err != nil {
 			t.Fatal(err)
 		}
@@ -21,37 +48,66 @@ func TestPruneStaleAudioCacheOnlyRemovesOldNeteaseStaging(t *testing.T) {
 		}
 		return path
 	}
-	oldSource := write("netease-old.flac", 600, now.Add(-5*time.Hour))
-	oldScrape := write("scraped-netease-old.flac", 400, now.Add(-5*time.Hour))
+	oldFiles := []string{
+		write("netease-old.flac", 600, now.Add(-5*time.Hour)),
+		write("scraped-netease-old.flac", 400, now.Add(-5*time.Hour)),
+		write(".scraped-old.tmp", 100, now.Add(-5*time.Hour)),
+		write(filepath.Join("engine-transcode", "engine-old.audio"), 100, now.Add(-5*time.Hour)),
+	}
 	recent := write("netease-recent.flac", 300, now.Add(-30*time.Minute))
+	downloadCopy := write("dl-old.flac", 300, now.Add(-24*time.Hour))
+	streamCopy := write("stream-old.flac", 200, now.Add(-24*time.Hour))
+	upload := write("my-recording.wav", 500, now.Add(-24*time.Hour))
 	manifest := write("playlist-test.m3u", 500, now.Add(-24*time.Hour))
-	freed, err := pruneStaleAudioCache(dir, 700, 4*time.Hour, now)
-	if err != nil || freed < 700 {
+	freed, err := pruneStaleAudioCache(dir, 1<<20, 4*time.Hour, now)
+	if err != nil || freed < 1200 {
 		t.Fatal(freed, err)
 	}
-	for _, path := range []string{oldSource, oldScrape} {
+	for _, path := range oldFiles {
 		if _, err := os.Stat(path); !os.IsNotExist(err) {
-			t.Fatal("stale NetEase staging survived", path, err)
+			t.Fatal("stale reproducible staging survived", path, err)
 		}
 	}
-	for _, path := range []string{recent, manifest} {
+	for _, path := range []string{recent, downloadCopy, streamCopy, upload, manifest} {
 		if _, err := os.Stat(path); err != nil {
-			t.Fatal("protected cache file was removed", path, err)
+			t.Fatal("protected file was removed", path, err)
 		}
 	}
 }
 
-func TestReserveAudioCacheDoesNotDeleteUnprotectedInput(t *testing.T) {
+func TestReserveAudioCacheCountsUploadsWithoutDeletingThem(t *testing.T) {
 	dir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(dir, "playlist-only.m3u"), make([]byte, 600), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	upload := filepath.Join(dir, "my-recording.wav")
+	if err := os.WriteFile(upload, make([]byte, 600), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	t.Setenv("MUSICOPS_AUDIO_CACHE_BYTES", "500")
 	if release, err := reserveAudioCache(dir, 100); err == nil {
 		release()
-		t.Fatal("cache accepted a write over the hard limit by deleting user input")
+		t.Fatal("audio staging accepted a write over the hard limit")
 	}
-	if _, err := os.Stat(filepath.Join(dir, "playlist-only.m3u")); err != nil {
-		t.Fatal("playlist input was removed", err)
+	for _, name := range []string{"playlist-only.m3u", "my-recording.wav"} {
+		if _, err := os.Stat(filepath.Join(dir, name)); err != nil {
+			t.Fatal("staging input was removed instead of pausing the write", name, err)
+		}
+	}
+}
+
+func TestReserveAudioCacheRejectsManagedStagingOverLimit(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "netease-current.flac")
+	if err := os.WriteFile(path, make([]byte, 600), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("MUSICOPS_AUDIO_CACHE_BYTES", "500")
+	if release, err := reserveAudioCache(dir, 100); err == nil {
+		release()
+		t.Fatal("cache accepted a write over the hard limit")
+	}
+	if _, err := os.Stat(path); err != nil {
+		t.Fatal("recent managed staging was deleted instead of pausing the write", err)
 	}
 }

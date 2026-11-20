@@ -1,0 +1,116 @@
+package workflow
+
+import (
+	"encoding/json"
+	"errors"
+	"strconv"
+	"strings"
+
+	"github.com/wsdbb72/MusicOps/native/core/internal/dataengine"
+	"github.com/wsdbb72/MusicOps/native/core/internal/searchdecision"
+	"github.com/wsdbb72/MusicOps/native/core/internal/taskrepo"
+)
+
+// ReconcileQueuedSuperseded cancels queued workflow tasks that no longer
+// belong to their job's current stage. Playlist re-enqueue, recovery and old
+// retry chains can leave such rows behind; letting the scheduler claim them
+// creates a misleading "task ownership or state changed" review even though
+// the replacement task is already correct. This is bookkeeping only and only
+// runs before scheduler workers start.
+func (r *Repository) ReconcileQueuedSuperseded(requestPrefix string, nowNS int64) (int, error) {
+	if r == nil || requestPrefix == "" || nowNS <= 0 {
+		return 0, dataengine.ErrInvalidRequest
+	}
+	reconciled := 0
+	for _, lane := range []string{"identify", "publish", "transcode", "aux", "download"} {
+		var after []byte
+		for {
+			page, err := r.tasks.List(lane, "queued", after, 200)
+			if err != nil {
+				return reconciled, err
+			}
+			for _, task := range page.Tasks {
+				if task.WorkflowJobID == "" {
+					continue
+				}
+				requestID := requestPrefix + "-" + digestBytes([]byte(task.ID + "/" + strconv.FormatUint(task.Revision, 10)))[:32]
+				result, err := r.discardQueuedSuperseded(requestID, task, nowNS)
+				if errors.Is(err, ErrStale) {
+					continue
+				}
+				if err != nil {
+					return reconciled, err
+				}
+				if result.Changed {
+					reconciled++
+				}
+			}
+			if len(page.Next) == 0 {
+				break
+			}
+			after = page.Next
+		}
+	}
+	return reconciled, nil
+}
+
+func (r *Repository) discardQueuedSuperseded(requestID string, task taskrepo.Task, nowNS int64) (Result, error) {
+	extra, _ := json.Marshal(struct{ JobID, Action string }{task.WorkflowJobID, "superseded"})
+	result, err := r.tasks.ControlOwned(requestID, task.ID, "cancel", nowNS, extra, func(v *dataengine.View, before, _ *taskrepo.Task, _ []taskrepo.Task) ([]dataengine.Condition, []dataengine.Mutation, json.RawMessage, error) {
+		if before == nil || before.State != "queued" || before.WorkflowJobID != task.WorkflowJobID || before.Revision != task.Revision {
+			return nil, nil, nil, ErrStale
+		}
+		live, _, err := readJob(v, before.WorkflowJobID)
+		if err != nil {
+			return nil, nil, nil, err
+		}
+		if live != nil && queuedTaskStillCurrent(v, *live, before) {
+			return nil, nil, nil, ErrStale
+		}
+		attached, err := json.Marshal(Result{Job: live})
+		return nil, nil, attached, err
+	})
+	return decode(result, err)
+}
+
+func queuedTaskStillCurrent(v *dataengine.View, job Job, task *taskrepo.Task) bool {
+	if task == nil || job.CancelRequested || terminalStage(job.Stage) || job.ActiveTaskID != task.ID {
+		return false
+	}
+	stage, ok := queuedTaskStage(v, job, task)
+	return ok && stage == job.Stage
+}
+
+func queuedTaskStage(v *dataengine.View, job Job, task *taskrepo.Task) (string, bool) {
+	switch task.Command {
+	case cmdSearch:
+		return "searching", true
+	case cmdDownload:
+		return "downloading", true
+	case cmdIdentify:
+		return "identifying", true
+	case cmdSnapshot:
+		return "snapshotting", true
+	case cmdPrepare:
+		return "preparing", true
+	case cmdRepair:
+		return "metadata", true
+	case cmdProcess, cmdPublish:
+		if stage, found := strings.CutPrefix(task.ID, "stage:"+job.ID+":"); found && stages[stage] {
+			return stage, true
+		}
+		if task.Command == cmdPublish || job.ParentJobID == "" {
+			return "", false
+		}
+		parent, _, err := readJob(v, job.ParentJobID)
+		if err != nil || parent == nil {
+			return "", false
+		}
+		if parent.SearchAction == searchdecision.ActionFallback {
+			return "fallback", true
+		}
+		return "requesting", true
+	default:
+		return "", false
+	}
+}

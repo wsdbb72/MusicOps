@@ -505,6 +505,7 @@ func planFollowups(job Job, in Complete, decision *searchdecision.Decision) ([]t
 			next.IdentificationJobID = job.IdentificationJobID
 			next.SearchJobID = job.ID
 			next.SearchRetryCount = 0
+			next.RecoveryRetryCount = 0
 			next.AIResearchCount = 0
 			next.SearchRetryAfterSec = 0
 			next.SearchAction = ""
@@ -738,6 +739,10 @@ func (r *Repository) commitJob(v *dataengine.View, raw, rootRaw []byte, live Job
 		next.ReviewKind = in.ReviewKind
 		next.ErrorClass = in.ErrorClass
 	}
+	// Reaching any completed workflow edge proves this executor did not get
+	// stuck in the interrupted-recovery loop. Only consecutive interruptions
+	// count against the recovery budget.
+	next.RecoveryRetryCount = 0
 	changedStage := stage != next.Stage
 	next.Stage = stage
 	updated, err := bump(next, in.NowNS, changedStage)

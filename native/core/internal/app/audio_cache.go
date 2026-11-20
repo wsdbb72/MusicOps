@@ -61,7 +61,7 @@ func audioCacheUsage(dir string) (int64, error) {
 		if err != nil {
 			return err
 		}
-		if !entry.Type().IsRegular() {
+		if !entry.Type().IsRegular() || !stagedAudioCacheFile(dir, path) {
 			return nil
 		}
 		info, err := entry.Info()
@@ -72,6 +72,71 @@ func audioCacheUsage(dir string) (int64, error) {
 		return nil
 	})
 	return used, err
+}
+
+func stagedAudioCacheFile(root, path string) bool {
+	rel, err := filepath.Rel(root, path)
+	if err != nil || rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return false
+	}
+	name := strings.ToLower(filepath.Base(rel))
+	if strings.HasPrefix(name, ".scraped-") && strings.HasSuffix(name, ".tmp") {
+		return true
+	}
+	for _, suffix := range []string{".flac", ".wav", ".audio"} {
+		if strings.HasSuffix(name, suffix) {
+			return true
+		}
+	}
+	return false
+}
+
+// managedAudioCacheFile recognizes the atoms written by our download,
+// stream, transcode, and scraping paths. Only these are candidates for
+// automatic cleanup; arbitrary user audio remains protected by the wider
+// usage-only check.
+func managedAudioCacheFile(root, path string) bool {
+	rel, err := filepath.Rel(root, path)
+	if err != nil || rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return false
+	}
+	name := strings.ToLower(filepath.Base(rel))
+	parent := strings.ToLower(filepath.Base(filepath.Dir(rel)))
+	if parent == "engine-transcode" {
+		return strings.HasPrefix(name, "engine-") && (strings.HasSuffix(name, ".audio") || strings.HasSuffix(name, ".flac"))
+	}
+	if strings.HasPrefix(name, ".scraped-") && strings.HasSuffix(name, ".tmp") {
+		return true
+	}
+	if !(strings.HasSuffix(name, ".flac") || strings.HasSuffix(name, ".wav")) {
+		return false
+	}
+	for _, prefix := range []string{"dl-", "scraped-dl-", "netease-", "scraped-netease-", "stream-", "scraped-stream-"} {
+		if strings.HasPrefix(name, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
+// prunableAudioCacheFile is deliberately narrower than the usage filter.
+// Download/stream copies can still be the recovery source for a reviewed
+// task, so age alone is not enough evidence to delete them. NetEase staging
+// and our own failed temp/transcode files are reproducible and safely
+// reclaimable once they are stale.
+func prunableAudioCacheFile(root, path string) bool {
+	if !managedAudioCacheFile(root, path) {
+		return false
+	}
+	name := strings.ToLower(filepath.Base(path))
+	parent := strings.ToLower(filepath.Base(filepath.Dir(path)))
+	if parent == "engine-transcode" {
+		return strings.HasPrefix(name, "engine-")
+	}
+	if strings.HasPrefix(name, ".scraped-") && strings.HasSuffix(name, ".tmp") {
+		return true
+	}
+	return strings.HasPrefix(name, "netease-") || strings.HasPrefix(name, "scraped-netease-")
 }
 
 // pruneStaleAudioCache reclaims failed or abandoned NetEase staging files.
@@ -95,9 +160,7 @@ func pruneStaleAudioCache(dir string, need int64, maxAge time.Duration, now time
 		if !entry.Type().IsRegular() {
 			return nil
 		}
-		name := entry.Name()
-		if !(strings.HasPrefix(name, "netease-") && strings.HasSuffix(name, ".flac") ||
-			strings.HasPrefix(name, "scraped-netease-") && strings.HasSuffix(name, ".flac")) {
+		if !prunableAudioCacheFile(dir, path) {
 			return nil
 		}
 		info, err := entry.Info()

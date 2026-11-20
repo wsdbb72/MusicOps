@@ -71,6 +71,9 @@ func (a *App) pipelineControl(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "code": "CONTROL_UNAVAILABLE"})
 			return
 		}
+		if a.libraryAutomation != nil {
+			a.libraryAutomation.stop()
+		}
 	case "resume":
 		if err := a.setPipelinePaused(false); err != nil {
 			writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "code": "CONTROL_UNAVAILABLE"})

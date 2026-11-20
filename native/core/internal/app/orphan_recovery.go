@@ -1,6 +1,7 @@
 package app
 
 import (
+	"fmt"
 	"strconv"
 	"time"
 
@@ -10,6 +11,9 @@ import (
 )
 
 func (a *App) recoverOrphanedTasks(currentOwner string, log StartupLogger) {
+	if log != nil {
+		log("task_recovery", "scanning stale task owners and interrupted attempts")
+	}
 	tasks, err := a.tasks.RestartRecoverable(currentOwner)
 	if err != nil {
 		if log != nil {
@@ -17,8 +21,14 @@ func (a *App) recoverOrphanedTasks(currentOwner string, log StartupLogger) {
 		}
 		return
 	}
+	if log != nil {
+		log("task_recovery", fmt.Sprintf("classified %d recoverable task(s)", len(tasks)))
+	}
 	recovered := 0
-	for _, task := range tasks {
+	for index, task := range tasks {
+		if log != nil && index > 0 && index%25 == 0 {
+			log("task_recovery", fmt.Sprintf("processed %d/%d recoverable task(s)", index, len(tasks)))
+		}
 		if task.State == "recovery_required" {
 			if task.Execution != "interrupted" || task.WorkflowJobID == "" || !autoRecoverableCommand(task.Command) {
 				continue
@@ -75,11 +85,31 @@ func (a *App) recoverOrphanedTasks(currentOwner string, log StartupLogger) {
 	}
 }
 
+// reconcileSupersededQueuedTasks performs the workflow-side cleanup after
+// orphan recovery and before any scheduler worker can claim a task. Old retry
+// chains and re-enqueued jobs can leave queued rows whose job now points at a
+// different task or stage; executing one produces a false RECOVERY_REQUIRED
+// review. These rows never crossed Begin, so cancelling the task is side-effect
+// free and does not change the current workflow job.
+func (a *App) reconcileSupersededQueuedTasks(log StartupLogger) {
+	prefix := "startup-queued-" + strconv.FormatInt(a.now().UnixNano(), 10)
+	count, err := a.flows.ReconcileQueuedSuperseded(prefix, a.now().UnixNano())
+	if err != nil && log != nil {
+		log("task_recovery", "queued reconciliation failed: "+scrub(err.Error()))
+	}
+	if count > 0 && log != nil {
+		log("task_recovery", "cancelled "+strconv.Itoa(count)+" superseded queued task(s)")
+	}
+}
+
 // normalizeLegacyRetrySchedules moves 0.4.90 job-only retry deadlines onto
 // queued task records. Those tasks used to sleep inside a worker after they
 // were claimed; persisting the deadline lets the new claimer skip them until
 // due and continue with unrelated work.
 func (a *App) normalizeLegacyRetrySchedules(log StartupLogger) {
+	if log != nil {
+		log("task_recovery", "normalizing legacy retry schedules")
+	}
 	var after []byte
 	updated := 0
 	for {

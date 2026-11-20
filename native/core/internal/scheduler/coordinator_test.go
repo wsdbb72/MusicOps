@@ -323,3 +323,38 @@ func TestPanicKeepsTheFrameInHealth(t *testing.T) {
 		t.Fatal(stacks)
 	}
 }
+
+func TestBeforeClaimGateLeavesWorkQueued(t *testing.T) {
+	gate := make(chan struct{})
+	started := make(chan struct{}, 1)
+	handler := func(context.Context, *Execution, []byte) (Outcome, error) {
+		started <- struct{}{}
+		return Outcome{State: "completed"}, nil
+	}
+	config := DefaultConfig()
+	config.BeforeClaim = func(ctx context.Context) error {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-gate:
+			return nil
+		}
+	}
+	repo, coordinator := setup(t, map[string]Handler{"controlled": handler}, config)
+	add(t, repo, "gated", "identify", "controlled", 1, "{}")
+	coordinator.Start(context.Background())
+	time.Sleep(75 * time.Millisecond)
+	if !hasState(repo, "gated", "queued") {
+		t.Fatal("task was claimed while the global gate was closed")
+	}
+	if active := len(coordinator.Health().Active); active != 0 {
+		t.Fatalf("active workers=%d while closed", active)
+	}
+	close(gate)
+	select {
+	case <-started:
+	case <-time.After(10 * time.Second):
+		t.Fatal("handler did not start after the gate opened")
+	}
+	until(t, func() bool { return hasState(repo, "gated", "completed") })
+}

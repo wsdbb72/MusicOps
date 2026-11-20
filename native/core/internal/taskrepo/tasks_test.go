@@ -398,3 +398,24 @@ func TestClockRollbackDoesNotBreakPauseOrRecentOrder(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestCancelFinalizesAlreadyInterruptedRequest(t *testing.T) {
+	r, _ := fixture(t)
+	token := start(t, r, "a", "aux")
+	if _, err := r.Control("cancel-running", "a", "cancel", 2100); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.Interrupt("interrupt-cancelled", token, 2200, "owned process exited"); err != nil {
+		t.Fatal(err)
+	}
+	if task := state(t, r, "a", "recovery_required"); task == nil || !task.CancelRequested {
+		t.Fatal("interrupted cancellation lost its request", task)
+	}
+	if _, err := r.Control("cancel-finalize", "a", "cancel", 2300); err != nil {
+		t.Fatal(err)
+	}
+	task := state(t, r, "a", "cancelled")
+	if task.Execution != "finished" || task.CancelOutcome != "cancelled_after_interrupt" {
+		t.Fatalf("task=%+v", task)
+	}
+}

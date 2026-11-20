@@ -898,8 +898,10 @@ func (r *Repository) Control(requestID, jobID, action string, nowNS int64) (Resu
 			next := *live
 			next.Paused = after.PauseRequested || after.State == "paused"
 			next.CancelRequested = after.CancelRequested || after.State == "cancelled"
-			if after.State == "cancelled" && !terminalStage(next.Stage) {
+			if after.State == "cancelled" && (!terminalStage(next.Stage) || next.Stage == "needs_review") {
 				next.Stage = "cancelled"
+				next.ReviewKind = ""
+				next.ErrorClass = ""
 				next.Message = "已取消后续处理；未开始的阶段不会继续"
 				next.StageStartedNS = later(nowNS, next.UpdatedNS)
 			}

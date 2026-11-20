@@ -303,3 +303,31 @@ func TestReviewMetadataRetryRunsIdentificationAgain(t *testing.T) {
 		t.Fatalf("%+v %v", task, err)
 	}
 }
+
+func TestInterruptedCancellationFinalizesWithoutPendingReview(t *testing.T) {
+	repo, tasks := fixture(t)
+	startPlaylist(t, repo)
+	token := begin(t, tasks, "album1", "identify")
+	if _, err := repo.Complete("cancel-handoff", token, handoff(3000)); err != nil {
+		t.Fatal(err)
+	}
+	token = begin(t, tasks, "search:album1", "identify")
+	if _, err := repo.Control("cancel-running", "search:album1", "cancel", 3500); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := repo.Interrupt("cancel-interrupt", token, 4000, "进程退出；取消请求待确认"); err != nil {
+		t.Fatal(err)
+	}
+	job, err := repo.Job("search:album1")
+	if err != nil || job == nil || !job.CancelRequested || job.Stage != "needs_review" {
+		t.Fatalf("interrupted cancellation was not preserved: %+v err=%v", job, err)
+	}
+	result, err := repo.Control("cancel-finalize", "search:album1", "cancel", 5000)
+	if err != nil || result.Job == nil || result.Job.Stage != "cancelled" || !result.Job.CancelRequested {
+		t.Fatalf("cancellation did not finalize: %+v err=%v", result.Job, err)
+	}
+	task, err := tasks.Get("search:album1")
+	if err != nil || task == nil || task.State != "cancelled" || task.CancelOutcome != "cancelled_after_interrupt" {
+		t.Fatalf("task=%+v err=%v", task, err)
+	}
+}

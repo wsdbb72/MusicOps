@@ -227,8 +227,16 @@ func open(dir, backup, password string, logger StartupLogger) (*App, error) {
 			return err
 		},
 		Interrupt: func(requestID string, token taskrepo.Token, nowNS int64, reason string) error {
-			_, err := app.flows.Interrupt(requestID, token, nowNS, reason)
-			return err
+			if _, err := app.flows.Interrupt(requestID, token, nowNS, reason); err != nil {
+				return err
+			}
+			if task, _ := app.tasks.Get(token.ID); task != nil && task.CancelRequested {
+				// The process is gone and the user already requested cancellation.
+				// There is no executor left to acknowledge it, so commit the final
+				// cancelled edge instead of leaving recovery_required forever.
+				_, _ = app.flows.Control("cancel-interrupted-"+token.ID+"-"+token.Owner, task.WorkflowJobID, "cancel", nowNS)
+			}
+			return nil
 		},
 		Cancel: func(requestID string, token taskrepo.Token, nowNS int64) error {
 			// A cancel that lands before the executor started: commit it as

@@ -30,7 +30,18 @@ func (a *App) recoverOrphanedTasks(currentOwner string, log StartupLogger) {
 			log("task_recovery", fmt.Sprintf("processed %d/%d recoverable task(s)", index, len(tasks)))
 		}
 		if task.State == "recovery_required" {
-			if task.Execution != "interrupted" || task.WorkflowJobID == "" || !autoRecoverableCommand(task.Command) {
+			if task.Execution != "interrupted" || task.WorkflowJobID == "" {
+				continue
+			}
+			if task.CancelRequested {
+				if _, err = a.flows.Control("orphan-cancel-"+task.ID+"-"+strconv.FormatUint(task.Fence, 10), task.WorkflowJobID, "cancel", a.now().UnixNano()); err == nil {
+					recovered++
+				} else if log != nil {
+					log("task_recovery", "cancel "+task.ID+" failed: "+scrub(err.Error()))
+				}
+				continue
+			}
+			if !autoRecoverableCommand(task.Command) {
 				continue
 			}
 			if task.Command == workflow.CommandDownload && !a.restoreDownloadCredentials(task.WorkflowJobID) {

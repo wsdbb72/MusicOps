@@ -412,11 +412,24 @@ func controlDecision(v *dataengine.View, current *Task, id, action string, nowNS
 			next.State = "running"
 		}
 	case "cancel":
-		if current.State == "cancelled" || current.CancelRequested {
+		if current.State == "cancelled" {
 			return &next, nil, nil
+		}
+		if current.CancelRequested && current.State == "recovery_required" && current.Owner == "" {
+			// A running executor keeps its request until its safe boundary.
+			// Once interruption has removed the owner, there is no execution
+			// left to acknowledge it: finalize the cancelled terminal state now.
+			next.State = "cancelled"
+			next.Execution = "finished"
+			next.PauseRequested = false
+			next.CancelOutcome = "cancelled_after_interrupt"
+			break
 		}
 		if terminal(current.State) {
 			return nil, nil, ErrStale
+		}
+		if current.CancelRequested {
+			return &next, nil, nil
 		}
 		next.CancelRequested = true
 		if current.Owner == "" || current.Execution == "claimed" {

@@ -535,10 +535,36 @@ func completion(decision searchdecision.Decision) (workflow.Complete, error) {
 
 func decodePlan(payload []byte) (SearchPlan, error) {
 	var plan SearchPlan
-	if err := json.Unmarshal(payload, &plan); err != nil || plan.RootJobID == "" || plan.Query == "" {
+	if err := json.Unmarshal(payload, &plan); err != nil || plan.RootJobID == "" || strings.TrimSpace(plan.Query) == "" {
 		return SearchPlan{}, errors.New("search plan is incomplete")
 	}
+	// Older playlist jobs stored the platform's complete artist credit in the
+	// query. A long ensemble credit can exceed the tracker client's 300-rune
+	// safety limit and previously failed before any site was searched. Reduce
+	// it to the primary credited artist plus the release/track title. This is
+	// only a search hint; the complete artist credit remains in ExpectedArtist
+	// and is still used for identity matching.
+	plan.Query = boundedTrackerQuery(plan.Query, plan.ExpectedTitle, plan.ExpectedArtist)
 	return plan, nil
+}
+
+func boundedTrackerQuery(query, title, artist string) string {
+	query = strings.TrimSpace(query)
+	if len([]rune(query)) <= 300 {
+		return query
+	}
+	title = strings.TrimSpace(title)
+	primaryArtist := strings.TrimSpace(strings.SplitN(artist, " / ", 2)[0])
+	for _, candidate := range []string{
+		strings.TrimSpace(primaryArtist + " " + title),
+		title,
+	} {
+		if candidate != "" && len([]rune(candidate)) <= 300 {
+			return candidate
+		}
+	}
+	runes := []rune(query)
+	return strings.TrimSpace(string(runes[:300]))
 }
 
 func (plan SearchPlan) evidence() workflow.EvidenceInput {

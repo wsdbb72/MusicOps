@@ -77,12 +77,62 @@ func TestNeteaseSourceFallbackWaitsUntilSitesAreExhausted(t *testing.T) {
 		t.Fatalf("contract exhausted decision=%+v err=%v", decision, err)
 	}
 
+	authPlusRate := base()
+	authPlusRate.Scene = "expand"
+	authPlusRate.SourceFallback = true
+	authPlusRate.Sites = sites(map[string]SiteReport{
+		"open.cd":  {Status: "AUTH_FAILED", Attempted: true},
+		"dicmusic": {Status: "RATE_LIMITED", Attempted: true},
+		"redacted": {Status: "DISABLED"},
+	})
+	if decision, err := Decide(authPlusRate); err != nil || decision.Action != ActionRetry || decision.Reason != "transient_retry" {
+		t.Fatalf("auth plus rate decision=%+v err=%v", decision, err)
+	}
+	authPlusRate.RetryCount = 3
+	if decision, err := Decide(authPlusRate); err != nil || decision.Action != ActionReviewSearch || decision.Reason != "transient_exhausted" {
+		t.Fatalf("auth plus exhausted rate decision=%+v err=%v", decision, err)
+	}
 	genuinelyEmpty := base()
 	genuinelyEmpty.Scene = "expand"
 	genuinelyEmpty.SourceFallback = true
 	genuinelyEmpty.Sites = sites(map[string]SiteReport{"redacted": {Status: "DISABLED"}})
 	if decision, err := Decide(genuinelyEmpty); err != nil || decision.Action != ActionFallback || decision.Reason != "sites_exhausted" {
 		t.Fatalf("genuine empty decision=%+v err=%v", decision, err)
+	}
+
+	browserAndContract := base()
+	browserAndContract.Scene = "expand"
+	browserAndContract.Sites = sites(map[string]SiteReport{
+		"open.cd":  {Status: "BROWSER_CHALLENGE", Attempted: true},
+		"dicmusic": {Status: "INVALID_INPUT", Attempted: true},
+		"redacted": {Status: "DISABLED"},
+	})
+	if decision, err := Decide(browserAndContract); err != nil || decision.Action != ActionRetry || decision.Reason != "transient_retry" {
+		t.Fatalf("browser/contract decision=%+v err=%v", decision, err)
+	}
+	browserAndContract.RetryCount = 3
+	if decision, err := Decide(browserAndContract); err != nil || decision.Action != ActionReviewSearch || decision.Reason != "transient_exhausted" {
+		t.Fatalf("browser/contract exhausted decision=%+v err=%v", decision, err)
+	}
+
+	reviewFallback := base()
+	reviewFallback.Scene = "expand"
+	reviewFallback.SourceFallback = true
+	reviewFallback.ExplicitFallback = true
+	reviewFallback.Sites = sites(map[string]SiteReport{
+		"dicmusic": {Status: "OK", Attempted: true, CandidateCount: 1, ObservedTitle: "Different Edition", ExpectedTitle: "Kind of Blue"},
+		"redacted": {Status: "DISABLED"},
+	})
+	if decision, err := Decide(reviewFallback); err != nil || decision.Action != ActionFallback || decision.Reason != "review_confirmed_fallback" {
+		t.Fatalf("reviewed candidate fallback decision=%+v err=%v", decision, err)
+	}
+	reviewFallback.Sites = sites(map[string]SiteReport{
+		"open.cd":  {Status: "AUTH_FAILED", Attempted: true},
+		"dicmusic": {Status: "OK", Attempted: true, CandidateCount: 1, ObservedTitle: "Different Edition", ExpectedTitle: "Kind of Blue"},
+		"redacted": {Status: "DISABLED"},
+	})
+	if decision, err := Decide(reviewFallback); err != nil || decision.Action != ActionReviewCandidate || decision.Reason != "candidate_review" {
+		t.Fatalf("reviewed fallback bypassed auth decision=%+v err=%v", decision, err)
 	}
 }
 

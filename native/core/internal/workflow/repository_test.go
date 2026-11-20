@@ -398,6 +398,83 @@ func TestInterruptRejectsTheOldFenceAndSearchHandoff(t *testing.T) {
 	}
 }
 
+func startNeteaseFallbackProcess(t *testing.T, batchID string) (*Repository, *taskrepo.Repository, string) {
+	t.Helper()
+	repo, tasks := fixture(t)
+	start := Start{JobID: "album1", BatchID: batchID, Scene: "expand", Stage: "identifying", Label: "示例", Payload: []byte("synthetic tracks"), NowNS: 1000}
+	if _, err := repo.Start("start", start); err != nil {
+		t.Fatal(err)
+	}
+	identifyToken := begin(t, tasks, "album1", "identify")
+	if _, err := repo.Complete("identify", identifyToken, handoff(3000)); err != nil {
+		t.Fatal(err)
+	}
+	searchToken := begin(t, tasks, "search:album1", "identify")
+	report := matchedReport()
+	report.Scene = "expand"
+	report.SourceFallback = true
+	report.StreamingEnabled = true
+	report.SelectedSite = ""
+	report.SelectedCandidateID = ""
+	report.Sites = fourSites(nil)
+	queued, err := repo.Complete("fallback", searchToken, Complete{
+		JobID: "search:album1", Edge: edgeQueueProcess, NextStage: "fallback", TaskState: "completed",
+		NowNS: 4000, Evidence: searchEvidence(), Search: &report,
+	})
+	if err != nil || len(queued.Children) != 1 {
+		t.Fatal(queued, err)
+	}
+	return repo, tasks, queued.Children[0].ID
+}
+
+func TestRecoverInterruptedResumesOnlyNeteaseFallbackProcess(t *testing.T) {
+	t.Run("netease fallback resumes", func(t *testing.T) {
+		repo, tasks, processID := startNeteaseFallbackProcess(t, "pl-netease-590536461-test")
+		held := begin(t, tasks, processID, "aux")
+		if _, err := repo.Interrupt("interrupt-netease", held, 5000, "执行器返回错误：context canceled"); err != nil {
+			t.Fatal(err)
+		}
+		recovered, err := repo.RecoverInterrupted("recover-netease", processID, 6000)
+		if err != nil || recovered.Job == nil || recovered.Job.Stage != "fallback" || recovered.Job.ReviewKind != "" {
+			t.Fatal(recovered, err)
+		}
+		task, err := tasks.Get(processID)
+		if err != nil || task == nil || task.State != "queued" || task.Owner != "" || task.Execution != "" {
+			t.Fatal(task, err)
+		}
+	})
+
+	t.Run("tracker acquire stays for review", func(t *testing.T) {
+		repo, tasks, processID := startNeteaseFallbackProcess(t, "batch1")
+		held := begin(t, tasks, processID, "aux")
+		if _, err := repo.Interrupt("interrupt-tracker", held, 5000, "执行器返回错误：context canceled"); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := repo.RecoverInterrupted("recover-tracker", processID, 6000); !errors.Is(err, ErrStale) {
+			t.Fatalf("expected ErrStale, got %v", err)
+		}
+		job, err := repo.Job(processID)
+		if err != nil || job == nil || job.Stage != "needs_review" || job.ReviewKind != "interrupted" {
+			t.Fatal(job, err)
+		}
+	})
+
+	t.Run("netease phase resumes without repeating tracker acquire", func(t *testing.T) {
+		repo, tasks, processID := startNeteaseFallbackProcess(t, "pl-netease-590536461-test")
+		held := begin(t, tasks, processID, "aux")
+		if _, err := tasks.Progress(held, taskrepo.Point{Sequence: 1, Percent: 40, Phase: "netease_album", NowNS: 4500}); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := repo.Interrupt("interrupt-netease-phase", held, 5000, "执行器返回错误：context canceled"); err != nil {
+			t.Fatal(err)
+		}
+		recovered, err := repo.RecoverInterrupted("recover-netease-phase", processID, 6000)
+		if err != nil || recovered.Job == nil || recovered.Job.Stage != "fallback" || recovered.Job.ReviewKind != "" {
+			t.Fatal(recovered, err)
+		}
+	})
+}
+
 func TestSearchHandoffCreatesProcessTaskWithoutRunningIt(t *testing.T) {
 	repo, tasks := fixture(t)
 	startPlaylist(t, repo)

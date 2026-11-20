@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -128,5 +129,26 @@ func TestEnqueueNormalizesHotSlowCompilationAlbumPlan(t *testing.T) {
 	plan, decodeErr := decodePlan(raw)
 	if err != nil || !found || decodeErr != nil || plan.ExpectedTitle != hotSlowCompilationAlbum || plan.AlbumArtist != hotSlowCompilationArtist {
 		t.Fatalf("plan=%+v found=%v err=%v decode=%v", plan, found, err, decodeErr)
+	}
+}
+
+func TestDecodePlanBoundsLongEnsembleArtistQueries(t *testing.T) {
+	artist := "Lionel Richie / Stevie Wonder / Paul Simon / Kenny Rogers / James Ingram / Tina Turner"
+	for i := 0; i < 12; i++ {
+		artist += " / Guest Artist " + string(rune('A'+i))
+	}
+	plan := SearchPlan{
+		RootJobID: "trk-long-query", Query: artist + " We Are The World", ExpectedTitle: "We Are The World", ExpectedArtist: artist,
+	}
+	raw, err := json.Marshal(plan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	decoded, err := decodePlan(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len([]rune(decoded.Query)) > 300 || decoded.Query != "Lionel Richie We Are The World" {
+		t.Fatalf("query=%q runes=%d", decoded.Query, len([]rune(decoded.Query)))
 	}
 }

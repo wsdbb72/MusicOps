@@ -11,6 +11,8 @@ import (
 	"testing"
 
 	"github.com/wsdbb72/MusicOps/native/core/internal/reviewai"
+	"github.com/wsdbb72/MusicOps/native/core/internal/searchdecision"
+	"github.com/wsdbb72/MusicOps/native/core/internal/taskrepo"
 	"github.com/wsdbb72/MusicOps/native/core/internal/workflow"
 )
 
@@ -172,6 +174,59 @@ func TestModelPassCannotOverrideMissingEvidence(t *testing.T) {
 	}
 }
 
+func TestNeteaseCandidateReviewAdvancesToAlbumFallback(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.Header.Get("X-MusicOps-Site") {
+		case "dicmusic":
+			io.WriteString(w, `{"status":"success","response":{"currentPage":1,"pages":1,"results":[{"groupId":10,"groupName":"Example & Test Live","artist":"Artist","torrents":[{"torrentId":11,"format":"FLAC","encoding":"Lossless","seeders":3}]}]}}`)
+		case "open.cd":
+			io.WriteString(w, `<html><a href="logout.php">logout</a><div>没有种子</div></html>`)
+		default:
+			io.WriteString(w, `{"status":"success","response":{"results":[],"pages":1}}`)
+		}
+	}))
+	defer server.Close()
+	application := newApp(t)
+	body := searchBody("album-netease-fallback", server.URL, []string{"open.cd", "dicmusic", "orpheus", "redacted"}, true)
+	body["batch_id"] = "pl-netease-590536461-test"
+	post(t, application, "/v1/search", body)
+	job := waitJob(t, application, "search:album-netease-fallback", "needs_review")
+	if job.ReviewKind != "candidate" {
+		t.Fatal(job)
+	}
+	inspection := inspect(t, application, job.ID)
+	raw, found, dataErr := application.tasks.Data(inspection.Task.ID, "arguments", 0)
+	var plan SearchPlan
+	if dataErr != nil || !found || json.Unmarshal(raw, &plan) != nil {
+		t.Fatal(dataErr, found)
+	}
+	observations, _, _, observationErr := application.reviewObservations(inspection, plan)
+	if observationErr != nil {
+		t.Fatal(observationErr)
+	}
+	report := application.rebuildReviewReport(job, plan, observations, "", "")
+	markNeteaseSourceFallback(&report)
+	report.ExplicitFallback = true
+	decision, decisionErr := searchdecision.Decide(report)
+	if decisionErr != nil || decision.Action != searchdecision.ActionFallback {
+		t.Fatalf("fallback report decision=%+v err=%v report=%+v", decision, decisionErr, report)
+	}
+	encodedPlan, encodeErr := json.Marshal(plan)
+	var roundTrip searchdecision.Report
+	reportRaw, _ := json.Marshal(report)
+	if encodeErr != nil || json.Unmarshal(reportRaw, &roundTrip) != nil || len(encodedPlan) == 0 || report.Scene != job.Scene || job.IdentificationJobID == "" || !report.SourceFallback || report.SelectedCandidateID != "" {
+		t.Fatalf("fallback transport invalid encode=%v plan=%d scene=%q/%q identification=%q source=%v selected=%q report=%s", encodeErr, len(encodedPlan), report.Scene, job.Scene, job.IdentificationJobID, report.SourceFallback, report.SelectedCandidateID, reportRaw)
+	}
+	recorder := postCode(t, application, "/v1/jobs/"+job.ID+"/review", map[string]any{"action": "ai"})
+	if recorder.Code != http.StatusOK {
+		t.Fatal(recorder.Code, recorder.Body.String())
+	}
+	inspection = inspect(t, application, job.ID)
+	if inspection.Job.Stage != "completed" || inspection.Job.ProcessingJobID == "" || inspection.Job.SearchAction != "fallback" {
+		t.Fatalf("candidate fallback did not advance: %+v", inspection.Job)
+	}
+}
+
 type reviewCaller struct {
 	calls *atomic.Int32
 	body  []byte
@@ -189,3 +244,40 @@ func (c reviewCaller) Complete(context.Context, []byte) ([]byte, error) {
 }
 
 var _ reviewai.Completer = reviewCaller{}
+
+func TestRebuildReviewReportKeepsMissingEnabledSitesUnsearched(t *testing.T) {
+	application := newApp(t)
+	report := application.rebuildReviewReport(workflow.Job{Scene: "expand"}, SearchPlan{
+		ExpectedTitle: "Album", EnabledSites: []string{"open.cd", "dicmusic"},
+	}, nil, "", "")
+	bySite := map[string]searchdecision.SiteReport{}
+	for _, row := range report.Sites {
+		bySite[row.Site] = row
+	}
+	if bySite["open.cd"].Status != "NOT_SEARCHED" || bySite["dicmusic"].Status != "NOT_SEARCHED" {
+		t.Fatalf("enabled missing sites=%+v", report.Sites)
+	}
+	if bySite["orpheus"].Status != "DISABLED" || bySite["redacted"].Status != "DISABLED" {
+		t.Fatalf("disabled sites=%+v", report.Sites)
+	}
+}
+
+func TestInterruptedReviewOnlyAutoRecoversSafeReadOrNeteaseAlbumWork(t *testing.T) {
+	job := workflow.Job{BatchID: "pl-netease-590536461-test"}
+	if !interruptedReviewSafe(job, &taskrepo.Task{Spec: taskrepo.Spec{Command: workflow.CommandSearch}}) {
+		t.Fatal("read-only search should auto-resume")
+	}
+	if !interruptedReviewSafe(job, &taskrepo.Task{Spec: taskrepo.Spec{Command: workflow.CommandProcess}, Phase: "netease_album"}) {
+		t.Fatal("NetEase album phase should auto-resume")
+	}
+	if interruptedReviewSafe(job, &taskrepo.Task{Spec: taskrepo.Spec{Command: workflow.CommandProcess}, Phase: "fetch_dicmusic"}) {
+		t.Fatal("tracker acquire phase must remain explicit-review")
+	}
+	if interruptedReviewSafe(job, &taskrepo.Task{Spec: taskrepo.Spec{Command: workflow.CommandDownload}}) {
+		t.Fatal("download recovery must reconcile qBittorrent first")
+	}
+	cancelled := workflow.Job{BatchID: job.BatchID, CancelRequested: true}
+	if interruptedReviewSafe(cancelled, &taskrepo.Task{Spec: taskrepo.Spec{Command: workflow.CommandSearch}}) {
+		t.Fatal("cancelled job became eligible")
+	}
+}

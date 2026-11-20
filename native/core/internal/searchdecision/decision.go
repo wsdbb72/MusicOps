@@ -191,6 +191,9 @@ func decide(in classified) Decision {
 	if !report.IdentityConfirmed {
 		return Decision{Action: ActionReviewSearch, Reason: "unknown_release"}
 	}
+	if explicitFallbackReady(report, in) {
+		return Decision{Action: ActionFallback, Reason: "review_confirmed_fallback"}
+	}
 	if report.VersionChoice && (len(in.qualified) > 0 || in.mismatch || in.held) {
 		return Decision{Action: ActionReviewCandidate, Reason: "version_choice"}
 	}
@@ -253,9 +256,35 @@ func decide(in classified) Decision {
 
 func override(report Report, decision Decision) Decision {
 	if report.ExplicitFallback && report.IdentityConfirmed && report.StreamingEnabled && (fallbackScene(report.Scene) || report.Scene == "expand") {
+		// A playlist source fallback must still wait through auth/rate/contract
+		// failures. Only an explicit source-owned track may bypass those site
+		// errors. NetEase playlist reports use SourceFallback to distinguish the
+		// catalogue source from a user-confirmed fallback after exhausted search.
+		if report.SourceFallback {
+			return decision
+		}
 		return Decision{Action: ActionFallback, Reason: "review_confirmed_fallback"}
 	}
 	return decision
+}
+
+func explicitFallbackReady(report Report, in classified) bool {
+	if !report.ExplicitFallback || !report.IdentityConfirmed || !report.StreamingEnabled ||
+		!fallbackAllowed(report) || in.limited || len(in.qualified) > 0 || in.held ||
+		report.SelectedSite != "" || report.SelectedCandidateID != "" {
+		return false
+	}
+	searched := false
+	for _, site := range TrackerSites {
+		switch in.classes[site] {
+		case ClassNoResult, ClassMismatch:
+			searched = true
+		case ClassDisabled:
+		default:
+			return false
+		}
+	}
+	return searched
 }
 
 func research(report Report) bool {
@@ -277,7 +306,7 @@ func retryable(in classified) bool {
 		switch in.classes[site] {
 		case ClassRateLimited, ClassNetwork, ClassTransient, ClassContract:
 			saw = true
-		case ClassNoResult, ClassDisabled, ClassMismatch, ClassMatched:
+		case ClassNoResult, ClassDisabled, ClassMismatch, ClassMatched, ClassAuth, ClassForbidden:
 		default:
 			return false
 		}
@@ -286,6 +315,17 @@ func retryable(in classified) bool {
 }
 
 func blocked(in classified) (string, string, bool) {
+	// A recoverable failure on a working site must get its backoff even when
+	// another site has a stale login. Otherwise one AUTH_FAILED site masks a
+	// RATE_LIMITED peer and sends every task to review immediately.
+	for _, site := range TrackerSites {
+		switch in.classes[site] {
+		case ClassContract:
+			return ActionReviewSearch, "contract_error", true
+		case ClassRateLimited, ClassNetwork, ClassTransient:
+			return ActionReviewSearch, "transient_exhausted", true
+		}
+	}
 	disabled := 0
 	for _, site := range TrackerSites {
 		switch in.classes[site] {
@@ -297,10 +337,6 @@ func blocked(in classified) (string, string, bool) {
 			return ActionReviewSearch, "auth_blocked", true
 		case ClassForbidden:
 			return ActionReviewSearch, "access_blocked", true
-		case ClassContract:
-			return ActionReviewSearch, "contract_error", true
-		case ClassRateLimited, ClassNetwork, ClassTransient:
-			return ActionReviewSearch, "transient_exhausted", true
 		case ClassNoResult:
 		case ClassMatched, ClassMismatch:
 			return ActionReviewSearch, "unresolved_match", true
@@ -361,6 +397,15 @@ func siteClass(site SiteReport) (string, error) {
 		return attempted(site, ClassTransient)
 	case "PARSE_ERROR", "API_CONTRACT_ERROR":
 		return attempted(site, ClassContract)
+	case "INVALID_INPUT":
+		// An invalid request is an integration/contract failure. It must not
+		// escape as a scheduler RECOVERY_REQUIRED error and strand the job
+		// outside the normal bounded retry/review flow.
+		return attempted(site, ClassContract)
+	case "BROWSER_CHALLENGE":
+		// A browser challenge can clear when the solver/session recovers. Give
+		// it the same bounded backoff as other transient site failures.
+		return attempted(site, ClassTransient)
 	case "NO_RESOURCE", "NO_MATCH":
 		if site.Exact || site.CandidateCount != 0 || site.Limited {
 			return "", dataengine.ErrInvalidRequest

@@ -11,6 +11,7 @@ import (
 	"github.com/wsdbb72/MusicOps/native/core/internal/dataengine"
 	"github.com/wsdbb72/MusicOps/native/core/internal/reviewai"
 	"github.com/wsdbb72/MusicOps/native/core/internal/searchdecision"
+	"github.com/wsdbb72/MusicOps/native/core/internal/taskrepo"
 	"github.com/wsdbb72/MusicOps/native/core/internal/trackersearch"
 	"github.com/wsdbb72/MusicOps/native/core/internal/workflow"
 )
@@ -181,10 +182,18 @@ func (a *App) rebuildReviewReport(job workflow.Job, plan SearchPlan, observation
 		Sites:        make([]searchdecision.SiteReport, 0, len(searchdecision.TrackerSites)),
 		SelectedSite: site, SelectedCandidateID: candidateID,
 	}
+	enabled := map[string]bool{}
+	for _, name := range a.effectiveEnabledSites(plan) {
+		enabled[name] = true
+	}
 	for _, name := range searchdecision.TrackerSites {
 		observation, ok := observations[name]
 		if !ok {
-			report.Sites = append(report.Sites, searchdecision.SiteReport{Site: name, Status: "DISABLED", ExpectedTitle: plan.ExpectedTitle})
+			status := "NOT_SEARCHED"
+			if !enabled[name] {
+				status = "DISABLED"
+			}
+			report.Sites = append(report.Sites, searchdecision.SiteReport{Site: name, Status: status, ExpectedTitle: plan.ExpectedTitle})
 			continue
 		}
 		row, _, _ := summarizeSite(plan, name, observation)
@@ -233,6 +242,11 @@ func (a *App) reviewWithAI(w http.ResponseWriter, r *http.Request, id, requestID
 	}
 	if err != nil || inspection.Job.Stage != "needs_review" || !a.aiReviewEligible(inspection.Job) {
 		writeJSON(w, http.StatusConflict, map[string]any{"ok": false, "code": "REVIEW_UNAVAILABLE"})
+		return
+	}
+	if inspection.Job.ReviewKind == "interrupted" {
+		result, recoverErr := a.flows.RecoverInterrupted(requestID, id, nowNS)
+		a.writeReviewResult(w, result, recoverErr, "ai")
 		return
 	}
 	if inspection.Job.TaskType != "search" {
@@ -301,6 +315,21 @@ func (a *App) reviewWithAI(w http.ResponseWriter, r *http.Request, id, requestID
 func (a *App) acceptNeteasePlaylistFallback(w http.ResponseWriter, id, requestID string, nowNS int64, job workflow.Job, plan SearchPlan, observations map[string]trackersearch.Observation) {
 	report := a.rebuildReviewReport(job, plan, observations, "", "")
 	markNeteaseSourceFallback(&report)
+	report.ExplicitFallback = true
+	decision, err := searchdecision.Decide(report)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "code": "REVIEW_UNAVAILABLE"})
+		return
+	}
+	if decision.Action == searchdecision.ActionRetry {
+		result, retryErr := a.flows.Review(requestID, id, workflow.ReviewDecision{Action: "retry"}, nowNS)
+		a.writeReviewResult(w, result, retryErr, "ai")
+		return
+	}
+	if decision.Action != searchdecision.ActionFallback {
+		writeJSON(w, http.StatusConflict, map[string]any{"ok": false, "code": "AI_NO_CONFIRMED_MATCH", "reason": decision.Reason, "message": "检索证据还不能安全推进；仍保留在待核对"})
+		return
+	}
 	plan.SelectedSite, plan.SelectedCandidateID = "", ""
 	encoded, err := json.Marshal(plan)
 	if err != nil {
@@ -326,13 +355,34 @@ func (a *App) aiReviewEligible(job workflow.Job) bool {
 		// hold is still active. Consumed or uncertain tokens remain explicit.
 		return job.ErrorClass == "account_token_hold" && strings.HasPrefix(job.BatchID, "pl-netease-")
 	}
-	// Metadata, album and interrupted jobs use the durable retry path and do
-	// not require a model. A NetEase playlist candidate can safely fall back
+	if job.ReviewKind == "interrupted" {
+		task, err := a.tasks.Get(job.ActiveTaskID)
+		return err == nil && interruptedReviewSafe(job, task)
+	}
+	// Metadata and album jobs use the durable retry path and do not require a
+	// model. A NetEase playlist candidate can safely fall back
 	// to its source platform after the tracker observations are exhausted.
 	if job.TaskType != "search" || job.ReviewKind == "candidate" && strings.HasPrefix(job.BatchID, "pl-netease-") {
 		return true
 	}
 	return a.reviewCompleter() != nil && a.reviews != nil
+}
+
+// interruptedReviewSafe identifies the interrupted paths that can be replayed
+// without spending another tracker token. Downloads and tracker acquire tasks
+// remain explicit-review only until their external effect is reconciled.
+func interruptedReviewSafe(job workflow.Job, task *taskrepo.Task) bool {
+	if task == nil || job.CancelRequested || task.CancelRequested {
+		return false
+	}
+	switch task.Command {
+	case workflow.CommandSearch, workflow.CommandIdentify, workflow.CommandSnapshot, workflow.CommandPublish:
+		return true
+	case workflow.CommandProcess:
+		return strings.HasPrefix(job.BatchID, "pl-netease-") && task.Phase == "netease_album"
+	default:
+		return false
+	}
 }
 
 func (a *App) reviewAccept(w http.ResponseWriter, id, requestID, site, candidateID string, nowNS int64) {

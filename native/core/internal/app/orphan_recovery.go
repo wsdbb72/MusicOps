@@ -123,8 +123,11 @@ func (a *App) reconcilePublishedRoots(now time.Time, log StartupLogger) {
 	}
 }
 func autoRecoverableCommand(command string) bool {
+	// Process is included so the workflow layer can decide on its narrow safe
+	// subset. RecoverInterrupted still refuses tracker acquire stages that may
+	// have spent a token; only NetEase playlist fallbacks are replayed.
 	switch command {
-	case workflow.CommandSearch, workflow.CommandDownload, workflow.CommandIdentify, workflow.CommandSnapshot, workflow.CommandPublish:
+	case workflow.CommandSearch, workflow.CommandDownload, workflow.CommandIdentify, workflow.CommandSnapshot, workflow.CommandPublish, workflow.CommandProcess:
 		return true
 	default:
 		return false

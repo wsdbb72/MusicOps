@@ -211,8 +211,11 @@ func (r *Repository) Review(requestID, jobID string, in ReviewDecision, nowNS in
 // RecoverInterrupted requeues a task interrupted because its previous process
 // disappeared. It is intentionally limited to stable, idempotent commands:
 // searches are read-only, downloads Query qBittorrent before resuming, and
-// local identify/snapshot/publish work can be verified and replayed. Acquire
-// tasks stay in needs_review because a replay could spend another token.
+// local identify/snapshot/publish work can be verified and replayed. Tracker
+// acquire tasks stay in needs_review because a replay could spend another
+// token. The one safe process exception is a NetEase playlist fallback: it
+// spends no FL token, skips tracks already verified in the library, and can
+// resume after a cancelled NetEase request.
 func (r *Repository) RecoverInterrupted(requestID, jobID string, nowNS int64) (Result, error) {
 	if !validID(jobID) || requestID == "" || len(requestID) > 128 || nowNS <= 0 {
 		return Result{}, dataengine.ErrInvalidRequest
@@ -227,8 +230,19 @@ func (r *Repository) RecoverInterrupted(requestID, jobID string, nowNS int64) (R
 	if job.Stage != "needs_review" || job.ReviewKind != "interrupted" || task.State != "recovery_required" {
 		return Result{}, ErrStale
 	}
+	if job.CancelRequested || task.CancelRequested {
+		return Result{}, ErrStale
+	}
 	switch task.Command {
 	case cmdSearch, cmdDownload, cmdIdentify, cmdSnapshot, cmdPublish:
+	case cmdProcess:
+		if !strings.HasPrefix(job.BatchID, "pl-netease-") {
+			return Result{}, ErrStale
+		}
+		stage, err := r.retryStage(*job, task)
+		if err != nil || (stage != "fallback" && !(stage == "requesting" && task.Phase == "netease_album")) {
+			return Result{}, ErrStale
+		}
 	default:
 		return Result{}, ErrStale
 	}
@@ -238,6 +252,11 @@ func (r *Repository) RecoverInterrupted(requestID, jobID string, nowNS int64) (R
 	stage, err := r.retryStage(*job, task)
 	if err != nil {
 		return Result{}, err
+	}
+	if task.Command == cmdProcess && task.Phase == "netease_album" {
+		// The interrupted attempt had already reached the NetEase album
+		// walk. Resuming that walk cannot spend another tracker FL token.
+		stage = "fallback"
 	}
 	extra, _ := json.Marshal(struct{ JobID, Action string }{job.ID, "recover"})
 	result, err := r.tasks.ControlOwned(requestID, task.ID, "recover", nowNS, extra, func(v *dataengine.View, _, after *taskrepo.Task, _ []taskrepo.Task) ([]dataengine.Condition, []dataengine.Mutation, json.RawMessage, error) {

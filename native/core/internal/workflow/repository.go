@@ -189,6 +189,9 @@ func (r *Repository) RecordRelease(in RecordReleaseInput) (Result, error) {
 		// of reopening publishing with no task to complete it.
 		if after == nil || !terminalTaskState(after.State) {
 			next.Stage = "publishing"
+			if after != nil {
+				next.ActiveTaskID = after.ID
+			}
 		}
 		updated, err := bump(next, in.NowNS, next.Stage != live.Stage)
 		if err != nil {

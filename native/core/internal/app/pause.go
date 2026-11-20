@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"strconv"
 	"time"
 )
 
@@ -65,6 +66,7 @@ func (a *App) pipelineControl(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "code": "INVALID_REQUEST"})
 		return
 	}
+	reconciled := 0
 	switch body.Action {
 	case "pause":
 		if err := a.setPipelinePaused(true); err != nil {
@@ -75,6 +77,14 @@ func (a *App) pipelineControl(w http.ResponseWriter, r *http.Request) {
 			a.libraryAutomation.stop()
 		}
 	case "resume":
+		if a.flows != nil {
+			var err error
+			reconciled, err = a.flows.ReconcileQueuedSuperseded("resume-queued-"+strconv.FormatInt(a.now().UnixNano(), 10), a.now().UnixNano())
+			if err != nil {
+				writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "code": "CONTROL_UNAVAILABLE"})
+				return
+			}
+		}
 		if err := a.setPipelinePaused(false); err != nil {
 			writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "code": "CONTROL_UNAVAILABLE"})
 			return
@@ -83,5 +93,5 @@ func (a *App) pipelineControl(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "code": "INVALID_REQUEST"})
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "paused": a.pipelinePaused()})
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "paused": a.pipelinePaused(), "reconciled": reconciled})
 }

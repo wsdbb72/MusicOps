@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -214,12 +215,37 @@ func genericAudioHash(ctx context.Context, path string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	for _, line := range strings.Split(string(raw), "\n") {
-		if _, value, found := strings.Cut(line, "="); found && strings.TrimSpace(value) != "" {
-			return strings.TrimSpace(value), nil
+	return parseGenericAudioHash(string(raw))
+}
+
+// parseGenericAudioHash accepts both streamhash layouts emitted by supported
+// FFmpeg releases: "0,a,SHA256=<hex>" and "0,a,<hex>".
+func parseGenericAudioHash(raw string) (string, error) {
+	for _, line := range strings.Split(raw, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		if _, value, found := strings.Cut(line, "="); found {
+			if hash := findSHA256Hex(value); hash != "" {
+				return hash, nil
+			}
+		}
+		if hash := findSHA256Hex(line); hash != "" {
+			return hash, nil
 		}
 	}
 	return "", errors.New("无法计算音频流指纹")
+}
+
+func findSHA256Hex(value string) string {
+	for index := 0; index+64 <= len(value); index++ {
+		candidate := value[index : index+64]
+		if _, err := hex.DecodeString(candidate); err == nil {
+			return strings.ToLower(candidate)
+		}
+	}
+	return ""
 }
 
 type genericScrapeGroup struct {

@@ -568,7 +568,7 @@ func catalogEvidence(t *testing.T, repo *Repository, jobID string) []Evidence {
 func TestRecordReleasePublishesAndQueuesPublishTask(t *testing.T) {
 	repo, tasks := completedAlbum(t)
 	result := recordRelease(t, repo, "album1", "record-1", 4000)
-	if result.Job == nil || result.Job.Stage != "publishing" {
+	if result.Job == nil || result.Job.Stage != "publishing" || result.Job.ActiveTaskID != "stage:album1:publishing" {
 		t.Fatalf("%+v", result.Job)
 	}
 	if result.Task == nil || result.Task.ID != "stage:album1:publishing" {

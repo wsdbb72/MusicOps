@@ -246,6 +246,12 @@ func (a *App) reviewWithAI(w http.ResponseWriter, r *http.Request, id, requestID
 	}
 	if inspection.Job.ReviewKind == "interrupted" {
 		result, recoverErr := a.flows.RecoverInterrupted(requestID, id, nowNS)
+		if errors.Is(recoverErr, workflow.ErrStale) && canResetInterruptedSearch(inspection.Job, inspection.Task) {
+			// Automatic recovery is bounded. Once that budget is exhausted, the
+			// AI review path may start one explicit read-only search cycle; this
+			// still refuses token/download/acquire recovery.
+			result, recoverErr = a.flows.Review(requestID+"-fresh", id, workflow.ReviewDecision{Action: "retry"}, nowNS)
+		}
 		a.writeReviewResult(w, result, recoverErr, "ai")
 		return
 	}
@@ -411,6 +417,11 @@ func (a *App) aiReviewEligible(job workflow.Job) bool {
 		return true
 	}
 	return a.reviewCompleter() != nil && a.reviews != nil
+}
+
+func canResetInterruptedSearch(job workflow.Job, task *taskrepo.Task) bool {
+	return job.ReviewKind == "interrupted" && job.RecoveryRetryCount >= 3 && !job.CancelRequested &&
+		task != nil && task.State == "recovery_required" && task.Command == workflow.CommandSearch && !task.CancelRequested
 }
 
 // interruptedReviewSafe identifies the interrupted paths that can be replayed

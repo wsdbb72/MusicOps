@@ -99,3 +99,55 @@ func TestInterruptedRecoveryHasSeparateBudgetAndManualReset(t *testing.T) {
 		t.Fatalf("task=%+v err=%v", task, err)
 	}
 }
+
+func TestReconcileClaimedKeepsCurrentWorkflowTask(t *testing.T) {
+	repo, tasks := fixture(t)
+	startPlaylist(t, repo)
+	identify := begin(t, tasks, "album1", "identify")
+	if _, err := repo.Complete("handoff-current-claim", identify, handoff(3000)); err != nil {
+		t.Fatal(err)
+	}
+	claim, err := tasks.Claim("claim-current-workflow", "identify", "gate-owner", 4000)
+	if err != nil || claim.Task == nil || claim.Task.ID != "search:album1" {
+		t.Fatalf("claim=%+v err=%v", claim, err)
+	}
+	skip, err := repo.ReconcileClaimedSuperseded("claim-current-check", *claim.Task, 4100)
+	if err != nil || skip {
+		t.Fatalf("current claim skip=%v err=%v", skip, err)
+	}
+	task, err := tasks.Get("search:album1")
+	if err != nil || task == nil || task.Owner != "gate-owner" || task.Execution != "claimed" {
+		t.Fatalf("current claim changed: %+v err=%v", task, err)
+	}
+}
+
+func TestReconcileClaimedCancelsDuplicateBeforeBegin(t *testing.T) {
+	repo, tasks := fixture(t)
+	startPlaylist(t, repo)
+	identify := begin(t, tasks, "album1", "identify")
+	if _, err := repo.Complete("handoff-stale-claim", identify, handoff(3000)); err != nil {
+		t.Fatal(err)
+	}
+	noDomain := func(*dataengine.View, *taskrepo.Task, *taskrepo.Task, []taskrepo.Task) ([]dataengine.Condition, []dataengine.Mutation, json.RawMessage, error) {
+		return nil, nil, nil, nil
+	}
+	if _, err := tasks.CreateFollowup("create-stale-claim", taskrepo.Spec{ID: "stale-search-claim", Command: cmdSearch, Lane: "identify", Priority: 0, CreatedNS: 3100}, []byte("{}"), "search:album1", nil, noDomain); err != nil {
+		t.Fatal(err)
+	}
+	claim, err := tasks.Claim("claim-stale-workflow", "identify", "gate-owner", 4000)
+	if err != nil || claim.Task == nil || claim.Task.ID != "stale-search-claim" {
+		t.Fatalf("claim=%+v err=%v", claim, err)
+	}
+	skip, err := repo.ReconcileClaimedSuperseded("claim-stale-check", *claim.Task, 4100)
+	if err != nil || !skip {
+		t.Fatalf("stale claim skip=%v err=%v", skip, err)
+	}
+	task, err := tasks.Get("stale-search-claim")
+	if err != nil || task == nil || task.State != "cancelled" || task.CancelOutcome != "cancelled_before_start" {
+		t.Fatalf("stale claim=%+v err=%v", task, err)
+	}
+	job, err := repo.Job("search:album1")
+	if err != nil || job == nil || job.ActiveTaskID != "search:album1" || job.Stage != "searching" {
+		t.Fatalf("job changed: %+v err=%v", job, err)
+	}
+}

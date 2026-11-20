@@ -9,6 +9,8 @@ import (
 	"time"
 
 	"github.com/wsdbb72/MusicOps/native/core/internal/reviewai"
+	"github.com/wsdbb72/MusicOps/native/core/internal/taskrepo"
+	"github.com/wsdbb72/MusicOps/native/core/internal/workflow"
 )
 
 func TestAutoReviewPassRunsWithoutAButtonAndCoolsRepeatedMetadataRetry(t *testing.T) {
@@ -57,5 +59,27 @@ func TestAutoReviewCooldownBlocksImmediateRepeatedAttempts(t *testing.T) {
 	application.setAutoReviewCooldown("token-hold", now)
 	if !application.autoReviewCoolingDown("token-hold", now.Add(time.Minute)) {
 		t.Fatal("cooldown was not applied")
+	}
+}
+
+func TestCanResetInterruptedSearchOnlyForExhaustedSafeSearch(t *testing.T) {
+	job := workflow.Job{Stage: "needs_review", ReviewKind: "interrupted", RecoveryRetryCount: 3}
+	task := &taskrepo.Task{Spec: taskrepo.Spec{Command: workflow.CommandSearch}, State: "recovery_required"}
+	if !canResetInterruptedSearch(job, task) {
+		t.Fatal("exhausted read-only search was not resettable")
+	}
+	unsafe := *task
+	unsafe.Spec.Command = workflow.CommandProcess
+	if canResetInterruptedSearch(job, &unsafe) {
+		t.Fatal("unsafe process recovery was allowed")
+	}
+	cancelled := *task
+	cancelled.CancelRequested = true
+	if canResetInterruptedSearch(job, &cancelled) {
+		t.Fatal("cancelled task was reset")
+	}
+	job.RecoveryRetryCount = 2
+	if canResetInterruptedSearch(job, task) {
+		t.Fatal("automatic budget was bypassed before exhaustion")
 	}
 }

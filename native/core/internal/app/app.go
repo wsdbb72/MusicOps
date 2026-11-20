@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"sync"
 	"time"
 
@@ -215,6 +216,13 @@ func open(dir, backup, password string, logger StartupLogger) (*App, error) {
 	// The global pause must stop every lane before it claims more work. A
 	// handler-level wait alone still showed queued jobs as running workers.
 	runnerConfig.BeforeClaim = app.waitIfPaused
+	runnerConfig.BeforeExecute = func(ctx context.Context, task taskrepo.Task) (bool, error) {
+		if err := app.waitIfPaused(ctx); err != nil {
+			return false, err
+		}
+		prefix := "claim-gate-" + strconv.FormatInt(app.now().UnixNano(), 10)
+		return app.flows.ReconcileClaimedSuperseded(prefix, task, app.now().UnixNano())
+	}
 	progress("scheduler_init", "creating bounded workflow queues")
 	runner, err := scheduler.New(app.tasks, app.handlers(), runnerConfig)
 	if err != nil {

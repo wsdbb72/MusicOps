@@ -60,30 +60,46 @@ func TestSearchHitQueuesAcquisitionWithoutADownloadExecutor(t *testing.T) {
 	}
 }
 
-func TestRateLimitWaitsBeforeAnotherRead(t *testing.T) {
+func TestRateLimitSchedulesPersistedRetryWithoutBlockingWorker(t *testing.T) {
 	var calls atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if calls.Add(1) == 1 {
-			w.Header().Set("Retry-After", "30")
-			w.WriteHeader(http.StatusTooManyRequests)
-			return
-		}
-		io.WriteString(w, `{"status":"success","response":{"results":[],"pages":1}}`)
+		calls.Add(1)
+		w.Header().Set("Retry-After", "30")
+		w.WriteHeader(http.StatusTooManyRequests)
 	}))
 	defer server.Close()
 	application := newApp(t)
-	clock := time.Now()
-	application.searcher.Now = func() time.Time { return clock }
 	var waited time.Duration
 	application.Wait = func(_ context.Context, delay time.Duration) error {
 		waited = delay
-		clock = clock.Add(delay)
 		return nil
 	}
 	post(t, application, "/v1/search", searchBody("album-limit", server.URL, []string{"dicmusic"}, false))
-	job := waitJob(t, application, "search:album-limit", "skipped")
-	if job.SearchRetryCount != 1 || waited < 590*time.Second || calls.Load() != 2 {
-		t.Fatal(job.SearchRetryCount, waited, calls.Load(), job.Stage, job.SearchAction)
+	deadline := time.Now().Add(10 * time.Second)
+	var job workflow.Job
+	for time.Now().Before(deadline) {
+		inspection := inspect(t, application, "search:album-limit")
+		job = inspection.Job
+		if job.SearchRetryCount == 1 {
+			break
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+	if job.Stage != "searching" || job.SearchRetryCount != 1 || job.SearchRetryAfterSec < 30 || waited != 0 || calls.Load() != 1 {
+		t.Fatal(job.Stage, job.SearchRetryCount, job.SearchRetryAfterSec, waited, calls.Load())
+	}
+	page, err := application.tasks.List("identify", "queued", nil, 200)
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, task := range page.Tasks {
+		if task.ID == "stage:search:album-limit:retry:1" {
+			found = task.NotBeforeNS > time.Now().UnixNano()
+		}
+	}
+	if !found {
+		t.Fatalf("future retry not persisted in queued lane: %+v", page.Tasks)
 	}
 }
 

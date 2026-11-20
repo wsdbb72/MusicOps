@@ -75,6 +75,44 @@ func (a *App) recoverOrphanedTasks(currentOwner string, log StartupLogger) {
 	}
 }
 
+// normalizeLegacyRetrySchedules moves 0.4.90 job-only retry deadlines onto
+// queued task records. Those tasks used to sleep inside a worker after they
+// were claimed; persisting the deadline lets the new claimer skip them until
+// due and continue with unrelated work.
+func (a *App) normalizeLegacyRetrySchedules(log StartupLogger) {
+	var after []byte
+	updated := 0
+	for {
+		page, err := a.tasks.List("identify", "queued", after, 200)
+		if err != nil {
+			if log != nil {
+				log("task_recovery", "legacy retry scan failed: "+scrub(err.Error()))
+			}
+			return
+		}
+		for _, task := range page.Tasks {
+			if task.Command != workflow.CommandSearch || task.NotBeforeNS != 0 || task.WorkflowJobID == "" {
+				continue
+			}
+			job, jobErr := a.flows.Job(task.WorkflowJobID)
+			if jobErr != nil || job == nil || job.Stage != "searching" || job.SearchRetryAfterSec <= 0 {
+				continue
+			}
+			due := job.UpdatedNS + int64(job.SearchRetryAfterSec)*int64(time.Second)
+			if _, err = a.tasks.Schedule("legacy-schedule-"+task.ID+"-"+strconv.FormatUint(task.Revision, 10), task.ID, due, a.now().UnixNano()); err == nil {
+				updated++
+			}
+		}
+		if len(page.Next) == 0 {
+			break
+		}
+		after = page.Next
+	}
+	if updated > 0 && log != nil {
+		log("task_recovery", "normalized "+strconv.Itoa(updated)+" legacy retry deadline(s)")
+	}
+}
+
 // reconcilePublishedRoots closes pre-0.4.71 roots that reached publishing
 // but never received a process follow-up. Only roots already present in the
 // verified audio catalogue are touched, and only after a ten-minute grace

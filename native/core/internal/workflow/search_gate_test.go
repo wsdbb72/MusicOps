@@ -4,6 +4,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/wsdbb72/MusicOps/native/core/internal/dataengine"
 	"github.com/wsdbb72/MusicOps/native/core/internal/searchdecision"
@@ -108,7 +109,7 @@ func TestTransientSearchDefersWithoutStreamingOrASecondJob(t *testing.T) {
 	if err != nil || result.Job.Stage != "searching" || result.Job.SearchRetryCount != 1 || result.Job.SearchRetryAfterSec != 600 || len(result.Children) != 0 || len(result.Followups) != 1 {
 		t.Fatal(result, err)
 	}
-	if result.Followups[0].ID != "stage:search:album1:retry:1" || result.Followups[0].State != "queued" || result.Followups[0].Command != cmdSearch {
+	if result.Followups[0].ID != "stage:search:album1:retry:1" || result.Followups[0].State != "queued" || result.Followups[0].Command != cmdSearch || result.Followups[0].NotBeforeNS != 4000+600*int64(time.Second) {
 		t.Fatal(result.Followups)
 	}
 	if result.Job.ProcessingJobID != "" || result.Search == nil || result.Search.StreamingDeferred != true {

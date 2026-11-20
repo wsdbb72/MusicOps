@@ -40,12 +40,28 @@ func startPlaylist(t *testing.T, repo *Repository) {
 
 func begin(t *testing.T, tasks *taskrepo.Repository, id, lane string) taskrepo.Token {
 	t.Helper()
-	claim, err := tasks.Claim("claim-"+id, lane, "owner", 2000)
+	claimAt := int64(2000)
+	if task, err := tasks.Get(id); err != nil {
+		t.Fatal(err)
+	} else if task != nil && task.NotBeforeNS > claimAt {
+		claimAt = task.NotBeforeNS
+	}
+	// Tests sometimes pass a generic label for "the next task in this lane".
+	// Claim selects the first queued task, so its persisted deadline also
+	// determines when this test helper may proceed.
+	page, listErr := tasks.List(lane, "queued", nil, 200)
+	if listErr != nil {
+		t.Fatal(listErr)
+	}
+	if len(page.Tasks) > 0 && page.Tasks[0].NotBeforeNS > claimAt {
+		claimAt = page.Tasks[0].NotBeforeNS
+	}
+	claim, err := tasks.Claim("claim-"+id, lane, "owner", claimAt)
 	if err != nil || claim.Task == nil {
 		t.Fatalf("%+v %v", claim, err)
 	}
 	token := taskrepo.Token{ID: claim.Task.ID, Owner: claim.Task.Owner, Fence: claim.Task.Fence}
-	if _, err = tasks.Begin("begin-"+id, token, 2100); err != nil {
+	if _, err = tasks.Begin("begin-"+id, token, claimAt+100); err != nil {
 		t.Fatal(err)
 	}
 	return token

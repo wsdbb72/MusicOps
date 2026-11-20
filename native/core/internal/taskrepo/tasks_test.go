@@ -107,6 +107,37 @@ func TestSummaryPagesCountsAndBlobDeduplication(t *testing.T) {
 	})
 }
 
+func TestClaimLeavesFutureRetryQueuedWithoutBlockingLaterWork(t *testing.T) {
+	r, _ := fixture(t)
+	future := spec("future", "identify", 1)
+	if _, err := r.Enqueue("enqueue-future-delay", future, []byte("future")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.Schedule("schedule-future-delay", "future", 10_000, 1_500); err != nil {
+		t.Fatal(err)
+	}
+	enqueue(t, r, "ready", "identify")
+	claim, err := r.Claim("claim-before-due", "identify", "owner", 9_000)
+	if err != nil || claim.Task == nil || claim.Task.ID != "ready" {
+		t.Fatalf("claim before due=%+v err=%v", claim, err)
+	}
+	token := Token{ID: "ready", Owner: "owner", Fence: claim.Task.Fence}
+	if _, err := r.Begin("begin-ready", token, 9_100); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.Finish("finish-ready", token, Completion{State: "completed", NowNS: 9_200}, nil); err != nil {
+		t.Fatal(err)
+	}
+	claim, err = r.Claim("claim-early-due", "identify", "owner", 9_999)
+	if err != nil || claim.Task != nil {
+		t.Fatalf("future task claimed early=%+v err=%v", claim, err)
+	}
+	claim, err = r.Claim("claim-due", "identify", "owner", 10_000)
+	if err != nil || claim.Task == nil || claim.Task.ID != "future" {
+		t.Fatalf("due task=%+v err=%v", claim, err)
+	}
+}
+
 func TestQueuedPauseAndCancellationBeforeBegin(t *testing.T) {
 	r, _ := fixture(t)
 	enqueue(t, r, "a", "identify")

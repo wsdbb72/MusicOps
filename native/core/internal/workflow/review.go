@@ -249,6 +249,13 @@ func (r *Repository) RecoverInterrupted(requestID, jobID string, nowNS int64) (R
 	if task.Command == cmdSearch && job.SearchRetryCount >= 3 {
 		return Result{}, ErrStale
 	}
+	// 0.4.90 stored the retry deadline only on the job and then slept inside
+	// a scheduler worker. Do not auto-recover one of those legacy tasks into
+	// the same blocking behaviour. An explicit review retry clears the old
+	// deadline and creates a 0.4.91 task with its own persisted NotBeforeNS.
+	if task.Command == cmdSearch && job.SearchRetryAfterSec > 0 && task.NotBeforeNS == 0 {
+		return Result{}, ErrStale
+	}
 	stage, err := r.retryStage(*job, task)
 	if err != nil {
 		return Result{}, err

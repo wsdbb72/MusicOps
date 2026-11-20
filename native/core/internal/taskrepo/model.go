@@ -30,12 +30,13 @@ var lanes = []string{"identify", "publish", "transcode", "aux", "download"}
 var states = []string{"queued", "running", "paused", "completed", "failed", "cancelled", "blocked", "recovery_required"}
 
 type Spec struct {
-	ID        string `json:"task_id"`
-	Command   string `json:"command"`
-	Lane      string `json:"lane"`
-	Priority  int    `json:"priority"`
-	CreatedNS int64  `json:"created_ns"`
-	ParentID  string `json:"parent_id,omitempty"`
+	ID          string `json:"task_id"`
+	Command     string `json:"command"`
+	Lane        string `json:"lane"`
+	Priority    int    `json:"priority"`
+	CreatedNS   int64  `json:"created_ns"`
+	ParentID    string `json:"parent_id,omitempty"`
+	NotBeforeNS int64  `json:"not_before_ns,omitempty"`
 }
 type Task struct {
 	Spec

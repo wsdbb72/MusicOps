@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"strconv"
+	"time"
 
 	"github.com/wsdbb72/MusicOps/native/core/internal/dataengine"
 	"github.com/wsdbb72/MusicOps/native/core/internal/searchdecision"
@@ -471,6 +472,9 @@ func planFollowups(job Job, in Complete, decision *searchdecision.Decision) ([]t
 		payload = []byte(`{"schema":1}`)
 	}
 	followup := taskrepo.NewTask{Spec: taskrepo.Spec{ID: id, Command: command, Lane: lane, Priority: 1, CreatedNS: in.NowNS}, Payload: payload}
+	if in.Edge == edgeDefer && decision != nil && decision.Action == searchdecision.ActionRetry && decision.RetryAfterSec > 0 {
+		followup.Spec.NotBeforeNS = in.NowNS + int64(decision.RetryAfterSec)*int64(time.Second)
+	}
 	owner := job.ID
 	var child *Job
 	if newJob {

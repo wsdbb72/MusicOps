@@ -235,6 +235,7 @@ func open(dir, backup, password string, logger StartupLogger) (*App, error) {
 		engine.Close()
 		return nil, fmt.Errorf("install workflow hooks: %w", err)
 	}
+	app.normalizeLegacyRetrySchedules(progress)
 	progress("scheduler_start", "starting scheduler workers")
 	if err = runner.Start(context.Background()); err != nil {
 		engine.Close()

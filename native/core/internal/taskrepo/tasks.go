@@ -29,6 +29,36 @@ func (r *Repository) Enqueue(requestID string, spec Spec, payload []byte) (Resul
 	}, nil)
 }
 
+// Schedule sets the earliest time a queued task may be claimed. It is used
+// for retries created before NotBeforeNS existed, so an upgrade can preserve
+// their deadline without sleeping inside a scheduler worker.
+func (r *Repository) Schedule(requestID, id string, notBeforeNS, nowNS int64) (Result, error) {
+	if requestID == "" || len(requestID) > 128 || !validID(id) || notBeforeNS < 0 || nowNS <= 0 {
+		return Result{}, dataengine.ErrInvalidRequest
+	}
+	intent := struct {
+		Operation   string
+		NotBeforeNS int64
+	}{"schedule", notBeforeNS}
+	return r.apply(requestID, id, intent, func(v *dataengine.View, current *Task) (*Task, []dataengine.Mutation, error) {
+		if current == nil || current.State != "queued" || current.Revision == math.MaxUint64 {
+			return nil, nil, ErrStale
+		}
+		if current.NotBeforeNS == notBeforeNS {
+			return current, nil, nil
+		}
+		next := *current
+		next.NotBeforeNS = notBeforeNS
+		next.Revision++
+		next.UpdatedNS = effectiveTime(nowNS, current)
+		_, mutations, err := stateMutations(v, current, &next)
+		if err != nil {
+			return nil, nil, err
+		}
+		return &next, mutations, nil
+	}, nil)
+}
+
 func (r *Repository) Claim(requestID, lane, owner string, nowNS int64) (Result, error) {
 	if requestID == "" || len(requestID) > 128 || !validLane(lane) || owner == "" || len(owner) > 128 || nowNS <= 0 {
 		return Result{}, dataengine.ErrInvalidRequest
@@ -48,15 +78,14 @@ func (r *Repository) Claim(requestID, lane, owner string, nowNS int64) (Result, 
 		if receipt != nil {
 			return receipt.Result, receiptError(receipt.Code)
 		}
-		page, err := r.List(lane, "queued", nil, 1)
+		selected, found, err := r.nextClaimable(lane, nowNS)
 		if err != nil {
 			return Result{}, err
 		}
 		// Empty polling is not a durable command; do not grow a receipt per idle tick.
-		if len(page.Tasks) == 0 {
+		if !found {
 			return Result{}, nil
 		}
-		selected := page.Tasks[0]
 		// A raced candidate is retried without recording a rejected claim. Its
 		// intended entity is "next in this lane", rather than that stale candidate.
 		result, err := r.applyClaim(requestID, selected, intent, owner, nowNS)
@@ -66,6 +95,28 @@ func (r *Repository) Claim(requestID, lane, owner string, nowNS int64) (Result, 
 		return result, err
 	}
 	return Result{}, ErrStale
+}
+
+// nextClaimable reads queued tasks in lane order and returns the first task
+// whose persisted retry deadline has elapsed. Future retry tasks stay visible
+// to operators but never occupy a scheduler worker while they wait.
+func (r *Repository) nextClaimable(lane string, nowNS int64) (Task, bool, error) {
+	var after []byte
+	for {
+		page, err := r.List(lane, "queued", after, 200)
+		if err != nil {
+			return Task{}, false, err
+		}
+		for _, task := range page.Tasks {
+			if task.NotBeforeNS <= nowNS {
+				return task, true, nil
+			}
+		}
+		if len(page.Next) == 0 {
+			return Task{}, false, nil
+		}
+		after = page.Next
+	}
 }
 
 func (r *Repository) applyClaim(requestID string, selected Task, intent any, owner string, nowNS int64) (Result, error) {

@@ -1,6 +1,7 @@
 package app
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -83,5 +84,34 @@ func TestPlaylistFetchAcceptsAShareLink(t *testing.T) {
 	// request reached the platform step instead of failing as a bad id.
 	if recorder.Code == http.StatusBadRequest && strings.Contains(recorder.Body.String(), "歌单 ID") {
 		t.Fatal(recorder.Body.String())
+	}
+}
+func TestPlaylistReenqueueReusesActiveAndReplacesTerminalJob(t *testing.T) {
+	application := newApp(t)
+	application.mu.Lock()
+	application.paused = true
+	application.mu.Unlock()
+	row := playlistTrack{Artist: "Artist", Album: "Album", Title: "Song", NeteaseSongID: 1, NeteaseAlbumID: 2}
+	first, err := application.startPlaylistAlbumJob(context.Background(), nil, "pl-netease-1", []string{"dicmusic"}, 0, row, true, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reused, err := application.startPlaylistAlbumJob(context.Background(), nil, "pl-netease-1", []string{"dicmusic"}, 0, row, true, false)
+	if err != nil || reused != first {
+		t.Fatalf("active job was not reused: first=%s reused=%s err=%v", first, reused, err)
+	}
+	if _, err := application.flows.Control("cancel-reenqueue-test", first, "cancel", application.now().UnixNano()); err != nil {
+		t.Fatal(err)
+	}
+	replacement, err := application.startPlaylistAlbumJob(context.Background(), nil, "pl-netease-1", []string{"dicmusic"}, 0, row, true, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if replacement == first {
+		t.Fatal("terminal job was returned instead of a fresh revision")
+	}
+	job, err := application.flows.Job(replacement)
+	if err != nil || job == nil || job.Stage != "identifying" {
+		t.Fatal(job, err)
 	}
 }

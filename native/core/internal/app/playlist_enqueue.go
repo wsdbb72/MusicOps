@@ -325,6 +325,31 @@ func playlistAlbumGroupKey(row playlistTrack, album string) string {
 	return "artist-album:" + normalizeKey(row.Artist) + "\x00" + normalizeKey(album)
 }
 
+func playlistJobReusable(stage string) bool {
+	switch stage {
+	case "identifying", "searching", "requesting", "downloading", "fallback", "validating", "publishing":
+		return true
+	default:
+		return false
+	}
+}
+
+func (a *App) replacementPlaylistJobID(base string, revision uint64) (string, error) {
+	for attempt := int64(0); attempt < 64; attempt++ {
+		seed := fmt.Sprintf("%s/%d/%d/%d", base, revision, a.now().UnixNano(), attempt)
+		sum := sha256.Sum256([]byte(seed))
+		candidate := base + "-r-" + hex.EncodeToString(sum[:6])
+		existing, err := a.flows.Job(candidate)
+		if err != nil {
+			return "", err
+		}
+		if existing == nil {
+			return candidate, nil
+		}
+	}
+	return "", fmt.Errorf("could not allocate a replacement playlist job id")
+}
+
 // startPlaylistAlbumJob creates one expand job. The album is the unit the
 // pipeline works in, so the job is named after it and the row is the evidence.
 func (a *App) startPlaylistAlbumJob(ctx context.Context, client *musicbrainz.Client, playlistJobID string, sites []string, budget int, row playlistTrack, albumCompletion, neteaseOnly bool) (string, error) {
@@ -349,11 +374,20 @@ func (a *App) startPlaylistAlbumJob(ctx context.Context, client *musicbrainz.Cli
 	}
 	jobKey, _ := json.Marshal(parts)
 	sum := sha256.Sum256(jobKey)
-	jobID := "trk-" + slug + "-" + hex.EncodeToString(sum[:6])
-	if existing, err := a.flows.Job(jobID); err != nil {
+	baseJobID := "trk-" + slug + "-" + hex.EncodeToString(sum[:6])
+	jobID := baseJobID
+	existing, err := a.flows.Job(baseJobID)
+	if err != nil {
 		return "", err
-	} else if existing != nil {
-		return jobID, nil
+	}
+	if existing != nil {
+		if !existing.CancelRequested && playlistJobReusable(existing.Stage) {
+			return baseJobID, nil
+		}
+		jobID, err = a.replacementPlaylistJobID(baseJobID, existing.Revision)
+		if err != nil {
+			return "", err
+		}
 	}
 	identity := a.playlistIdentity(client, jobID, artist, album, title)
 	if err := ctx.Err(); err != nil {

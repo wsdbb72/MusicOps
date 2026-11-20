@@ -406,7 +406,7 @@ const appJS = `(function () {
       '<p class="meta">dicmusic、orpheus 几乎没有免费种子，正常下载就是用 FL 令牌。这里填每个歌单批次最多用多少个令牌；0 表示只用免费种子。流媒体引擎用随程序启动的内嵌引擎，不需要填地址（远程引擎用环境变量 MUSICOPS_ENGINE_URL）。</p>' +
       '<p><button type="button" id="save-download" class="primary">保存</button></p>' +
       '<p class="meta">流媒体回退顺序（可上下调整）：</p>' + orderHtml +
-      '<p class="meta">实际会尝试的顺序是 Tidal、Apple Music、QQ 音乐、网易云，最后是已导入的歌单文件。Qobuz 和 Deezer 排在表里，但默认不启用。下载由随程序启动的内嵌引擎完成（go-music-dl），只有返回的文件通过音频校验才算下载，而且这时仍未入库。</p></article>';
+      '<p class="meta">实际会尝试的顺序是 Tidal、Apple Music、QQ 音乐、网易云，最后是已导入的歌单文件；网易云来源的歌单也遵守这里保存的顺序。Qobuz 和 Deezer 排在表里，但默认不启用。下载由随程序启动的内嵌引擎完成（go-music-dl），只有返回的文件通过音频校验才算下载，而且这时仍未入库。</p></article>';
   }
   // A staled cookie answers as a guest: search still works, the download
   // does not. Ask each site instead of letting the job fail much later.

@@ -279,6 +279,12 @@ func explicitFallbackReady(report Report, in classified) bool {
 		switch in.classes[site] {
 		case ClassNoResult, ClassMismatch:
 			searched = true
+		case ClassAuth, ClassForbidden:
+			// A source-owned playlist may continue through its native fallback
+			// after one provider login expires, provided at least one other
+			// provider completed a definitive search. Transient/rate/contract
+			// failures still wait for bounded retries so a temporary outage does
+			// not silently turn every album into a streaming fallback.
 		case ClassDisabled:
 		default:
 			return false

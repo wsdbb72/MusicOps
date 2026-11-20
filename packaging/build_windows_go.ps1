@@ -194,12 +194,22 @@ if ($Compiler) {
     New-Item -ItemType Directory -Force -Path $installerOut | Out-Null
     & $Compiler /DAppVersion=$Version /DBundleDir=$bundleRoot /O$installerOut (Join-Path $PSScriptRoot 'MusicOps-go.iss')
     if ($LASTEXITCODE -ne 0) { throw 'Inno Setup compile failed' }
-    $installer=Get-ChildItem -LiteralPath $installerOut -Filter '*-Setup.exe' | Select-Object -First 1
-    if (-not $installer) { throw 'Inno Setup produced no installer' }
-    Write-Output "Installer: $($installer.FullName)"
+    $installer=Join-Path $installerOut "MusicOps-$Version-Setup.exe"
+    if (-not (Test-Path -LiteralPath $installer)) { throw "Inno Setup produced no installer for $Version" }
+    Write-Output "Installer: $installer"
     $env:MUSICOPS_SMOKE_INSTALLER_BUNDLE=$bundleRoot
     $env:MUSICOPS_SMOKE_INSTALLER_COMPILER=$Compiler
-    $env:MUSICOPS_SMOKE_INSTALLER_WORK=Join-Path $buildRoot 'installer-acceptance'
+    $installerWork=Join-Path $buildRoot 'installer-acceptance'
+    $installerWorkFull=[IO.Path]::GetFullPath($installerWork)
+    $buildFull=[IO.Path]::GetFullPath($buildRoot)
+    $buildPrefix=$buildFull.TrimEnd([IO.Path]::DirectorySeparatorChar)+[IO.Path]::DirectorySeparatorChar
+    if (-not $installerWorkFull.StartsWith($buildPrefix, [StringComparison]::OrdinalIgnoreCase)) {
+        throw "Refusing to clean unexpected installer acceptance path: $installerWorkFull"
+    }
+    if (Test-Path -LiteralPath $installerWorkFull) {
+        Remove-Item -LiteralPath $installerWorkFull -Recurse -Force
+    }
+    $env:MUSICOPS_SMOKE_INSTALLER_WORK=$installerWork
     # Compile the acceptance installer with its own random QA AppIdentity.
     # Using the shipping AppIdentity makes the test collide with an existing
     # production install on a developer machine (and can replace its files).

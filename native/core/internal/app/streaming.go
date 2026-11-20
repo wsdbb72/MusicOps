@@ -168,6 +168,16 @@ func (a *App) streamingSourceStatus() []streamSourceStatus {
 					break
 				}
 			}
+			if streamingEngineOverride() != "" {
+				status.Configured = true
+				status.Reason = "已配置外部流媒体引擎。音频须通过校验才算下载。"
+				break
+			}
+			if _, bundled := a.engineBinary(engineStreaming); bundled {
+				status.Configured = true
+				status.Reason = "安装包内置 go-music-dl；轮到该源时自动启动。"
+				break
+			}
 			status.Reason = "无凭证与引擎，未接入"
 		default:
 			status.Reason = "无凭证与引擎，未接入"
@@ -197,8 +207,10 @@ func (a *App) playlistFile(rootJobID string) (string, bool) {
 // It replaces the old "尚未接入" punt: the walk really runs, each source's
 // outcome is recorded, and the job ends in needs_review with the walk as
 // evidence instead of an empty placeholder message.
-// Batch IDs come from the saved playlist slug. Using the batch ID also
-// applies this to jobs already persisted before source routing was added.
+// Batch IDs come from the saved playlist slug. The origin enables the
+// source-platform album path (durable NetEase song/album ids), but it does
+// not make that source exclusive: the saved streaming order still decides
+// which configured provider is attempted first.
 func isNeteasePlaylistFallback(batchID string, plan SearchPlan) bool {
 	return strings.HasPrefix(batchID, "pl-netease-")
 }
@@ -219,9 +231,9 @@ func neteasePlaylistTitle(plan SearchPlan) string {
 	return ""
 }
 
-func playlistFallbackSteps(order []string, neteaseOnly bool) ([]downloadpolicy.Step, error) {
-	steps, err := downloadpolicy.PlanOrdered(downloadpolicy.DefaultSources(), order, downloadpolicy.Track{SourceKnown: neteaseOnly})
-	if err != nil || !neteaseOnly {
+func playlistFallbackSteps(order []string, exclusiveNetease bool) ([]downloadpolicy.Step, error) {
+	steps, err := downloadpolicy.PlanOrdered(downloadpolicy.DefaultSources(), order, downloadpolicy.Track{SourceKnown: exclusiveNetease})
+	if err != nil || !exclusiveNetease {
 		return steps, err
 	}
 	for _, step := range steps {
@@ -232,12 +244,14 @@ func playlistFallbackSteps(order []string, neteaseOnly bool) ([]downloadpolicy.S
 	return nil, errors.New("网易云回退源未启用")
 }
 
+func neteaseFallbackRouting(batchID string, plan SearchPlan) (albumPath, exclusive bool) {
+	albumPath = isNeteasePlaylistFallback(batchID, plan)
+	return albumPath, albumPath && plan.NeteaseOnly
+}
+
 func (a *App) acquireFallback(ctx context.Context, execution *scheduler.Execution, held taskrepo.Token, job workflow.Job, plan SearchPlan) (scheduler.Outcome, error) {
-	neteaseOnly := isNeteasePlaylistFallback(job.BatchID, plan)
-	if neteaseOnly {
-		return a.acquireNeteaseAlbum(ctx, execution, held, job, plan)
-	}
-	steps, err := playlistFallbackSteps(a.streamingOrder(), neteaseOnly)
+	neteaseAlbum, exclusiveNetease := neteaseFallbackRouting(job.BatchID, plan)
+	steps, err := playlistFallbackSteps(a.streamingOrder(), exclusiveNetease)
 	if err != nil {
 		return scheduler.Outcome{}, err
 	}
@@ -274,8 +288,16 @@ func (a *App) acquireFallback(ctx context.Context, execution *scheduler.Executio
 			outcomes = append(outcomes, downloadpolicy.Outcome{Source: "playlist", Class: downloadpolicy.ClassImport})
 			notes = append(notes, fmt.Sprintf("playlist 已读取 %d 首歌单曲目", len(rows)))
 		default:
-			// NetEase is built in: with a saved cookie the client below does
-			// the search and the lossless download itself, no engine needed.
+			// A NetEase playlist carries durable song and album ids. Once the
+			// configured providers ahead of NetEase have failed, use that
+			// source-specific album path so missing tracks, artists and covers
+			// remain tied to the original release. Explicit netease_only mode
+			// reaches this branch immediately through playlistFallbackSteps.
+			if step.Name == "netease" && neteaseAlbum && a.neteaseCookie() != "" {
+				return a.acquireNeteaseAlbum(ctx, execution, held, job, plan)
+			}
+			// Without a built-in NetEase session, a configured engine may still
+			// provide this source.
 			if step.Name == "netease" {
 				if path, note, class, handled := a.tryNeteaseStream(ctx, plan); handled {
 					outcomes = append(outcomes, downloadpolicy.Outcome{Source: step.Name, Class: class})
@@ -289,9 +311,9 @@ func (a *App) acquireFallback(ctx context.Context, execution *scheduler.Executio
 					continue
 				}
 			}
-			if neteaseOnly {
+			if exclusiveNetease {
 				outcomes = append(outcomes, downloadpolicy.Outcome{Source: step.Name, Class: downloadpolicy.ClassAuth})
-				notes = append(notes, "网易云歌单需要已登录的网易云账号，没有切换到其他平台")
+				notes = append(notes, "本次明确要求仅使用网易云，当前没有可用账号或引擎")
 				continue
 			}
 			// Without a configured engine the note stays "未接入". A saved

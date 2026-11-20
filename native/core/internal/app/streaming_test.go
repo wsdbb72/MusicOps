@@ -132,3 +132,28 @@ func TestStreamingSourceStatus(t *testing.T) {
 		t.Fatal(byName)
 	}
 }
+
+func TestStreamingSourceStatusRecognizesBundledEngine(t *testing.T) {
+	services := t.TempDir()
+	suffix := ""
+	if filepath.Separator == '\\' {
+		suffix = ".exe"
+	}
+	binary := filepath.Join(services, string(engineStreaming), string(engineStreaming)+suffix)
+	if err := os.MkdirAll(filepath.Dir(binary), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(binary, []byte("fixture"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("MUSICOPS_SERVICES_DIR", services)
+	application := newApp(t)
+	status := application.streamingSourceStatus()
+	for _, entry := range status {
+		if entry.Name == "tidal" || entry.Name == "applemusic" || entry.Name == "qqmusic" {
+			if !entry.Configured {
+				t.Fatalf("bundled go-music-dl was not reported for %s: %+v", entry.Name, entry)
+			}
+		}
+	}
+}

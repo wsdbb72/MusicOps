@@ -131,8 +131,8 @@ func TestNeteaseSourceFallbackWaitsUntilSitesAreExhausted(t *testing.T) {
 		"dicmusic": {Status: "OK", Attempted: true, CandidateCount: 1, ObservedTitle: "Different Edition", ExpectedTitle: "Kind of Blue"},
 		"redacted": {Status: "DISABLED"},
 	})
-	if decision, err := Decide(reviewFallback); err != nil || decision.Action != ActionReviewCandidate || decision.Reason != "candidate_review" {
-		t.Fatalf("reviewed fallback bypassed auth decision=%+v err=%v", decision, err)
+	if decision, err := Decide(reviewFallback); err != nil || decision.Action != ActionFallback || decision.Reason != "review_confirmed_fallback" {
+		t.Fatalf("reviewed fallback did not continue past expired auth=%+v err=%v", decision, err)
 	}
 }
 

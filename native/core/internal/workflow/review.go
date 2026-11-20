@@ -23,8 +23,9 @@
 //   - retry: a job in needs_review (ReviewKind search, candidate, token or metadata)
 //     or a failed job. The task goes back to queued with the taskrepo retry
 //     semantics, and the job stage is restored to the stage the task runs in
-//     (see retryStage). The search retry count is bounded at 3, matching the
-//     classifier's own retry limit. Retry is refused for ReviewKind "error"
+//     (see retryStage). Automatic search retries are bounded at 3, while an
+//     explicit/AI review retry restarts that bounded cycle after evidence has
+//     had time to change. Retry is refused for ReviewKind "error"
 //     (no executor is registered, so a re-run would block again
 //     deterministically), for "interrupted" (the task is recovery_required
 //     and taskrepo retry deliberately refuses it until the external effects
@@ -152,9 +153,6 @@ func (r *Repository) retryAction(job *Job, task *taskrepo.Task) ReviewAction {
 		}
 	default:
 		return ReviewAction{Action: "retry", Reason: "当前阶段不能重试"}
-	}
-	if task.Command == cmdSearch && job.SearchRetryCount >= 3 {
-		return ReviewAction{Action: "retry", Reason: "已达 3 次重试上限"}
 	}
 	if _, err := r.retryStage(*job, task); err != nil {
 		return ReviewAction{Action: "retry", Reason: "无法确认重回阶段"}
@@ -310,7 +308,7 @@ func (r *Repository) reviewAccept(requestID string, job Job, task *taskrepo.Task
 	if job.Stage != "needs_review" || task.State != "blocked" {
 		return Result{}, ErrStale
 	}
-	if job.ReviewKind != "candidate" || job.TaskType != "search" {
+	if job.TaskType != "search" || (job.ReviewKind != "candidate" && job.ReviewKind != "search") {
 		return Result{}, ErrStale
 	}
 	decision := searchdecision.Decision{Action: searchdecision.ActionQueueRequest}
@@ -330,7 +328,7 @@ func (r *Repository) reviewAccept(requestID string, job Job, task *taskrepo.Task
 		// report. Both must match the user's selection: the report is rebuilt
 		// from stored evidence, so a selection that is not in the evidence
 		// cannot classify as an exact match.
-		if !((decision.Action == searchdecision.ActionQueueRequest && in.Site != "" && in.CandidateID != "" && decision.SelectedSite == in.Site && in.Search.SelectedSite == in.Site && in.Search.SelectedCandidateID == in.CandidateID) || (decision.Action == searchdecision.ActionFallback && in.Search.SourceFallback && strings.HasPrefix(job.BatchID, "pl-netease-") && in.Site == "" && in.CandidateID == "" && in.Search.SelectedCandidateID == "")) {
+		if !((decision.Action == searchdecision.ActionQueueRequest && in.Site != "" && in.CandidateID != "" && decision.SelectedSite == in.Site && in.Search.SelectedSite == in.Site && in.Search.SelectedCandidateID == in.CandidateID) || (decision.Action == searchdecision.ActionFallback && in.Search.SourceFallback && in.Site == "" && in.CandidateID == "" && in.Search.SelectedCandidateID == "")) {
 			return Result{}, dataengine.ErrInvalidRequest
 		}
 	}
@@ -363,7 +361,7 @@ func (r *Repository) reviewAccept(requestID string, job Job, task *taskrepo.Task
 	child.SearchAction = decision.Action
 	child.Message = "已确认候选，等待获取；尚未下载、尚未入库"
 	if child.Stage == "fallback" {
-		child.Message = "站点候选未确认，等待网易云原发行版处理"
+		child.Message = "站点候选未确认，等待配置的流媒体回退；尚未下载、尚未入库"
 	}
 	followup := taskrepo.NewTask{Spec: taskrepo.Spec{ID: childID, Command: cmdProcess, Lane: "aux", Priority: 1, CreatedNS: nowNS}, Payload: in.Plan}
 	end := taskrepo.Completion{State: "completed", NowNS: nowNS, Message: child.Message, Payload: in.Plan}
@@ -463,9 +461,6 @@ func (r *Repository) reviewRetry(requestID string, job Job, task *taskrepo.Task,
 	default:
 		return Result{}, ErrStale
 	}
-	if task.Command == cmdSearch && job.SearchRetryCount >= 3 {
-		return Result{}, ErrStale
-	}
 	stage, err := r.retryStage(job, task)
 	if err != nil {
 		return Result{}, err
@@ -495,7 +490,14 @@ func (r *Repository) reviewRetry(requestID string, job Job, task *taskrepo.Task,
 		next.SearchAction = ""
 		next.SearchRetryAfterSec = 0
 		if task.Command == cmdSearch {
+			// Three scheduler retries form one bounded cycle. A reviewed retry
+			// starts a fresh cycle only after the user or the evidence-driven
+			// auto reviewer has seen the latest site state; otherwise a stale
+			// login plus a temporary rate limit stranded the job forever.
 			next.SearchRetryCount = live.SearchRetryCount + 1
+			if next.SearchRetryCount >= 3 {
+				next.SearchRetryCount = 0
+			}
 		}
 		next.Message = "已安排重新执行"
 		updated, err := bump(next, nowNS, next.Stage != live.Stage)

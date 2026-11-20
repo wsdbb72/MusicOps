@@ -24,8 +24,9 @@ func TestAIReviewEligibilityCoversNonSearchButNeverTokenHolds(t *testing.T) {
 	}
 	ordinarySearch := neteaseSource
 	ordinarySearch.BatchID = "batch-1"
-	if withoutAI.aiReviewEligible(ordinarySearch) {
-		t.Fatal("ordinary search candidate became eligible without a model")
+	ordinarySearch.ReviewKind = "search"
+	if !withoutAI.aiReviewEligible(ordinarySearch) {
+		t.Fatal("evidence-driven search review must remain eligible without a model")
 	}
 	application := newApp(t)
 	calls := atomic.Int32{}
@@ -224,6 +225,37 @@ func TestNeteaseCandidateReviewAdvancesToAlbumFallback(t *testing.T) {
 	inspection = inspect(t, application, job.ID)
 	if inspection.Job.Stage != "completed" || inspection.Job.ProcessingJobID == "" || inspection.Job.SearchAction != "fallback" {
 		t.Fatalf("candidate fallback did not advance: %+v", inspection.Job)
+	}
+}
+
+func TestExpiredLoginDoesNotStrandDefinitiveSearchReview(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("X-MusicOps-Site") == "open.cd" {
+			w.WriteHeader(http.StatusUnauthorized)
+			io.WriteString(w, "login required")
+			return
+		}
+		io.WriteString(w, `{"status":"success","response":{"results":[],"pages":1}}`)
+	}))
+	defer server.Close()
+	application := newApp(t)
+	body := searchBody("album-expired-auth", server.URL, []string{"open.cd", "dicmusic", "orpheus", "redacted"}, true)
+	body["batch_id"] = "pl-netease-590536461-test"
+	post(t, application, "/v1/search", body)
+	search := waitJob(t, application, "search:album-expired-auth", "needs_review")
+	if search.ReviewKind != "search" {
+		t.Fatal(search)
+	}
+	if err := application.runner.Stop(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	stats := application.autoReviewPass(context.Background())
+	if stats.Candidates != 1 || stats.Accepted != 1 || stats.Held != 0 {
+		t.Fatalf("auto review did not resolve the definitive search: %+v", stats)
+	}
+	job, err := application.flows.Job("search:album-expired-auth")
+	if err != nil || job == nil || job.Stage != "completed" || job.SearchAction != searchdecision.ActionFallback || job.ProcessingJobID == "" {
+		t.Fatalf("search did not queue fallback: %+v err=%v", job, err)
 	}
 }
 

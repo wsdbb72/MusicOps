@@ -159,7 +159,7 @@ func TestReviewSkipAbandonsSearch(t *testing.T) {
 	}
 }
 
-func TestReviewRetryRefusesAfterThreeSearchRetries(t *testing.T) {
+func TestReviewRetryStartsAFreshCycleAfterThreeSearchRetries(t *testing.T) {
 	repo, tasks := fixture(t)
 	startPlaylist(t, repo)
 	token := begin(t, tasks, "album1", "identify")
@@ -193,13 +193,18 @@ func TestReviewRetryRefusesAfterThreeSearchRetries(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	retryAllowed := false
 	for _, action := range actions {
 		if action.Action == "retry" && action.Allowed {
-			t.Fatal("the fourth search retry must be refused")
+			retryAllowed = true
 		}
 	}
-	if _, err := repo.Review("review-capped", "search:album1", ReviewDecision{Action: "retry"}, 9100); err == nil {
-		t.Fatal("the fourth search retry must be refused")
+	if !retryAllowed {
+		t.Fatal("a reviewed retry must start a fresh bounded search cycle")
+	}
+	result, err := repo.Review("review-reset", "search:album1", ReviewDecision{Action: "retry"}, 9100)
+	if err != nil || result.Job == nil || result.Job.Stage != "searching" || result.Job.SearchRetryCount != 0 {
+		t.Fatalf("reviewed retry did not reset the retry cycle: %+v err=%v", result.Job, err)
 	}
 }
 

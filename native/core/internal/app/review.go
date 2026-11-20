@@ -272,6 +272,9 @@ func (a *App) reviewWithAI(w http.ResponseWriter, r *http.Request, id, requestID
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "code": "REVIEW_UNAVAILABLE"})
 		return
 	}
+	if a.reviewSearchFromEvidence(w, requestID, id, nowNS, inspection.Job, plan, observations) {
+		return
+	}
 	model := a.reviewCompleter()
 	if model == nil || a.reviews == nil {
 		if inspection.Job.ReviewKind == "candidate" && isNeteasePlaylistFallback(inspection.Job.BatchID, plan) {
@@ -310,6 +313,46 @@ func (a *App) reviewWithAI(w http.ResponseWriter, r *http.Request, id, requestID
 		return
 	}
 	writeJSON(w, http.StatusConflict, map[string]any{"ok": false, "code": "AI_NO_CONFIRMED_MATCH", "reason": advice.Reason, "message": "AI 未能核实可下载的发行版"})
+}
+
+// reviewSearchFromEvidence resolves the common no-candidate search checkpoint
+// without asking the model to invent a release. A transient/contract failure
+// starts a fresh bounded retry cycle; an exhausted but definitive search with
+// streaming enabled queues the configured fallback. This is the same decision
+// shape used by the executor, rebuilt from the persisted per-site observations.
+func (a *App) reviewSearchFromEvidence(w http.ResponseWriter, requestID, id string, nowNS int64, job workflow.Job, plan SearchPlan, observations map[string]trackersearch.Observation) bool {
+	if job.TaskType != "search" || job.ReviewKind != "search" {
+		return false
+	}
+	for _, observation := range observations {
+		if len(observation.Candidates) > 0 {
+			return false
+		}
+	}
+	report := a.rebuildReviewReport(job, plan, observations, "", "")
+	report.SourceFallback = true
+	report.ExplicitFallback = true
+	decision, err := searchdecision.Decide(report)
+	if err != nil {
+		return false
+	}
+	if decision.Action == searchdecision.ActionRetry || decision.Action == searchdecision.ActionReviewSearch && (decision.Reason == "transient_exhausted" || decision.Reason == "contract_error") {
+		result, retryErr := a.flows.Review(requestID, id, workflow.ReviewDecision{Action: "retry"}, nowNS)
+		a.writeReviewResult(w, result, retryErr, "ai")
+		return true
+	}
+	if decision.Action != searchdecision.ActionFallback {
+		return false
+	}
+	plan.SelectedSite, plan.SelectedCandidateID = "", ""
+	encoded, err := json.Marshal(plan)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "code": "REVIEW_UNAVAILABLE"})
+		return true
+	}
+	result, acceptErr := a.flows.Review(requestID, id, workflow.ReviewDecision{Action: "accept", Search: &report, Plan: encoded}, nowNS)
+	a.writeReviewResult(w, result, acceptErr, "ai")
+	return true
 }
 
 func (a *App) acceptNeteasePlaylistFallback(w http.ResponseWriter, id, requestID string, nowNS int64, job workflow.Job, plan SearchPlan, observations map[string]trackersearch.Observation) {
@@ -359,10 +402,11 @@ func (a *App) aiReviewEligible(job workflow.Job) bool {
 		task, err := a.tasks.Get(job.ActiveTaskID)
 		return err == nil && interruptedReviewSafe(job, task)
 	}
-	// Metadata and album jobs use the durable retry path and do not require a
-	// model. A NetEase playlist candidate can safely fall back
-	// to its source platform after the tracker observations are exhausted.
-	if job.TaskType != "search" || job.ReviewKind == "candidate" && strings.HasPrefix(job.BatchID, "pl-netease-") {
+	// Search checkpoints first replay the persisted site evidence. This can
+	// retry an expired rate limit or choose the configured fallback without a
+	// model. Candidate comparisons still need the configured reviewer below.
+	// Metadata and album jobs use the durable retry path too.
+	if job.TaskType != "search" || job.ReviewKind == "search" || job.ReviewKind == "candidate" && strings.HasPrefix(job.BatchID, "pl-netease-") {
 		return true
 	}
 	return a.reviewCompleter() != nil && a.reviews != nil

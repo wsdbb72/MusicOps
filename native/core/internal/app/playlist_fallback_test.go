@@ -27,6 +27,19 @@ func TestNeteasePlaylistFallbackKeepsOriginalPlatform(t *testing.T) {
 	if err != nil || len(normal) < 2 || normal[0].Name == "netease" {
 		t.Fatal(normal, err)
 	}
+	album, exclusive := neteaseFallbackRouting("pl-netease-590536461-batch", plan)
+	if !album || exclusive {
+		t.Fatal("Netease-origin playlist must follow the configured provider order unless netease_only was explicit")
+	}
+	plan.NeteaseOnly = true
+	album, exclusive = neteaseFallbackRouting("pl-netease-590536461-batch", plan)
+	if !album || !exclusive {
+		t.Fatal("explicit netease_only routing was not preserved")
+	}
+	album, exclusive = neteaseFallbackRouting("pl-qqmusic-123-batch", plan)
+	if album || exclusive {
+		t.Fatal("non-Netease playlist was routed through the NetEase album path")
+	}
 }
 
 func TestLegacyNeteasePlanIsPromotedToSourceFallback(t *testing.T) {

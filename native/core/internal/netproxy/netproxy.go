@@ -208,7 +208,11 @@ func Probe(ctx context.Context, raw string) ProbeResult {
 	}
 	ctx, cancel := context.WithTimeout(ctx, 12*time.Second)
 	defer cancel()
-	transport := Transport(&http.Transport{Proxy: http.ProxyURL(parsed)})
+	// Probe with the same default transport shape as normal traffic. A
+	// zero-value transport can negotiate differently with some HTTP proxies
+	// (notably when CONNECT is upgraded to HTTP/2), producing an EOF even
+	// though the saved proxy is usable by the tracker clients.
+	transport := Transport(nil)
 	transport.Proxy = http.ProxyURL(parsed)
 	defer transport.CloseIdleConnections()
 	client := &http.Client{Transport: transport, Timeout: 12 * time.Second}

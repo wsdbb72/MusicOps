@@ -5,6 +5,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -107,6 +108,18 @@ func TestEmptyConfigurationDisablesEnvironmentProxy(t *testing.T) {
 	joined := strings.Join(env, "\n")
 	if strings.Contains(joined, "inherited.example") || !strings.Contains(joined, "KEEP=yes") {
 		t.Fatal(joined)
+	}
+}
+
+func TestProbeTransportKeepsDefaultTransportSettings(t *testing.T) {
+	proxy, err := url.Parse("http://192.168.31.11:7890")
+	if err != nil {
+		t.Fatal(err)
+	}
+	transport := Transport(nil)
+	transport.Proxy = http.ProxyURL(proxy)
+	if transport.DialContext == nil || !transport.ForceAttemptHTTP2 {
+		t.Fatalf("probe transport lost defaults: dial=%v h2=%v", transport.DialContext != nil, transport.ForceAttemptHTTP2)
 	}
 }
 

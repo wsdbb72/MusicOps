@@ -152,7 +152,7 @@ go build -tags desktop,production ./cmd/musicops-desktop   # 桌面壳
 
 发版由 [desktop-release.yml](.github/workflows/desktop-release.yml) 一次跑完：Windows 安装器与便携包、macOS arm64 三件套、Linux amd64 镜像，全部通过测试与安装验收后才创建 Release，并校验校验和与源码提交。Docker Hub 的 `latest` 只在完整发布后推进。
 
-当前版本：**0.4.92** · 更新内容见 [发布说明](docs/发布说明.md)。
+当前版本：**0.4.93** · 更新内容见 [发布说明](docs/发布说明.md)。
 
 ## 已知限制
 

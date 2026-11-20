@@ -327,10 +327,10 @@ func playlistAlbumGroupKey(row playlistTrack, album string) string {
 
 func playlistJobReusable(stage string) bool {
 	switch stage {
-	case "identifying", "searching", "requesting", "downloading", "fallback", "validating", "publishing":
-		return true
-	default:
+	case "completed", "failed", "cancelled", "skipped", "needs_review":
 		return false
+	default:
+		return true
 	}
 }
 

@@ -86,6 +86,18 @@ func TestPlaylistFetchAcceptsAShareLink(t *testing.T) {
 		t.Fatal(recorder.Body.String())
 	}
 }
+func TestPlaylistReenqueueStageClassification(t *testing.T) {
+	for _, stage := range []string{"preparing", "identifying", "snapshotting", "metadata", "searching", "requesting", "downloading", "fallback", "validating", "publishing", "notifying"} {
+		if !playlistJobReusable(stage) {
+			t.Fatalf("active stage %q was not reusable", stage)
+		}
+	}
+	for _, stage := range []string{"completed", "failed", "cancelled", "skipped", "needs_review"} {
+		if playlistJobReusable(stage) {
+			t.Fatalf("terminal stage %q was reusable", stage)
+		}
+	}
+}
 func TestPlaylistReenqueueReusesActiveAndReplacesTerminalJob(t *testing.T) {
 	application := newApp(t)
 	application.mu.Lock()

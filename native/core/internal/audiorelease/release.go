@@ -234,10 +234,17 @@ func Release(ctx context.Context, engine *dataengine.Engine, input Request) (Res
 			return empty, err
 		}
 	}
+	snapshot, statErr := indexedStatForPath(dest)
+	if statErr != nil {
+		if created {
+			_ = os.Remove(dest)
+		}
+		return empty, statErr
+	}
 	rec := record{
 		RequestID: input.RequestID, RootID: input.RootID, Path: dest, SHA256: digest, Format: format,
 		DecodeState: decodeState, Origin: origin, SourceName: input.SourceName,
-		State: "published", Verified: true, LibraryPublished: true, Library: library,
+		State: "published", Verified: true, LibraryPublished: true, Library: library, IndexedStat: snapshot,
 		// Downloaded stays false: a verified local import is not a download.
 	}
 	encoded, err := json.Marshal(rec)
@@ -354,10 +361,14 @@ func RecordPublished(ctx context.Context, engine *dataengine.Engine, input Publi
 	}
 	before := sha256.Sum256(body)
 	digest := hex.EncodeToString(before[:])
+	snapshot, statErr := indexedStatForPath(path)
+	if statErr != nil {
+		return empty, statErr
+	}
 	rec := record{
 		RequestID: input.RequestID, RootID: input.RootID, Path: path, SHA256: digest, Format: format,
 		DecodeState: decodeState, Origin: "controlled_audio", SourceName: filepath.Base(path),
-		State: "published", Verified: true, LibraryPublished: true, Library: library,
+		State: "published", Verified: true, LibraryPublished: true, Library: library, IndexedStat: snapshot,
 	}
 	encoded, err := json.Marshal(rec)
 	if err != nil {
@@ -696,6 +707,10 @@ type Entry struct {
 	indexedModifiedNS int64
 	hasIndexedStat    bool
 }
+
+// HasIndexedStat reports whether this entry carries the size/time snapshot
+// that makes future presence checks O(1) instead of a full-file hash.
+func (e Entry) HasIndexedStat() bool { return e.hasIndexedStat }
 
 // PresenceUnchanged verifies this already-listed entry against the file state
 // captured by List/ListIndexed. It avoids a second per-track database lookup

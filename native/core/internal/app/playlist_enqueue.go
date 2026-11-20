@@ -87,12 +87,13 @@ type playlistEnqueueReport struct {
 
 // Index only candidate names. Verify bytes lazily for playlist matches.
 type playlistLibraryIndex struct {
-	engine    *dataengine.Engine
-	tracks    map[[3]string][]string
-	albums    map[[2]string][]string
-	verified  map[string]bool
-	tagTitles map[[2]string]map[string]bool
-	records   map[string]audiorelease.Entry
+	engine           *dataengine.Engine
+	tracks           map[[3]string][]string
+	albums           map[[2]string][]string
+	verified         map[string]bool
+	tagTitles        map[[2]string]map[string]bool
+	records          map[string]audiorelease.Entry
+	pendingSnapshots map[string]audiorelease.VerifiedPresence
 }
 
 func normalizeKey(s string) string {
@@ -126,7 +127,7 @@ func (a *App) playlistLibrary() playlistLibraryIndex {
 }
 
 func indexPlaylistLibrary(engine *dataengine.Engine, entries []audiorelease.Entry) playlistLibraryIndex {
-	index := playlistLibraryIndex{engine: engine, tracks: map[[3]string][]string{}, albums: map[[2]string][]string{}, verified: map[string]bool{}, tagTitles: map[[2]string]map[string]bool{}, records: map[string]audiorelease.Entry{}}
+	index := playlistLibraryIndex{engine: engine, tracks: map[[3]string][]string{}, albums: map[[2]string][]string{}, verified: map[string]bool{}, tagTitles: map[[2]string]map[string]bool{}, records: map[string]audiorelease.Entry{}, pendingSnapshots: map[string]audiorelease.VerifiedPresence{}}
 	for _, entry := range entries {
 		if !entry.FilePresent {
 			continue
@@ -180,12 +181,27 @@ func (index playlistLibraryIndex) isUnchanged(id string) bool {
 	if !checked {
 		if entry, found := index.records[id]; found {
 			ok = entry.PresenceUnchanged()
+			if ok && !entry.HasIndexedStat() {
+				index.pendingSnapshots[id] = audiorelease.VerifiedPresence{RequestID: id, RootID: entry.RootID, Track: entry.Track}
+			}
 		} else {
 			ok = audiorelease.PresenceUnchanged(index.engine, id)
 		}
 		index.verified[id] = ok
 	}
 	return ok
+}
+
+func (index *playlistLibraryIndex) commitPresenceSnapshots() {
+	if index == nil || len(index.pendingSnapshots) == 0 {
+		return
+	}
+	items := make([]audiorelease.VerifiedPresence, 0, len(index.pendingSnapshots))
+	for _, item := range index.pendingSnapshots {
+		items = append(items, item)
+	}
+	_ = audiorelease.StampVerifiedPresences(index.engine, items)
+	index.pendingSnapshots = map[string]audiorelease.VerifiedPresence{}
 }
 
 // Only an explicit total in a local file is evidence that a folder has gaps.
@@ -279,6 +295,7 @@ func (a *App) enqueuePlaylistTracks(ctx context.Context, playlistJobID string, r
 		}
 		report.Created = append(report.Created, jobID)
 	}
+	library.commitPresenceSnapshots()
 	return report, nil
 }
 
@@ -475,6 +492,7 @@ func (a *App) playlistTracksView(w http.ResponseWriter, r *http.Request) {
 	for i, row := range rows {
 		out = append(out, rowView{Index: i, Artist: row.Artist, Title: row.Title, Album: row.Album, Present: library.hasTrack(row.Artist, row.Album, row.Title)})
 	}
+	library.commitPresenceSnapshots()
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "name": name, "tracks": out, "total": len(out)})
 }
 

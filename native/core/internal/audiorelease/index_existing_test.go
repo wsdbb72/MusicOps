@@ -1,6 +1,9 @@
 package audiorelease
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"testing"
@@ -60,6 +63,56 @@ func TestMetadataIndexReplacesFormatVersionAndPrunesMissingPath(t *testing.T) {
 	}
 }
 
+func TestStampVerifiedPresencesUpgradesLegacyRecord(t *testing.T) {
+	engine, err := dataengine.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer engine.Close()
+	library := filepath.Join(t.TempDir(), "music")
+	path := filepath.Join(library, "Artist", "Album", "01 Song.flac")
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	body := []byte("verified legacy audio")
+	if err := os.WriteFile(path, body, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	sum := sha256.Sum256(body)
+	root, request := "stamp-root", "stamp-request"
+	rec := record{
+		RequestID: request, RootID: root, Path: path, SHA256: hex.EncodeToString(sum[:]), Format: "flac",
+		State: "published", Verified: true, LibraryPublished: true, Library: library,
+	}
+	raw, err := json.Marshal(rec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ok, err := engine.CompareAndSwap(nil, []dataengine.Mutation{
+		{Key: releaseKey(request), Value: raw},
+		{Key: albumKey(root, 1), Value: raw},
+	})
+	if err != nil || !ok {
+		t.Fatal(ok, err)
+	}
+	entries, err := ListIndexed(engine)
+	if err != nil || len(entries) != 1 || entries[0].HasIndexedStat() {
+		t.Fatal(entries, err)
+	}
+	if err := StampVerifiedPresences(engine, []VerifiedPresence{{RequestID: request, RootID: root, Track: 1}}); err != nil {
+		t.Fatal(err)
+	}
+	entries, err = ListIndexed(engine)
+	if err != nil || len(entries) != 1 || !entries[0].HasIndexedStat() || !entries[0].PresenceUnchanged() {
+		t.Fatal(entries, err)
+	}
+	if err := os.WriteFile(path, []byte("changed audio"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if entries[0].PresenceUnchanged() {
+		t.Fatal("changed legacy file was stamped as unchanged")
+	}
+}
 func TestSnapshotBatchAcceptsEveryIndexedAudioExtension(t *testing.T) {
 	engine, err := dataengine.Open(t.TempDir())
 	if err != nil {

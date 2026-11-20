@@ -1,6 +1,7 @@
 package audiorelease
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -213,6 +214,113 @@ func RemoveIndexed(engine *dataengine.Engine, requestID, rootID string, track in
 type indexedStat struct {
 	Size       int64 `json:"size"`
 	ModifiedNS int64 `json:"modified_ns"`
+}
+
+func indexedStatForPath(path string) (*indexedStat, error) {
+	info, err := os.Lstat(path)
+	if err != nil {
+		return nil, err
+	}
+	if !info.Mode().IsRegular() {
+		return nil, dataengine.ErrInvalidRequest
+	}
+	return &indexedStat{Size: info.Size(), ModifiedNS: info.ModTime().UnixNano()}, nil
+}
+
+// VerifiedPresence identifies a record whose current bytes the caller has
+// already verified against its published SHA-256.
+type VerifiedPresence struct {
+	RequestID string
+	RootID    string
+	Track     int
+}
+
+// StampVerifiedPresences adds size/time snapshots in bounded batches. The
+// caller must have verified the current file bytes first; this function does
+// not replace the published digest or any other release evidence.
+func StampVerifiedPresences(engine *dataengine.Engine, items []VerifiedPresence) error {
+	if engine == nil {
+		return dataengine.ErrInvalidRequest
+	}
+	const batchSize = 200
+	for start := 0; start < len(items); start += batchSize {
+		end := start + batchSize
+		if end > len(items) {
+			end = len(items)
+		}
+		type update struct {
+			releaseKey  []byte
+			mappingKeys [][]byte
+			raw         []byte
+			value       []byte
+		}
+		updates := []update{}
+		err := engine.View(func(v *dataengine.View) error {
+			for _, item := range items[start:end] {
+				if !validID(item.RequestID) || !validID(item.RootID) || item.Track < 1 || item.Track > 999 {
+					continue
+				}
+				primary := releaseKey(item.RequestID)
+				raw, found, err := v.Get(primary)
+				if err != nil {
+					return err
+				}
+				if !found {
+					continue
+				}
+				var rec record
+				if json.Unmarshal(raw, &rec) != nil || rec.RequestID != item.RequestID || rec.RootID != item.RootID ||
+					rec.State != "published" || !rec.LibraryPublished || rec.IndexedStat != nil {
+					continue
+				}
+				snapshot, err := indexedStatForPath(rec.Path)
+				if err != nil {
+					continue
+				}
+				updated := rec
+				updated.IndexedStat = snapshot
+				encoded, err := json.Marshal(updated)
+				if err != nil {
+					return err
+				}
+				keys := make([][]byte, 0, 2)
+				for _, key := range [][]byte{albumKey(item.RootID, item.Track), alternateAlbumKey(item.RootID, item.Track, item.RequestID)} {
+					mapping, exists, err := v.Get(key)
+					if err != nil {
+						return err
+					}
+					if exists && bytes.Equal(mapping, raw) {
+						keys = append(keys, key)
+					}
+				}
+				if len(keys) > 0 {
+					updates = append(updates, update{releaseKey: primary, mappingKeys: keys, raw: raw, value: encoded})
+				}
+			}
+			return nil
+		})
+		if err != nil {
+			return err
+		}
+		if len(updates) == 0 {
+			continue
+		}
+		conditions := make([]dataengine.Condition, 0, len(updates)*3)
+		mutations := make([]dataengine.Mutation, 0, len(updates)*3)
+		for _, item := range updates {
+			conditions = append(conditions, dataengine.Condition{Key: item.releaseKey, Value: item.raw})
+			mutations = append(mutations, dataengine.Mutation{Key: item.releaseKey, Value: item.value})
+			for _, key := range item.mappingKeys {
+				conditions = append(conditions, dataengine.Condition{Key: key, Value: item.raw})
+				mutations = append(mutations, dataengine.Mutation{Key: key, Value: item.value})
+			}
+		}
+		_, err = engine.CompareAndSwap(conditions, mutations)
+		if err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // PresenceUnchanged checks the published digest or the metadata snapshot of

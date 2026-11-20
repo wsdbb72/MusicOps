@@ -31,6 +31,10 @@ func TestWAVPublishesOnceAndKeepsTheSource(t *testing.T) {
 	if err != nil || !bytes.Equal(file, body) {
 		t.Fatal(err, len(file))
 	}
+	entries, err := ListIndexed(engine)
+	if err != nil || len(entries) != 1 || !entries[0].HasIndexedStat() {
+		t.Fatal(entries, err)
+	}
 	again, err := Release(context.Background(), engine, sample(incoming, library, "song.wav"))
 	if err != nil || !again.Replayed || again.Downloaded || again.SHA256 != got.SHA256 {
 		t.Fatal(again, err)

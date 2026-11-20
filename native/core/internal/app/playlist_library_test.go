@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/wsdbb72/MusicOps/native/core/internal/audiorelease"
 	"github.com/wsdbb72/MusicOps/native/core/internal/dataengine"
@@ -54,5 +55,37 @@ func TestPlaylistLibraryReusesListedFileStateWithoutAnotherDatabaseRead(t *testi
 	removed := indexPlaylistLibrary(engine, entries)
 	if removed.hasTrack("Artist", "Album", "Song") {
 		t.Fatal("a removed file was treated as present")
+	}
+}
+func TestPlaylistLibraryReusesListingWithinCacheTTL(t *testing.T) {
+	engine, err := dataengine.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	libraryDir := filepath.Join(t.TempDir(), "music")
+	file := filepath.Join(libraryDir, "Artist", "Album", "01 Song.flac")
+	if err := os.MkdirAll(filepath.Dir(file), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(file, []byte("flac"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if added, err := audiorelease.IndexExisting(engine, audiorelease.Existing{
+		RequestID: "playlist-list-cache", RootID: "playlist-list-root", Track: 1,
+		Path: file, Library: libraryDir, Format: "flac", SourceName: "reindex", MetadataOnly: true,
+	}); err != nil || !added {
+		t.Fatal(added, err)
+	}
+	now := time.Date(2026, 11, 20, 8, 0, 0, 0, time.UTC)
+	application := &App{engine: engine, now: func() time.Time { return now }}
+	_ = application.playlistLibrary()
+	if err := engine.Close(); err != nil {
+		t.Fatal(err)
+	}
+	// A second call inside the TTL must use the listing snapshot rather than
+	// reopening the now-closed catalog.
+	library := application.playlistLibrary()
+	if !library.hasTrack("Artist", "Album", "Song") {
+		t.Fatal("playlist listing cache was not reused")
 	}
 }

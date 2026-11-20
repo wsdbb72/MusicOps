@@ -13,6 +13,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/wsdbb72/MusicOps/native/core/internal/audiorelease"
 	"github.com/wsdbb72/MusicOps/native/core/internal/configmigrate"
 	"github.com/wsdbb72/MusicOps/native/core/internal/dataengine"
 	"github.com/wsdbb72/MusicOps/native/core/internal/livemigrate"
@@ -58,6 +59,12 @@ type App struct {
 	// playlistBases replaces a platform origin in tests. Production leaves it nil,
 	// so a fetch uses the public host and never a caller-chosen remote server.
 	playlistBases map[string]string
+	// A large playlist preview and its immediate enqueue reuse one immutable
+	// library listing. Per-track file state is still checked on every call.
+	playlistEntriesMu     sync.Mutex
+	playlistEntriesCache  []audiorelease.Entry
+	playlistEntriesCached bool
+	playlistEntriesAt     time.Time
 	// neteaseBases replaces the NetEase API origin in tests, the same seam as
 	// playlistBases. Production leaves it nil.
 	neteaseBases map[string]string

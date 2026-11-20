@@ -23,6 +23,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/wsdbb72/MusicOps/native/core/internal/audiorelease"
 	"github.com/wsdbb72/MusicOps/native/core/internal/dataengine"
@@ -121,8 +122,23 @@ func trackKeyOfPath(file string) (artist, album, title string) {
 	return normalizeKey(artist), normalizeKey(album), normalizeKey(base)
 }
 
+const playlistLibraryCacheTTL = 2 * time.Minute
+
 func (a *App) playlistLibrary() playlistLibraryIndex {
-	entries, _ := audiorelease.ListIndexed(a.engine)
+	// One listing is reused by the preview and its immediate enqueue; the
+	// per-track file state remains verified independently.
+	a.playlistEntriesMu.Lock()
+	defer a.playlistEntriesMu.Unlock()
+	entries := a.playlistEntriesCache
+	if !a.playlistEntriesCached || a.now().Sub(a.playlistEntriesAt) >= playlistLibraryCacheTTL {
+		fresh, err := audiorelease.ListIndexed(a.engine)
+		if err == nil {
+			entries = fresh
+			a.playlistEntriesCache = fresh
+			a.playlistEntriesCached = true
+			a.playlistEntriesAt = a.now()
+		}
+	}
 	return indexPlaylistLibrary(a.engine, entries)
 }
 

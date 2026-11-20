@@ -358,3 +358,28 @@ func TestBeforeClaimGateLeavesWorkQueued(t *testing.T) {
 	}
 	until(t, func() bool { return hasState(repo, "gated", "completed") })
 }
+
+func TestBeforeExecuteGateCancelsWithoutRunningHandler(t *testing.T) {
+	handled := make(chan struct{}, 1)
+	handler := func(context.Context, *Execution, []byte) (Outcome, error) {
+		handled <- struct{}{}
+		return Outcome{State: "completed"}, nil
+	}
+	var repo *taskrepo.Repository
+	config := DefaultConfig()
+	config.BeforeExecute = func(_ context.Context, task taskrepo.Task) (bool, error) {
+		if _, err := repo.Control("gate-cancel", task.ID, "cancel", time.Now().UnixNano()); err != nil {
+			return false, err
+		}
+		return true, nil
+	}
+	repo, coordinator := setup(t, map[string]Handler{"controlled": handler}, config)
+	add(t, repo, "stale-claim", "identify", "controlled", 1, "{}")
+	coordinator.Start(context.Background())
+	until(t, func() bool { return hasState(repo, "stale-claim", "cancelled") })
+	select {
+	case <-handled:
+		t.Fatal("superseded handler ran")
+	case <-time.After(100 * time.Millisecond):
+	}
+}

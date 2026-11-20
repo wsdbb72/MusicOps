@@ -76,6 +76,10 @@ type Config struct {
 	// control (for example the maintenance pause switch) is active. Tasks
 	// stay queued instead of appearing as claimed workers.
 	BeforeClaim func(context.Context) error
+	// BeforeExecute validates a claimed workflow task against current job
+	// ownership before it crosses Begin. Returning skip records a safe
+	// cancellation of a superseded task and leaves the current job alone.
+	BeforeExecute func(context.Context, taskrepo.Task) (bool, error)
 }
 
 func DefaultConfig() Config {
@@ -306,6 +310,24 @@ func (c *Coordinator) worker(ctx context.Context, lane string) {
 			case <-time.After(time.Second):
 			}
 			continue
+		}
+		if c.config.BeforeExecute != nil {
+			skip, gateErr := c.config.BeforeExecute(ctx, *result.Task)
+			if gateErr != nil {
+				c.failure(lane, gateErr)
+				token := taskrepo.Token{ID: result.Task.ID, Owner: result.Task.Owner, Fence: result.Task.Fence}
+				_, releaseErr := c.repo.ReleaseClaim("gate-release-"+nonce(), token, time.Now().UnixNano())
+				if releaseErr != nil && !errors.Is(releaseErr, taskrepo.ErrStale) {
+					c.failure(lane, releaseErr)
+				}
+				if !wait(ctx, 100*time.Millisecond) {
+					return
+				}
+				continue
+			}
+			if skip {
+				continue
+			}
 		}
 		c.execute(ctx, *result.Task)
 	}

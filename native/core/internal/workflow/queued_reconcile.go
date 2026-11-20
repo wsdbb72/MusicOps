@@ -95,11 +95,22 @@ func queuedTaskStage(v *dataengine.View, job Job, task *taskrepo.Task) (string, 
 		return "preparing", true
 	case cmdRepair:
 		return "metadata", true
-	case cmdProcess, cmdPublish:
+	case cmdPublish:
+		if task.ID == job.ID && job.Stage == "publishing" {
+			return "publishing", true
+		}
+		if stage, found := strings.CutPrefix(task.ID, "stage:"+job.ID+":"); found && stage == "publishing" {
+			return stage, true
+		}
+		return "", false
+	case cmdProcess:
+		if task.ID == job.ID && (job.Stage == "requesting" || job.Stage == "fallback") {
+			return job.Stage, true
+		}
 		if stage, found := strings.CutPrefix(task.ID, "stage:"+job.ID+":"); found && stages[stage] {
 			return stage, true
 		}
-		if task.Command == cmdPublish || job.ParentJobID == "" {
+		if job.ParentJobID == "" {
 			return "", false
 		}
 		parent, _, err := readJob(v, job.ParentJobID)
@@ -113,4 +124,48 @@ func queuedTaskStage(v *dataengine.View, job Job, task *taskrepo.Task) (string, 
 	default:
 		return "", false
 	}
+}
+
+var errClaimedTaskCurrent = errors.New("claimed workflow task is still current")
+
+// ReconcileClaimedSuperseded runs between Claim and Begin. It prevents both
+// stale retry rows and concurrent workers from entering a workflow that has
+// already moved to another task. A current claim is left untouched; a
+// superseded claim is safely cancelled because no executor has started yet.
+func (r *Repository) ReconcileClaimedSuperseded(requestPrefix string, task taskrepo.Task, nowNS int64) (bool, error) {
+	if r == nil || requestPrefix == "" || task.ID == "" || nowNS <= 0 {
+		return false, dataengine.ErrInvalidRequest
+	}
+	if task.WorkflowJobID == "" {
+		return false, nil
+	}
+	requestID := requestPrefix + "-" + digestBytes([]byte(task.ID + "/" + strconv.FormatUint(task.Revision, 10)))[:32]
+	extra, _ := json.Marshal(struct{ JobID, Action string }{task.WorkflowJobID, "superseded_claim"})
+	result, err := r.tasks.ControlOwned(requestID, task.ID, "cancel", nowNS, extra, func(v *dataengine.View, before, _ *taskrepo.Task, _ []taskrepo.Task) ([]dataengine.Condition, []dataengine.Mutation, json.RawMessage, error) {
+		if before == nil || before.WorkflowJobID != task.WorkflowJobID || (before.State != "queued" && before.State != "running") || before.Execution != "claimed" || before.Owner != task.Owner || before.Fence != task.Fence || before.Revision != task.Revision {
+			return nil, nil, nil, ErrStale
+		}
+		live, _, err := readJob(v, before.WorkflowJobID)
+		if err != nil {
+			return nil, nil, nil, err
+		}
+		if live != nil && queuedTaskStillCurrent(v, *live, before) {
+
+			return nil, nil, nil, errClaimedTaskCurrent
+		}
+		attached, err := json.Marshal(Result{Job: live})
+		return nil, nil, attached, err
+	})
+	if errors.Is(err, errClaimedTaskCurrent) {
+		return false, nil
+	}
+	if errors.Is(err, ErrStale) {
+		// The claim moved or disappeared while being validated. Never execute
+		// the old snapshot; let the scheduler obtain a fresh row.
+		return true, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return result.Changed, nil
 }

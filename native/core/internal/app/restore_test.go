@@ -56,6 +56,21 @@ func TestReindexListsGapsAndDoesNotDeleteAudio(t *testing.T) {
 	if err != nil || string(got) != string(first) {
 		t.Fatal("reindex changed the audio file", err)
 	}
+	path := filepath.Join(library, "01 first.flac")
+	revised := []byte("track-one with updated artwork")
+	if err := os.WriteFile(path, revised, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if audiorelease.PresenceUnchanged(application.engine, libraryFileID(path)) {
+		t.Fatal("an externally changed file still matched the old snapshot")
+	}
+	refreshed := post(t, application, "/v1/library/reindex", map[string]any{})
+	if refreshed["added"] != float64(0) || refreshed["kept"] != float64(2) || !audiorelease.PresenceUnchanged(application.engine, libraryFileID(path)) {
+		t.Fatal("reindex did not refresh an existing local snapshot", refreshed)
+	}
+	if got, err := os.ReadFile(path); err != nil || !bytes.Equal(got, revised) {
+		t.Fatal("reindex modified the file", err)
+	}
 	started := post(t, application, "/v1/library/workflow", map[string]any{"scene": "fill", "label": "补缺"})
 	if started["downloaded"] != false || started["started"] != false {
 		t.Fatal(started)

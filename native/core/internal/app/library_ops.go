@@ -59,11 +59,15 @@ func (a *App) indexLibraryTreeWithProgress(ctx context.Context, root string, pro
 	}
 	seen := map[string]bool{}
 	seenPaths := map[string]bool{}
+	stale := map[string]bool{}
 	for _, entry := range existing {
 		seen[entry.RequestID] = true
 		if entry.FilePresent {
 			path := filepath.Clean(a.entryFilePath(entry))
 			seenPaths[strings.ToLower(path)] = true
+			if entry.MetadataSnapshotChanged() && entry.RequestID == libraryFileID(path) {
+				stale[entry.RequestID] = true
+			}
 		}
 	}
 	if progress != nil {
@@ -109,7 +113,7 @@ func (a *App) indexLibraryTreeWithProgress(ctx context.Context, root string, pro
 		}
 		track := trackNumberFromName(filepath.Base(path))
 		requestID := libraryFileID(abs)
-		if seen[requestID] || seenPaths[strings.ToLower(filepath.Clean(abs))] {
+		if !stale[requestID] && (seen[requestID] || seenPaths[strings.ToLower(abs)]) {
 			kept++
 			return nil
 		}

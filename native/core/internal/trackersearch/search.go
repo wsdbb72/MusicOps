@@ -115,10 +115,12 @@ type Doer interface {
 
 // Client performs allowlisted reads. A rate-limit block is process memory only.
 type Client struct {
-	Doer   Doer
-	Now    func() time.Time
-	mu     sync.Mutex
-	blocks map[string]time.Time
+	Doer         Doer
+	Now          func() time.Time
+	ReadInterval time.Duration
+	mu           sync.Mutex
+	blocks       map[string]time.Time
+	nextRead     map[string]time.Time
 }
 
 func (c *Client) now() time.Time {
@@ -174,16 +176,16 @@ func (c *Client) roundTrip(ctx context.Context, q Query) (Observation, error) {
 	if strings.TrimSpace(q.Cookie) == "" {
 		return base, nil
 	}
-	if until, ok := c.blocked(q.Site); ok {
-		wait := int(until.Sub(c.now()).Seconds())
-		if wait < 1 {
-			wait = 1
-		}
+	retry, err := c.waitRead(ctx, q)
+	if err != nil {
+		return Observation{}, err
+	}
+	if retry > 0 {
 		out := base
 		out.Status = "RATE_LIMITED"
 		out.ErrorClass = "RATE_LIMITED"
 		out.Reason = "站点仍在 Retry-After 等待期"
-		out.RetryAfterSec = wait
+		out.RetryAfterSec = retry
 		return out, nil
 	}
 	endpoint, err := endpointURL(q)
@@ -400,20 +402,50 @@ func (c *Client) block(site string, seconds int) {
 	if c.blocks == nil {
 		c.blocks = map[string]time.Time{}
 	}
-	c.blocks[site] = c.now().Add(time.Duration(seconds) * time.Second)
+	until := c.now().Add(time.Duration(seconds) * time.Second)
+	if until.After(c.blocks[site]) {
+		c.blocks[site] = until
+	}
 }
 
-func (c *Client) blocked(site string) (time.Time, bool) {
+// waitRead spreads starts from all workers over one per-site interval. A
+// server-directed cooldown takes priority over the local pacing budget.
+func (c *Client) waitRead(ctx context.Context, q Query) (int, error) {
 	if c == nil {
-		return time.Time{}, false
+		return 0, ctx.Err()
 	}
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	until, ok := c.blocks[site]
-	if !ok || !until.After(c.now()) {
-		return time.Time{}, false
+	for {
+		if err := ctx.Err(); err != nil {
+			return 0, err
+		}
+		c.mu.Lock()
+		if remaining := c.blocks[q.Site].Sub(c.now()); remaining > 0 {
+			c.mu.Unlock()
+			return int((remaining-1)/time.Second) + 1, nil
+		}
+		if c.ReadInterval <= 0 || q.Synthetic || !isTokenSite(q.Site) {
+			c.mu.Unlock()
+			return 0, nil
+		}
+		now := time.Now()
+		wait := c.nextRead[q.Site].Sub(now)
+		if wait <= 0 {
+			if c.nextRead == nil {
+				c.nextRead = make(map[string]time.Time)
+			}
+			c.nextRead[q.Site] = now.Add(c.ReadInterval)
+			c.mu.Unlock()
+			return 0, nil
+		}
+		c.mu.Unlock()
+		timer := time.NewTimer(wait)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return 0, ctx.Err()
+		case <-timer.C:
+		}
 	}
-	return until, true
 }
 
 func (c *Client) redirect(base Observation, q Query, location string) Observation {

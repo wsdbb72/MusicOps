@@ -706,11 +706,16 @@ type Entry struct {
 	indexedSize       int64
 	indexedModifiedNS int64
 	hasIndexedStat    bool
+	metadataChanged   bool
 }
 
 // HasIndexedStat reports whether this entry carries the size/time snapshot
 // that makes future presence checks O(1) instead of a full-file hash.
 func (e Entry) HasIndexedStat() bool { return e.hasIndexedStat }
+
+// MetadataSnapshotChanged reports a stale local index snapshot observed by List.
+// Published receipts with a verified digest are excluded.
+func (e Entry) MetadataSnapshotChanged() bool { return e.metadataChanged }
 
 // PresenceUnchanged verifies this already-listed entry against the file state
 // captured by List/ListIndexed. It avoids a second per-track database lookup
@@ -769,16 +774,18 @@ func list(engine *dataengine.Engine, checkPresence bool) ([]Entry, error) {
 			if root != rec.RootID {
 				continue
 			}
-			present := true
+			present, metadataChanged := true, false
 			if checkPresence {
-				_, statErr := os.Stat(rec.Path)
+				info, statErr := os.Stat(rec.Path)
 				present = statErr == nil
+				metadataChanged = present && info.Mode().IsRegular() && rec.SHA256 == "" &&
+					(rec.IndexedStat == nil || rec.IndexedStat.Size != info.Size() || rec.IndexedStat.ModifiedNS != info.ModTime().UnixNano())
 			}
 			entry := Entry{
 				RequestID: rec.RequestID, RootID: rec.RootID, Track: track,
 				File: libraryFileFor(rec.Path, rec.Library), Format: rec.Format, DecodeState: rec.DecodeState,
 				SHA256: rec.SHA256, Origin: rec.Origin, SourceName: rec.SourceName,
-				FilePresent: present, LibraryDir: rec.Library, fullPath: rec.Path,
+				FilePresent: present, LibraryDir: rec.Library, fullPath: rec.Path, metadataChanged: metadataChanged,
 			}
 			if rec.IndexedStat != nil {
 				entry.indexedSize = rec.IndexedStat.Size

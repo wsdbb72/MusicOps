@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/wsdbb72/MusicOps/native/core/internal/dataengine"
 )
@@ -159,5 +160,25 @@ func TestRateLimitIsRememberedWithoutAnotherRequest(t *testing.T) {
 	second, err2 := client.Search(context.Background(), Query{Site: "dicmusic", Text: "Album", Cookie: "session=virtual"})
 	if err != nil || err2 != nil || first.Status != "RATE_LIMITED" || second.Status != "RATE_LIMITED" || len(doer.urls) != 1 || second.RetryAfterSec < 1 {
 		t.Fatal(first, second, err, doer.urls)
+	}
+}
+func TestPacingSharesSiteCooldownAcrossWorkers(t *testing.T) {
+	client := &Client{ReadInterval: time.Minute}
+	query := Query{Site: "dicmusic"}
+	if retry, err := client.waitRead(context.Background(), query); err != nil || retry != 0 {
+		t.Fatalf("first read: retry=%d err=%v", retry, err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Millisecond)
+	defer cancel()
+	if retry, err := client.waitRead(ctx, query); err != context.DeadlineExceeded || retry != 0 {
+		t.Fatalf("second worker was not paced: retry=%d err=%v", retry, err)
+	}
+	if retry, err := client.waitRead(context.Background(), Query{Site: "orpheus"}); err != nil || retry != 0 {
+		t.Fatalf("independent site read: retry=%d err=%v", retry, err)
+	}
+	client.block("dicmusic", 50)
+	client.block("dicmusic", 10)
+	if retry, err := client.waitRead(context.Background(), query); err != nil || retry < 49 {
+		t.Fatalf("shorter response replaced the site cooldown: retry=%d err=%v", retry, err)
 	}
 }

@@ -63,6 +63,9 @@ func IndexExisting(engine *dataengine.Engine, item Existing) (bool, error) {
 			return false, dataengine.ErrInvalidRequest
 		}
 		snapshot = &indexedStat{Size: info.Size(), ModifiedNS: info.ModTime().UnixNano()}
+		if found, err := refreshMetadataSnapshot(engine, item, snapshot); err != nil || found {
+			return false, err
+		}
 	} else {
 		file, err := os.Open(item.Path)
 		if err == nil {
@@ -101,6 +104,41 @@ func IndexExisting(engine *dataengine.Engine, item Existing) (bool, error) {
 		}
 	}
 	return false, dataengine.ErrInvalidRequest
+}
+
+func refreshMetadataSnapshot(engine *dataengine.Engine, item Existing, snapshot *indexedStat) (bool, error) {
+	primary := releaseKey(item.RequestID)
+	raw, found, err := readRaw(engine, primary)
+	if err != nil || !found {
+		return found, err
+	}
+	var existing record
+	if json.Unmarshal(raw, &existing) != nil {
+		return true, ErrConflict
+	}
+	if existing.Path != item.Path || existing.RootID != item.RootID || existing.SHA256 != "" ||
+		existing.State != "published" || !existing.LibraryPublished || existing.IndexedStat != nil && *existing.IndexedStat == *snapshot {
+		return true, nil
+	}
+	existing.IndexedStat = snapshot
+	encoded, err := json.Marshal(existing)
+	if err != nil {
+		return true, err
+	}
+	for _, key := range [][]byte{albumKey(item.RootID, item.Track), alternateAlbumKey(item.RootID, item.Track, item.RequestID)} {
+		current, exists, err := readRaw(engine, key)
+		if err != nil {
+			return true, err
+		}
+		if exists && bytes.Equal(current, raw) {
+			_, err := engine.CompareAndSwap(
+				[]dataengine.Condition{{Key: primary, Value: raw}, {Key: key, Value: raw}},
+				[]dataengine.Mutation{{Key: primary, Value: encoded}, {Key: key, Value: encoded}},
+			)
+			return true, err
+		}
+	}
+	return true, ErrConflict
 }
 
 // indexRecordAt writes the request record and one album mapping atomically.

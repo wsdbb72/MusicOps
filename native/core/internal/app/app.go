@@ -180,7 +180,7 @@ func open(dir, backup, password string, logger StartupLogger) (*App, error) {
 		return nil, fmt.Errorf("open native Pebble store: %w", err)
 	}
 	progress("native_store_ready", "Pebble opened and schema checked")
-	app := &App{Dir: dir, Backup: backup, password: password, engine: engine, tasks: taskrepo.New(engine), searcher: &trackersearch.Client{}, now: time.Now, secrets: map[string]string{}, autoReviewRetryAt: map[string]time.Time{}, libraryAutomation: &libraryAutomationState{}}
+	app := &App{Dir: dir, Backup: backup, password: password, engine: engine, tasks: taskrepo.New(engine), searcher: &trackersearch.Client{ReadInterval: 2 * time.Second}, now: time.Now, secrets: map[string]string{}, autoReviewRetryAt: map[string]time.Time{}, libraryAutomation: &libraryAutomationState{}}
 	progress("outbound_proxy", "loading saved proxy before the scheduler starts")
 	if proxyErr := app.restoreOutboundProxy(); proxyErr != nil {
 		progress("outbound_proxy", "saved proxy could not be applied; local services remain available")

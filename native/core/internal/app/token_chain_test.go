@@ -335,6 +335,7 @@ func TestRateLimitRecheckDoesNotDownloadAndThenRestoresTheRead(t *testing.T) {
 	application := newApp(t)
 	clock := time.Now()
 	application.now = func() time.Time { return clock }
+	application.searcher.Now = application.now
 	body := tokenBody("album-limit-token", server.URL, []string{"dicmusic"})
 	body["token_cost"] = 1
 	body["balance"] = 99

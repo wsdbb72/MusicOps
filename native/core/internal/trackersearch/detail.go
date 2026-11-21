@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 
 	"github.com/wsdbb72/MusicOps/native/core/internal/dataengine"
@@ -33,11 +34,21 @@ func (c *Client) ReadDetail(ctx context.Context, q Query, path string, values ur
 	if q.Synthetic {
 		req.Header.Set("X-MusicOps-Site", q.Site)
 	}
+	if retry, err := c.waitRead(ctx, q); err != nil {
+		return nil, err
+	} else if retry > 0 {
+		return nil, fmt.Errorf("detail is rate limited for %d seconds", retry)
+	}
 	response, err := c.doer(q.Timeout).Do(req)
 	if err != nil {
 		return nil, err
 	}
 	defer response.Body.Close()
+	if response.StatusCode == http.StatusTooManyRequests {
+		delay := retryAfter(response.Header.Get("Retry-After"))
+		c.block(q.Site, delay)
+		return nil, fmt.Errorf("detail is rate limited for %d seconds", delay)
+	}
 	body, err := io.ReadAll(io.LimitReader(response.Body, maxBody+1))
 	if err != nil {
 		return nil, err
@@ -85,6 +96,11 @@ func (c *Client) ReadAccount(ctx context.Context, q Query, values url.Values) ([
 	if q.Synthetic {
 		req.Header.Set("X-MusicOps-Site", q.Site)
 	}
+	if retry, err := c.waitRead(ctx, q); err != nil {
+		return nil, 0, "", err
+	} else if retry > 0 {
+		return nil, http.StatusTooManyRequests, strconv.Itoa(retry), nil
+	}
 	response, err := c.doer(q.Timeout).Do(req)
 	if err != nil {
 		if ctx.Err() != nil {
@@ -93,6 +109,11 @@ func (c *Client) ReadAccount(ctx context.Context, q Query, values url.Values) ([
 		return nil, 0, "", errorsNewAccount()
 	}
 	defer response.Body.Close()
+	if response.StatusCode == http.StatusTooManyRequests {
+		delay := retryAfter(response.Header.Get("Retry-After"))
+		c.block(q.Site, delay)
+		return nil, http.StatusTooManyRequests, strconv.Itoa(delay), nil
+	}
 	body, err := io.ReadAll(io.LimitReader(response.Body, maxBody+1))
 	if err != nil {
 		return nil, response.StatusCode, response.Header.Get("Retry-After"), errorsNewAccount()

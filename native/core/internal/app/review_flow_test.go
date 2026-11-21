@@ -39,15 +39,18 @@ func TestAIReviewEligibilityCoversSafeNonSearchAndTokenHoldPaths(t *testing.T) {
 	}
 	token := base
 	token.ReviewKind = "token"
-	token.ErrorClass = "account_token_hold"
-	token.BatchID = "pl-netease-fixture"
-	if !application.aiReviewEligible(token) {
-		t.Fatal("proven zero-spend token hold should retry through the safe fallback")
+	for _, class := range []string{"account_token_hold", "rate_limited", "token_pending"} {
+		token.ErrorClass = class
+		token.BatchID = ""
+		if !application.aiReviewEligible(token) {
+			t.Fatalf("%s is a proven zero-spend review and should retry automatically", class)
+		}
 	}
-	spent := token
-	spent.ErrorClass = "token_spent"
-	if application.aiReviewEligible(spent) {
-		t.Fatal("consumed token hold became eligible for automatic retry")
+	for _, class := range []string{"token_spent", "REQUEST_UNKNOWN", "SPEND_CONFIRMED"} {
+		token.ErrorClass = class
+		if application.aiReviewEligible(token) {
+			t.Fatalf("%s must remain explicit or be handled by the token reconciler", class)
+		}
 	}
 	complete := base
 	complete.Stage = "completed"

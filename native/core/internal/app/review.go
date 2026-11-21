@@ -256,7 +256,7 @@ func (a *App) reviewWithAI(w http.ResponseWriter, r *http.Request, id, requestID
 		return
 	}
 	if inspection.Job.ReviewKind == "token" {
-		// aiReviewEligible admits only a ledger-proven zero-spend account hold.
+		// aiReviewEligible admits only token checkpoints proven to have made no token download request.
 		// Replay that hold through the ordinary bounded review path so acquire
 		// re-checks the balance and enters the NetEase fallback when the account
 		// still cannot fund an FL request. Unknown or consumed token requests
@@ -401,19 +401,26 @@ func (a *App) acceptNeteasePlaylistFallback(w http.ResponseWriter, id, requestID
 }
 
 // aiReviewEligible keeps single and batch AI review on the same safe set.
-// A ledger-proven account hold sent no token request and may safely retry into
-// the source-platform fallback. Consumed, uncertain and pending token actions
-// still require explicit review. Every other review can be replayed from its
-// durable evidence without inventing a release.
+// A zero-spend token hold may safely retry: the account read was held or
+// rate-limited, or no reservation formed, so no token download was sent.
+// Consumed, confirmed and uncertain token actions still remain explicit or
+// flow through the background token reconciler. Every other review can be
+// replayed from its durable evidence without inventing a release.
 func (a *App) aiReviewEligible(job workflow.Job) bool {
 	if a == nil || job.Stage != "needs_review" {
 		return false
 	}
 	if job.ReviewKind == "token" {
-		// A confirmed ledger hold sent no request. Replaying it is safe: acquire
-		// re-checks the ledger and falls back to the source platform when the FL
-		// hold is still active. Consumed or uncertain tokens remain explicit.
-		return job.ErrorClass == "account_token_hold" && strings.HasPrefix(job.BatchID, "pl-netease-")
+		// These classes are emitted before a token download request exists:
+		// the account read was held or rate-limited, or the reservation never
+		// formed. Replaying them only re-checks the ledger and current balance;
+		// consumed, released and uncertain requests remain explicit/reconciled.
+		switch job.ErrorClass {
+		case "account_token_hold", "rate_limited", "token_pending":
+			return true
+		default:
+			return false
+		}
 	}
 	if job.ReviewKind == "interrupted" {
 		task, err := a.tasks.Get(job.ActiveTaskID)

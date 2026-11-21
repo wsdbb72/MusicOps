@@ -284,18 +284,22 @@ func open(dir, backup, password string, logger StartupLogger) (*App, error) {
 	}
 	app.runner = runner
 	app.stopSubs = make(chan struct{})
-	app.startBackground("published-root-reconcile", func() { app.reconcilePublishedRoots(app.stopSubs, time.Now(), progress) })
-	app.startBackground("playlist-subscriptions", func() { app.runSubscriptions(app.stopSubs) })
+	stopSubs := app.stopSubs
+	app.startBackground("published-root-reconcile", func() { app.reconcilePublishedRoots(stopSubs, time.Now(), progress) })
+	app.startBackground("playlist-subscriptions", func() { app.runSubscriptions(stopSubs) })
 	// Token reconciliation runs with the app: an unanswered spend must stop
 	// blocking its site on evidence, not only on a 30-minute deadline.
 	app.stopReconcile = make(chan struct{})
-	app.startBackground("token-reconcile", func() { app.runTokenReconciler(app.stopReconcile) })
+	stopReconcile := app.stopReconcile
+	app.startBackground("token-reconcile", func() { app.runTokenReconciler(stopReconcile) })
 	// Safe review items are retried by the core itself. Token holds remain
 	// excluded by aiReviewEligible and still require an explicit FL decision.
 	app.stopAutoReview = make(chan struct{})
-	app.startBackground("auto-review", func() { app.runAutoReview(app.stopAutoReview) })
+	stopAutoReview := app.stopAutoReview
+	app.startBackground("auto-review", func() { app.runAutoReview(stopAutoReview) })
 	app.stopLibraryAuto = make(chan struct{})
-	app.startBackground("library-automation", func() { app.runLibraryAutomationScheduler(app.stopLibraryAuto) })
+	stopLibraryAuto := app.stopLibraryAuto
+	app.startBackground("library-automation", func() { app.runLibraryAutomationScheduler(stopLibraryAuto) })
 	// A managed solver is started once, in the background: a slow browser
 	// start must not delay the UI, and the settings page reports the state.
 	go app.autoStartSolver()

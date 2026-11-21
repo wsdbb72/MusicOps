@@ -18,6 +18,10 @@ func TestWebUIExposesEmbeddedBrandIconAndManifest(t *testing.T) {
 		t.Fatalf("home status=%d", home.Code)
 	}
 	pageBody := home.Body.String()
+	csp := home.Header().Get("Content-Security-Policy")
+	if !strings.Contains(csp, "img-src 'self' data:") || !strings.Contains(csp, "manifest-src 'self'") {
+		t.Fatalf("CSP does not allow the brand icon or manifest: %q", csp)
+	}
 	for _, expected := range []string{
 		`rel="icon"`, `href="/brand-icon.png"`, `rel="apple-touch-icon"`, `rel="manifest"`, `name="theme-color"`, `src="/brand-icon.png"`,
 	} {

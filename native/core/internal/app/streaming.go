@@ -351,7 +351,7 @@ func (a *App) acquireFallback(ctx context.Context, execution *scheduler.Executio
 	// has no import and no retryable failure. Retrying that terminal no-result
 	// through auto review forever was the cause of the large maintenance review
 	// queue. Cache/network failures remain recoverable and are bounded below.
-	if validated == "" && len(imported) == 0 && !walk.Recoverable {
+	if validated == "" && len(imported) == 0 && !walk.Recoverable && streamingOutcomesAreDefinitive(outcomes) {
 		message := streamWalkMessage(notes, "") + "；已自动结束，下一轮库维护会重新尝试"
 		complete := workflow.Complete{
 			Edge: workflow.EdgeTerminal, NextStage: "skipped", TaskState: "completed", Message: message, NowNS: a.now().UnixNano(),
@@ -408,4 +408,15 @@ func playlistSuffix(name string) string {
 		return ""
 	}
 	return "（" + name + "）"
+}
+func streamingOutcomesAreDefinitive(outcomes []downloadpolicy.Outcome) bool {
+	if len(outcomes) == 0 {
+		return false
+	}
+	for _, outcome := range outcomes {
+		if outcome.Class != downloadpolicy.ClassNoResult {
+			return false
+		}
+	}
+	return true
 }

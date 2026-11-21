@@ -25,6 +25,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/wsdbb72/MusicOps/native/core/internal/audiorelease"
 	"github.com/wsdbb72/MusicOps/native/core/internal/dataengine"
@@ -107,8 +108,10 @@ func normalizeKey(s string) string {
 	return strings.Join(strings.Fields(s), " ")
 }
 
-// trackKeyOfPath strips the track number and extension from a library file.
-func trackKeyOfPath(file string) (artist, album, title string) {
+// trackPathOf strips the track number and extension while preserving the raw
+// artist, album and title text. Callers choose the comparison key appropriate
+// for their operation.
+func trackPathOf(file string) (artist, album, title string) {
 	base := strings.TrimSuffix(filepath.Base(file), filepath.Ext(file))
 	base = strings.TrimSpace(base)
 	// Drop a leading track number ("01 ", "01 - ", "1.").
@@ -120,9 +123,39 @@ func trackKeyOfPath(file string) (artist, album, title string) {
 	}
 	base = strings.TrimLeft(base, "-_. ")
 	dir := filepath.Dir(file)
-	album = filepath.Base(dir)
-	artist = filepath.Base(filepath.Dir(dir))
-	return normalizeKey(artist), normalizeKey(album), normalizeKey(base)
+	return filepath.Base(filepath.Dir(dir)), filepath.Base(dir), base
+}
+
+// trackKeyOfPath is the duplicate-scan key. It retains punctuation that can
+// distinguish editions while folding path separators and whitespace.
+func trackKeyOfPath(file string) (artist, album, title string) {
+	artist, album, title = trackPathOf(file)
+	return normalizeKey(artist), normalizeKey(album), normalizeKey(title)
+}
+
+// libraryPathKey is the playlist-presence key. Filesystem-safe publishing may
+// replace punctuation such as ':' or '?' with underscores, while the source
+// playlist keeps the catalogue spelling. Comparing letters and digits keeps
+// those same recordings together without collapsing different worded albums.
+func libraryPathKey(value string) string {
+	var out strings.Builder
+	for _, r := range value {
+		if unicode.IsLetter(r) || unicode.IsDigit(r) {
+			out.WriteRune(unicode.ToLower(r))
+			continue
+		}
+		out.WriteByte(' ')
+	}
+	key := strings.Join(strings.Fields(out.String()), " ")
+	if key == "" && strings.TrimSpace(value) != "" {
+		return "\x00punctuation"
+	}
+	return key
+}
+
+func trackPathKeyOfPath(file string) (artist, album, title string) {
+	artist, album, title = trackPathOf(file)
+	return libraryPathKey(artist), libraryPathKey(album), libraryPathKey(title)
 }
 
 const playlistLibraryCacheTTL = 2 * time.Minute
@@ -166,7 +199,7 @@ func indexPlaylistLibrary(engine *dataengine.Engine, entries []audiorelease.Entr
 			continue
 		}
 		index.records[entry.RequestID] = entry
-		artist, album, title := trackKeyOfPath(entry.File)
+		artist, album, title := trackPathKeyOfPath(entry.File)
 		if artist != "" && artist != "." && album != "" && album != "." && title != "" {
 			key := [3]string{artist, album, title}
 			index.tracks[key] = append(index.tracks[key], entry.RequestID)
@@ -181,8 +214,8 @@ func indexPlaylistLibrary(engine *dataengine.Engine, entries []audiorelease.Entr
 func (index playlistLibraryIndex) hasTrack(artist, album, title string) bool {
 	// A source row without an album is published under its own title.
 	// Use that same folder when checking whether it has already been filed.
-	key := [2]string{normalizeKey(artist), normalizeKey(firstNonEmpty(album, title))}
-	want := normalizeKey(title)
+	key := [2]string{libraryPathKey(artist), libraryPathKey(firstNonEmpty(album, title))}
+	want := libraryPathKey(title)
 	if key[0] == "" || key[1] == "" || want == "" {
 		return false
 	}
@@ -206,8 +239,8 @@ func (index playlistLibraryIndex) hasTrack(artist, album, title string) bool {
 				continue
 			}
 			tags, err := readFLACTagsPrefix(path)
-			if err == nil && normalizeKey(tags.Album) == key[1] && normalizeKey(tags.Title) != "" {
-				titles[normalizeKey(tags.Title)] = true
+			if err == nil && libraryPathKey(tags.Album) == key[1] && libraryPathKey(tags.Title) != "" {
+				titles[libraryPathKey(tags.Title)] = true
 			}
 		}
 		index.tagTitles[key] = titles
@@ -218,13 +251,13 @@ func (index playlistLibraryIndex) hasTrack(artist, album, title string) bool {
 // Compilation folders share an album artist, so only the embedded track
 // artist can distinguish recordings with the same title.
 func (index playlistLibraryIndex) hasCompilationTrack(artist, album, title string) bool {
-	pathArtist := normalizeKey(artist)
+	pathArtist := libraryPathKey(artist)
 	for _, id := range index.tracks[[3]string{pathArtist, album, title}] {
-		if pathArtist != normalizeKey(hotSlowCompilationArtist) && index.isUnchanged(id) {
+		if pathArtist != libraryPathKey(hotSlowCompilationArtist) && index.isUnchanged(id) {
 			return true
 		}
 	}
-	unified := normalizeKey(hotSlowCompilationAlbum)
+	unified := libraryPathKey(hotSlowCompilationAlbum)
 	track := [2]string{compilationArtistKey([]string{artist}), title}
 	return index.compilationMatches(unified)[track] || album != unified && index.compilationMatches(album)[track]
 }
@@ -244,7 +277,7 @@ func (index playlistLibraryIndex) compilationMatches(album string) map[[2]string
 			artists, albumTag, titleTag := compilationTrackTags(path)
 			artistKey := compilationArtistKey(artists)
 			if isHotSlowCompilationAlbum(albumTag) && artistKey != "" && titleTag != "" {
-				matches[[2]string{artistKey, normalizeKey(titleTag)}] = true
+				matches[[2]string{artistKey, libraryPathKey(titleTag)}] = true
 			}
 		}
 		index.compilationTags[album] = matches
@@ -256,7 +289,7 @@ func compilationArtistKey(values []string) string {
 	var artists []string
 	for _, value := range values {
 		for _, artist := range strings.Split(value, " / ") {
-			if key := normalizeKey(artist); key != "" {
+			if key := libraryPathKey(artist); key != "" {
 				artists = append(artists, key)
 			}
 		}
@@ -310,7 +343,7 @@ func (index *playlistLibraryIndex) commitPresenceSnapshots() {
 
 // Only an explicit total in a local file is evidence that a folder has gaps.
 func (index playlistLibraryIndex) hasAlbumGap(artist, album string) bool {
-	ids := index.albums[[2]string{normalizeKey(artist), normalizeKey(album)}]
+	ids := index.albums[[2]string{libraryPathKey(artist), libraryPathKey(album)}]
 	if len(ids) == 0 {
 		return false
 	}

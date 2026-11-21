@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -185,5 +186,20 @@ func TestNeteaseCookieIsSharedWithPlaylists(t *testing.T) {
 	}
 	if dirContains(t, application.Dir, "test-session") {
 		t.Fatal("the cookie was written to the state directory in plaintext")
+	}
+}
+
+func TestNeteaseSearchAcceptsCurrentResponseWithoutCode(t *testing.T) {
+	vaultKey(t)
+	application := newApp(t)
+	saveNeteaseTestCookie(t, application)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		io.WriteString(w, `{"result":{"songs":[{"id":42,"name":"Havana","duration":216896,"album":{"id":35829532,"name":"Havana"},"artists":[{"name":"Camila Cabello"},{"name":"Young Thug"}]}]}}`)
+	}))
+	defer server.Close()
+	application.neteaseBases = map[string]string{"api": server.URL}
+	song, err := application.neteaseSearchSong(context.Background(), SearchPlan{ExpectedTitle: "Havana", ExpectedArtist: "Camila Cabello;Young Thug"})
+	if err != nil || song == nil || song.ID != 42 || song.AlbumID != 35829532 {
+		t.Fatalf("song=%+v err=%v", song, err)
 	}
 }

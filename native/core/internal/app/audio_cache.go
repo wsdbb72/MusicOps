@@ -13,10 +13,19 @@ import (
 )
 
 const defaultAudioCacheBytes int64 = 8 << 30
-const audioCacheStaleAfter = 4 * time.Hour
+const audioCacheStaleAfter = time.Hour
 const audioCacheTrimTargetBytes int64 = 256 << 20
 
 var audioCacheMu sync.Mutex
+
+type audioCacheCapacityError struct{ reason string }
+
+func (e *audioCacheCapacityError) Error() string { return e.reason }
+
+func isTemporaryAudioCacheError(err error) bool {
+	var target *audioCacheCapacityError
+	return errors.As(err, &target)
+}
 
 // reserveAudioCache serializes bounded audio writes, including concurrent
 // NetEase downloads and the temporary copy created by metadata writes.
@@ -27,14 +36,26 @@ func reserveAudioCache(dir string, bytes int64) (func(), error) {
 		limit = n
 	}
 	used, err := audioCacheUsage(dir)
-	if err == nil && bytes > 0 && used+bytes > limit {
-		need := used + bytes - limit + audioCacheTrimTargetBytes
+	if err == nil && bytes > 0 {
+		target := limit * 3 / 4
+		need := int64(0)
+		if used > target {
+			need = used - target + audioCacheTrimTargetBytes
+		}
+		if used+bytes > limit {
+			overLimit := used + bytes - limit + audioCacheTrimTargetBytes
+			if overLimit > need {
+				need = overLimit
+			}
+		}
 		if need > limit {
 			need = limit
 		}
-		_, err = pruneStaleAudioCache(dir, need, audioCacheStaleAfter, time.Now())
-		if err == nil {
-			used, err = audioCacheUsage(dir)
+		if need > 0 {
+			_, err = pruneStaleAudioCache(dir, need, audioCacheStaleAfter, time.Now())
+			if err == nil {
+				used, err = audioCacheUsage(dir)
+			}
 		}
 	}
 	if err == nil && bytes <= limit-used {
@@ -42,7 +63,7 @@ func reserveAudioCache(dir string, bytes int64) (func(), error) {
 		if spaceErr != nil {
 			err = spaceErr
 		} else if available < uint64(bytes)+(2<<30) {
-			err = errors.New("缓存盘可用空间不足，需保留 2 GiB")
+			err = &audioCacheCapacityError{reason: "缓存盘可用空间不足，需保留 2 GiB"}
 		}
 	}
 	if err != nil || bytes > limit-used {
@@ -50,7 +71,7 @@ func reserveAudioCache(dir string, bytes int64) (func(), error) {
 		if err != nil {
 			return nil, err
 		}
-		return nil, errors.New("音频缓存达到容量上限，暂缓写入")
+		return nil, &audioCacheCapacityError{reason: "音频缓存达到容量上限，暂缓写入"}
 	}
 	return audioCacheMu.Unlock, nil
 }

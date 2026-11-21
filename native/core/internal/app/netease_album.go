@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	"github.com/wsdbb72/MusicOps/native/core/internal/audiorelease"
+	"github.com/wsdbb72/MusicOps/native/core/internal/downloadpolicy"
 	"github.com/wsdbb72/MusicOps/native/core/internal/scheduler"
 	"github.com/wsdbb72/MusicOps/native/core/internal/taskrepo"
 	"github.com/wsdbb72/MusicOps/native/core/internal/workflow"
@@ -255,7 +256,7 @@ func neteasePlaylistIDFromBatch(batchID string) string {
 }
 
 func splitPlaylistArtists(raw string) []string {
-	normalized := strings.NewReplacer("／", "/", "、", "/", ",", "/").Replace(raw)
+	normalized := strings.NewReplacer("／", "/", "、", "/", ",", "/", ";", "/", "；", "/").Replace(raw)
 	out := []string{}
 	for _, part := range strings.Split(normalized, "/") {
 		if part = strings.TrimSpace(part); part != "" {
@@ -285,6 +286,13 @@ func (a *App) acquireNeteaseAlbum(ctx context.Context, execution *scheduler.Exec
 		}
 		path, note, class, _ := a.stageNeteaseSong(ctx, plan, song)
 		if path == "" {
+			if isTemporaryStreamFailure(class) {
+				message := "网易云音频暂时不可取：" + note
+				if job.SearchRetryCount >= 3 {
+					return a.finishSkipAcquire(held, job, message+"；已有限重试三轮")
+				}
+				return review(message+"；将由自动核对重试", "STREAM_RETRY")
+			}
 			return review(note, class)
 		}
 		if song.CatalogVerified {
@@ -335,6 +343,7 @@ func (a *App) acquireNeteaseAlbum(ctx context.Context, execution *scheduler.Exec
 	receipts := make([]publishReceipt, 0, len(tracks))
 	missing := []string{}
 	var ingestFailure error
+	temporaryFailure := false
 	order := make([]int, len(tracks))
 	for i := range order {
 		order[i] = i
@@ -365,8 +374,11 @@ func (a *App) acquireNeteaseAlbum(ctx context.Context, execution *scheduler.Exec
 		trackPlan := plan
 		trackPlan.PlaylistTrack = song.Name
 		trackPlan.NeteaseSongID = song.ID
-		path, note, _, _ := a.stageNeteaseSong(ctx, trackPlan, song)
+		path, note, class, _ := a.stageNeteaseSong(ctx, trackPlan, song)
 		if path == "" {
+			if isTemporaryStreamFailure(class) {
+				temporaryFailure = true
+			}
 			missing = append(missing, song.Name+"："+note)
 			continue
 		}
@@ -385,6 +397,16 @@ func (a *App) acquireNeteaseAlbum(ctx context.Context, execution *scheduler.Exec
 			continue
 		}
 		receipts = append(receipts, item)
+	}
+	if temporaryFailure {
+		message := fmt.Sprintf("网易云音频暂时不可取；本轮已入库 %d 首，仍缺 %d 首：%s", len(receipts), len(missing), firstMissing(missing))
+		if job.SearchRetryCount < 3 {
+			return review(message+"；将由自动核对重试", "STREAM_RETRY")
+		}
+		if len(receipts) == 0 {
+			return a.finishSkipAcquire(held, job, message+"；已有限重试三轮")
+		}
+		return a.finishPlaylistStreams(held, job, receipts, message+"；已有限重试三轮，先校验本轮已入库曲目", missing...)
 	}
 	if len(receipts) == 0 {
 		if ingestFailure != nil {
@@ -430,4 +452,19 @@ func verifiedNeteaseTrackPresent(local map[string][]string, song *neteaseSong) b
 		}
 	}
 	return false
+}
+func isTemporaryStreamFailure(class string) bool {
+	switch class {
+	case downloadpolicy.ClassRateLimited, downloadpolicy.ClassNetwork:
+		return true
+	default:
+		return false
+	}
+}
+
+func firstMissing(items []string) string {
+	if len(items) == 0 {
+		return ""
+	}
+	return items[0]
 }

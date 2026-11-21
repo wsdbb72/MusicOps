@@ -9,6 +9,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/wsdbb72/MusicOps/native/core/internal/downloadpolicy"
 )
 
 func TestParseM3U(t *testing.T) {
@@ -155,5 +157,21 @@ func TestStreamingSourceStatusRecognizesBundledEngine(t *testing.T) {
 				t.Fatalf("bundled go-music-dl was not reported for %s: %+v", entry.Name, entry)
 			}
 		}
+	}
+}
+
+func TestStreamingOutcomesSettleOnlyWhenEverySourceIsDefinitivelyEmpty(t *testing.T) {
+	noResult := []downloadpolicy.Outcome{{Class: downloadpolicy.ClassNoResult}, {Class: downloadpolicy.ClassNoResult}}
+	if !streamingOutcomesAreDefinitive(noResult) {
+		t.Fatal("all no-result outcomes were not definitive")
+	}
+	for _, class := range []string{downloadpolicy.ClassAuth, downloadpolicy.ClassAuthorization, downloadpolicy.ClassNetwork, downloadpolicy.ClassRateLimited, downloadpolicy.ClassMatch, downloadpolicy.ClassImport} {
+		mixed := append([]downloadpolicy.Outcome{{Class: class}}, noResult...)
+		if streamingOutcomesAreDefinitive(mixed) {
+			t.Fatalf("%s failure was incorrectly treated as a definitive empty result", class)
+		}
+	}
+	if streamingOutcomesAreDefinitive(nil) {
+		t.Fatal("an empty walk was treated as definitive")
 	}
 }

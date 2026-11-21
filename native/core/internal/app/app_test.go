@@ -33,7 +33,18 @@ func TestSearchHitQueuesAcquisitionWithoutADownloadExecutor(t *testing.T) {
 	hits := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.Header.Get("X-MusicOps-Site") {
 		case "dicmusic":
-			io.WriteString(w, `{"status":"success","response":{"currentPage":1,"pages":1,"results":[{"groupId":10,"groupName":"Example &amp; Test","artist":"Artist","torrents":[{"torrentId":11,"format":"FLAC","encoding":"Lossless","seeders":3}]}]}}`)
+			switch r.URL.Query().Get("action") {
+			case "torrent":
+				io.WriteString(w, `{"status":"success","response":{"group":{"id":10},"torrent":{"id":"11","isPersonalFreeleech":true}}}`)
+			case "download":
+				io.WriteString(w, sampleTorrent)
+			default:
+				if strings.HasPrefix(r.URL.Path, "/download.php") {
+					io.WriteString(w, sampleTorrent)
+					return
+				}
+				io.WriteString(w, `{"status":"success","response":{"currentPage":1,"pages":1,"results":[{"groupId":10,"groupName":"Example &amp; Test","artist":"Artist","torrents":[{"torrentId":11,"format":"FLAC","encoding":"Lossless","seeders":3}]}]}}`)
+			}
 		case "open.cd":
 			io.WriteString(w, `<html><a href="logout.php">logout</a><div>没有种子</div></html>`)
 		default:
@@ -43,6 +54,7 @@ func TestSearchHitQueuesAcquisitionWithoutADownloadExecutor(t *testing.T) {
 	defer hits.Close()
 	application := newApp(t)
 	body := searchBody("album-exact", hits.URL, []string{"open.cd", "dicmusic", "orpheus", "redacted"}, false)
+	body["dicmusic_authkey"] = "sentinel-dic-auth"
 	response := post(t, application, "/v1/search", body)
 	if response["downloaded"] != false || response["python"] != false || response["production_verified"] != false {
 		t.Fatal(response)
@@ -51,8 +63,8 @@ func TestSearchHitQueuesAcquisitionWithoutADownloadExecutor(t *testing.T) {
 	if searchJob.SearchAction != "queue_request" {
 		t.Fatal(searchJob)
 	}
-	child := waitJob(t, application, "process:search:album-exact", "skipped")
-	if !strings.Contains(child.Message, "尚未下载") || strings.Contains(child.Message, "已入库") {
+	child := waitJob(t, application, "process:search:album-exact", "needs_review")
+	if child.ReviewKind != "candidate" || !strings.Contains(child.Message, "尚未下载") || strings.Contains(child.Message, "已入库") {
 		t.Fatal(child)
 	}
 	if dirContains(t, application.Dir, "cookie-secret-not-stored") {

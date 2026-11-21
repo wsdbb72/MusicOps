@@ -219,6 +219,7 @@ func TestHotSlowFallbackPublishesOneAlbumWithTrackIdentityAndCover(t *testing.T)
 		t.Fatal(reused.Message)
 	}
 }
+
 func TestNeteaseCoverBytesUsesSelectedAlbumArtwork(t *testing.T) {
 	a := newApp(t)
 	cover := solidJPEG(color.RGBA{R: 12, G: 34, B: 56, A: 255})
@@ -425,5 +426,40 @@ func TestIdentifyRecoversLegacyNeteaseIdentityWithoutManualReview(t *testing.T) 
 	}
 	if job.Stage == "needs_review" && job.ErrorClass == "IDENTITY_UNCONFIRMED" {
 		t.Fatalf("recovered identity returned to manual review: %+v", job)
+	}
+}
+
+func TestPlaylistArtistsMatchSplitsVorbisAndSourceSeparators(t *testing.T) {
+	tests := []struct {
+		name string
+		want []string
+		got  []string
+		ok   bool
+	}{
+		{name: "single Vorbis value uses semicolon", want: []string{"11t", "西野カナ"}, got: []string{"11t;西野カナ"}, ok: true},
+		{name: "source values use slash", want: []string{"11t", "西野カナ"}, got: []string{"11t / 西野カナ"}, ok: true},
+		{name: "fullwidth semicolon", want: []string{"11t", "西野カナ"}, got: []string{"11t；西野カナ"}, ok: true},
+		{name: "different credited artist still fails", want: []string{"11t", "西野カナ"}, got: []string{"11t;Other Artist"}, ok: false},
+		{name: "empty credits never match", want: []string{}, got: []string{"Artist"}, ok: false},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := playlistArtistsMatch(test.want, test.got); got != test.ok {
+				t.Fatalf("playlistArtistsMatch(%v, %v)=%v, want %v", test.want, test.got, got, test.ok)
+			}
+		})
+	}
+}
+
+func TestTemporaryStreamFailureClasses(t *testing.T) {
+	for _, class := range []string{"rate_limited", "network"} {
+		if !isTemporaryStreamFailure(class) {
+			t.Fatalf("%s should be retryable", class)
+		}
+	}
+	for _, class := range []string{"", "no_result", "auth", "STREAM_INGEST_FAILED"} {
+		if isTemporaryStreamFailure(class) {
+			t.Fatalf("%s should not be retryable", class)
+		}
 	}
 }

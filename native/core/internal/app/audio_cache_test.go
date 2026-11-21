@@ -1,6 +1,7 @@
 package app
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -106,8 +107,47 @@ func TestReserveAudioCacheRejectsManagedStagingOverLimit(t *testing.T) {
 	if release, err := reserveAudioCache(dir, 100); err == nil {
 		release()
 		t.Fatal("cache accepted a write over the hard limit")
+	} else if !isTemporaryAudioCacheError(err) {
+		t.Fatalf("capacity error must be retryable, got %T: %v", err, err)
 	}
 	if _, err := os.Stat(path); err != nil {
 		t.Fatal("recent managed staging was deleted instead of pausing the write", err)
+	}
+}
+
+func TestAudioCacheCapacityClassificationDoesNotCatchUnrelatedErrors(t *testing.T) {
+	if !isTemporaryAudioCacheError(&audioCacheCapacityError{reason: "full"}) {
+		t.Fatal("capacity error was not temporary")
+	}
+	if isTemporaryAudioCacheError(errors.New("permission denied")) {
+		t.Fatal("unrelated error was treated as a retryable cache-capacity failure")
+	}
+}
+
+func TestReserveAudioCachePrunesReconstructibleStagingAboveSeventyFivePercent(t *testing.T) {
+	dir := t.TempDir()
+	old := filepath.Join(dir, "netease-abandoned.flac")
+	user := filepath.Join(dir, "my-recording.wav")
+	if err := os.WriteFile(old, make([]byte, 650), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(user, make([]byte, 100), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	oldTime := time.Now().Add(-2 * time.Hour)
+	if err := os.Chtimes(old, oldTime, oldTime); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("MUSICOPS_AUDIO_CACHE_BYTES", "800")
+	release, err := reserveAudioCache(dir, 100)
+	if err != nil {
+		t.Fatalf("reservation should prune stale staging first: %v", err)
+	}
+	release()
+	if _, err := os.Stat(old); !os.IsNotExist(err) {
+		t.Fatal("stale reproducible staging survived the early cleanup threshold", err)
+	}
+	if _, err := os.Stat(user); err != nil {
+		t.Fatal("user audio was removed", err)
 	}
 }

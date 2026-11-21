@@ -73,8 +73,8 @@ func (a *App) acquire(ctx context.Context, execution *scheduler.Execution, paylo
 	// a real loss with no benefit. sitefree only reports Global when the
 	// response was about this resource id, so a stray flag cannot route an
 	// unrelated torrent here.
-	strictFL := strings.HasPrefix(job.BatchID, "pl-") && (site == "dicmusic" || site == "orpheus")
-	if !strictFL && (decision.Personal || decision.Global) {
+	strictFL := site == "dicmusic" || site == "orpheus"
+	if decision.Personal || decision.Global {
 		receipt, err := a.fetchTorrent(ctx, execution, plan, site, resource, false)
 		if err != nil {
 			return a.finishAcquire(held, *job, "candidate", "种子响应不是有效元信息；尚未下载、尚未入库", "PARSE_ERROR", nil)

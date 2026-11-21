@@ -5,7 +5,11 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
+	"sync/atomic"
 	"testing"
+
+	"github.com/wsdbb72/MusicOps/native/core/internal/downloadpolicy"
 )
 
 func TestVerifiedNeteaseDurationToleratesListingDriftButRejectsPreview(t *testing.T) {
@@ -80,5 +84,53 @@ func TestNeteaseMediaQualityLadderFallsBackPastUnavailableLossless(t *testing.T)
 	}
 	if len(levels) != 3 || levels[0] != "lossless" || levels[1] != "hires" || levels[2] != "exhigh" {
 		t.Fatalf("quality ladder unexpectedly stopped: %v", levels)
+	}
+}
+
+func TestNeteaseHTTPFailureRemainsRetryable(t *testing.T) {
+	vaultKey(t)
+	a := newApp(t)
+	saveNeteaseTestCookie(t, a)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "temporarily unavailable", http.StatusServiceUnavailable)
+	}))
+	defer server.Close()
+	a.neteaseBases = map[string]string{"api": server.URL}
+	_, note, class, handled := a.tryNeteaseStream(context.Background(), SearchPlan{ExpectedArtist: "Artist", PlaylistTrack: "Song"})
+	if !handled || class != downloadpolicy.ClassNetwork || !strings.Contains(note, "503") {
+		t.Fatalf("handled=%v class=%q note=%q", handled, class, note)
+	}
+}
+
+func TestNeteaseAuthenticationFailureStaysInReview(t *testing.T) {
+	vaultKey(t)
+	a := newApp(t)
+	saveNeteaseTestCookie(t, a)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "expired session", http.StatusUnauthorized)
+	}))
+	defer server.Close()
+	a.neteaseBases = map[string]string{"api": server.URL}
+	_, _, class, handled := a.tryNeteaseStream(context.Background(), SearchPlan{ExpectedArtist: "Artist", PlaylistTrack: "Song"})
+	if !handled || class != downloadpolicy.ClassAuth {
+		t.Fatalf("handled=%v class=%q", handled, class)
+	}
+}
+
+func TestNeteaseRateLimitStopsTheQualityLadder(t *testing.T) {
+	vaultKey(t)
+	var calls atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		w.Header().Set("Retry-After", "30")
+		w.WriteHeader(http.StatusTooManyRequests)
+	}))
+	defer server.Close()
+	a := newApp(t)
+	saveNeteaseTestCookie(t, a)
+	a.neteaseBases = map[string]string{"api": server.URL}
+	_, _, err := a.neteaseURLFor(context.Background(), &neteaseSong{ID: 7, CatalogVerified: true})
+	if err == nil || classifyNeteaseFailure(err) != downloadpolicy.ClassRateLimited || calls.Load() != 1 {
+		t.Fatalf("calls=%d err=%v", calls.Load(), err)
 	}
 }

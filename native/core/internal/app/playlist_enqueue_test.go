@@ -23,6 +23,10 @@ func TestTrackKeyOfPath(t *testing.T) {
 	if title != "song name" {
 		t.Fatalf("%q", title)
 	}
+	artist, album, title = trackPathKeyOfPath("Artist: One/Album: Two/01 Song._.flac")
+	if artist != "artist one" || album != "album two" || title != "song" {
+		t.Fatalf("forward-slash path key = %q %q %q", artist, album, title)
+	}
 }
 
 func TestPlaylistPresenceRequiresMatchingUnchangedAudio(t *testing.T) {
@@ -80,6 +84,37 @@ func TestPlaylistPresenceRequiresMatchingUnchangedAudio(t *testing.T) {
 	}
 	if application.playlistLibrary().hasTrack("Artist A", "Album X", "Song One") {
 		t.Fatal("a changed file was reported present")
+	}
+}
+
+func TestLibraryPathKeyKeepsPunctuationOnlyIdentity(t *testing.T) {
+	if libraryPathKey("?") == "" || libraryPathKey("?") != libraryPathKey("_") || libraryPathKey("...") != libraryPathKey("_") {
+		t.Fatal("punctuation-only names collapsed to empty identity")
+	}
+	if libraryPathKey("Album: X") != libraryPathKey("Album_ X") || libraryPathKey("Album: X") == libraryPathKey("Album Y") {
+		t.Fatal("filesystem-safe punctuation folding lost album identity")
+	}
+}
+
+func TestPlaylistPresenceFoldsFilesystemSanitizedPunctuation(t *testing.T) {
+	application := newApp(t)
+	incoming, library := t.TempDir(), t.TempDir()
+	if err := os.WriteFile(filepath.Join(incoming, "track.wav"), pcmWAV(120), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := audiorelease.Release(context.Background(), application.engine, audiorelease.Request{
+		RequestID: "punctuation-presence", RootID: "punctuation-album", Artist: "Artist_ One", Album: "Album_ Part_", Title: "Song", Track: 1,
+		SourceName: "track.wav", Incoming: incoming, Library: library,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	application.invalidatePlaylistLibraryCache()
+	index := application.playlistLibrary()
+	if !index.hasTrack("Artist: One", "Album: Part?", "Song.") {
+		t.Fatal("filesystem-sanitized source identity was reported missing")
+	}
+	if index.hasTrack("Artist One", "Different Album", "Song") || index.hasTrack("Different Artist", "Album Part", "Song") {
+		t.Fatal("punctuation folding collapsed a different artist or album")
 	}
 }
 
@@ -145,6 +180,7 @@ func TestEnqueueGroupsRowsByAlbum(t *testing.T) {
 		t.Fatalf("%+v", second)
 	}
 }
+
 func TestHotSlowCompilationAlbumsFoldToSingleTitleAndArtist(t *testing.T) {
 	for _, input := range []string{"最新热歌慢摇19", "最新热歌慢摇 101", "最新热歌慢摇１１４", "最新热歌慢摇"} {
 		plan := SearchPlan{ExpectedTitle: input}
@@ -157,6 +193,7 @@ func TestHotSlowCompilationAlbumsFoldToSingleTitleAndArtist(t *testing.T) {
 		t.Fatalf("unrelated suffix changed: %q", got)
 	}
 }
+
 func TestEnqueueNormalizesHotSlowCompilationAlbumPlan(t *testing.T) {
 	application := newApp(t)
 	rows := []playlistTrack{{Artist: "Artist", Title: "Song", Album: "最新热歌慢摇114"}}

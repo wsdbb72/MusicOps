@@ -16,6 +16,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -79,6 +80,42 @@ func (a *App) neteaseSaved() bool {
 	return err == nil && found
 }
 
+type neteaseHTTPError struct {
+	operation string
+	status    int
+}
+
+func (e *neteaseHTTPError) Error() string {
+	return "netease: " + e.operation + "返回 " + strconv.Itoa(e.status)
+}
+
+func classifyNeteaseFailure(err error) string {
+	if err == nil || errors.Is(err, context.Canceled) {
+		return downloadpolicy.ClassNoResult
+	}
+	var httpErr *neteaseHTTPError
+	if errors.As(err, &httpErr) {
+		if httpErr.status == http.StatusTooManyRequests {
+			return downloadpolicy.ClassRateLimited
+		}
+		if httpErr.status == http.StatusUnauthorized || httpErr.status == http.StatusForbidden {
+			return downloadpolicy.ClassAuth
+		}
+		if httpErr.status == http.StatusRequestTimeout || httpErr.status >= 500 {
+			return downloadpolicy.ClassNetwork
+		}
+		return downloadpolicy.ClassNoResult
+	}
+	var netErr net.Error
+	if errors.As(err, &netErr) {
+		return downloadpolicy.ClassNetwork
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return downloadpolicy.ClassNetwork
+	}
+	return downloadpolicy.ClassNoResult
+}
+
 // neteaseGet performs one read against the API with the headers the web
 // client sends. Without them the service answers HTML instead of JSON.
 func (a *App) neteaseGet(ctx context.Context, endpoint, cookie string) ([]byte, error) {
@@ -101,7 +138,7 @@ func (a *App) neteaseGet(ctx context.Context, endpoint, cookie string) ([]byte, 
 	}
 	defer response.Body.Close()
 	if response.StatusCode != http.StatusOK {
-		return nil, errors.New("netease: 服务返回 " + strconv.Itoa(response.StatusCode))
+		return nil, &neteaseHTTPError{operation: "服务", status: response.StatusCode}
 	}
 	body, err := io.ReadAll(io.LimitReader(response.Body, 8<<20))
 	if err != nil {
@@ -126,8 +163,9 @@ type neteaseSong struct {
 }
 
 // neteaseSearchSong finds the best match for a query. A hit counts only when
-// the folded title equals the query's expected title and at least one artist
-// matches; otherwise nothing is returned and the caller records "no result".
+// the folded title equals the query's expected title and every credited
+// source artist matches; otherwise nothing is returned and the caller records
+// "no result".
 func (a *App) neteaseSearchSong(ctx context.Context, plan SearchPlan) (*neteaseSong, error) {
 	query := strings.TrimSpace(plan.Query)
 	if plan.PlaylistTrack != "" {
@@ -175,15 +213,14 @@ func (a *App) neteaseSearchSong(ctx context.Context, plan SearchPlan) (*neteaseS
 	if err := json.Unmarshal(body, &decoded); err != nil {
 		return nil, err
 	}
-	if decoded.Code != 200 {
+	if decoded.Code != 0 && decoded.Code != 200 {
 		return nil, errors.New("netease: 搜索被拒绝")
 	}
 	wantTitle := foldTagText(firstNonEmpty(plan.PlaylistTrack, plan.ExpectedTitle))
 	if wantTitle == "" {
 		wantTitle = foldTagText(plan.Query)
 	}
-	wantArtist := foldTagText(plan.ExpectedArtist)
-	wantParts := strings.Split(plan.ExpectedArtist, "/")
+	wantParts := splitPlaylistArtists(plan.ExpectedArtist)
 	best := (*neteaseSong)(nil)
 	for _, item := range decoded.Result.Songs {
 		if item.ID <= 0 || strings.TrimSpace(item.Name) == "" {
@@ -193,19 +230,14 @@ func (a *App) neteaseSearchSong(ctx context.Context, plan SearchPlan) (*neteaseS
 			continue
 		}
 		artists := make([]string, 0, len(item.Artists))
-		artistMatch := wantArtist == ""
 		for _, artist := range item.Artists {
-			name := strings.TrimSpace(artist.Name)
-			if name == "" {
-				continue
-			}
-			artists = append(artists, name)
-			if wantArtist != "" && (foldTagText(name) == wantArtist || strings.Contains(foldTagText(name), wantArtist)) {
-				artistMatch = true
+			if name := strings.TrimSpace(artist.Name); name != "" {
+				artists = append(artists, name)
 			}
 		}
+		artistMatch := len(wantParts) == 0 || playlistArtistsMatch(wantParts, artists)
 		if plan.PlaylistTrack != "" {
-			artistMatch = playlistArtistsMatch(wantParts, artists) && normalizeKey(item.Album.Name) == normalizeKey(plan.ExpectedTitle)
+			artistMatch = artistMatch && normalizeKey(item.Album.Name) == normalizeKey(plan.ExpectedTitle)
 		}
 		if !artistMatch || len(artists) == 0 {
 			continue
@@ -238,11 +270,18 @@ func (a *App) neteaseURLFor(ctx context.Context, song *neteaseSong) (string, str
 		{"/api/song/enhance/player/url", "ids=" + url.QueryEscape(ids) + "&br=999000"},
 		{"/api/song/enhance/player/url", "ids=" + url.QueryEscape(ids) + "&br=320000"},
 	}
+	var lastErr error
+	sawResponse := false
 	for _, attempt := range attempts {
 		body, err := a.neteaseGet(ctx, a.neteaseBase()+attempt.path+"?"+attempt.values, cookie)
 		if err != nil {
+			lastErr = err
+			if classifyNeteaseFailure(err) != downloadpolicy.ClassNoResult {
+				break
+			}
 			continue
 		}
+		sawResponse = true
 		var decoded struct {
 			Data []struct {
 				URL   string `json:"url"`
@@ -262,6 +301,9 @@ func (a *App) neteaseURLFor(ctx context.Context, song *neteaseSong) (string, str
 			continue
 		}
 		return item.URL, strings.ToLower(item.Type), nil
+	}
+	if lastErr != nil && !sawResponse {
+		return "", "", lastErr
 	}
 	return "", "", errors.New("netease: 没有取到音源地址")
 }
@@ -323,7 +365,7 @@ func (a *App) neteaseOriginalCoverSong(ctx context.Context, song *neteaseSong) (
 			} `json:"songs"`
 		} `json:"result"`
 	}
-	if json.Unmarshal(body, &decoded) != nil || decoded.Code != 200 {
+	if json.Unmarshal(body, &decoded) != nil || (decoded.Code != 0 && decoded.Code != 200) {
 		return nil, errors.New("网易云原发行版封面检索失败")
 	}
 	var best *neteaseSong
@@ -467,7 +509,7 @@ func (a *App) neteaseDownload(ctx context.Context, mediaURL string) ([]byte, err
 	}
 	defer response.Body.Close()
 	if response.StatusCode != http.StatusOK {
-		return nil, errors.New("netease: 音频返回 " + strconv.Itoa(response.StatusCode))
+		return nil, &neteaseHTTPError{operation: "音频", status: response.StatusCode}
 	}
 	body, err := io.ReadAll(io.LimitReader(response.Body, neteaseMediaMaxBytes+1))
 	if err != nil {
@@ -488,7 +530,7 @@ func (a *App) tryNeteaseStream(ctx context.Context, plan SearchPlan) (string, st
 	}
 	song, err := a.neteaseSearchSong(ctx, plan)
 	if err != nil {
-		return "", "netease 没有连上（" + err.Error() + "）", downloadpolicy.ClassNoResult, true
+		return "", "netease 没有连上（" + err.Error() + "）", classifyNeteaseFailure(err), true
 	}
 	if song == nil {
 		return "", "netease 没有找到标题与艺人同时对得上的曲目", downloadpolicy.ClassNoResult, true
@@ -499,11 +541,11 @@ func (a *App) tryNeteaseStream(ctx context.Context, plan SearchPlan) (string, st
 func (a *App) stageNeteaseSong(ctx context.Context, plan SearchPlan, song *neteaseSong) (string, string, string, bool) {
 	mediaURL, _, err := a.neteaseURLFor(ctx, song)
 	if err != nil {
-		return "", "netease 取不到音源地址", downloadpolicy.ClassNoResult, true
+		return "", "netease 取不到音源地址（" + err.Error() + "）", classifyNeteaseFailure(err), true
 	}
 	body, err := a.neteaseDownload(ctx, mediaURL)
 	if err != nil {
-		return "", "netease 没有取到音频", downloadpolicy.ClassNoResult, true
+		return "", "netease 没有取到音频（" + err.Error() + "）", classifyNeteaseFailure(err), true
 	}
 	if len(body) < 1024 || !isKnownAudio(body) {
 		return "", "netease 返回的内容不是可识别音频", downloadpolicy.ClassNoResult, true
@@ -557,11 +599,11 @@ func (a *App) stageNeteaseSong(ctx context.Context, plan SearchPlan, song *netea
 		}
 	}
 	if err := os.MkdirAll(a.workPath("incoming"), 0o700); err != nil {
-		return "", "netease 校验通过但没有写入", downloadpolicy.ClassNoResult, true
+		return "", "netease 校验通过但没有写入：" + err.Error(), downloadpolicy.ClassRateLimited, true
 	}
 	dir, err := resolveInDir(a.workDir(), "incoming")
 	if err != nil {
-		return "", "netease 校验通过但没有写入", downloadpolicy.ClassNoResult, true
+		return "", "netease 校验通过但没有写入：" + err.Error(), downloadpolicy.ClassRateLimited, true
 	}
 	quality := ""
 	if lossySource {
@@ -575,7 +617,7 @@ func (a *App) stageNeteaseSong(ctx context.Context, plan SearchPlan, song *netea
 	}
 	defer release()
 	if err := os.WriteFile(path, body, 0o600); err != nil {
-		return "", "netease 校验通过但没有写入", downloadpolicy.ClassNoResult, true
+		return "", "netease 校验通过但没有写入：" + err.Error(), downloadpolicy.ClassRateLimited, true
 	}
 	// The media file carries NetEase's own tags; write the identity the
 	// search confirmed so the rest of the pipeline sees a known track. The
@@ -604,9 +646,11 @@ func (a *App) stageNeteaseSong(ctx context.Context, plan SearchPlan, song *netea
 }
 
 func playlistArtistsMatch(want, got []string) bool {
-	for _, expected := range want {
+	wantParts := splitPlaylistArtists(strings.Join(want, " / "))
+	gotParts := splitPlaylistArtists(strings.Join(got, " / "))
+	for _, expected := range wantParts {
 		found := false
-		for _, actual := range got {
+		for _, actual := range gotParts {
 			if normalizeKey(expected) == normalizeKey(actual) && normalizeKey(expected) != "" {
 				found = true
 				break
@@ -616,7 +660,7 @@ func playlistArtistsMatch(want, got []string) bool {
 			return false
 		}
 	}
-	return len(want) > 0
+	return len(wantParts) > 0
 }
 
 // A catalog-verified NetEase song id is stronger identity evidence than a

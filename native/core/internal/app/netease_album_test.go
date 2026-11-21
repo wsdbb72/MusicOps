@@ -62,7 +62,7 @@ func TestNeteaseAlbumCompletesOnlyMissingTracks(t *testing.T) {
 		t.Fatal(err)
 	}
 	existing := filepath.Join(folder, "existing name.flac")
-	if out, err := exec.Command(tool, "-nostdin", "-v", "error", "-f", "lavfi", "-i", "sine=frequency=440:duration=3", "-metadata", "artist=Artist", "-metadata", "album=Album", "-metadata", "title=One", existing).CombinedOutput(); err != nil {
+	if out, err := exec.Command(tool, "-nostdin", "-v", "error", "-f", "lavfi", "-i", "sine=frequency=440:duration=5.24", "-metadata", "artist=Artist", "-metadata", "album=Album", "-metadata", "title=One", existing).CombinedOutput(); err != nil {
 		t.Fatal(err, string(out))
 	}
 	audio, err := os.ReadFile(existing)
@@ -207,6 +207,16 @@ func TestHotSlowFallbackPublishesOneAlbumWithTrackIdentityAndCover(t *testing.T)
 	}
 	if old := readTags(t, sameTitle); old.Artist != "Different Artist" {
 		t.Fatalf("the preexisting recording was modified: %+v", old)
+	}
+	plan.RootJobID = "net-album-direct-reuse"
+	plan.Identity.ID = "net-direct-reuse-ident"
+	raw, _ = json.Marshal(plan)
+	if _, err := a.flows.Start("start-net-direct-reuse", workflow.Start{JobID: plan.RootJobID, BatchID: "pl-netease-direct-fixture", Scene: "expand", Stage: "identifying", Label: "Album", Payload: raw, NowNS: a.now().UnixNano()}); err != nil {
+		t.Fatal(err)
+	}
+	reused := waitJob(t, a, "process:search:"+plan.RootJobID, "skipped")
+	if !strings.Contains(reused.Message, "目标曲目在库") {
+		t.Fatal(reused.Message)
 	}
 }
 func TestNeteaseCoverBytesUsesSelectedAlbumArtwork(t *testing.T) {

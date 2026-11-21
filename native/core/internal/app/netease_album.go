@@ -270,6 +270,8 @@ func (a *App) acquireNeteaseAlbum(ctx context.Context, execution *scheduler.Exec
 	review := func(message, class string) (scheduler.Outcome, error) {
 		return a.finishAcquire(held, job, "candidate", message, class, nil)
 	}
+	artist := publishComponent(firstNonEmpty(plan.AlbumArtist, plan.ExpectedArtist))
+	album := publishComponent(plan.ExpectedTitle)
 	directTrack := func(song *neteaseSong, fallbackReason string) (scheduler.Outcome, error) {
 		if plan.PlaylistTrack == "" {
 			plan.PlaylistTrack = neteasePlaylistTitle(plan)
@@ -284,6 +286,19 @@ func (a *App) acquireNeteaseAlbum(ctx context.Context, execution *scheduler.Exec
 		path, note, class, _ := a.stageNeteaseSong(ctx, plan, song)
 		if path == "" {
 			return review(note, class)
+		}
+		if song.CatalogVerified {
+			// When the album endpoint was unavailable, the exact source
+			// recording we just retrieved provides the comparison duration.
+			if tags, err := readFLACTagsPrefix(path); err == nil && tags.StreamInfo.SampleRate != 0 {
+				source := *song
+				source.DurationMS = int(tags.StreamInfo.TotalSamples * 1000 / uint64(tags.StreamInfo.SampleRate))
+				local := a.verifiedPlaylistAlbumTracks(a.libraryDir(), artist, album, plan.ExpectedTitle)
+				if verifiedNeteaseTrackPresent(local, &source) {
+					removeNeteaseStaging(a.workPath("incoming"), path, "scraped-"+filepath.Base(path))
+					return a.finishSkipAcquire(held, job, "已核实目标曲目在库；网易云暂未提供可验证的专辑清单")
+				}
+			}
 		}
 		item, err := a.ingestPlaylistStream(ctx, job, plan, path, 1)
 		if err != nil {
@@ -316,7 +331,6 @@ func (a *App) acquireNeteaseAlbum(ctx context.Context, execution *scheduler.Exec
 	if err != nil {
 		return directTrack(anchor, err.Error())
 	}
-	artist, album := publishComponent(plan.ExpectedArtist), publishComponent(plan.ExpectedTitle)
 	local := a.verifiedPlaylistAlbumTracks(a.libraryDir(), artist, album, plan.ExpectedTitle)
 	receipts := make([]publishReceipt, 0, len(tracks))
 	missing := []string{}
@@ -345,20 +359,7 @@ func (a *App) acquireNeteaseAlbum(ctx context.Context, execution *scheduler.Exec
 		if err := execution.Checkpoint(ctx, "netease_album", float64(processed)*100/float64(len(order)), song.Name); err != nil {
 			return scheduler.Outcome{}, err
 		}
-		present := false
-		for _, file := range local[normalizeKey(song.Name)] {
-			tags, err := readFLACTagsPrefix(file)
-			if err != nil || tags.StreamInfo.SampleRate == 0 || !playlistArtistsMatch(song.Artists, tags.Artists) {
-				continue
-			}
-			ms := int64(tags.StreamInfo.TotalSamples) * 1000 / int64(tags.StreamInfo.SampleRate)
-			delta := ms - int64(song.DurationMS)
-			if delta >= -1500 && delta <= 1500 {
-				present = true
-				break
-			}
-		}
-		if present {
+		if verifiedNeteaseTrackPresent(local, song) {
 			continue
 		}
 		trackPlan := plan
@@ -405,4 +406,28 @@ func (a *App) acquireNeteaseAlbum(ctx context.Context, execution *scheduler.Exec
 		return a.finishSkipAcquire(held, job, "网易云专辑的全部曲目已在库")
 	}
 	return a.finishPlaylistStreams(held, job, receipts, fmt.Sprintf("网易云发行版共 %d 首，取到 %d 首可用音频，%d 首未取得；等待发布校验", len(tracks), len(receipts), len(missing)), missing...)
+}
+
+func verifiedNeteaseTrackPresent(local map[string][]string, song *neteaseSong) bool {
+	if song.DurationMS <= 0 {
+		return false
+	}
+	tolerance := int64(1500)
+	if song.CatalogVerified {
+		// Match padding differences only for an identified catalogue track.
+		// The folder, title and credited artists must still match.
+		tolerance = 3000
+	}
+	for _, file := range local[normalizeKey(song.Name)] {
+		tags, err := readFLACTagsPrefix(file)
+		if err != nil || tags.StreamInfo.SampleRate == 0 || !playlistArtistsMatch(song.Artists, tags.Artists) {
+			continue
+		}
+		duration := int64(tags.StreamInfo.TotalSamples) * 1000 / int64(tags.StreamInfo.SampleRate)
+		delta := duration - int64(song.DurationMS)
+		if delta >= -tolerance && delta <= tolerance {
+			return true
+		}
+	}
+	return false
 }

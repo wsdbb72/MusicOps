@@ -29,6 +29,12 @@ func (a *App) ingestPlaylistStream(ctx context.Context, job workflow.Job, plan S
 	if err != nil {
 		return publishReceipt{}, fmt.Errorf("流媒体音频刮削失败，尚未入库: %w", err)
 	}
+	diskTitle := title
+	if isHotSlowCompilationAlbum(plan.ExpectedTitle) && plan.NeteaseSongID > 0 {
+		// The shared folder can contain different recordings with the same
+		// title and position. Use the catalogue ID in the filename only.
+		diskTitle = "[" + strconv.FormatInt(plan.NeteaseSongID, 10) + "] " + title
+	}
 	id := audioRequestID(job.RootID, position)
 	result, err := audiorelease.Release(ctx, a.engine, audiorelease.Request{
 		RequestID: id, RootID: job.RootID, Track: position, Artist: publishComponent(plan.ExpectedArtist), FolderArtist: func() string {
@@ -36,7 +42,7 @@ func (a *App) ingestPlaylistStream(ctx context.Context, job workflow.Job, plan S
 				return ""
 			}
 			return publishComponent(plan.AlbumArtist)
-		}(), Album: publishComponent(plan.ExpectedTitle), Title: publishComponent(title),
+		}(), Album: publishComponent(plan.ExpectedTitle), Title: publishComponent(diskTitle),
 		SourceName: name, Incoming: root, Library: a.libraryDir(), Decoder: audiorelease.SystemDecoder(), InternalDownload: true,
 	})
 	if err != nil {

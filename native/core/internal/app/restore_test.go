@@ -147,6 +147,30 @@ func TestCompilationMergeRelocatesIndexedRecordAndLyrics(t *testing.T) {
 	if err := os.WriteFile(lyrics, []byte("[00:00.00]lyrics\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	legacyLyrics := source + ".lrc"
+	if err := os.WriteFile(legacyLyrics, []byte("[00:00.00]legacy lyrics\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	compilationDir := filepath.Join(library, "Compilations", "合辑")
+	if err := os.MkdirAll(compilationDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	conflictingLyric := filepath.Join(compilationDir, filepath.Base(lyrics))
+	if err := os.WriteFile(conflictingLyric, []byte("existing"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if moved, err := application.compilationMoves(true); len(moved) != 0 || !os.IsExist(err) {
+		t.Fatalf("conflicting lyrics: %v %v", moved, err)
+	}
+	if body, err := os.ReadFile(conflictingLyric); err != nil || string(body) != "existing" {
+		t.Fatalf("conflicting lyrics overwritten: %q %v", body, err)
+	}
+	if _, err := os.Stat(source); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(conflictingLyric); err != nil {
+		t.Fatal(err)
+	}
 	merged := post(t, application, "/v1/library/compilations/merge", map[string]any{})
 	if merged["applied"] != true {
 		t.Fatal(merged)
@@ -160,6 +184,9 @@ func TestCompilationMergeRelocatesIndexedRecordAndLyrics(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(filepath.Dir(dest), "01 Song.lrc")); err != nil {
 		t.Fatal("lyrics sidecar was not moved with the audio:", err)
+	}
+	if _, err := os.Stat(dest + ".lrc"); err != nil {
+		t.Fatal("legacy lyrics sidecar was not moved with the audio:", err)
 	}
 }
 func TestXLSXPlaylistReadsRowsWithoutMacros(t *testing.T) {

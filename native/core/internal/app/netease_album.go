@@ -363,6 +363,7 @@ func (a *App) acquireNeteaseAlbum(ctx context.Context, execution *scheduler.Exec
 		}
 		trackPlan := plan
 		trackPlan.PlaylistTrack = song.Name
+		trackPlan.NeteaseSongID = song.ID
 		path, note, _, _ := a.stageNeteaseSong(ctx, trackPlan, song)
 		if path == "" {
 			missing = append(missing, song.Name+"："+note)

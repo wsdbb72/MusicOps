@@ -94,6 +94,7 @@ type playlistLibraryIndex struct {
 	albumMembers     map[string][]string
 	verified         map[string]bool
 	tagTitles        map[[2]string]map[string]bool
+	compilationTags  map[string]map[[2]string]bool
 	records          map[string]audiorelease.Entry
 	pendingSnapshots map[string]audiorelease.VerifiedPresence
 }
@@ -158,7 +159,7 @@ func (a *App) invalidatePlaylistLibraryCache() {
 	a.playlistEntriesMu.Unlock()
 }
 func indexPlaylistLibrary(engine *dataengine.Engine, entries []audiorelease.Entry) playlistLibraryIndex {
-	index := playlistLibraryIndex{engine: engine, tracks: map[[3]string][]string{}, albums: map[[2]string][]string{}, albumMembers: map[string][]string{}, verified: map[string]bool{}, tagTitles: map[[2]string]map[string]bool{}, records: map[string]audiorelease.Entry{}, pendingSnapshots: map[string]audiorelease.VerifiedPresence{}}
+	index := playlistLibraryIndex{engine: engine, tracks: map[[3]string][]string{}, albums: map[[2]string][]string{}, albumMembers: map[string][]string{}, verified: map[string]bool{}, tagTitles: map[[2]string]map[string]bool{}, compilationTags: map[string]map[[2]string]bool{}, records: map[string]audiorelease.Entry{}, pendingSnapshots: map[string]audiorelease.VerifiedPresence{}}
 	for _, entry := range entries {
 		if !entry.FilePresent {
 			continue
@@ -182,13 +183,13 @@ func (index playlistLibraryIndex) hasTrack(artist, album, title string) bool {
 	if key[0] == "" || key[1] == "" || want == "" {
 		return false
 	}
+	if isHotSlowCompilationAlbum(album) {
+		return index.hasCompilationTrack(key[0], key[1], want)
+	}
 	for _, id := range index.tracks[[3]string{key[0], key[1], want}] {
 		if index.isUnchanged(id) {
 			return true
 		}
-	}
-	if isHotSlowCompilationAlbum(album) && index.hasCompilationTrack(normalizeKey(normalizePlaylistAlbumTitle(album)), want) {
-		return true
 	}
 	titles, checked := index.tagTitles[key]
 	if !checked {
@@ -211,42 +212,54 @@ func (index playlistLibraryIndex) hasTrack(artist, album, title string) bool {
 	return titles[want]
 }
 
-// hasCompilationTrack matches the unified compilation folder without using
-// the per-track artist: those files live under 群星, while each row keeps the
-// original artist for display and matching. The album must still agree, and
-// bytes are checked through the same unchanged-file snapshot as other
-// presence checks.
-func (index playlistLibraryIndex) hasCompilationTrack(album, title string) bool {
-	for _, id := range index.albumMembers[album] {
-		entry, found := index.records[id]
-		if !found || !index.isUnchanged(id) {
-			continue
-		}
-		_, _, pathTitle := trackKeyOfPath(entry.File)
-		if pathTitle == title {
+// Compilation folders share an album artist, so only the embedded track
+// artist can distinguish recordings with the same title.
+func (index playlistLibraryIndex) hasCompilationTrack(artist, album, title string) bool {
+	for _, id := range index.tracks[[3]string{artist, album, title}] {
+		if artist != normalizeKey(hotSlowCompilationArtist) && index.isUnchanged(id) {
 			return true
 		}
 	}
-	cacheKey := [2]string{"", album}
-	titles, checked := index.tagTitles[cacheKey]
+	unified := normalizeKey(hotSlowCompilationAlbum)
+	return index.compilationMatches(unified)[[2]string{artist, title}] ||
+		album != unified && index.compilationMatches(album)[[2]string{artist, title}]
+}
+
+func (index playlistLibraryIndex) compilationMatches(album string) map[[2]string]bool {
+	matches, checked := index.compilationTags[album]
 	if !checked {
-		titles = map[string]bool{}
+		matches = map[[2]string]bool{}
 		for _, id := range index.albumMembers[album] {
 			if !index.isUnchanged(id) {
 				continue
 			}
 			path, found, err := audiorelease.PathFor(index.engine, id)
-			if err != nil || !found || !strings.EqualFold(filepath.Ext(path), ".flac") {
+			if err != nil || !found {
 				continue
 			}
-			tags, err := readFLACTagsPrefix(path)
-			if err == nil && normalizeKey(tags.Album) == album && normalizeKey(tags.Title) != "" {
-				titles[normalizeKey(tags.Title)] = true
+			artistTag, albumTag, titleTag := compilationTrackTags(path)
+			if isHotSlowCompilationAlbum(albumTag) && artistTag != "" && titleTag != "" {
+				matches[[2]string{normalizeKey(artistTag), normalizeKey(titleTag)}] = true
 			}
 		}
-		index.tagTitles[cacheKey] = titles
+		index.compilationTags[album] = matches
 	}
-	return titles[title]
+	return matches
+}
+
+func compilationTrackTags(path string) (artist, album, title string) {
+	if strings.EqualFold(filepath.Ext(path), ".flac") {
+		if tags, err := readFLACTagsPrefix(path); err == nil {
+			return tags.Artist, tags.Album, tags.Title
+		}
+		return "", "", ""
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if info, err := probeGenericAudio(ctx, path); err == nil {
+		return info.Tags["artist"], info.Tags["album"], info.Tags["title"]
+	}
+	return "", "", ""
 }
 
 func (index playlistLibraryIndex) isUnchanged(id string) bool {
@@ -353,7 +366,7 @@ func (a *App) enqueuePlaylistTracks(ctx context.Context, playlistJobID string, r
 		report.Tracks++
 		album := normalizePlaylistAlbumTitle(row.Album)
 		albumCompletion := opts.AlbumCompletion && !isHotSlowCompilationAlbum(album)
-		if library.hasTrack(artist, album, title) && (!albumCompletion || !library.hasAlbumGap(artist, album)) {
+		if library.hasTrack(artist, row.Album, title) && (!albumCompletion || !library.hasAlbumGap(artist, album)) {
 			report.Skipped = append(report.Skipped, artist+" - "+title)
 			continue
 		}

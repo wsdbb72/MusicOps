@@ -488,7 +488,12 @@ func (a *App) jobs(w http.ResponseWriter, r *http.Request) {
 
 	collected := make([]workflow.Job, 0, 100)
 	next := ""
-	for scanned := 0; scanned < 2000; {
+	// A filtered scan can advance across many pages before finding a match.
+	// Avoid returning an empty page with a continuation cursor.
+	for scanned := 0; scanned < 2000 || len(collected) == 0; {
+		if r.Context().Err() != nil {
+			return
+		}
 		page, err := a.flows.List(after, 100)
 		if err != nil {
 			writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "code": "JOBS_UNAVAILABLE"})

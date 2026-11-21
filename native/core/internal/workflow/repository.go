@@ -1053,6 +1053,11 @@ func (r *Repository) List(after []byte, limit int) (JobPage, error) {
 	return page, err
 }
 
+// ListCursor resumes a root-index listing immediately after job.
+func ListCursor(job Job) []byte {
+	return rootIndex(job.RootID, job.ID)
+}
+
 // Family reads every job that belongs to one root, including the root itself.
 func (r *Repository) Family(root string) ([]Job, error) {
 	if !validID(root) {

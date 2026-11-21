@@ -10,6 +10,8 @@ import (
 	"testing"
 
 	"github.com/wsdbb72/MusicOps/native/core/internal/audiorelease"
+	"github.com/wsdbb72/MusicOps/native/core/internal/flactags"
+	"github.com/wsdbb72/MusicOps/native/core/internal/wavflac"
 )
 
 func TestTrackKeyOfPath(t *testing.T) {
@@ -40,18 +42,24 @@ func TestPlaylistPresenceRequiresMatchingUnchangedAudio(t *testing.T) {
 	if !index.hasTrack("Artist A", "Album X", "Song One") || index.hasTrack("Artist A", "Album Y", "Song One") {
 		t.Fatal("presence must match the album")
 	}
-	if err := os.WriteFile(filepath.Join(incoming, "hot.wav"), pcmWAV(300), 0o600); err != nil {
+	tagged := filepath.Join(incoming, "hot.flac")
+	if _, err := wavflac.ConvertFile(filepath.Join(incoming, "track.wav"), tagged, true); err != nil {
+		t.Fatal(err)
+	}
+	if err := flactags.Write(tagged, flactags.Tags{Artist: "Original Artist", Album: hotSlowCompilationAlbum, Title: "Hot Song"}); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := audiorelease.Release(context.Background(), application.engine, audiorelease.Request{
 		RequestID: "playlist-hot-presence", RootID: "playlist-hot-album", Artist: "Original Artist", FolderArtist: hotSlowCompilationArtist,
-		Album: hotSlowCompilationAlbum, Title: "Hot Song", Track: 1, SourceName: "hot.wav", Incoming: incoming, Library: library,
+		Album: hotSlowCompilationAlbum, Title: "Hot Song", Track: 1, SourceName: "hot.flac", Incoming: filepath.Dir(tagged), Library: library,
 	}); err != nil {
 		t.Fatal(err)
 	}
 	application.invalidatePlaylistLibraryCache()
 	hotIndex := application.playlistLibrary()
-	if !hotIndex.hasTrack("Original Artist", "最新热歌慢摇114", "Hot Song") || hotIndex.hasTrack("Original Artist", "最新热歌慢摇114", "Other Song") {
+	if !hotIndex.hasTrack("Original Artist", "最新热歌慢摇114", "Hot Song") ||
+		hotIndex.hasTrack("Other Artist", "最新热歌慢摇114", "Hot Song") ||
+		hotIndex.hasTrack("Original Artist", "最新热歌慢摇114", "Other Song") {
 		t.Fatal("unified compilation presence did not match the original row artist and album")
 	}
 	path := filepath.Join(library, "Artist A", "Album X", "01 Song One.wav")

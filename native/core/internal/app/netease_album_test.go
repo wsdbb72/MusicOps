@@ -147,6 +147,15 @@ func TestHotSlowFallbackPublishesOneAlbumWithTrackIdentityAndCover(t *testing.T)
 		t.Fatal(err)
 	}
 	cover := solidJPEG(color.RGBA{R: 20, G: 80, B: 160, A: 255})
+	compilationDir := filepath.Join(library, hotSlowCompilationArtist, hotSlowCompilationAlbum)
+	if err := os.MkdirAll(compilationDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	sameTitle := filepath.Join(compilationDir, "01 One.flac")
+	if out, err := exec.Command(ffmpeg, "-nostdin", "-v", "error", "-f", "lavfi", "-i", "sine=frequency=880:duration=3",
+		"-metadata", "artist=Different Artist", "-metadata", "album="+hotSlowCompilationAlbum, "-metadata", "title=One", sameTitle).CombinedOutput(); err != nil {
+		t.Fatal(err, string(out))
+	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/ajax.php", func(w http.ResponseWriter, r *http.Request) { http.NotFound(w, r) })
 	mux.HandleFunc("/api/search/get/web", func(w http.ResponseWriter, r *http.Request) {
@@ -181,7 +190,7 @@ func TestHotSlowFallbackPublishesOneAlbumWithTrackIdentityAndCover(t *testing.T)
 	}
 	found := ""
 	for _, file := range files {
-		if strings.EqualFold(filepath.Ext(file.Name()), ".flac") && strings.Contains(file.Name(), "One") {
+		if strings.EqualFold(filepath.Ext(file.Name()), ".flac") && strings.Contains(file.Name(), "[10] One") {
 			found = filepath.Join(library, hotSlowCompilationArtist, hotSlowCompilationAlbum, file.Name())
 		}
 	}
@@ -190,11 +199,14 @@ func TestHotSlowFallbackPublishesOneAlbumWithTrackIdentityAndCover(t *testing.T)
 	}
 	body, err := os.ReadFile(found)
 	tags, tagErr := flactags.ReadBytes(body)
-	if err != nil || tagErr != nil || tags.Album != hotSlowCompilationAlbum || tags.AlbumArtist != hotSlowCompilationArtist || tags.Artist != "Artist" {
+	if err != nil || tagErr != nil || tags.Title != "One" || tags.Album != hotSlowCompilationAlbum || tags.AlbumArtist != hotSlowCompilationArtist || tags.Artist != "Artist" {
 		t.Fatalf("body=%d tags=%+v err=%v tagErr=%v", len(body), tags, err, tagErr)
 	}
 	if got := flactags.FrontCover(body); !bytes.Equal(got, cover) {
 		t.Fatal("the selected song's per-track cover was not preserved")
+	}
+	if old := readTags(t, sameTitle); old.Artist != "Different Artist" {
+		t.Fatalf("the preexisting recording was modified: %+v", old)
 	}
 }
 func TestNeteaseCoverBytesUsesSelectedAlbumArtwork(t *testing.T) {

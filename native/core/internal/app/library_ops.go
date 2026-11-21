@@ -859,30 +859,42 @@ func (a *App) compilationMoves(apply bool) ([]compilationMove, error) {
 			recordsByPath[filepath.Clean(a.entryFilePath(entry))] = append(recordsByPath[filepath.Clean(a.entryFilePath(entry))], entry)
 		}
 	}
+	defer a.invalidatePlaylistLibraryCache()
 	for i, move := range moves {
 		matched := recordsByPath[filepath.Clean(move.From)]
 		if err := os.MkdirAll(filepath.Dir(move.To), 0o700); err != nil {
-			a.invalidatePlaylistLibraryCache()
 			return moves[:i], err
 		}
-		if _, err := os.Stat(move.To); err == nil {
-			a.invalidatePlaylistLibraryCache()
-			return moves[:i], os.ErrExist
+		files := []compilationMove{move}
+		targets := sidecarCandidates(move.To)
+		for j, source := range sidecarCandidates(move.From) {
+			_, err := os.Lstat(source)
+			if err == nil {
+				files = append(files, compilationMove{From: source, To: targets[j]})
+			} else if !errors.Is(err, os.ErrNotExist) {
+				return moves[:i], err
+			}
 		}
-		if err := os.Rename(move.From, move.To); err != nil {
-			a.invalidatePlaylistLibraryCache()
-			return moves[:i], err
+		for _, file := range files {
+			if _, err := os.Lstat(file.To); !errors.Is(err, os.ErrNotExist) {
+				if err == nil {
+					err = &os.PathError{Op: "rename", Path: file.To, Err: os.ErrExist}
+				}
+				return moves[:i], err
+			}
 		}
-		moveSidecar(move.From, move.To)
+		for j, file := range files {
+			if err := os.Rename(file.From, file.To); err != nil {
+				return moves[:i], errors.Join(err, rollbackCompilationFiles(files[:j]))
+			}
+		}
 		relocated := make([]string, 0, len(matched))
 		for _, entry := range matched {
 			if err := audiorelease.Relocate(a.engine, entry.RequestID, move.To); err != nil {
+				err = errors.Join(err, rollbackCompilationFiles(files))
 				for j := len(relocated) - 1; j >= 0; j-- {
-					_ = audiorelease.Relocate(a.engine, relocated[j], move.From)
+					err = errors.Join(err, audiorelease.Relocate(a.engine, relocated[j], move.From))
 				}
-				moveSidecar(move.To, move.From)
-				_ = os.Rename(move.To, move.From)
-				a.invalidatePlaylistLibraryCache()
 				return moves[:i], err
 			}
 			relocated = append(relocated, entry.RequestID)
@@ -894,6 +906,14 @@ func (a *App) compilationMoves(apply bool) ([]compilationMove, error) {
 	encoded, _ := json.Marshal(map[string]any{"moves": moves, "at": time.Now().UTC().Format(time.RFC3339)})
 	_ = a.casSaveJSON([]byte("app/library/compilation-last"), encoded)
 	return moves, nil
+}
+
+func rollbackCompilationFiles(files []compilationMove) error {
+	var rollbackErr error
+	for i := len(files) - 1; i >= 0; i-- {
+		rollbackErr = errors.Join(rollbackErr, os.Rename(files[i].To, files[i].From))
+	}
+	return rollbackErr
 }
 
 // automationWorkflowID preserves the stable idempotency key while allowing

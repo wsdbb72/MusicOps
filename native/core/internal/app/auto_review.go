@@ -6,6 +6,8 @@ import (
 	"net/http/httptest"
 	"strings"
 	"time"
+
+	"github.com/wsdbb72/MusicOps/native/core/internal/workflow"
 )
 
 const (
@@ -73,17 +75,18 @@ func (a *App) autoReviewPass(ctx context.Context) autoReviewStats {
 	if a == nil || a.flows == nil {
 		return stats
 	}
-	var cursor []byte
+	cursor := a.autoReviewCursor
 	for scanned := 0; scanned < 10000 && stats.Candidates < autoReviewBatch; {
 		page, err := a.flows.List(cursor, 100)
-		if err != nil || len(page.Jobs) == 0 {
-			break
+		if err != nil {
+			return stats
 		}
 		scanned += len(page.Jobs)
 		for _, job := range page.Jobs {
-			if stats.Candidates >= autoReviewBatch {
-				break
+			if stats.Candidates >= autoReviewBatch || ctx.Err() != nil {
+				return stats
 			}
+			a.autoReviewCursor = workflow.ListCursor(job)
 			if !a.aiReviewEligible(job) || a.autoReviewCoolingDown(job.ID, a.now()) {
 				continue
 			}
@@ -106,6 +109,7 @@ func (a *App) autoReviewPass(ctx context.Context) autoReviewStats {
 			}
 		}
 		if len(page.Next) == 0 {
+			a.autoReviewCursor = nil
 			break
 		}
 		cursor = page.Next

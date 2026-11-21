@@ -93,6 +93,7 @@ type playlistLibraryIndex struct {
 	engine           *dataengine.Engine
 	tracks           map[[3]string][]string
 	albums           map[[2]string][]string
+	titleCandidates  map[string][]string
 	albumMembers     map[string][]string
 	verified         map[string]bool
 	tagTitles        map[[2]string]map[string]bool
@@ -193,7 +194,7 @@ func (a *App) invalidatePlaylistLibraryCache() {
 	a.playlistEntriesMu.Unlock()
 }
 func indexPlaylistLibrary(engine *dataengine.Engine, entries []audiorelease.Entry) playlistLibraryIndex {
-	index := playlistLibraryIndex{engine: engine, tracks: map[[3]string][]string{}, albums: map[[2]string][]string{}, albumMembers: map[string][]string{}, verified: map[string]bool{}, tagTitles: map[[2]string]map[string]bool{}, compilationTags: map[string]map[[2]string]bool{}, records: map[string]audiorelease.Entry{}, pendingSnapshots: map[string]audiorelease.VerifiedPresence{}}
+	index := playlistLibraryIndex{engine: engine, tracks: map[[3]string][]string{}, albums: map[[2]string][]string{}, titleCandidates: map[string][]string{}, albumMembers: map[string][]string{}, verified: map[string]bool{}, tagTitles: map[[2]string]map[string]bool{}, compilationTags: map[string]map[[2]string]bool{}, records: map[string]audiorelease.Entry{}, pendingSnapshots: map[string]audiorelease.VerifiedPresence{}}
 	for _, entry := range entries {
 		if !entry.FilePresent {
 			continue
@@ -203,6 +204,7 @@ func indexPlaylistLibrary(engine *dataengine.Engine, entries []audiorelease.Entr
 		if artist != "" && artist != "." && album != "" && album != "." && title != "" {
 			key := [3]string{artist, album, title}
 			index.tracks[key] = append(index.tracks[key], entry.RequestID)
+			index.titleCandidates[title] = append(index.titleCandidates[title], entry.RequestID)
 			albumKey := [2]string{artist, album}
 			index.albums[albumKey] = append(index.albums[albumKey], entry.RequestID)
 			index.albumMembers[album] = append(index.albumMembers[album], entry.RequestID)
@@ -245,7 +247,30 @@ func (index playlistLibraryIndex) hasTrack(artist, album, title string) bool {
 		}
 		index.tagTitles[key] = titles
 	}
-	return titles[want]
+	if titles[want] {
+		return true
+	}
+	// A filesystem component may be truncated or otherwise altered after the
+	// catalogue identity was written. Candidate files are found by title, then
+	// accepted only when the embedded full album and every credited artist also
+	// match and the file snapshot is unchanged.
+	for _, id := range index.titleCandidates[want] {
+		if !index.isUnchanged(id) {
+			continue
+		}
+		path, found, err := audiorelease.PathFor(index.engine, id)
+		if err != nil || !found || !strings.EqualFold(filepath.Ext(path), ".flac") {
+			continue
+		}
+		tags, err := readFLACTagsPrefix(path)
+		if err != nil || libraryPathKey(tags.Title) != want || libraryPathKey(tags.Album) != key[1] {
+			continue
+		}
+		if playlistArtistsMatch(splitPlaylistArtists(artist), tags.Artists) {
+			return true
+		}
+	}
+	return false
 }
 
 // Compilation folders share an album artist, so only the embedded track
@@ -288,7 +313,7 @@ func (index playlistLibraryIndex) compilationMatches(album string) map[[2]string
 func compilationArtistKey(values []string) string {
 	var artists []string
 	for _, value := range values {
-		for _, artist := range strings.Split(value, " / ") {
+		for _, artist := range splitPlaylistArtists(value) {
 			if key := libraryPathKey(artist); key != "" {
 				artists = append(artists, key)
 			}

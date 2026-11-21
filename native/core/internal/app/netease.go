@@ -43,6 +43,8 @@ const (
 // cookie serves both reading a playlist and falling back to one track.
 const neteaseStreamingRef = "vault://streaming/netease"
 
+var errNeteaseUnexpectedHTML = errors.New("netease: 返回了网页而不是 JSON")
+
 // neteaseBases lets a test point the client at a local server. Production
 // leaves it nil and uses the official origin.
 func (a *App) neteaseBase() string {
@@ -92,6 +94,9 @@ func (e *neteaseHTTPError) Error() string {
 func classifyNeteaseFailure(err error) string {
 	if err == nil || errors.Is(err, context.Canceled) {
 		return downloadpolicy.ClassNoResult
+	}
+	if errors.Is(err, errNeteaseUnexpectedHTML) {
+		return downloadpolicy.ClassNetwork
 	}
 	var httpErr *neteaseHTTPError
 	if errors.As(err, &httpErr) {
@@ -145,7 +150,7 @@ func (a *App) neteaseGet(ctx context.Context, endpoint, cookie string) ([]byte, 
 		return nil, err
 	}
 	if len(body) == 0 || body[0] == '<' {
-		return nil, errors.New("netease: 返回了网页而不是 JSON")
+		return nil, errNeteaseUnexpectedHTML
 	}
 	return body, nil
 }
@@ -277,7 +282,7 @@ func (a *App) neteaseURLFor(ctx context.Context, song *neteaseSong) (string, str
 		if err != nil {
 			lastErr = err
 			if classifyNeteaseFailure(err) != downloadpolicy.ClassNoResult {
-				break
+				return "", "", err
 			}
 			continue
 		}
@@ -580,7 +585,7 @@ func (a *App) stageNeteaseSong(ctx context.Context, plan SearchPlan, song *netea
 	if isHotSlowCompilationAlbum(song.Album) {
 		cover, coverErr := a.neteasePreferredCoverBytes(ctx, song)
 		if coverErr != nil {
-			return "", "网易云歌曲封面不可用：" + coverErr.Error(), downloadpolicy.ClassNoResult, true
+			return "", "网易云歌曲封面不可用：" + coverErr.Error(), classifyNeteaseFailure(coverErr), true
 		}
 		body, err = flactags.EmbedFrontCover(body, cover)
 		if err != nil {

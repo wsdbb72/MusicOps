@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -132,5 +133,29 @@ func TestNeteaseRateLimitStopsTheQualityLadder(t *testing.T) {
 	_, _, err := a.neteaseURLFor(context.Background(), &neteaseSong{ID: 7, CatalogVerified: true})
 	if err == nil || classifyNeteaseFailure(err) != downloadpolicy.ClassRateLimited || calls.Load() != 1 {
 		t.Fatalf("calls=%d err=%v", calls.Load(), err)
+	}
+}
+func TestNeteaseTransientFailureAfterEmptyQualityStillRetries(t *testing.T) {
+	vaultKey(t)
+	var calls atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if calls.Add(1) == 1 {
+			io.WriteString(w, `{"data":[]}`)
+			return
+		}
+		http.Error(w, "temporarily unavailable", http.StatusServiceUnavailable)
+	}))
+	defer server.Close()
+	a := newApp(t)
+	saveNeteaseTestCookie(t, a)
+	a.neteaseBases = map[string]string{"api": server.URL}
+	_, _, err := a.neteaseURLFor(context.Background(), &neteaseSong{ID: 7, CatalogVerified: true})
+	if err == nil || classifyNeteaseFailure(err) != downloadpolicy.ClassNetwork || calls.Load() != 2 {
+		t.Fatalf("calls=%d err=%v", calls.Load(), err)
+	}
+}
+func TestNeteaseUnexpectedHTMLIsRetryable(t *testing.T) {
+	if got := classifyNeteaseFailure(errNeteaseUnexpectedHTML); got != downloadpolicy.ClassNetwork {
+		t.Fatalf("HTML/anti-bot response class = %q", got)
 	}
 }

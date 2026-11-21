@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/wsdbb72/MusicOps/native/core/internal/audiorelease"
@@ -61,7 +62,7 @@ func TestPlaylistPresenceRequiresMatchingUnchangedAudio(t *testing.T) {
 	if _, err := wavflac.ConvertFile(filepath.Join(incoming, "track.wav"), tagged, true); err != nil {
 		t.Fatal(err)
 	}
-	if err := flactags.Write(tagged, flactags.Tags{Artists: []string{"Original Artist", "Guest / MC"}, Album: hotSlowCompilationAlbum, Title: "Hot Song"}); err != nil {
+	if err := flactags.Write(tagged, flactags.Tags{Artists: []string{"Original Artist;Guest / MC"}, Album: hotSlowCompilationAlbum, Title: "Hot Song"}); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := audiorelease.Release(context.Background(), application.engine, audiorelease.Request{
@@ -253,5 +254,38 @@ func TestDecodePlanBoundsLongEnsembleArtistQueries(t *testing.T) {
 	}
 	if len([]rune(decoded.Query)) > 300 || decoded.Query != "Lionel Richie We Are The World" {
 		t.Fatalf("query=%q runes=%d", decoded.Query, len([]rune(decoded.Query)))
+	}
+}
+func TestPlaylistPresenceUsesFullTagsWhenFolderNameIsTruncated(t *testing.T) {
+	application := newApp(t)
+	incoming, library := t.TempDir(), t.TempDir()
+	wav := filepath.Join(incoming, "track.wav")
+	if err := os.WriteFile(wav, pcmWAV(140), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	tagged := filepath.Join(incoming, "track.flac")
+	if _, err := wavflac.ConvertFile(wav, tagged, true); err != nil {
+		t.Fatal(err)
+	}
+	fullAlbum := strings.TrimSpace(strings.Repeat("Catalogue Album With A Long Descriptive Name ", 6))
+	folderAlbum := "Catalogue Album File Safe Truncated"
+	if err := flactags.Write(tagged, flactags.Tags{
+		Artists: []string{"Artist;Guest"}, Album: fullAlbum, Title: "Long Album Song",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := audiorelease.Release(context.Background(), application.engine, audiorelease.Request{
+		RequestID: "truncated-folder-presence", RootID: "truncated-folder-album", Artist: "Artist",
+		Album: folderAlbum, Title: "Long Album Song", Track: 1, SourceName: "track.flac", Incoming: incoming, Library: library,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	application.invalidatePlaylistLibraryCache()
+	index := application.playlistLibrary()
+	if !index.hasTrack("Artist / Guest", fullAlbum, "Long Album Song") {
+		t.Fatal("full embedded album and artist tags were ignored because the folder name differed")
+	}
+	if index.hasTrack("Artist / Guest", fullAlbum+" Other", "Long Album Song") || index.hasTrack("Other Artist", fullAlbum, "Long Album Song") {
+		t.Fatal("full-tag fallback collapsed a different album or artist")
 	}
 }

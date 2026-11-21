@@ -101,7 +101,7 @@ func metadataJSON(ctx context.Context, endpoint string, target any) error {
 	}
 	defer response.Body.Close()
 	if response.StatusCode != http.StatusOK {
-		return errors.New("封面目录返回失败")
+		return &neteaseHTTPError{operation: "封面目录", status: response.StatusCode}
 	}
 	body, err := io.ReadAll(io.LimitReader(response.Body, 4<<20))
 	if err != nil {
@@ -192,7 +192,7 @@ func downloadExternalCover(ctx context.Context, raw string) ([]byte, error) {
 	}
 	defer response.Body.Close()
 	if response.StatusCode != http.StatusOK {
-		return nil, errors.New("封面下载失败")
+		return nil, &neteaseHTTPError{operation: "封面下载", status: response.StatusCode}
 	}
 	body, err := io.ReadAll(io.LimitReader(response.Body, (10<<20)+1))
 	if err != nil {

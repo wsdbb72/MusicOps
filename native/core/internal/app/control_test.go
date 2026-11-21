@@ -79,18 +79,23 @@ func TestJobControlLiveJob(t *testing.T) {
 	}
 }
 
-// A needs_review job has a blocked task and the completed root is terminal,
-// so every control is stale rather than silently accepted.
+// A blocked review node has no live executor. Pause/resume are stale, while
+// cancel is a local-only convergence step: it must abandon the unresolved work
+// without replaying the search or any external request.
 func TestJobControlNeedsReview(t *testing.T) {
 	application := newApp(t)
 	post(t, application, "/v1/search", searchBody("control-2", "http://127.0.0.1:9", []string{}, false))
 	waitJob(t, application, "search:control-2", "needs_review")
 
-	for _, action := range []string{"pause", "resume", "cancel"} {
+	for _, action := range []string{"pause", "resume"} {
 		recorder := postControl(t, application, "search:control-2", action)
 		if recorder.Code != http.StatusConflict {
 			t.Fatal(action, recorder.Code, recorder.Body.String())
 		}
+	}
+	cancelled := decodeControl(t, postControl(t, application, "search:control-2", "cancel"))
+	if cancelled.Job.Stage != "cancelled" || !cancelled.Job.CancelRequested {
+		t.Fatal(cancelled.Job)
 	}
 	recorder := postControl(t, application, "control-2", "pause")
 	if recorder.Code != http.StatusConflict {

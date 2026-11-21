@@ -191,13 +191,22 @@ func (a *App) streamingSourceStatus() []streamSourceStatus {
 // The file lives under incoming/ and is named after the root job so one
 // playlist cannot leak into another job.
 func (a *App) playlistFile(rootJobID string) (string, bool) {
-	for _, suffix := range []string{".m3u", ".m3u8"} {
-		candidate, err := resolveInDir(a.Dir, filepath.Join("incoming", "playlist-"+rootJobID+suffix))
-		if err != nil {
-			continue
-		}
-		if _, err := os.Stat(candidate); err == nil {
-			return candidate, true
+	// New jobs write the manifest to the configured staging directory. Keep
+	// the state directory as a compatibility fallback for jobs created before
+	// a dedicated work directory was configured.
+	roots := []string{a.workDir()}
+	if a.Dir != roots[0] {
+		roots = append(roots, a.Dir)
+	}
+	for _, root := range roots {
+		for _, suffix := range []string{".m3u", ".m3u8"} {
+			candidate, err := resolveInDir(root, filepath.Join("incoming", "playlist-"+rootJobID+suffix))
+			if err != nil {
+				continue
+			}
+			if _, err := os.Stat(candidate); err == nil {
+				return candidate, true
+			}
 		}
 	}
 	return "", false

@@ -125,6 +125,18 @@ func TestRequeueTokenFallbackClosesBlockedNeteaseProcess(t *testing.T) {
 	}
 }
 
+func TestControlCancelsBlockedReviewNodeWithoutExternalReplay(t *testing.T) {
+	repo, tasks := fixture(t)
+	searchReviewJob(t, repo, tasks, 0)
+	result, err := repo.Control("cancel-blocked-review", "search:album1", "cancel", 5000)
+	if err != nil || result.Job == nil || result.Job.Stage != "cancelled" || result.Job.ReviewKind != "" {
+		t.Fatalf("job=%+v err=%v", result.Job, err)
+	}
+	task, err := tasks.Get("search:album1")
+	if err != nil || task == nil || task.State != "cancelled" || !task.CancelRequested || task.CancelOutcome != "cancelled_after_blocked" {
+		t.Fatalf("task=%+v err=%v", task, err)
+	}
+}
 func TestReviewAcceptQueuesProcessWithSelectedCandidate(t *testing.T) {
 	repo, tasks := fixture(t)
 	searchReviewJob(t, repo, tasks, 0)

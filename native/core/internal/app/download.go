@@ -528,6 +528,16 @@ func (a *App) downloadJob(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusAccepted, map[string]any{"ok": true, "job": publicJob(*result.Job), "stage": stage, "download_task_id": workflow.DownloadTaskID(id)})
 }
 
+// downloadSourceRoot resolves the qBittorrent save path. A per-task value is
+// kept, while the default follows the configured work directory so torrent
+// payloads cannot silently land on the state SSD after that setting changes.
+func (a *App) downloadSourceRoot(configured string) string {
+	if configured != "" {
+		return configured
+	}
+	return a.workPath("downloads")
+}
+
 // downloadRetry re-supplies qBittorrent credentials for a failed download
 // task and retries it. Only a failed job whose active task is the failed
 // download task may take this path; anything else is refused, and a bare
@@ -805,10 +815,7 @@ func (a *App) download(ctx context.Context, execution *scheduler.Execution, payl
 		return a.failDownload(execution, class, "qBittorrent 登录失败")
 	}
 	taskID := downloadRecordID(plan.JobID)
-	sourceRoot := plan.SavePath
-	if sourceRoot == "" {
-		sourceRoot = filepath.Join(a.Dir, "downloads")
-	}
+	sourceRoot := a.downloadSourceRoot(plan.SavePath)
 	rec, err := qbittorrent.NewRecord(taskID, sourceRoot, plan.Category)
 	if err != nil {
 		return a.failDownload(execution, "INVALID_PLAN", "下载任务标识无效")
@@ -1537,6 +1544,7 @@ func (a *App) ingestDownload(ctx context.Context, plan downloadPlan, meta qbitto
 			}
 			return nil, downloadError(class, "入库失败："+filepath.Base(f.Path))
 		}
+		a.invalidatePlaylistLibraryCache()
 		if scrape != nil && scrape.lyrics != "" {
 			path, found, err := audiorelease.PathFor(a.engine, result.RequestID)
 			if err != nil || !found {

@@ -91,3 +91,31 @@ func TestKuwoPlaylistReadsThePublicPage(t *testing.T) {
 		t.Fatal(fetched)
 	}
 }
+
+func TestPlaylistFetchInfersPlatformFromAQQShareLink(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/qzone/fcg-bin/fcg_ucc_getcdinfo_byids_cp.fcg" || r.URL.Query().Get("disstid") != "123" {
+			http.NotFound(w, r)
+			return
+		}
+		_, _ = w.Write([]byte(`{"code":0,"cdlist":[{"disstid":123,"dissname":"链接歌单","songnum":1,"songlist":[{"name":"第一首","singer":[{"name":"甲"}],"albumname":"甲专","interval":200}]}]}`))
+	}))
+	defer server.Close()
+	application := newApp(t)
+	found, locateErr := parsePlaylistLocator("https://y.qq.com/n/ryqq/playlist/123", "auto")
+	if locateErr != nil || len(found) != 1 || found[0].Platform != "qqmusic" || found[0].PlaylistID != "123" {
+		t.Fatalf("locator=%+v err=%v", found, locateErr)
+	}
+	fetched := post(t, application, "/v1/playlists/fetch", map[string]any{
+		"playlist_id": "https://y.qq.com/n/ryqq/playlist/123", "base_url": server.URL, "save": true,
+	})
+	if fetched["platform"] != "qqmusic" || fetched["playlist_id"] != "qqmusic-123" || fetched["track_count"] != float64(1) {
+		t.Fatal(fetched)
+	}
+	mismatch := postCode(t, application, "/v1/playlists/fetch", map[string]any{
+		"platform": "netease", "playlist_id": "https://y.qq.com/n/ryqq/playlist/123", "base_url": server.URL, "save": true,
+	})
+	if mismatch.Code != http.StatusBadRequest {
+		t.Fatal(mismatch.Code, mismatch.Body.String())
+	}
+}

@@ -174,6 +174,7 @@ func (a *App) indexConverted(path string) {
 		RequestID: libraryFileID(abs), RootID: libraryRootID(filepath.Dir(abs)), Track: track,
 		Path: abs, Library: library, Format: "flac", SourceName: "wav-convert",
 	})
+	a.invalidatePlaylistLibraryCache()
 }
 
 type wavBatch struct {

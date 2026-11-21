@@ -255,6 +255,16 @@ func (a *App) reviewWithAI(w http.ResponseWriter, r *http.Request, id, requestID
 		a.writeReviewResult(w, result, recoverErr, "ai")
 		return
 	}
+	if inspection.Job.ReviewKind == "token" {
+		// aiReviewEligible admits only a ledger-proven zero-spend account hold.
+		// Replay that hold through the ordinary bounded review path so acquire
+		// re-checks the balance and enters the NetEase fallback when the account
+		// still cannot fund an FL request. Unknown or consumed token requests
+		// never reach this branch.
+		result, retryErr := a.flows.Review(requestID, id, workflow.ReviewDecision{Action: "retry"}, nowNS)
+		a.writeReviewResult(w, result, retryErr, "ai")
+		return
+	}
 	if inspection.Job.TaskType != "search" {
 		// Album expansion, metadata and interrupted jobs do not have a tracker
 		// candidate to compare. Use the original identity and current source

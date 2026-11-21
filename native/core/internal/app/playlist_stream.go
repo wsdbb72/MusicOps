@@ -42,6 +42,7 @@ func (a *App) ingestPlaylistStream(ctx context.Context, job workflow.Job, plan S
 	if err != nil {
 		return publishReceipt{}, playlistReleaseError(err, result)
 	}
+	a.invalidatePlaylistLibraryCache()
 	placed, found, err := audiorelease.PathFor(a.engine, id)
 	if err != nil || !found {
 		return publishReceipt{}, fmt.Errorf("已复制音频，但无法确认发布位置: %w", err)

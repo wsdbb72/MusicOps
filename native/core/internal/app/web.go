@@ -66,13 +66,14 @@ const appJS = `(function () {
   }
   function queueRows() { return jobs.filter(function (job) { return active[job.stage]; }); }
   function taskCounts() {
-    var running = 0, review = 0, finished = 0;
+    var running = 0, queued = 0, review = 0, failed = 0, finished = 0;
     roots().forEach(function (job) {
       if (active[job.stage]) running++;
       else if (job.stage === "needs_review") review++;
+      else if (job.stage === "failed") failed++;
       else finished++;
     });
-    return {running: running, review: review, finished: finished};
+    return {running: running, queued: queued, review: review, failed: failed, finished: finished};
   }
   function visible() {
     if (view === "tasks") return roots();
@@ -154,7 +155,7 @@ const appJS = `(function () {
     setStatus("", "");
     var html = '<p class="meta" id="pipeline-status">后台调度 ' + (pipelinePaused ? "已暂停" : "已开启") + " · 正在执行 " + activeCount + " 项</p>";
     if (view === "tasks") {
-      html += '<p class="meta" id="job-counts">共 ' + counts.total + ' 个任务：执行中 ' + counts.running + ' · 待执行 ' + (counts.queued || 0) + ' · 待核对 ' + counts.review + ' · 已完成 ' + counts.finished + '。点任务查看详情。</p>';
+      html += '<p class="meta" id="job-counts">共 ' + counts.total + ' 个任务：执行中 ' + counts.running + ' · 待执行 ' + (counts.queued || 0) + ' · 待核对 ' + counts.review + ' · 失败 ' + (counts.failed || 0) + ' · 已完成 ' + counts.finished + '。点任务查看详情。</p>';
       html += newTaskCard() + pipelineBar() + batchBar();
     } else if (view === "queue") {
       html += '<p class="meta">队列只显示正在识别、检索、下载、校验或入库的任务，每 3 秒刷新。待核对的任务在「任务」里处理。</p>';
@@ -195,7 +196,7 @@ const appJS = `(function () {
               globalJobCounts = counts;
               activeCount = body.active_count || 0;
               pipelinePaused = !!body.pipeline_paused;
-              label.textContent = "共 " + counts.total + " 个任务，执行中 " + counts.running + "，待执行 " + (counts.queued || 0) + "，待核对 " + counts.review + "，已完成 " + counts.finished + "。点任务查看详情。";
+              label.textContent = "共 " + counts.total + " 个任务，执行中 " + counts.running + "，待执行 " + (counts.queued || 0) + "，待核对 " + counts.review + "，失败 " + (counts.failed || 0) + "，已完成 " + counts.finished + "。点任务查看详情。";
               var pipelineStatus = document.getElementById("pipeline-status");
               if (pipelineStatus) pipelineStatus.textContent = "后台调度 " + (pipelinePaused ? "已暂停" : "已开启") + " · 正在执行 " + activeCount + " 项";
             }

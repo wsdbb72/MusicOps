@@ -495,6 +495,24 @@ func TestCancelFinalizesAnAlreadyInterruptedTaskWithoutPriorIntent(t *testing.T)
 	}
 }
 
+func TestCancelFinalizesBlockedTaskWithoutReplayingRequest(t *testing.T) {
+	r, _ := fixture(t)
+	token := start(t, r, "blocked-direct-cancel", "aux")
+	if _, err := r.Finish("block-direct", token, Completion{State: "blocked", Message: "needs review", NowNS: 2200}, nil); err != nil {
+		t.Fatal(err)
+	}
+	before := state(t, r, "blocked-direct-cancel", "blocked")
+	if before == nil {
+		t.Fatal("task did not reach blocked")
+	}
+	if _, err := r.Control("cancel-blocked-direct", "blocked-direct-cancel", "cancel", 2300); err != nil {
+		t.Fatal(err)
+	}
+	task := state(t, r, "blocked-direct-cancel", "cancelled")
+	if task == nil || !task.CancelRequested || task.Execution != "finished" || task.Owner != "" || task.Fence <= before.Fence || task.CancelOutcome != "cancelled_after_blocked" {
+		t.Fatalf("before=%+v after=%+v", before, task)
+	}
+}
 func TestCancelFinalizesAlreadyInterruptedRequest(t *testing.T) {
 	r, _ := fixture(t)
 	token := start(t, r, "a", "aux")

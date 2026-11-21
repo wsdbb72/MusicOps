@@ -40,12 +40,35 @@ func TestPlaylistPresenceRequiresMatchingUnchangedAudio(t *testing.T) {
 	if !index.hasTrack("Artist A", "Album X", "Song One") || index.hasTrack("Artist A", "Album Y", "Song One") {
 		t.Fatal("presence must match the album")
 	}
+	if err := os.WriteFile(filepath.Join(incoming, "hot.wav"), pcmWAV(300), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := audiorelease.Release(context.Background(), application.engine, audiorelease.Request{
+		RequestID: "playlist-hot-presence", RootID: "playlist-hot-album", Artist: "Original Artist", FolderArtist: hotSlowCompilationArtist,
+		Album: hotSlowCompilationAlbum, Title: "Hot Song", Track: 1, SourceName: "hot.wav", Incoming: incoming, Library: library,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	application.invalidatePlaylistLibraryCache()
+	hotIndex := application.playlistLibrary()
+	if !hotIndex.hasTrack("Original Artist", "最新热歌慢摇114", "Hot Song") || hotIndex.hasTrack("Original Artist", "最新热歌慢摇114", "Other Song") {
+		t.Fatal("unified compilation presence did not match the original row artist and album")
+	}
 	path := filepath.Join(library, "Artist A", "Album X", "01 Song One.wav")
 	if err := os.WriteFile(path, pcmWAV(200), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	if application.playlistLibrary().hasTrack("Artist A", "Album X", "Song One") {
 		t.Fatal("a changed file was reported present")
+	}
+}
+
+func TestEnqueueSkipsExactDuplicateRows(t *testing.T) {
+	application := newApp(t)
+	row := playlistTrack{Artist: "Artist", Album: "Album", Title: "Song", NeteaseSongID: 7, NeteaseAlbumID: 9}
+	report, err := application.enqueuePlaylistTracks(context.Background(), "pl-duplicate", []playlistTrack{row, row}, []int{0, 1}, playlistEnqueueOptions{AlbumCompletion: false})
+	if err != nil || len(report.Created) != 1 || len(report.Skipped) != 1 || report.Tracks != 1 {
+		t.Fatalf("report=%+v err=%v", report, err)
 	}
 }
 

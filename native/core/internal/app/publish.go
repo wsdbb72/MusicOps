@@ -125,6 +125,7 @@ func (a *App) publishControlled(ctx context.Context, execution *scheduler.Execut
 	}); err != nil {
 		return a.failPublish(execution, receipt, "LIBRARY_RECORD_FAILED", "已发布文件未能记入库目录: "+err.Error())
 	}
+	a.invalidatePlaylistLibraryCache()
 	evidence, err := json.Marshal(result)
 	if err != nil {
 		return scheduler.Outcome{}, err

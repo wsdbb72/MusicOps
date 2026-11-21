@@ -21,8 +21,9 @@ type autoReviewStats struct {
 }
 
 // runAutoReview is the in-process counterpart to the "AI review all" button.
-// It only enters the same handler after aiReviewEligible has excluded token
-// holds, so an automated pass can never spend a DicMusic or Orpheus token.
+// It only enters the same handler after aiReviewEligible has admitted the safe
+// review paths. A proven zero-spend account hold may retry without issuing a
+// tracker request; consumed and uncertain token requests remain excluded.
 func (a *App) runAutoReview(stop <-chan struct{}) {
 	timer := time.NewTimer(8 * time.Second)
 	defer timer.Stop()

@@ -134,6 +134,9 @@ func (a *App) indexLibraryTreeWithProgress(ctx context.Context, root string, pro
 	if err == nil && progress != nil {
 		progress(checked, "索引完成")
 	}
+	if err == nil {
+		a.invalidatePlaylistLibraryCache()
+	}
 	return added, kept, pruned, err
 }
 
@@ -796,9 +799,11 @@ func (a *App) compilationPreview(w http.ResponseWriter, _ *http.Request) {
 func (a *App) compilationMerge(w http.ResponseWriter, _ *http.Request) {
 	moves, err := a.compilationMoves(true)
 	if err != nil {
+		a.invalidatePlaylistLibraryCache()
 		writeJSON(w, http.StatusConflict, map[string]any{"ok": false, "code": "MERGE_FAILED", "error": "合并没有完成，已移动的文件记在回执里"})
 		return
 	}
+	a.invalidatePlaylistLibraryCache()
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "moves": moves, "applied": true})
 }
 
@@ -844,15 +849,43 @@ func (a *App) compilationMoves(apply bool) ([]compilationMove, error) {
 		}
 		return moves, nil
 	}
+	entries, err := audiorelease.List(a.engine)
+	if err != nil {
+		return nil, err
+	}
+	recordsByPath := map[string][]audiorelease.Entry{}
+	for _, entry := range entries {
+		if entry.FilePresent {
+			recordsByPath[filepath.Clean(a.entryFilePath(entry))] = append(recordsByPath[filepath.Clean(a.entryFilePath(entry))], entry)
+		}
+	}
 	for i, move := range moves {
+		matched := recordsByPath[filepath.Clean(move.From)]
 		if err := os.MkdirAll(filepath.Dir(move.To), 0o700); err != nil {
+			a.invalidatePlaylistLibraryCache()
 			return moves[:i], err
 		}
 		if _, err := os.Stat(move.To); err == nil {
+			a.invalidatePlaylistLibraryCache()
 			return moves[:i], os.ErrExist
 		}
 		if err := os.Rename(move.From, move.To); err != nil {
+			a.invalidatePlaylistLibraryCache()
 			return moves[:i], err
+		}
+		moveSidecar(move.From, move.To)
+		relocated := make([]string, 0, len(matched))
+		for _, entry := range matched {
+			if err := audiorelease.Relocate(a.engine, entry.RequestID, move.To); err != nil {
+				for j := len(relocated) - 1; j >= 0; j-- {
+					_ = audiorelease.Relocate(a.engine, relocated[j], move.From)
+				}
+				moveSidecar(move.To, move.From)
+				_ = os.Rename(move.To, move.From)
+				a.invalidatePlaylistLibraryCache()
+				return moves[:i], err
+			}
+			relocated = append(relocated, entry.RequestID)
 		}
 	}
 	if moves == nil {

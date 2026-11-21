@@ -91,6 +91,7 @@ type playlistLibraryIndex struct {
 	engine           *dataengine.Engine
 	tracks           map[[3]string][]string
 	albums           map[[2]string][]string
+	albumMembers     map[string][]string
 	verified         map[string]bool
 	tagTitles        map[[2]string]map[string]bool
 	records          map[string]audiorelease.Entry
@@ -142,8 +143,22 @@ func (a *App) playlistLibrary() playlistLibraryIndex {
 	return indexPlaylistLibrary(a.engine, entries)
 }
 
+// invalidatePlaylistLibraryCache makes the next presence check observe a
+// just-published, moved or removed file. The cache only serves the large
+// preview/enqueue pair; library mutations must not leave a two-minute blind
+// spot that re-queues an already ingested track.
+func (a *App) invalidatePlaylistLibraryCache() {
+	if a == nil {
+		return
+	}
+	a.playlistEntriesMu.Lock()
+	a.playlistEntriesCache = nil
+	a.playlistEntriesCached = false
+	a.playlistEntriesAt = time.Time{}
+	a.playlistEntriesMu.Unlock()
+}
 func indexPlaylistLibrary(engine *dataengine.Engine, entries []audiorelease.Entry) playlistLibraryIndex {
-	index := playlistLibraryIndex{engine: engine, tracks: map[[3]string][]string{}, albums: map[[2]string][]string{}, verified: map[string]bool{}, tagTitles: map[[2]string]map[string]bool{}, records: map[string]audiorelease.Entry{}, pendingSnapshots: map[string]audiorelease.VerifiedPresence{}}
+	index := playlistLibraryIndex{engine: engine, tracks: map[[3]string][]string{}, albums: map[[2]string][]string{}, albumMembers: map[string][]string{}, verified: map[string]bool{}, tagTitles: map[[2]string]map[string]bool{}, records: map[string]audiorelease.Entry{}, pendingSnapshots: map[string]audiorelease.VerifiedPresence{}}
 	for _, entry := range entries {
 		if !entry.FilePresent {
 			continue
@@ -155,6 +170,7 @@ func indexPlaylistLibrary(engine *dataengine.Engine, entries []audiorelease.Entr
 			index.tracks[key] = append(index.tracks[key], entry.RequestID)
 			albumKey := [2]string{artist, album}
 			index.albums[albumKey] = append(index.albums[albumKey], entry.RequestID)
+			index.albumMembers[album] = append(index.albumMembers[album], entry.RequestID)
 		}
 	}
 	return index
@@ -170,6 +186,9 @@ func (index playlistLibraryIndex) hasTrack(artist, album, title string) bool {
 		if index.isUnchanged(id) {
 			return true
 		}
+	}
+	if isHotSlowCompilationAlbum(album) && index.hasCompilationTrack(normalizeKey(normalizePlaylistAlbumTitle(album)), want) {
+		return true
 	}
 	titles, checked := index.tagTitles[key]
 	if !checked {
@@ -190,6 +209,44 @@ func (index playlistLibraryIndex) hasTrack(artist, album, title string) bool {
 		index.tagTitles[key] = titles
 	}
 	return titles[want]
+}
+
+// hasCompilationTrack matches the unified compilation folder without using
+// the per-track artist: those files live under 群星, while each row keeps the
+// original artist for display and matching. The album must still agree, and
+// bytes are checked through the same unchanged-file snapshot as other
+// presence checks.
+func (index playlistLibraryIndex) hasCompilationTrack(album, title string) bool {
+	for _, id := range index.albumMembers[album] {
+		entry, found := index.records[id]
+		if !found || !index.isUnchanged(id) {
+			continue
+		}
+		_, _, pathTitle := trackKeyOfPath(entry.File)
+		if pathTitle == title {
+			return true
+		}
+	}
+	cacheKey := [2]string{"", album}
+	titles, checked := index.tagTitles[cacheKey]
+	if !checked {
+		titles = map[string]bool{}
+		for _, id := range index.albumMembers[album] {
+			if !index.isUnchanged(id) {
+				continue
+			}
+			path, found, err := audiorelease.PathFor(index.engine, id)
+			if err != nil || !found || !strings.EqualFold(filepath.Ext(path), ".flac") {
+				continue
+			}
+			tags, err := readFLACTagsPrefix(path)
+			if err == nil && normalizeKey(tags.Album) == album && normalizeKey(tags.Title) != "" {
+				titles[normalizeKey(tags.Title)] = true
+			}
+		}
+		index.tagTitles[cacheKey] = titles
+	}
+	return titles[title]
 }
 
 func (index playlistLibraryIndex) isUnchanged(id string) bool {
@@ -269,6 +326,7 @@ func (a *App) enqueuePlaylistTracks(ctx context.Context, playlistJobID string, r
 		client = musicbrainz.NewClient()
 		client.BaseURL = opts.CatalogBaseURL
 	}
+	seenTracks := map[string]bool{}
 	seenAlbums := map[string]bool{}
 	for _, index := range indices {
 		if err := ctx.Err(); err != nil {
@@ -283,6 +341,15 @@ func (a *App) enqueuePlaylistTracks(ctx context.Context, playlistJobID string, r
 		if title == "" {
 			continue
 		}
+		trackKey := normalizeKey(artist) + "\x00" + normalizeKey(normalizePlaylistAlbumTitle(row.Album)) + "\x00" + normalizeKey(title)
+		if row.NeteaseSongID > 0 {
+			trackKey = "netease:" + strconv.FormatInt(row.NeteaseSongID, 10)
+		}
+		if seenTracks[trackKey] {
+			report.Skipped = append(report.Skipped, artist+" - "+title+"（歌单内重复）")
+			continue
+		}
+		seenTracks[trackKey] = true
 		report.Tracks++
 		album := normalizePlaylistAlbumTitle(row.Album)
 		albumCompletion := opts.AlbumCompletion && !isHotSlowCompilationAlbum(album)

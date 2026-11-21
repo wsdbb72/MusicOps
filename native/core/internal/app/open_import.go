@@ -88,6 +88,7 @@ func (a *App) openImport(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, status, map[string]any{"ok": false, "code": code, "error": message, "written": false})
 		return
 	}
+	a.invalidatePlaylistLibraryCache()
 	placed, _, _ := audiorelease.PathFor(a.engine, result.RequestID)
 	writeJSON(w, http.StatusOK, map[string]any{
 		"ok": true, "written": true, "request_id": result.RequestID, "root_id": result.RootID,

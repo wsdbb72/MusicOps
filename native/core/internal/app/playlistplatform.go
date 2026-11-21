@@ -64,20 +64,25 @@ func (a *App) fetchPlaylist(w http.ResponseWriter, r *http.Request) {
 	}
 	// The field accepts a share link as well as a bare id: pasting the link
 	// the platform gave the user is the normal case, and asking them to dig
-	// the id out of it by hand is a pointless step.
-	if strings.TrimSpace(body.Platform) == "" {
-		body.Platform = "netease"
-	}
+	// the id out of it by hand is a pointless step. A complete link carries
+	// stronger platform evidence than the form default, so infer it before
+	// applying the bare-id default.
+	body.Platform = strings.TrimSpace(body.Platform)
 	if strings.Contains(body.PlaylistID, "://") {
 		found, locateErr := parsePlaylistLocator(body.PlaylistID, "auto")
 		if locateErr != nil || len(found) != 1 || found[0].PlaylistID == "" {
 			writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "code": "INVALID_REQUEST", "error": "这个链接里没有可用的歌单 ID"})
 			return
 		}
-		if body.Platform == "" {
-			body.Platform = found[0].Platform
+		if body.Platform != "" && body.Platform != "auto" && body.Platform != found[0].Platform {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "code": "INVALID_REQUEST", "error": "歌单域名与所选平台不匹配"})
+			return
 		}
+		body.Platform = found[0].Platform
 		body.PlaylistID = found[0].PlaylistID
+	}
+	if body.Platform == "" {
+		body.Platform = "netease"
 	}
 	remote, err := a.fetchRemotePlaylist(r.Context(), body.Platform, body.PlaylistID, body.BaseURL)
 	if err != nil {

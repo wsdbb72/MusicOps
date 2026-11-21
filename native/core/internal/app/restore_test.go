@@ -11,9 +11,11 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/wsdbb72/MusicOps/native/core/internal/audiorelease"
 	"github.com/wsdbb72/MusicOps/native/core/internal/searchdecision"
 	"github.com/wsdbb72/MusicOps/native/core/internal/workflow"
 )
@@ -121,6 +123,45 @@ func TestCompilationPreviewDoesNotMoveUntilMerge(t *testing.T) {
 	}
 }
 
+func TestCompilationMergeRelocatesIndexedRecordAndLyrics(t *testing.T) {
+	application := newApp(t)
+	library := filepath.Join(t.TempDir(), "music")
+	incoming := filepath.Join(t.TempDir(), "incoming")
+	if err := os.MkdirAll(incoming, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	writeToneWAV(t, filepath.Join(incoming, "compilation.wav"), 440)
+	result, err := audiorelease.Release(context.Background(), application.engine, audiorelease.Request{
+		RequestID: "compilation-record", RootID: "compilation-root", Artist: "Artist", Album: "合辑",
+		Title: "Song", Track: 1, SourceName: "compilation.wav", Incoming: incoming, Library: library,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	post(t, application, "/v1/settings/library", map[string]any{"library_dir": library})
+	source, found, err := audiorelease.PathFor(application.engine, result.RequestID)
+	if err != nil || !found {
+		t.Fatal(source, found, err)
+	}
+	lyrics := filepath.Join(filepath.Dir(source), "01 Song.lrc")
+	if err := os.WriteFile(lyrics, []byte("[00:00.00]lyrics\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	merged := post(t, application, "/v1/library/compilations/merge", map[string]any{})
+	if merged["applied"] != true {
+		t.Fatal(merged)
+	}
+	dest, found, err := audiorelease.PathFor(application.engine, result.RequestID)
+	if err != nil || !found || !strings.Contains(dest, filepath.Join("Compilations", "合辑")) {
+		t.Fatalf("dest=%q found=%v err=%v", dest, found, err)
+	}
+	if _, err := os.Stat(dest); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(filepath.Dir(dest), "01 Song.lrc")); err != nil {
+		t.Fatal("lyrics sidecar was not moved with the audio:", err)
+	}
+}
 func TestXLSXPlaylistReadsRowsWithoutMacros(t *testing.T) {
 	tracks, _, err := parsePlaylistDocument(xlsxSheet(t), "")
 	if err != nil || len(tracks) != 1 || tracks[0].Title != "夜曲" || tracks[0].Artist != "周杰伦" {

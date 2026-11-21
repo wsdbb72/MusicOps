@@ -532,9 +532,11 @@ func (a *App) duplicateMerge(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, http.StatusConflict, map[string]any{"ok": false, "code": "MERGE_CONFLICT"})
 			return
 		}
+		a.invalidatePlaylistLibraryCache()
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "replayed": true, "merge_id": existing.MergeID, "group_id": existing.GroupID, "kept": existing.Keep, "quarantined": existing.Moved})
 		return
 	}
+	a.invalidatePlaylistLibraryCache()
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "merge_id": receipt.MergeID, "group_id": receipt.GroupID, "kept": receipt.Keep, "quarantined": receipt.Moved, "filled_fields": filled})
 }
 
@@ -810,6 +812,7 @@ func (a *App) duplicateRestore(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if receipt.Restored {
+		a.invalidatePlaylistLibraryCache()
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "replayed": true, "merge_id": receipt.MergeID, "restored": receipt.Moved})
 		return
 	}
@@ -875,6 +878,7 @@ func (a *App) duplicateRestore(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"ok": false, "code": "LIBRARY_UNAVAILABLE", "error": "files restored but the receipt could not be updated: " + err.Error()})
 		return
 	}
+	a.invalidatePlaylistLibraryCache()
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "merge_id": receipt.MergeID, "restored": restored})
 }
 
@@ -1173,6 +1177,7 @@ func (a *App) artistFolderRelocate(w http.ResponseWriter, r *http.Request) {
 		}
 		results = append(results, map[string]any{"request_id": plan.RequestID, "file": plan.File, "state": "done", "from": plan.From, "to": moved})
 	}
+	a.invalidatePlaylistLibraryCache()
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "results": results, "count": len(results)})
 }
 

@@ -445,16 +445,26 @@ func controlDecision(v *dataengine.View, current *Task, id, action string, nowNS
 		if current.State == "cancelled" {
 			return &next, nil, nil
 		}
-		if current.State == "recovery_required" && current.Owner == "" {
-			// No executor remains. A cancel issued before or after interruption
-			// only abandons the unresolved work; it never replays an external
-			// effect, so it can finalize immediately instead of looping through
-			// another review action.
+		if current.State == "recovery_required" && current.Owner == "" || current.State == "blocked" && current.Execution == "finished" {
+			// No executor remains. A cancel after interruption or a blocked
+			// checkpoint only abandons unresolved work; it never replays an
+			// external effect, so it can finalize immediately instead of leaving
+			// a stale review node that every re-enqueue has to work around.
+			if current.Fence == math.MaxUint64 {
+				return nil, nil, ErrIntegrity
+			}
 			next.CancelRequested = true
 			next.State = "cancelled"
 			next.Execution = "finished"
 			next.PauseRequested = false
-			next.CancelOutcome = "cancelled_after_interrupt"
+			next.Owner = ""
+			next.Fence++
+			next.ErrorClass = ""
+			if current.State == "blocked" {
+				next.CancelOutcome = "cancelled_after_blocked"
+			} else {
+				next.CancelOutcome = "cancelled_after_interrupt"
+			}
 			break
 		}
 		if terminal(current.State) {

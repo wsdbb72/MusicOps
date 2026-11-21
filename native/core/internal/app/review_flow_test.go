@@ -9,6 +9,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/wsdbb72/MusicOps/native/core/internal/reviewai"
 	"github.com/wsdbb72/MusicOps/native/core/internal/searchdecision"
@@ -16,7 +17,7 @@ import (
 	"github.com/wsdbb72/MusicOps/native/core/internal/workflow"
 )
 
-func TestAIReviewEligibilityCoversNonSearchButNeverTokenHolds(t *testing.T) {
+func TestAIReviewEligibilityCoversSafeNonSearchAndTokenHoldPaths(t *testing.T) {
 	withoutAI := newApp(t)
 	neteaseSource := workflow.Job{Stage: "needs_review", TaskType: "search", ReviewKind: "candidate", BatchID: "pl-netease-fixture"}
 	if !withoutAI.aiReviewEligible(neteaseSource) {
@@ -53,6 +54,82 @@ func TestAIReviewEligibilityCoversNonSearchButNeverTokenHolds(t *testing.T) {
 	if application.aiReviewEligible(complete) {
 		t.Fatal("completed job became AI-review eligible")
 	}
+}
+
+func TestAIReviewRetriesAZeroSpendTokenHoldWithoutCallingTheModel(t *testing.T) {
+	application := newApp(t)
+	application.mu.Lock()
+	application.paused = true
+	application.mu.Unlock()
+	now := time.Now().UnixNano()
+	rootID := "ai-token-hold-root"
+	processID := "process:search:" + rootID
+	plan, _ := json.Marshal(SearchPlan{RootJobID: rootID, Query: "Artist Album", ExpectedTitle: "Album", ExpectedArtist: "Artist", SelectedSite: "dicmusic", SelectedCandidateID: "dicmusic:11", Budget: 0})
+	if _, err := application.flows.Start("start-"+rootID, workflow.Start{
+		JobID: rootID, BatchID: "pl-netease-ai-token-hold", Scene: "expand", Stage: "identifying", Label: "Artist - Album", Payload: plan, NowNS: now,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	token := claimAndBeginWorkflowTask(t, application, rootID, "identify", now+100)
+	if _, err := application.flows.Complete("handoff-"+rootID, token, workflow.Complete{
+		JobID: rootID, Edge: workflow.EdgeQueueSearch, TaskState: "completed", NowNS: now + 200,
+		Evidence: []workflow.EvidenceInput{{ID: "identity-" + rootID, Kind: "api", Source: "musicbrainz", SubjectID: "release-ai-token", TracklistVerified: true, IdentityConfirmed: true, Payload: []byte("verified tracklist")}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	token = claimAndBeginWorkflowTask(t, application, "search:"+rootID, "identify", now+300)
+	report := searchdecision.Report{
+		Scene: "expand", IdentityConfirmed: true, SelectedSite: "dicmusic", SelectedCandidateID: "dicmusic:11",
+		Sites: []searchdecision.SiteReport{
+			{Site: "open.cd", Status: "DISABLED"},
+			{Site: "dicmusic", Status: "OK", Attempted: true, CandidateCount: 1, Exact: true, ObservedTitle: "Album", ExpectedTitle: "Album", Seeders: 3, SeedersKnown: true},
+			{Site: "orpheus", Status: "DISABLED"},
+			{Site: "redacted", Status: "DISABLED"},
+		},
+	}
+	if _, err := application.flows.Complete("process-"+rootID, token, workflow.Complete{
+		JobID: "search:" + rootID, Edge: workflow.EdgeQueueProcess, NextStage: "requesting", TaskState: "completed", NowNS: now + 400,
+		Result: plan, Search: &report,
+		Evidence: []workflow.EvidenceInput{{ID: "search-" + rootID, Kind: "catalog", Source: "dicmusic", Payload: []byte("observed candidate")}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	token = claimAndBeginWorkflowTask(t, application, processID, "aux", now+500)
+	blocked, err := application.flows.Complete("block-"+rootID, token, workflow.Complete{
+		JobID: processID, Edge: workflow.EdgeTerminal, NextStage: "needs_review", ReviewKind: "token", TaskState: "blocked",
+		ErrorClass: "account_token_hold", Message: "余额不足，未向站点请求令牌", NowNS: now + 600,
+	})
+	if err != nil || blocked.Job == nil || blocked.Job.Stage != "needs_review" || !application.aiReviewEligible(*blocked.Job) {
+		t.Fatalf("blocked=%+v err=%v", blocked.Job, err)
+	}
+	calls := atomic.Int32{}
+	application.setReviewCompleter(reviewCaller{calls: &calls, body: []byte(`{"decision":"pass","candidate_id":"dicmusic:11","reason":"should not run"}`)})
+	application.reviews = reviewai.NewCache(1)
+	recorder := postCode(t, application, "/v1/jobs/"+processID+"/review", map[string]any{"action": "ai"})
+	if recorder.Code != http.StatusOK || calls.Load() != 0 {
+		t.Fatalf("code=%d calls=%d body=%s", recorder.Code, calls.Load(), recorder.Body.String())
+	}
+	job, err := application.flows.Job(processID)
+	if err != nil || job == nil || job.Stage != "requesting" || job.ReviewKind != "" || job.ErrorClass != "" {
+		t.Fatalf("job=%+v err=%v", job, err)
+	}
+	task, err := application.tasks.Get(job.ActiveTaskID)
+	if err != nil || task == nil || task.State != "queued" || task.Owner != "" {
+		t.Fatalf("task=%+v err=%v", task, err)
+	}
+}
+
+func claimAndBeginWorkflowTask(t *testing.T, application *App, id, lane string, now int64) taskrepo.Token {
+	t.Helper()
+	claim, err := application.tasks.Claim("claim-"+id, lane, "review-test-owner", now)
+	if err != nil || claim.Task == nil {
+		t.Fatalf("claim %s: %+v %v", id, claim, err)
+	}
+	token := taskrepo.Token{ID: claim.Task.ID, Owner: claim.Task.Owner, Fence: claim.Task.Fence}
+	if _, err := application.tasks.Begin("begin-"+id, token, now+1); err != nil {
+		t.Fatal(err)
+	}
+	return token
 }
 
 func TestNormalizedAndSameReleaseCanQueueWithoutAModel(t *testing.T) {

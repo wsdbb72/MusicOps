@@ -402,9 +402,10 @@ type rootJobState uint8
 
 const (
 	rootFinished rootJobState = iota
+	rootFailed
+	rootReview
 	rootQueued
 	rootRunning
-	rootReview
 )
 
 func classifyJobCounts(jobs []workflow.Job, active map[string]bool) map[string]int {
@@ -416,8 +417,10 @@ func classifyJobCounts(jobs []workflow.Job, active map[string]bool) map[string]i
 		}
 		state := rootFinished
 		switch job.Stage {
-		case "needs_review", "failed":
+		case "needs_review":
 			state = rootReview
+		case "failed":
+			state = rootFailed
 		case "preparing", "identifying", "snapshotting", "metadata", "searching", "fallback", "requesting", "downloading", "validating", "publishing", "notifying":
 			state = rootQueued
 			if job.ActiveTaskID != "" && active[job.ActiveTaskID] {
@@ -428,11 +431,13 @@ func classifyJobCounts(jobs []workflow.Job, active map[string]bool) map[string]i
 			states[root] = state
 		}
 	}
-	counts := map[string]int{"total": len(states), "running": 0, "executing": 0, "queued": 0, "review": 0, "finished": 0}
+	counts := map[string]int{"total": len(states), "running": 0, "executing": 0, "queued": 0, "review": 0, "failed": 0, "finished": 0}
 	for _, state := range states {
 		switch state {
 		case rootReview:
 			counts["review"]++
+		case rootFailed:
+			counts["failed"]++
 		case rootRunning:
 			counts["running"]++
 			counts["executing"]++
@@ -926,6 +931,7 @@ func (a *App) releaseAudio(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
+	a.invalidatePlaylistLibraryCache()
 	// The ingest is committed; now record it on the workflow and move the job
 	// to publishing. The request id is deterministic per (root, track), so a
 	// retried call replays the release and replays this record instead of

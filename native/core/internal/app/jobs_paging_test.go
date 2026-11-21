@@ -78,13 +78,16 @@ func TestClassifyJobCountsSeparatesWorkersFromRetryBacklog(t *testing.T) {
 	jobs := []workflow.Job{
 		{ID: "run-root", RootID: "run-root", Stage: "completed", ActiveTaskID: "run-search"},
 		{ID: "run-search", RootID: "run-root", ParentJobID: "run-root", Stage: "searching", ActiveTaskID: "run-task"},
+		{ID: "run-old-failure", RootID: "run-root", ParentJobID: "run-root", Stage: "failed"},
 		{ID: "wait-root", RootID: "wait-root", Stage: "completed", ActiveTaskID: "wait-search"},
 		{ID: "wait-search", RootID: "wait-root", ParentJobID: "wait-root", Stage: "searching", ActiveTaskID: "wait-task"},
 		{ID: "review-root", RootID: "review-root", Stage: "needs_review", ActiveTaskID: "review-task"},
+		{ID: "failed-root", RootID: "failed-root", Stage: "completed", ActiveTaskID: "failed-search"},
+		{ID: "failed-search", RootID: "failed-root", ParentJobID: "failed-root", Stage: "failed", ActiveTaskID: "failed-task"},
 		{ID: "done-root", RootID: "done-root", Stage: "completed"},
 	}
 	counts := classifyJobCounts(jobs, map[string]bool{"run-task": true})
-	want := map[string]int{"total": 4, "running": 1, "executing": 1, "queued": 1, "review": 1, "finished": 1}
+	want := map[string]int{"total": 5, "running": 1, "executing": 1, "queued": 1, "review": 1, "failed": 1, "finished": 1}
 	for key, value := range want {
 		if counts[key] != value {
 			t.Fatalf("%s=%d want=%d all=%v", key, counts[key], value, counts)

@@ -31,9 +31,20 @@ func TestWorkDirStagesOnTheConfiguredDisk(t *testing.T) {
 		t.Fatal("the settings did not take effect:", application.workDir(), application.libraryDir())
 	}
 
+	application.playlistLibrary()
+	if application.downloadSourceRoot("") != filepath.Join(work, "downloads") {
+		t.Fatal("qBittorrent default save path did not follow the work directory")
+	}
 	incoming := filepath.Join(work, "incoming")
 	if err := os.MkdirAll(incoming, 0o700); err != nil {
 		t.Fatal(err)
+	}
+	playlist := filepath.Join(incoming, "playlist-ssd-job.m3u")
+	if err := os.WriteFile(playlist, []byte("#EXTM3U`n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if found, ok := application.playlistFile("ssd-job"); !ok || realPath(t, found) != realPath(t, playlist) {
+		t.Fatalf("playlistFile found=%q ok=%v want=%q", found, ok, playlist)
 	}
 	writeToneWAV(t, filepath.Join(incoming, "ssd.wav"), 440)
 
@@ -50,6 +61,9 @@ func TestWorkDirStagesOnTheConfiguredDisk(t *testing.T) {
 	}
 	if _, err := os.Stat(placed); err != nil {
 		t.Fatal(err)
+	}
+	if !application.playlistLibrary().hasTrack("Artist", "Album", "Song") {
+		t.Fatal("playlist presence cache did not observe the import")
 	}
 	// The staging copy stays where it was: releasing never moves the source.
 	if _, err := os.Stat(filepath.Join(incoming, "ssd.wav")); err != nil {

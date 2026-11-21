@@ -46,7 +46,7 @@ func TestPlaylistPresenceRequiresMatchingUnchangedAudio(t *testing.T) {
 	if _, err := wavflac.ConvertFile(filepath.Join(incoming, "track.wav"), tagged, true); err != nil {
 		t.Fatal(err)
 	}
-	if err := flactags.Write(tagged, flactags.Tags{Artist: "Original Artist", Album: hotSlowCompilationAlbum, Title: "Hot Song"}); err != nil {
+	if err := flactags.Write(tagged, flactags.Tags{Artists: []string{"Original Artist", "Guest / MC"}, Album: hotSlowCompilationAlbum, Title: "Hot Song"}); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := audiorelease.Release(context.Background(), application.engine, audiorelease.Request{
@@ -57,7 +57,8 @@ func TestPlaylistPresenceRequiresMatchingUnchangedAudio(t *testing.T) {
 	}
 	application.invalidatePlaylistLibraryCache()
 	hotIndex := application.playlistLibrary()
-	if !hotIndex.hasTrack("Original Artist", "最新热歌慢摇114", "Hot Song") ||
+	if !hotIndex.hasTrack("Guest / MC / Original Artist", "最新热歌慢摇114", "Hot Song") ||
+		hotIndex.hasTrack("Original Artist", "最新热歌慢摇114", "Hot Song") ||
 		hotIndex.hasTrack("Other Artist", "最新热歌慢摇114", "Hot Song") ||
 		hotIndex.hasTrack("Original Artist", "最新热歌慢摇114", "Other Song") {
 		t.Fatal("unified compilation presence did not match the original row artist and album")

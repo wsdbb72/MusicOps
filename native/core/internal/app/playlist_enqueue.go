@@ -21,6 +21,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -184,7 +185,7 @@ func (index playlistLibraryIndex) hasTrack(artist, album, title string) bool {
 		return false
 	}
 	if isHotSlowCompilationAlbum(album) {
-		return index.hasCompilationTrack(key[0], key[1], want)
+		return index.hasCompilationTrack(artist, key[1], want)
 	}
 	for _, id := range index.tracks[[3]string{key[0], key[1], want}] {
 		if index.isUnchanged(id) {
@@ -215,14 +216,15 @@ func (index playlistLibraryIndex) hasTrack(artist, album, title string) bool {
 // Compilation folders share an album artist, so only the embedded track
 // artist can distinguish recordings with the same title.
 func (index playlistLibraryIndex) hasCompilationTrack(artist, album, title string) bool {
-	for _, id := range index.tracks[[3]string{artist, album, title}] {
-		if artist != normalizeKey(hotSlowCompilationArtist) && index.isUnchanged(id) {
+	pathArtist := normalizeKey(artist)
+	for _, id := range index.tracks[[3]string{pathArtist, album, title}] {
+		if pathArtist != normalizeKey(hotSlowCompilationArtist) && index.isUnchanged(id) {
 			return true
 		}
 	}
 	unified := normalizeKey(hotSlowCompilationAlbum)
-	return index.compilationMatches(unified)[[2]string{artist, title}] ||
-		album != unified && index.compilationMatches(album)[[2]string{artist, title}]
+	track := [2]string{compilationArtistKey([]string{artist}), title}
+	return index.compilationMatches(unified)[track] || album != unified && index.compilationMatches(album)[track]
 }
 
 func (index playlistLibraryIndex) compilationMatches(album string) map[[2]string]bool {
@@ -237,9 +239,10 @@ func (index playlistLibraryIndex) compilationMatches(album string) map[[2]string
 			if err != nil || !found {
 				continue
 			}
-			artistTag, albumTag, titleTag := compilationTrackTags(path)
-			if isHotSlowCompilationAlbum(albumTag) && artistTag != "" && titleTag != "" {
-				matches[[2]string{normalizeKey(artistTag), normalizeKey(titleTag)}] = true
+			artists, albumTag, titleTag := compilationTrackTags(path)
+			artistKey := compilationArtistKey(artists)
+			if isHotSlowCompilationAlbum(albumTag) && artistKey != "" && titleTag != "" {
+				matches[[2]string{artistKey, normalizeKey(titleTag)}] = true
 			}
 		}
 		index.compilationTags[album] = matches
@@ -247,19 +250,32 @@ func (index playlistLibraryIndex) compilationMatches(album string) map[[2]string
 	return matches
 }
 
-func compilationTrackTags(path string) (artist, album, title string) {
+func compilationArtistKey(values []string) string {
+	var artists []string
+	for _, value := range values {
+		for _, artist := range strings.Split(value, " / ") {
+			if key := normalizeKey(artist); key != "" {
+				artists = append(artists, key)
+			}
+		}
+	}
+	sort.Strings(artists)
+	return strings.Join(artists, "\x00")
+}
+
+func compilationTrackTags(path string) (artists []string, album, title string) {
 	if strings.EqualFold(filepath.Ext(path), ".flac") {
 		if tags, err := readFLACTagsPrefix(path); err == nil {
-			return tags.Artist, tags.Album, tags.Title
+			return tags.Artists, tags.Album, tags.Title
 		}
-		return "", "", ""
+		return nil, "", ""
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	if info, err := probeGenericAudio(ctx, path); err == nil {
-		return info.Tags["artist"], info.Tags["album"], info.Tags["title"]
+		return []string{firstNonEmpty(info.Tags["artist"], info.Tags["artists"])}, info.Tags["album"], info.Tags["title"]
 	}
-	return "", "", ""
+	return nil, "", ""
 }
 
 func (index playlistLibraryIndex) isUnchanged(id string) bool {

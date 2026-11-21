@@ -40,6 +40,7 @@ type Spec struct {
 }
 type Task struct {
 	Spec
+	QueuedAtNS       int64   `json:"queued_at_ns,omitempty"`
 	State            string  `json:"state"`
 	UpdatedNS        int64   `json:"updated_ns"`
 	Revision         uint64  `json:"revision"`
@@ -161,7 +162,11 @@ func attemptKey(t Token) []byte {
 	return []byte(fmt.Sprintf("task-attempt/%s/%020d", digest([]byte(t.ID)), t.Fence))
 }
 func indexKey(t Task) []byte {
-	return []byte(fmt.Sprintf("task-index/%s/%s/%04d/%020d/%s", t.Lane, t.State, t.Priority, t.CreatedNS, digest([]byte(t.ID))))
+	queuedAt := t.CreatedNS
+	if t.State == "queued" && t.QueuedAtNS > 0 {
+		queuedAt = t.QueuedAtNS
+	}
+	return []byte(fmt.Sprintf("task-index/%s/%s/%04d/%020d/%s", t.Lane, t.State, t.Priority, queuedAt, digest([]byte(t.ID))))
 }
 func recentKey(t Task) []byte {
 	return []byte(fmt.Sprintf("task-recent/%020d/%s", int64(^uint64(0)>>1)-t.UpdatedNS, digest([]byte(t.ID))))

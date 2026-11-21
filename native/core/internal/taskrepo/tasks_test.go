@@ -533,3 +533,27 @@ func TestCancelFinalizesAlreadyInterruptedRequest(t *testing.T) {
 		t.Fatalf("task=%+v", task)
 	}
 }
+
+func TestRetriedTaskQueuesBehindWaitingTasks(t *testing.T) {
+	r, _ := fixture(t)
+	token := start(t, r, "older", "aux")
+	if _, err := r.Finish("fail-older", token, Completion{State: "failed", NowNS: 2200}, nil); err != nil {
+		t.Fatal(err)
+	}
+	waiting := spec("waiting", "aux", 1)
+	waiting.CreatedNS = 2300
+	if _, err := r.Enqueue("enqueue-waiting", waiting, nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.Control("retry-older", "older", "retry", 2400); err != nil {
+		t.Fatal(err)
+	}
+	claim, err := r.Claim("claim-waiting", "aux", "worker", 2500)
+	if err != nil || claim.Task == nil || claim.Task.ID != waiting.ID {
+		t.Fatalf("waiting task should run before retry: %+v %v", claim, err)
+	}
+	retry, err := r.Claim("claim-retry", "aux", "worker", 2600)
+	if err != nil || retry.Task == nil || retry.Task.ID != token.ID || retry.Task.CreatedNS != 1000 {
+		t.Fatalf("retry lost original task or creation time: %+v %v", retry, err)
+	}
+}

@@ -498,6 +498,7 @@ func controlDecision(v *dataengine.View, current *Task, id, action string, nowNS
 			}
 		}
 		next.State = "queued"
+		next.QueuedAtNS = effectiveTime(nowNS, current)
 		next.Owner = ""
 		next.Execution = ""
 		next.PauseRequested = false

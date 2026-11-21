@@ -381,6 +381,57 @@ func TestConcurrentClaimsKeepCountersAndOwnershipConsistent(t *testing.T) {
 	}
 }
 
+func TestBeginOwnedAtomicallyIncludesDomainCondition(t *testing.T) {
+	r, _ := fixture(t)
+	enqueue(t, r, "atomic-begin", "identify")
+	claim, err := r.Claim("atomic-claim", "identify", "owner", 2000)
+	if err != nil || claim.Task == nil {
+		t.Fatalf("claim=%+v err=%v", claim, err)
+	}
+	token := Token{ID: claim.Task.ID, Owner: claim.Task.Owner, Fence: claim.Task.Fence}
+	key := []byte("test/workflow-owner")
+	domain := func(v *dataengine.View, _, _ *Task, _ []Task) ([]dataengine.Condition, []dataengine.Mutation, json.RawMessage, error) {
+		raw, found, err := v.Get(key)
+		if err != nil {
+			return nil, nil, nil, err
+		}
+		return []dataengine.Condition{{Key: key, Value: raw, Absent: !found}}, nil, nil, nil
+	}
+	start := make(chan struct{})
+	beginDone := make(chan error, 1)
+	moveDone := make(chan bool, 1)
+	moveErr := make(chan error, 1)
+	go func() {
+		<-start
+		_, err := r.BeginOwned("atomic-begin-owned", token, 2100, domain)
+		beginDone <- err
+	}()
+	go func() {
+		<-start
+		ok, err := r.engine.CompareAndSwap(
+			[]dataengine.Condition{{Key: key, Absent: true}},
+			[]dataengine.Mutation{{Key: key, Value: []byte("moved")}},
+		)
+		moveDone <- ok
+		moveErr <- err
+	}()
+	close(start)
+	beginErr := <-beginDone
+	moved := <-moveDone
+	if err := <-moveErr; err != nil {
+		t.Fatal(err)
+	}
+	if beginErr == nil && moved {
+		t.Fatal("BeginOwned and the competing workflow write both committed")
+	}
+	if beginErr != nil && !errors.Is(beginErr, ErrStale) && !errors.Is(beginErr, ErrRequestConflict) {
+		t.Fatalf("unexpected begin error: %v", beginErr)
+	}
+	if beginErr == nil && moved {
+		t.Fatal("atomic ownership condition was omitted")
+	}
+}
+
 func TestClockRollbackDoesNotBreakPauseOrRecentOrder(t *testing.T) {
 	r, _ := fixture(t)
 	token := start(t, r, "a", "identify")

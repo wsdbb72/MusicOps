@@ -132,6 +132,32 @@ var errClaimedTaskCurrent = errors.New("claimed workflow task is still current")
 // stale retry rows and concurrent workers from entering a workflow that has
 // already moved to another task. A current claim is left untouched; a
 // superseded claim is safely cancelled because no executor has started yet.
+
+// ClaimedBeginDomain is the atomic half of the pre-execution gate. The
+// scheduler passes it to taskrepo.BeginOwned, which verifies the claimed task
+// and this returned job condition in one CAS. A job revision that changes
+// after the advisory gate therefore cannot start a superseded executor.
+func (r *Repository) ClaimedBeginDomain(task taskrepo.Task) taskrepo.Domain {
+	return func(v *dataengine.View, before, _ *taskrepo.Task, _ []taskrepo.Task) ([]dataengine.Condition, []dataengine.Mutation, json.RawMessage, error) {
+		if before == nil || before.WorkflowJobID == "" || before.ID != task.ID || before.Owner != task.Owner ||
+			before.Fence != task.Fence || before.Revision != task.Revision || before.Execution != "claimed" {
+			return nil, nil, nil, ErrStale
+		}
+		live, raw, err := readJob(v, before.WorkflowJobID)
+		if err != nil || live == nil {
+			if err != nil {
+				return nil, nil, nil, err
+			}
+			return nil, nil, nil, ErrNotFound
+		}
+		if !queuedTaskStillCurrent(v, *live, before) {
+			return nil, nil, nil, ErrStale
+		}
+		attached, err := json.Marshal(Result{Job: live})
+		return []dataengine.Condition{{Key: jobKey(live.ID), Value: raw}}, nil, attached, err
+	}
+}
+
 func (r *Repository) ReconcileClaimedSuperseded(requestPrefix string, task taskrepo.Task, nowNS int64) (bool, error) {
 	if r == nil || requestPrefix == "" || task.ID == "" || nowNS <= 0 {
 		return false, dataengine.ErrInvalidRequest

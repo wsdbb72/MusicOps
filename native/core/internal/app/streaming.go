@@ -207,10 +207,10 @@ func (a *App) playlistFile(rootJobID string) (string, bool) {
 // It replaces the old "尚未接入" punt: the walk really runs, each source's
 // outcome is recorded, and the job ends in needs_review with the walk as
 // evidence instead of an empty placeholder message.
-// Batch IDs come from the saved playlist slug. The origin enables the
-// source-platform album path (durable NetEase song/album ids), but it does
-// not make that source exclusive: the saved streaming order still decides
-// which configured provider is attempted first.
+// Batch IDs come from the saved playlist slug. A NetEase-origin playlist
+// always falls back to NetEase: its durable song/album ids, per-track artist
+// and cover belong to that platform. Other providers are attempted only by
+// the four-site acquisition stage, before fallback.
 func isNeteasePlaylistFallback(batchID string, plan SearchPlan) bool {
 	return strings.HasPrefix(batchID, "pl-netease-")
 }
@@ -246,7 +246,7 @@ func playlistFallbackSteps(order []string, exclusiveNetease bool) ([]downloadpol
 
 func neteaseFallbackRouting(batchID string, plan SearchPlan) (albumPath, exclusive bool) {
 	albumPath = isNeteasePlaylistFallback(batchID, plan)
-	return albumPath, albumPath && plan.NeteaseOnly
+	return albumPath, albumPath
 }
 
 func (a *App) acquireFallback(ctx context.Context, execution *scheduler.Execution, held taskrepo.Token, job workflow.Job, plan SearchPlan) (scheduler.Outcome, error) {

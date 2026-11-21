@@ -195,6 +195,32 @@ func TestEvidenceConflictRollsBackTheWholeStage(t *testing.T) {
 	}
 }
 
+func TestFinishDomainAcceptsBenignRevisionBumpForSameOwner(t *testing.T) {
+	repo, tasks := fixture(t)
+	startPlaylist(t, repo)
+	token := begin(t, tasks, "album1", "identify")
+	if _, err := repo.Complete("benign-handoff", token, handoff(3000)); err != nil {
+		t.Fatal(err)
+	}
+	live, err := repo.Job("search:album1")
+	if err != nil || live == nil || live.Stage != "searching" {
+		t.Fatalf("job=%+v err=%v", live, err)
+	}
+	planned := *live
+	planned.Revision--
+	var conditions []dataengine.Condition
+	err = repo.engine.View(func(v *dataengine.View) error {
+		var domainErr error
+		conditions, _, _, domainErr = repo.finishDomain(v, planned, Complete{
+			Edge: edgeTerminal, NextStage: "needs_review", ReviewKind: "search", TaskState: "blocked", NowNS: 4000,
+		}, nil, nil, nil, nil, nil, nil)
+		return domainErr
+	})
+	if err != nil || len(conditions) == 0 {
+		t.Fatalf("conditions=%+v err=%v", conditions, err)
+	}
+}
+
 func TestConcurrentCompletionCreatesOneSuccessor(t *testing.T) {
 	repo, tasks := fixture(t)
 	startPlaylist(t, repo)

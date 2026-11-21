@@ -43,14 +43,26 @@ func (a *App) runAutoReview(stop <-chan struct{}) {
 			continue
 		}
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+		done := make(chan struct{})
+		monitorDone := make(chan struct{})
+		go func() {
+			defer close(monitorDone)
+			select {
+			case <-stop:
+				cancel()
+			case <-done:
+			}
+		}()
 		_ = a.autoReviewPass(ctx)
+		close(done)
+		<-monitorDone
 		cancel()
-		ticker := time.NewTimer(autoReviewInterval)
+		timer := time.NewTimer(autoReviewInterval)
 		select {
 		case <-stop:
-			ticker.Stop()
+			timer.Stop()
 			return
-		case <-ticker.C:
+		case <-timer.C:
 		}
 	}
 }

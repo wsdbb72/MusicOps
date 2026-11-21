@@ -76,6 +76,7 @@ type App struct {
 	// searcher.Now and Wait above.
 	aiHTTPClient      *http.Client
 	mu                sync.Mutex
+	background        sync.WaitGroup
 	duplicateMu       sync.Mutex
 	neteaseRecoveryMu sync.Mutex
 	secrets           map[string]string
@@ -223,6 +224,12 @@ func open(dir, backup, password string, logger StartupLogger) (*App, error) {
 		prefix := "claim-gate-" + strconv.FormatInt(app.now().UnixNano(), 10)
 		return app.flows.ReconcileClaimedSuperseded(prefix, task, app.now().UnixNano())
 	}
+	runnerConfig.BeginDomain = func(_ context.Context, task taskrepo.Task) (taskrepo.Domain, error) {
+		if task.WorkflowJobID == "" {
+			return nil, nil
+		}
+		return app.flows.ClaimedBeginDomain(task), nil
+	}
 	progress("scheduler_init", "creating bounded workflow queues")
 	runner, err := scheduler.New(app.tasks, app.handlers(), runnerConfig)
 	if err != nil {
@@ -274,19 +281,19 @@ func open(dir, backup, password string, logger StartupLogger) (*App, error) {
 		return nil, fmt.Errorf("start scheduler: %w", err)
 	}
 	app.runner = runner
-	go app.reconcilePublishedRoots(time.Now(), progress)
+	app.startBackground(func() { app.reconcilePublishedRoots(time.Now(), progress) })
 	app.stopSubs = make(chan struct{})
-	go app.runSubscriptions(app.stopSubs)
+	app.startBackground(func() { app.runSubscriptions(app.stopSubs) })
 	// Token reconciliation runs with the app: an unanswered spend must stop
 	// blocking its site on evidence, not only on a 30-minute deadline.
 	app.stopReconcile = make(chan struct{})
-	go app.runTokenReconciler(app.stopReconcile)
+	app.startBackground(func() { app.runTokenReconciler(app.stopReconcile) })
 	// Safe review items are retried by the core itself. Token holds remain
 	// excluded by aiReviewEligible and still require an explicit FL decision.
 	app.stopAutoReview = make(chan struct{})
-	go app.runAutoReview(app.stopAutoReview)
+	app.startBackground(func() { app.runAutoReview(app.stopAutoReview) })
 	app.stopLibraryAuto = make(chan struct{})
-	go app.runLibraryAutomationScheduler(app.stopLibraryAuto)
+	app.startBackground(func() { app.runLibraryAutomationScheduler(app.stopLibraryAuto) })
 	// A managed solver is started once, in the background: a slow browser
 	// start must not delay the UI, and the settings page reports the state.
 	go app.autoStartSolver()
@@ -341,6 +348,17 @@ func (a *App) whenPipelineRunning(handler scheduler.Handler) scheduler.Handler {
 	}
 }
 
+func (a *App) startBackground(fn func()) {
+	if a == nil || fn == nil {
+		return
+	}
+	a.background.Add(1)
+	go func() {
+		defer a.background.Done()
+		fn()
+	}()
+}
+
 // Close stops workers and closes Pebble. It does not delete imported rows.
 func (a *App) Close() error {
 	if a == nil {
@@ -374,17 +392,37 @@ func (a *App) Close() error {
 		a.libraryAutomation.wait(waitCtx)
 		cancelWait()
 	}
+
+	backgroundDone := make(chan struct{})
+	go func() {
+		a.background.Wait()
+		close(backgroundDone)
+	}()
+	backgroundCtx, cancelBackground := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancelBackground()
+	select {
+	case <-backgroundDone:
+	case <-backgroundCtx.Done():
+		return scheduler.ErrShutdownPending
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if a.runner != nil {
+		if err := a.runner.Stop(ctx); err != nil {
+			// A timed-out executor still owns the Pebble store. Closing it
+			// underneath that goroutine turns an orderly shutdown into corrupt
+			// task writes; the process exit is safer, and startup recovery will
+			// reconcile the durable owner on the next launch.
+			return err
+		}
+	}
+	// Helper processes stay alive until every executor has stopped using them.
+	// Shutting them down first made an in-flight transcode/download observe a
+	// dead engine while its task was still writing durable progress.
 	a.stopManagedSolver()
 	a.stopEngines()
 	a.closeRoon()
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	err := a.runner.Stop(ctx)
-	closeErr := a.engine.Close()
-	if err != nil {
-		return err
-	}
-	return closeErr
+	return a.engine.Close()
 }
 
 func (a *App) remember(jobID, cookie string) {

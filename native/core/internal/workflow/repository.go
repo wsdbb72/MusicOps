@@ -630,7 +630,13 @@ func (r *Repository) finishDomain(v *dataengine.View, planned Job, in Complete, 
 		}
 		return nil, nil, nil, ErrNotFound
 	}
-	if live.Revision != planned.Revision || live.Stage != planned.Stage || live.ActiveTaskID != planned.ActiveTaskID {
+	// Exact revision equality is not an ownership invariant. Background
+	// messages and recovery counters may bump a job while the same task is
+	// still running. The job key is conditionally written below, so accepting
+	// a newer revision with the same owner/stage is safe and prevents a benign
+	// metadata write from turning every search completion into a false
+	// RECOVERY_REQUIRED review.
+	if live.Stage != planned.Stage || live.ActiveTaskID != planned.ActiveTaskID {
 		return nil, nil, nil, errRetry
 	}
 	var rootRaw []byte

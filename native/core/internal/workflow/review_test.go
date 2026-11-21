@@ -40,6 +40,54 @@ func searchReviewJob(t *testing.T, repo *Repository, tasks *taskrepo.Repository,
 	}
 }
 
+func TestRequeueTokenFallbackClosesBlockedNeteaseProcess(t *testing.T) {
+	repo, tasks := fixture(t)
+	if _, err := repo.Start("start-token-fallback", Start{
+		JobID: "album1", BatchID: "pl-netease-590536461-test", Scene: "expand", Stage: "identifying",
+		Label: "Artist - Album", Payload: []byte("{}"), NowNS: 1000,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	token := begin(t, tasks, "album1", "identify")
+	if _, err := repo.Complete("handoff-token-fallback", token, handoff(3000)); err != nil {
+		t.Fatal(err)
+	}
+	token = begin(t, tasks, "search:album1", "identify")
+	blockReport := candidateReport(0)
+	blockReport.Scene = "expand"
+	if _, err := repo.Complete("block-search", token, Complete{
+		JobID: "search:album1", Edge: edgeTerminal, NextStage: "needs_review", ReviewKind: "candidate",
+		TaskState: "blocked", Message: "候选待核对", Search: blockReport, NowNS: 4000,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	report := candidateReport(0)
+	report.Scene = "expand"
+	report.SelectedSite = "dicmusic"
+	report.SelectedCandidateID = "dicmusic:11"
+	if _, err := repo.Review("accept-process", "search:album1", ReviewDecision{
+		Action: "accept", Site: "dicmusic", CandidateID: "dicmusic:11", Search: report,
+		Plan: []byte(`{"root_job_id":"album1","query":"Artist Album","selected_site":"dicmusic","selected_candidate_id":"dicmusic:11"}`),
+	}, 5000); err != nil {
+		t.Fatal(err)
+	}
+	token = begin(t, tasks, "process:search:album1", "aux")
+	if _, err := repo.Complete("block-token", token, Complete{
+		JobID: "process:search:album1", Edge: edgeTerminal, NextStage: "needs_review", ReviewKind: "token",
+		TaskState: "blocked", ErrorClass: "REQUEST_UNKNOWN", Message: "令牌待对账", NowNS: 6000,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	result, err := repo.RequeueTokenFallback("token-fallback-test", "process:search:album1", 7000, "令牌结果不明，改用网易云回退")
+	if err != nil || result.Job == nil || result.Job.Stage != "fallback" || result.Job.ReviewKind != "" || result.Job.ErrorClass != "" {
+		t.Fatalf("job=%+v err=%v", result.Job, err)
+	}
+	queued, err := tasks.Get("process:search:album1")
+	if err != nil || queued == nil || queued.State != "queued" || queued.Owner != "" {
+		t.Fatalf("task=%+v err=%v", queued, err)
+	}
+}
+
 func TestReviewAcceptQueuesProcessWithSelectedCandidate(t *testing.T) {
 	repo, tasks := fixture(t)
 	searchReviewJob(t, repo, tasks, 0)

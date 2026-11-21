@@ -317,17 +317,72 @@ func (r *Repository) interruptedRecoveryStage(job Job, task *taskrepo.Task) (str
 		if !strings.HasPrefix(job.BatchID, "pl-netease-") {
 			return "", ErrStale
 		}
-		stage, err := r.retryStage(job, task)
-		if err != nil || (stage != "fallback" && !(stage == "requesting" && task.Phase == "netease_album")) {
-			return "", ErrStale
-		}
-		if task.Phase == "netease_album" {
-			return "fallback", nil
-		}
+		// A process_release task can have crossed the token request boundary
+		// before the process disappeared. Replaying DAC/Orpheus could charge a
+		// second token, while replaying an ordinary link is forbidden by the
+		// playlist policy. Resume such a task through the source-platform
+		// fallback instead; that path never sends usetoken and skips tracks
+		// already verified in the library.
+		return "fallback", nil
 	default:
 		return "", ErrStale
 	}
 	return r.retryStage(job, task)
+}
+
+// RequeueTokenFallback sends an unresolved NetEase playlist token acquisition
+// to the source-platform fallback. It never replays usetoken and never uses a
+// normal tracker download. This is the terminal reconciliation path for a
+// request whose external token effect cannot be proved: falling back avoids a
+// second charge while still allowing the playlist row to finish.
+func (r *Repository) RequeueTokenFallback(requestID, jobID string, nowNS int64, reason string) (Result, error) {
+	if !validID(jobID) || requestID == "" || len(requestID) > 128 || nowNS <= 0 || len(reason) > 4000 {
+		return Result{}, dataengine.ErrInvalidRequest
+	}
+	job, task, err := r.reviewTarget(jobID)
+	if err != nil || job == nil || task == nil {
+		if err != nil {
+			return Result{}, err
+		}
+		return Result{}, ErrNotFound
+	}
+	if job.Stage != "needs_review" || job.ReviewKind != "token" || job.CancelRequested || job.Paused ||
+		task.State != "blocked" || task.CancelRequested || task.Command != cmdProcess || !strings.HasPrefix(job.BatchID, "pl-netease-") {
+		return Result{}, ErrStale
+	}
+	extra, _ := json.Marshal(struct{ JobID, Action string }{job.ID, "token_fallback"})
+	result, err := r.tasks.ControlOwned(requestID, task.ID, "retry", nowNS, extra, func(v *dataengine.View, _, after *taskrepo.Task, _ []taskrepo.Task) ([]dataengine.Condition, []dataengine.Mutation, json.RawMessage, error) {
+		live, raw, err := readJob(v, job.ID)
+		if err != nil || live == nil {
+			if err != nil {
+				return nil, nil, nil, err
+			}
+			return nil, nil, nil, ErrNotFound
+		}
+		if live.Revision != job.Revision || live.Stage != "needs_review" || live.ReviewKind != "token" || live.ActiveTaskID != task.ID {
+			return nil, nil, nil, ErrStale
+		}
+		if after == nil || after.State != "queued" || after.Owner != "" || after.Execution != "" {
+			return nil, nil, nil, ErrStale
+		}
+		next := *live
+		next.Stage = "fallback"
+		next.ReviewKind = ""
+		next.ErrorClass = ""
+		next.SearchAction = searchdecision.ActionFallback
+		next.Message = messageOr(reason, "令牌结果无法安全确认，已自动改用网易云回退；未重复使用令牌")
+		updated, err := bump(next, nowNS, true)
+		if err != nil {
+			return nil, nil, nil, err
+		}
+		condition, writes, err := putJob(raw, updated)
+		if err != nil {
+			return nil, nil, nil, err
+		}
+		attached, err := json.Marshal(Result{Job: &updated})
+		return []dataengine.Condition{condition}, writes, attached, err
+	})
+	return decode(result, err)
 }
 
 func (r *Repository) reviewAccept(requestID string, job Job, task *taskrepo.Task, in ReviewDecision, nowNS int64) (Result, error) {

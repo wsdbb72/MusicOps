@@ -68,6 +68,16 @@ func TestLibraryAutomationEnqueuesLossyUpgradeOnce(t *testing.T) {
 	}
 }
 
+func TestSingleLossyTrackStillGetsAlbumCompletion(t *testing.T) {
+	tracks := []localWorkflowTrack{{Codec: "mp3", Artist: "Artist", Album: "Album", Title: "Song", Duration: 180}}
+	if !shouldExpandSingleAlbum(tracks, true, 0) {
+		t.Fatal("a one-track lossy album must still be eligible for completion")
+	}
+	if shouldExpandSingleAlbum(tracks, false, 0) || shouldExpandSingleAlbum(tracks, true, libraryAutomationMaxJobs) {
+		t.Fatal("disabled or exhausted automation expanded an album")
+	}
+}
+
 func TestLibraryAutomationRunEndpointReturnsAcceptedOrRunning(t *testing.T) {
 	application := newApp(t)
 	post(t, application, "/v1/settings/library", map[string]any{"library_dir": t.TempDir()})

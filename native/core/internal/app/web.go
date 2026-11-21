@@ -715,8 +715,8 @@ const appJS = `(function () {
       var body = await postSetting("/v1/settings/proxy", {url: field ? field.value.trim() : ""});
       outboundProxy = body.proxy || null;
       renderSettings();
-      if (!body.reachable && body.probe) {
-        setStatus("review", "代理已保存并切换，但连接探测失败：" + (body.probe.error || "未知错误"));
+      if (!body.reachable && body.check) {
+        setStatus("review", "代理已保存并切换，但连接检查失败：" + (body.check.error || "未知错误"));
       } else if (outboundProxy && outboundProxy.enabled) {
         setStatus("ok", "代理已保存并切换，外部连接探测成功。");
       } else {
@@ -737,7 +737,7 @@ const appJS = `(function () {
     try {
       var body = await postSetting("/v1/settings/proxy/test", {url: field ? field.value.trim() : ""});
       var text = body.message || "代理连接成功。";
-      if (body.probe && body.probe.latency_ms != null) text += "耗时 " + body.probe.latency_ms + " ms。";
+      if (body.check && body.check.latency_ms != null) text += "耗时 " + body.check.latency_ms + " ms。";
       if (result) result.textContent = text;
       setStatus("ok", text);
     } catch (err) {

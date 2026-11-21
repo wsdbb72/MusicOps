@@ -368,7 +368,7 @@ func IndexSnapshots(engine *dataengine.Engine, items []Existing) (int, error) {
 		if !info.Mode().IsRegular() {
 			return 0, dataengine.ErrInvalidRequest
 		}
-		rec := record{RequestID: item.RequestID, RootID: item.RootID, Path: item.Path, Format: item.Format,
+		rec := record{RequestID: item.RequestID, RootID: item.RootID, Path: item.Path, Format: format,
 			Library: item.Library, SourceName: item.SourceName, Origin: "local_import", State: "published",
 			Verified: true, LibraryPublished: true, DecodeState: "not_run",
 			IndexedStat: &indexedStat{Size: info.Size(), ModifiedNS: info.ModTime().UnixNano()}}

@@ -129,14 +129,14 @@ func (a *App) saveOutboundProxy(w http.ResponseWriter, r *http.Request) {
 	// FlareSolverr receives the proxy per target request, so switching it does
 	// not require killing the browser service.
 	a.retireStreamingEngineForProxyChange()
-	var probe *netproxy.ProbeResult
+	var check *netproxy.ConnectivityResult
 	if normalized != "" {
-		result := netproxy.Probe(r.Context(), normalized)
-		probe = &result
+		result := netproxy.CheckConnectivity(r.Context(), normalized)
+		check = &result
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"ok": true, "proxy": a.outboundProxyView(settings, true),
-		"reachable": probe == nil || probe.OK, "probe": probe,
+		"reachable": check == nil || check.OK, "check": check,
 	})
 }
 
@@ -158,10 +158,10 @@ func (a *App) testOutboundProxy(w http.ResponseWriter, r *http.Request) {
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), 15*time.Second)
 	defer cancel()
-	result := netproxy.Probe(ctx, raw)
+	result := netproxy.CheckConnectivity(ctx, raw)
 	if !result.OK {
-		writeJSON(w, http.StatusBadGateway, map[string]any{"ok": false, "code": "PROXY_UNREACHABLE", "error": result.Error, "probe": result})
+		writeJSON(w, http.StatusBadGateway, map[string]any{"ok": false, "code": "PROXY_UNREACHABLE", "error": result.Error, "check": result})
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "probe": result, "message": "代理连接成功。"})
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "check": result, "message": "代理连接成功。"})
 }

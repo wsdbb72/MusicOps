@@ -111,7 +111,7 @@ func TestEmptyConfigurationDisablesEnvironmentProxy(t *testing.T) {
 	}
 }
 
-func TestProbeTransportKeepsDefaultTransportSettings(t *testing.T) {
+func TestConnectivityTransportKeepsDefaultTransportSettings(t *testing.T) {
 	proxy, err := url.Parse("http://192.168.31.11:7890")
 	if err != nil {
 		t.Fatal(err)
@@ -123,7 +123,7 @@ func TestProbeTransportKeepsDefaultTransportSettings(t *testing.T) {
 	}
 }
 
-func TestProbeAndChildEnvironment(t *testing.T) {
+func TestConnectivityAndChildEnvironment(t *testing.T) {
 	proxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.String() != "http://probe.example.invalid/meta" {
 			t.Errorf("probe used %s", r.URL.String())
@@ -132,10 +132,10 @@ func TestProbeAndChildEnvironment(t *testing.T) {
 		io.WriteString(w, `{"ok":true}`)
 	}))
 	defer proxy.Close()
-	previousProbeURL := probeURLForTest
-	probeURLForTest = "http://probe.example.invalid/meta"
-	t.Cleanup(func() { probeURLForTest = previousProbeURL })
-	result := Probe(context.Background(), proxy.URL)
+	previousConnectivityURL := connectivityURLForTest
+	connectivityURLForTest = "http://probe.example.invalid/meta"
+	t.Cleanup(func() { connectivityURLForTest = previousConnectivityURL })
+	result := CheckConnectivity(context.Background(), proxy.URL)
 	if !result.OK || result.Status != http.StatusOK {
 		t.Fatalf("%+v", result)
 	}

@@ -435,7 +435,11 @@ func interruptedReviewSafe(job workflow.Job, task *taskrepo.Task) bool {
 	case workflow.CommandSearch, workflow.CommandIdentify, workflow.CommandSnapshot, workflow.CommandPublish:
 		return true
 	case workflow.CommandProcess:
-		return strings.HasPrefix(job.BatchID, "pl-netease-") && task.Phase == "netease_album"
+		// A NetEase playlist process task has no safe in-place replay: it may
+		// already have crossed the FL token boundary. RecoverInterrupted routes
+		// every such task through the source-platform fallback, which is
+		// idempotent and never sends a second token or ordinary tracker download.
+		return strings.HasPrefix(job.BatchID, "pl-netease-")
 	default:
 		return false
 	}

@@ -213,6 +213,36 @@ func (r *Repository) Begin(requestID string, token Token, nowNS int64) (Result, 
 	}, nil)
 }
 
+// BeginOwned crosses the claimed -> started boundary while, in the same CAS,
+// proving that a workflow job still points at this exact task. The job
+// condition is supplied by Domain, so a recovery/review/enqueue write that
+// changes ownership after BeforeExecute but before Begin wins the race and
+// this task never reaches an executor.
+func (r *Repository) BeginOwned(requestID string, token Token, nowNS int64, domain Domain) (Result, error) {
+	if !validToken(token) || nowNS <= 0 || domain == nil {
+		return Result{}, dataengine.ErrInvalidRequest
+	}
+	return r.apply(requestID, token.ID, struct {
+		Operation string
+		Token     Token
+	}{"begin_owned", token}, func(v *dataengine.View, current *Task) (*Task, []dataengine.Mutation, error) {
+		if !matches(current, token) || current.State != "running" || current.Execution != "claimed" || current.CancelRequested || current.PauseRequested || current.WorkflowJobID == "" {
+			return nil, nil, ErrStale
+		}
+		next := *current
+		next.Execution = "started"
+		next.UpdatedNS = effectiveTime(nowNS, current)
+		attempt, err := readAttempt(v, token)
+		if err != nil {
+			return nil, nil, err
+		}
+		attempt.State = "started"
+		attempt.StartedNS = next.UpdatedNS
+		raw, _ := json.Marshal(attempt)
+		return &next, []dataengine.Mutation{{Key: attemptKey(token), Value: raw}}, nil
+	}, domain)
+}
+
 func decision(task Task) string {
 	if task.CancelRequested {
 		return "cancel"

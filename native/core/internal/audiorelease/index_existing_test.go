@@ -144,6 +144,32 @@ func TestSnapshotBatchAcceptsEveryIndexedAudioExtension(t *testing.T) {
 	}
 }
 
+func TestSnapshotBatchDerivesFormatWhenCallerLeavesItEmpty(t *testing.T) {
+	engine, err := dataengine.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer engine.Close()
+	library := filepath.Join(t.TempDir(), "library")
+	if err := os.MkdirAll(library, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(library, "Artist", "Album", "01 Track.FLAC")
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte("snapshot"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if added, err := IndexSnapshots(engine, []Existing{{RequestID: "derive-format", RootID: "derive-album", Track: 1, Path: path, Library: library, MetadataOnly: true}}); err != nil || added != 1 {
+		t.Fatalf("added=%d err=%v", added, err)
+	}
+	entries, err := ListIndexed(engine)
+	if err != nil || len(entries) != 1 || entries[0].Format != "flac" {
+		t.Fatalf("entries=%+v err=%v", entries, err)
+	}
+}
+
 func TestSnapshotBatchUsesPrimaryTrackMapping(t *testing.T) {
 	engine, err := dataengine.Open(t.TempDir())
 	if err != nil {

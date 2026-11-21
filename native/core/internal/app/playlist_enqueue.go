@@ -285,16 +285,17 @@ func (a *App) enqueuePlaylistTracks(ctx context.Context, playlistJobID string, r
 		}
 		report.Tracks++
 		album := normalizePlaylistAlbumTitle(row.Album)
-		if library.hasTrack(artist, album, title) && (!opts.AlbumCompletion || !library.hasAlbumGap(artist, album)) {
+		albumCompletion := opts.AlbumCompletion && !isHotSlowCompilationAlbum(album)
+		if library.hasTrack(artist, album, title) && (!albumCompletion || !library.hasAlbumGap(artist, album)) {
 			report.Skipped = append(report.Skipped, artist+" - "+title)
 			continue
 		}
-		if opts.AlbumCompletion && album != "" {
+		if albumCompletion && album != "" {
 			key := playlistAlbumGroupKey(row, album)
 			if seenAlbums[key] {
 				continue
 			}
-			jobID, err := a.startPlaylistAlbumJob(ctx, client, playlistJobID, sites, budget, row, opts.AlbumCompletion, opts.NeteaseOnly)
+			jobID, err := a.startPlaylistAlbumJob(ctx, client, playlistJobID, sites, budget, row, albumCompletion, opts.NeteaseOnly)
 			if err != nil {
 				report.Unmatched = append(report.Unmatched, artist+" - "+album+": "+err.Error())
 				continue
@@ -304,7 +305,7 @@ func (a *App) enqueuePlaylistTracks(ctx context.Context, playlistJobID string, r
 			report.Albums++
 			continue
 		}
-		jobID, err := a.startPlaylistAlbumJob(ctx, client, playlistJobID, sites, budget, row, opts.AlbumCompletion, opts.NeteaseOnly)
+		jobID, err := a.startPlaylistAlbumJob(ctx, client, playlistJobID, sites, budget, row, albumCompletion, opts.NeteaseOnly)
 		if err != nil {
 			report.Unmatched = append(report.Unmatched, artist+" - "+title+": "+err.Error())
 			continue
@@ -316,11 +317,11 @@ func (a *App) enqueuePlaylistTracks(ctx context.Context, playlistJobID string, r
 }
 
 func playlistAlbumGroupKey(row playlistTrack, album string) string {
-	if row.NeteaseAlbumID > 0 {
-		return "netease-album:" + strconv.FormatInt(row.NeteaseAlbumID, 10)
-	}
 	if isHotSlowCompilationAlbum(album) {
 		return "compilation:" + normalizeKey(album)
+	}
+	if row.NeteaseAlbumID > 0 {
+		return "netease-album:" + strconv.FormatInt(row.NeteaseAlbumID, 10)
 	}
 	return "artist-album:" + normalizeKey(row.Artist) + "\x00" + normalizeKey(album)
 }
@@ -384,6 +385,13 @@ func (a *App) startPlaylistAlbumJob(ctx context.Context, client *musicbrainz.Cli
 		if !existing.CancelRequested && playlistJobReusable(existing.Stage) {
 			return baseJobID, nil
 		}
+		if existing.Stage == "needs_review" && !existing.CancelRequested {
+			// Re-adding a playlist must supersede the old review, not leave the
+			// same track in both the old review queue and a fresh replacement
+			// chain. Cancellation is durable and the scheduler gate keeps any
+			// already-claimed legacy task out of the new workflow.
+			_, _ = a.flows.Control("supersede-"+baseJobID+"-"+strconv.FormatUint(existing.Revision, 10), baseJobID, "cancel", a.now().UnixNano())
+		}
 		jobID, err = a.replacementPlaylistJobID(baseJobID, existing.Revision)
 		if err != nil {
 			return "", err
@@ -397,7 +405,7 @@ func (a *App) startPlaylistAlbumJob(ctx context.Context, client *musicbrainz.Cli
 		RootJobID: jobID, Scene: "expand",
 		Query: strings.TrimSpace(artist + " " + firstNonEmpty(title, expected)), ExpectedTitle: expected, ExpectedArtist: artist,
 		EnabledSites: sites, StreamingEnabled: true, Identity: identity, Budget: budget, PlaylistTrack: title,
-		NeteaseOnly: neteaseOnly, NeteaseTrackOnly: neteaseOnly && !albumCompletion, NeteaseSongID: row.NeteaseSongID, NeteaseAlbumID: row.NeteaseAlbumID,
+		NeteaseOnly: neteaseOnly, NeteaseTrackOnly: isHotSlowCompilationAlbum(album) || neteaseOnly && !albumCompletion, NeteaseSongID: row.NeteaseSongID, NeteaseAlbumID: row.NeteaseAlbumID,
 		AlbumArtist: func() string {
 			if isHotSlowCompilationAlbum(album) {
 				return hotSlowCompilationArtist

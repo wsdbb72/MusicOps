@@ -80,6 +80,10 @@ type Config struct {
 	// ownership before it crosses Begin. Returning skip records a safe
 	// cancellation of a superseded task and leaves the current job alone.
 	BeforeExecute func(context.Context, taskrepo.Task) (bool, error)
+	// BeginDomain is evaluated by taskrepo.BeginOwned in the same CAS that
+	// changes claimed -> started. It closes the Check/Begin time-of-check to
+	// time-of-use window for workflow-owned tasks.
+	BeginDomain func(context.Context, taskrepo.Task) (taskrepo.Domain, error)
 }
 
 func DefaultConfig() Config {
@@ -389,11 +393,47 @@ func (c *Coordinator) execute(ctx context.Context, claimed taskrepo.Task) {
 			}
 			continue
 		}
-		_, err = c.repo.Begin(beginID, token, time.Now().UnixNano())
+		beginDomain := taskrepo.Domain(nil)
+		if c.config.BeginDomain != nil {
+			var domainErr error
+			beginDomain, domainErr = c.config.BeginDomain(ctx, *current)
+			if domainErr != nil {
+				c.failure(claimed.Lane, domainErr)
+				if _, releaseErr := c.repo.ReleaseClaim("begin-domain-release-"+nonce(), token, time.Now().UnixNano()); releaseErr != nil && !errors.Is(releaseErr, taskrepo.ErrStale) {
+					c.failure(claimed.Lane, releaseErr)
+				}
+				return
+			}
+		}
+		if beginDomain != nil {
+			_, err = c.repo.BeginOwned(beginID, token, time.Now().UnixNano(), beginDomain)
+		} else {
+			_, err = c.repo.Begin(beginID, token, time.Now().UnixNano())
+		}
 		if err == nil {
 			break
 		}
 		if errors.Is(err, taskrepo.ErrStale) {
+			// Re-run the authoritative gate after any Begin CAS conflict. It
+			// either cancels a now-superseded claim or leaves the still-current
+			// claim queued for one fresh Begin attempt.
+			if c.config.BeforeExecute != nil {
+				fresh, getErr := c.repo.Get(claimed.ID)
+				if getErr != nil {
+					c.failure(claimed.Lane, getErr)
+					return
+				}
+				if fresh == nil || fresh.Owner != token.Owner || fresh.Fence != token.Fence {
+					return
+				}
+				skip, gateErr := c.config.BeforeExecute(ctx, *fresh)
+				if gateErr != nil || skip {
+					if gateErr != nil {
+						c.failure(claimed.Lane, gateErr)
+					}
+					return
+				}
+			}
 			beginID = "begin-" + nonce()
 			continue
 		}

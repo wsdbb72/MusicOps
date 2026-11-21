@@ -1303,7 +1303,7 @@ func (a *App) enqueueLibraryMaintenanceWorkflows(ctx context.Context, byDir map[
 				}
 			}
 		}
-		if settings.Expand && len(tracks) == 1 && !isLossyUpgradeSource(tracks[0].Codec) && jobs < libraryAutomationMaxJobs {
+		if shouldExpandSingleAlbum(tracks, settings.Expand, jobs) {
 			if a.enqueueMaintenanceWorkflow(ctx, "expand", tracks, dir) {
 				jobs++
 				state.update(func(report *libraryAutomationReport) { report.ExpandJobs++ })
@@ -1313,6 +1313,10 @@ func (a *App) enqueueLibraryMaintenanceWorkflows(ctx context.Context, byDir map[
 	if jobs >= libraryAutomationMaxJobs {
 		state.update(func(report *libraryAutomationReport) { report.Backlog = true })
 	}
+}
+
+func shouldExpandSingleAlbum(tracks []localWorkflowTrack, enabled bool, jobs int) bool {
+	return enabled && len(tracks) == 1 && jobs < libraryAutomationMaxJobs
 }
 
 func (a *App) enqueueMaintenanceWorkflow(ctx context.Context, scene string, tracks []localWorkflowTrack, dir string) bool {

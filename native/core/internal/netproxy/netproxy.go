@@ -21,9 +21,9 @@ import (
 	"time"
 )
 
-const ProbeURL = "https://api.github.com/meta"
+const ConnectivityURL = "https://api.github.com/meta"
 
-var probeURLForTest = ProbeURL
+var connectivityURLForTest = ConnectivityURL
 
 var current atomic.Pointer[url.URL]
 
@@ -178,8 +178,8 @@ func closeDefaultIdleConnections() {
 	}
 }
 
-// ProbeResult is the independent connectivity check exposed by settings.
-type ProbeResult struct {
+// ConnectivityResult is the independent connectivity check exposed by settings.
+type ConnectivityResult struct {
 	OK        bool   `json:"ok"`
 	Proxy     string `json:"proxy"`
 	URL       string `json:"url"`
@@ -188,27 +188,27 @@ type ProbeResult struct {
 	Error     string `json:"error,omitempty"`
 }
 
-// Probe checks an explicit proxy URL. It uses the proxy for this request even
+// CheckConnectivity checks an explicit proxy URL. It uses the proxy for this request even
 // when the runtime setting is empty, so the settings page can validate before
 // saving. The response body is hashed only by success, never logged.
-func Probe(ctx context.Context, raw string) ProbeResult {
+func CheckConnectivity(ctx context.Context, raw string) ConnectivityResult {
 	normalized, err := Normalize(raw)
 	if err != nil {
-		return ProbeResult{Proxy: strings.TrimSpace(raw), URL: probeURLForTest, Error: err.Error()}
+		return ConnectivityResult{Proxy: strings.TrimSpace(raw), URL: connectivityURLForTest, Error: err.Error()}
 	}
 	if normalized == "" {
-		return ProbeResult{Proxy: "", URL: probeURLForTest, Error: "proxy is not configured"}
+		return ConnectivityResult{Proxy: "", URL: connectivityURLForTest, Error: "proxy is not configured"}
 	}
 	parsed, err := url.Parse(normalized)
 	if err != nil {
-		return ProbeResult{Proxy: normalized, URL: probeURLForTest, Error: err.Error()}
+		return ConnectivityResult{Proxy: normalized, URL: connectivityURLForTest, Error: err.Error()}
 	}
 	if ctx == nil {
 		ctx = context.Background()
 	}
 	ctx, cancel := context.WithTimeout(ctx, 12*time.Second)
 	defer cancel()
-	// Probe with the same default transport shape as normal traffic. A
+	// Check with the same default transport shape as normal traffic. A
 	// zero-value transport can negotiate differently with some HTTP proxies
 	// (notably when CONNECT is upgraded to HTTP/2), producing an EOF even
 	// though the saved proxy is usable by the tracker clients.
@@ -217,29 +217,29 @@ func Probe(ctx context.Context, raw string) ProbeResult {
 	defer transport.CloseIdleConnections()
 	client := &http.Client{Transport: transport, Timeout: 12 * time.Second}
 	started := time.Now()
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, probeURLForTest, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, connectivityURLForTest, nil)
 	if err != nil {
-		return ProbeResult{Proxy: normalized, URL: probeURLForTest, Error: err.Error()}
+		return ConnectivityResult{Proxy: normalized, URL: connectivityURLForTest, Error: err.Error()}
 	}
 	req.Header.Set("Accept", "application/vnd.github+json")
-	req.Header.Set("User-Agent", "MusicOps/proxy-probe")
+	req.Header.Set("User-Agent", "MusicOps/settings-network-check")
 	resp, err := client.Do(req)
 	latency := time.Since(started).Milliseconds()
 	if err != nil {
-		return ProbeResult{Proxy: normalized, URL: probeURLForTest, LatencyMS: latency, Error: sanitizeProbeError(err)}
+		return ConnectivityResult{Proxy: normalized, URL: connectivityURLForTest, LatencyMS: latency, Error: sanitizeConnectivityError(err)}
 	}
 	defer resp.Body.Close()
 	_, readErr := io.Copy(io.Discard, io.LimitReader(resp.Body, 1<<20))
 	if readErr != nil {
-		return ProbeResult{Proxy: normalized, URL: probeURLForTest, Status: resp.StatusCode, LatencyMS: latency, Error: "proxy response could not be read"}
+		return ConnectivityResult{Proxy: normalized, URL: connectivityURLForTest, Status: resp.StatusCode, LatencyMS: latency, Error: "proxy response could not be read"}
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 400 {
-		return ProbeResult{Proxy: normalized, URL: probeURLForTest, Status: resp.StatusCode, LatencyMS: latency, Error: fmt.Sprintf("proxy probe returned HTTP %d", resp.StatusCode)}
+		return ConnectivityResult{Proxy: normalized, URL: connectivityURLForTest, Status: resp.StatusCode, LatencyMS: latency, Error: fmt.Sprintf("network check returned HTTP %d", resp.StatusCode)}
 	}
-	return ProbeResult{OK: true, Proxy: normalized, URL: probeURLForTest, Status: resp.StatusCode, LatencyMS: latency}
+	return ConnectivityResult{OK: true, Proxy: normalized, URL: connectivityURLForTest, Status: resp.StatusCode, LatencyMS: latency}
 }
 
-func sanitizeProbeError(err error) string {
+func sanitizeConnectivityError(err error) string {
 	if err == nil {
 		return ""
 	}

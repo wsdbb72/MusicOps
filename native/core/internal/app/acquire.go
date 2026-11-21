@@ -238,11 +238,17 @@ func (a *App) acquireWithToken(ctx context.Context, execution *scheduler.Executi
 			switch proof.State {
 			case "CONSUMED":
 				if fetchErr != nil {
+					if plan.StreamingEnabled && isNeteasePlaylistFallback(job.BatchID, plan) {
+						return a.acquireFallback(ctx, execution, held, job, plan)
+					}
 					return a.finishAcquire(held, job, "token", "令牌已确认消耗，但获取未完成；尚未下载、尚未入库", "SPEND_CONFIRMED", nil)
 				}
 				return a.finishConfirmedToken(held, job, "令牌已确认消耗，种子已保存；尚未下载、尚未入库", "SPEND_CONFIRMED", receiptPtr)
 			case "NOT_CONSUMED":
 				if fetchErr != nil {
+					if plan.StreamingEnabled && isNeteasePlaylistFallback(job.BatchID, plan) {
+						return a.acquireFallback(ctx, execution, held, job, plan)
+					}
 					return a.finishAcquire(held, job, "token", "令牌未消耗，但获取未完成；尚未下载、尚未入库", "SPEND_NOT_CONSUMED", nil)
 				}
 				return a.finishAcquire(held, job, "token", "令牌未消耗，种子已保存；尚未下载、尚未入库", "SPEND_NOT_CONSUMED", receiptPtr)
@@ -321,6 +327,10 @@ func (a *App) confirmTokenFromSite(ctx context.Context, execution *scheduler.Exe
 		return outcome, true, err
 	}
 	if strings.HasPrefix(job.BatchID, "pl-") && (site == "dicmusic" || site == "orpheus") {
+		if plan.StreamingEnabled && isNeteasePlaylistFallback(job.BatchID, plan) {
+			outcome, err := a.acquireFallback(ctx, execution, held, job, plan)
+			return outcome, true, err
+		}
 		outcome, err := a.finishAcquire(held, job, "token", "站点已确认免费，但没有收到令牌种子；未改用普通下载链接", "SPEND_CONFIRMED", nil)
 		return outcome, true, err
 	}

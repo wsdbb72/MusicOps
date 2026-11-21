@@ -68,9 +68,12 @@ func (a *App) reconcileTokens(ctx context.Context, now time.Time) int {
 	// Expiry first: a row past the deadline must leave the in-flight set even
 	// if the balance cannot be read.
 	expired, _ := a.ledger.SweepExpired(now, tokenledger.UnknownExpire)
+	moved := len(expired)
 	retrySites := map[string]bool{}
 	for _, row := range expired {
 		retrySites[row.Site] = true
+		a.requeueReconciledTokenJob(row.RequestID, tokenledger.StateExpired,
+			"令牌请求超过对账时限且无法证明是否扣费；已自动改用网易云回退，未再次发送令牌")
 	}
 	pending, err := a.ledger.Pending()
 	if err != nil {
@@ -83,7 +86,6 @@ func (a *App) reconcileTokens(ctx context.Context, now time.Time) int {
 		}
 		bySite[row.Site] = append(bySite[row.Site], row)
 	}
-	moved := 0
 	for site, rows := range bySite {
 		if !a.tokenReadAllowed(site, now) {
 			continue
@@ -107,15 +109,42 @@ func (a *App) reconcileTokens(ctx context.Context, now time.Time) int {
 				moved++
 				retrySites[site] = true
 				if state == tokenledger.StateConfirmed {
-					if job, err := a.flows.Job(row.RequestID); err == nil && job != nil && strings.HasPrefix(job.BatchID, "pl-") {
+					if job, err := a.flows.Job(row.RequestID); err == nil && job != nil && strings.HasPrefix(job.BatchID, "pl-") && job.Stage != "needs_review" {
 						a.tryAutoDownload(row.RequestID)
 					}
 				}
+				a.requeueReconciledTokenJob(row.RequestID, state, note)
 			}
 		}
 	}
 	a.retryHeldPlaylistTokens(now, retrySites)
 	return moved
+}
+
+// requeueReconciledTokenJob closes a still-blocked FL acquisition after the
+// ledger has a terminal verdict. It deliberately sends the task to NetEase's
+// source fallback instead of retrying the token site: a CONFIRMED charge may
+// already have succeeded remotely, while RELEASED/EXPIRED cannot prove that a
+// repeated request is safe. This avoids both a double spend and a permanent
+// needs_review/token row.
+func (a *App) requeueReconciledTokenJob(requestID, state, note string) bool {
+	job, err := a.flows.Job(requestID)
+	if err != nil || job == nil || job.Stage != "needs_review" || job.ReviewKind != "token" ||
+		job.Paused || job.CancelRequested || !strings.HasPrefix(job.BatchID, "pl-netease-") {
+		return false
+	}
+	reason := strings.TrimSpace(note)
+	switch state {
+	case tokenledger.StateConfirmed:
+		reason = "令牌扣费已从余额变化确认，但本次没有取得种子；已自动改用网易云回退，未重复请求令牌"
+	case tokenledger.StateReleased:
+		reason = "余额对账确认上次请求未扣费；为避免结果不明时重复请求，已自动改用网易云回退"
+	case tokenledger.StateExpired:
+		reason = "令牌请求超过对账时限且无法证明是否扣费；已自动改用网易云回退，未再次发送令牌"
+	}
+	request := "token-fallback-" + requestID + "-" + strconv.FormatUint(job.Revision, 10)
+	_, err = a.flows.RequeueTokenFallback(request, requestID, a.now().UnixNano(), reason)
+	return err == nil
 }
 
 // tokenReadAllowed keeps the background reads to one per site per

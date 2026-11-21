@@ -294,7 +294,7 @@ func TestRebuildReviewReportKeepsMissingEnabledSitesUnsearched(t *testing.T) {
 	}
 }
 
-func TestInterruptedReviewOnlyAutoRecoversSafeReadOrNeteaseAlbumWork(t *testing.T) {
+func TestInterruptedReviewAutoRecoversSafeReadsAndNeteaseFallback(t *testing.T) {
 	job := workflow.Job{BatchID: "pl-netease-590536461-test"}
 	if !interruptedReviewSafe(job, &taskrepo.Task{Spec: taskrepo.Spec{Command: workflow.CommandSearch}}) {
 		t.Fatal("read-only search should auto-resume")
@@ -302,8 +302,11 @@ func TestInterruptedReviewOnlyAutoRecoversSafeReadOrNeteaseAlbumWork(t *testing.
 	if !interruptedReviewSafe(job, &taskrepo.Task{Spec: taskrepo.Spec{Command: workflow.CommandProcess}, Phase: "netease_album"}) {
 		t.Fatal("NetEase album phase should auto-resume")
 	}
-	if interruptedReviewSafe(job, &taskrepo.Task{Spec: taskrepo.Spec{Command: workflow.CommandProcess}, Phase: "fetch_dicmusic"}) {
-		t.Fatal("tracker acquire phase must remain explicit-review")
+	if !interruptedReviewSafe(job, &taskrepo.Task{Spec: taskrepo.Spec{Command: workflow.CommandProcess}, Phase: "fetch_dicmusic"}) {
+		t.Fatal("an interrupted NetEase process must resume through the safe source fallback")
+	}
+	if interruptedReviewSafe(workflow.Job{BatchID: "pl-other-test"}, &taskrepo.Task{Spec: taskrepo.Spec{Command: workflow.CommandProcess}, Phase: "fetch_dicmusic"}) {
+		t.Fatal("a non-NetEase tracker acquire must remain explicit-review")
 	}
 	if interruptedReviewSafe(job, &taskrepo.Task{Spec: taskrepo.Spec{Command: workflow.CommandDownload}}) {
 		t.Fatal("download recovery must reconcile qBittorrent first")

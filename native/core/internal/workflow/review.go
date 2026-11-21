@@ -648,6 +648,11 @@ func (r *Repository) reviewRetry(requestID string, job Job, task *taskrepo.Task,
 			if next.SearchRetryCount >= 3 {
 				next.SearchRetryCount = 0
 			}
+		} else if task.Command == cmdProcess && stage == "fallback" && next.SearchRetryCount < 3 {
+			// Streaming fallback uses the same durable bounded counter. After
+			// three temporary failures, acquireFallback settles the maintenance
+			// chain instead of returning to the same review forever.
+			next.SearchRetryCount++
 		}
 		next.Message = "已安排重新执行"
 		updated, err := bump(next, nowNS, next.Stage != live.Stage)

@@ -339,9 +339,28 @@ func (a *App) acquireFallback(ctx context.Context, execution *scheduler.Executio
 			break
 		}
 	}
-	walk, err := downloadpolicy.Apply(steps, outcomes, 0)
+	walk, err := downloadpolicy.Apply(steps, outcomes, int(job.SearchRetryCount))
 	if err != nil {
 		return scheduler.Outcome{}, err
+	}
+	walkPayload, err := json.Marshal(walk)
+	if err != nil {
+		return scheduler.Outcome{}, err
+	}
+	// There is no later source or candidate to inspect when the complete walk
+	// has no import and no retryable failure. Retrying that terminal no-result
+	// through auto review forever was the cause of the large maintenance review
+	// queue. Cache/network failures remain recoverable and are bounded below.
+	if validated == "" && len(imported) == 0 && !walk.Recoverable {
+		message := streamWalkMessage(notes, "") + "；已自动结束，下一轮库维护会重新尝试"
+		complete := workflow.Complete{
+			Edge: workflow.EdgeTerminal, NextStage: "skipped", TaskState: "completed", Message: message, NowNS: a.now().UnixNano(),
+			Evidence: []workflow.EvidenceInput{{ID: evidenceID(held.ID, held.Fence, "streaming"), Kind: "api", Source: "streaming", SubjectID: job.RootID, Payload: walkPayload}},
+		}
+		if _, err := a.flows.Complete(intentID("streaming", held.ID, held.Fence), held, complete); err != nil {
+			return scheduler.Outcome{}, err
+		}
+		return scheduler.Outcome{State: "completed", Message: message}, nil
 	}
 	complete := workflow.Complete{
 		Edge: workflow.EdgeTerminal, NextStage: "needs_review", ReviewKind: "candidate", TaskState: "blocked",
@@ -356,13 +375,9 @@ func (a *App) acquireFallback(ctx context.Context, execution *scheduler.Executio
 	if validated != "" && plan.PlaylistTrack != "" && normalizeKey(plan.PlaylistTrack) == normalizeKey(plan.ExpectedTitle) {
 		return a.publishPlaylistStream(ctx, held, job, plan, validated)
 	}
-	encoded, err := json.Marshal(walk)
-	if err != nil {
-		return scheduler.Outcome{}, err
-	}
 	complete.Evidence = []workflow.EvidenceInput{{
 		ID: evidenceID(held.ID, held.Fence, "streaming"), Kind: "api", Source: "streaming",
-		SubjectID: job.RootID, Payload: encoded,
+		SubjectID: job.RootID, Payload: walkPayload,
 	}}
 	if len(imported) > 0 {
 		rows, err := json.Marshal(imported)

@@ -47,8 +47,8 @@ func TestStreamingFallbackWithoutPlaylist(t *testing.T) {
 	defer server.Close()
 	application := newApp(t)
 	post(t, application, "/v1/search", searchBody("album-stream", server.URL, []string{"dicmusic", "orpheus"}, true))
-	job := waitJob(t, application, "process:search:album-stream", "needs_review")
-	if job.ReviewKind != "candidate" || !strings.Contains(job.Message, "tidal 未接入") || !strings.Contains(job.Message, "playlist 未找到歌单文件") || !strings.Contains(job.Message, "尚未下载") {
+	job := waitJob(t, application, "process:search:album-stream", "skipped")
+	if job.ReviewKind != "" || !strings.Contains(job.Message, "tidal 未接入") || !strings.Contains(job.Message, "playlist 未找到歌单文件") || !strings.Contains(job.Message, "已自动结束") || !strings.Contains(job.Message, "尚未下载") {
 		t.Fatal(job)
 	}
 	detail := inspect(t, application, "process:search:album-stream")
@@ -104,8 +104,8 @@ func TestStreamingFallbackRejectsBadPlaylist(t *testing.T) {
 		t.Fatal(err)
 	}
 	post(t, application, "/v1/search", searchBody("album-bad", server.URL, []string{"dicmusic", "orpheus"}, true))
-	job := waitJob(t, application, "process:search:album-bad", "needs_review")
-	if job.ReviewKind != "candidate" || !strings.Contains(job.Message, "无法解析") {
+	job := waitJob(t, application, "process:search:album-bad", "skipped")
+	if job.ReviewKind != "" || !strings.Contains(job.Message, "无法解析") || !strings.Contains(job.Message, "已自动结束") {
 		t.Fatal(job)
 	}
 }

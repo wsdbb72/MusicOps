@@ -428,3 +428,32 @@ func TestInterruptedCancellationFinalizesWithoutPendingReview(t *testing.T) {
 		t.Fatalf("task=%+v err=%v", task, err)
 	}
 }
+
+func TestReviewRetryCountsTemporaryStreamingFallback(t *testing.T) {
+	repo, tasks := fixture(t)
+	searchReviewJob(t, repo, tasks, 0)
+	report := candidateReport(0)
+	report.StreamingEnabled = true
+	report.SourceFallback = true
+	report.ExplicitFallback = true
+	report.SourceFallbackConfirmed = true
+	for i := range report.Sites {
+		report.Sites[i] = searchdecision.SiteReport{Site: searchdecision.TrackerSites[i], Status: "NO_RESOURCE", Attempted: true}
+	}
+	plan := []byte(`{"root_job_id":"album1","query":"Artist Album"}`)
+	accepted, err := repo.Review("fallback-accept", "search:album1", ReviewDecision{Action: "accept", Search: report, Plan: plan}, 5000)
+	if err != nil || accepted.Children == nil || len(accepted.Children) != 1 || accepted.Children[0].Stage != "fallback" {
+		t.Fatalf("accepted=%+v err=%v", accepted, err)
+	}
+	token := begin(t, tasks, "process:search:album1", "aux")
+	if _, err := repo.Complete("fallback-temporary", token, Complete{
+		JobID: "process:search:album1", Edge: edgeTerminal, NextStage: "needs_review", ReviewKind: "candidate",
+		TaskState: "blocked", Message: "缓存暂时不可用", NowNS: 6000,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	retried, err := repo.Review("fallback-retry", "process:search:album1", ReviewDecision{Action: "retry"}, 7000)
+	if err != nil || retried.Job == nil || retried.Job.Stage != "fallback" || retried.Job.SearchRetryCount != 1 {
+		t.Fatalf("retried=%+v err=%v", retried.Job, err)
+	}
+}

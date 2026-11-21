@@ -2,8 +2,10 @@ package app
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"time"
 
@@ -19,6 +21,7 @@ const (
 type autoReviewStats struct {
 	Candidates int
 	Accepted   int
+	Settled    int
 	Held       int
 }
 
@@ -91,7 +94,7 @@ func (a *App) autoReviewPass(ctx context.Context) autoReviewStats {
 				continue
 			}
 			stats.Candidates++
-			code, _ := a.autoReviewJob(ctx, job.ID)
+			code, body := a.autoReviewJob(ctx, job.ID)
 			if code == http.StatusOK {
 				inspection, inspectErr := a.flows.Inspect(job.ID)
 				if job.TaskType != "search" || job.ReviewKind == "metadata" || inspectErr == nil && inspection.Job.Stage == "needs_review" {
@@ -102,6 +105,16 @@ func (a *App) autoReviewPass(ctx context.Context) autoReviewStats {
 				} else {
 					stats.Accepted++
 					a.clearAutoReviewCooldown(job.ID)
+				}
+			} else if autoReviewNoMatch(code, body) {
+				requestID := "auto-skip-" + job.ID + "-" + strconv.FormatInt(a.now().UnixNano(), 10)
+				result, skipErr := a.flows.Review(requestID, job.ID, workflow.ReviewDecision{Action: "skip"}, a.now().UnixNano())
+				if skipErr == nil && result.Job != nil && result.Job.Stage == "skipped" {
+					stats.Settled++
+					a.clearAutoReviewCooldown(job.ID)
+				} else {
+					stats.Held++
+					a.setAutoReviewCooldown(job.ID, a.now())
 				}
 			} else {
 				stats.Held++
@@ -147,4 +160,14 @@ func (a *App) clearAutoReviewCooldown(id string) {
 	a.autoReviewMu.Lock()
 	defer a.autoReviewMu.Unlock()
 	delete(a.autoReviewRetryAt, id)
+}
+
+func autoReviewNoMatch(code int, body string) bool {
+	if code != http.StatusConflict {
+		return false
+	}
+	var failure struct {
+		Code string `json:"code"`
+	}
+	return json.Unmarshal([]byte(body), &failure) == nil && failure.Code == "AI_NO_CONFIRMED_MATCH"
 }

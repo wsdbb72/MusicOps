@@ -245,7 +245,7 @@ func TestStreamingOrderEditableAndFollowed(t *testing.T) {
 	server := emptyResultsServer(t)
 	defer server.Close()
 	post(t, application, "/v1/search", searchBody("album-order", server.URL, []string{"dicmusic", "orpheus"}, true))
-	job := waitJob(t, application, "process:search:album-order", "needs_review")
+	job := waitJob(t, application, "process:search:album-order", "skipped")
 	playlistAt := strings.Index(job.Message, "playlist")
 	tidalAt := strings.Index(job.Message, "tidal")
 	if playlistAt < 0 || tidalAt < 0 || playlistAt > tidalAt {

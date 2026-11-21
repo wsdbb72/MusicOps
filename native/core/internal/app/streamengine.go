@@ -156,7 +156,7 @@ func (a *App) tryConfiguredStream(ctx context.Context, source string, plan Searc
 	path := filepath.Join(dir, name)
 	release, cacheErr := reserveAudioCache(dir, 2*int64(len(body))+65536)
 	if cacheErr != nil {
-		return "", cacheErr.Error(), downloadpolicy.ClassNoResult
+		return "", cacheErr.Error(), downloadpolicy.ClassRateLimited
 	}
 	defer release()
 	if err := os.WriteFile(path, body, 0o600); err != nil {

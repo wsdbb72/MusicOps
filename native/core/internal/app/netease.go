@@ -571,7 +571,7 @@ func (a *App) stageNeteaseSong(ctx context.Context, plan SearchPlan, song *netea
 	path := filepath.Join(dir, name)
 	release, err := reserveAudioCache(dir, 2*int64(len(body))+65536)
 	if err != nil {
-		return "", err.Error(), downloadpolicy.ClassNoResult, true
+		return "", err.Error(), downloadpolicy.ClassRateLimited, true
 	}
 	defer release()
 	if err := os.WriteFile(path, body, 0o600); err != nil {

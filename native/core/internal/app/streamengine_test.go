@@ -96,7 +96,7 @@ func TestStreamEngineSkipsAudioThatFailsValidation(t *testing.T) {
 	t.Setenv("MUSICOPS_ENGINE_URL", server.URL)
 	post(t, application, "/v1/settings/download", map[string]any{"streaming_enabled": true})
 	post(t, application, "/v1/search", searchBody("album-bad-audio", tracker.URL, []string{"dicmusic", "orpheus"}, true))
-	job := waitJob(t, application, "process:search:album-bad-audio", "needs_review")
+	job := waitJob(t, application, "process:search:album-bad-audio", "skipped")
 	if !strings.Contains(job.Message, "没有通过音频校验") || !strings.Contains(job.Message, "尚未下载") {
 		t.Fatal(job.Message)
 	}

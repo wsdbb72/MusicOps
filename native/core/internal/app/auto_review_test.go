@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"sync/atomic"
@@ -89,5 +90,33 @@ func TestCanResetInterruptedSearchOnlyForExhaustedSafeSearch(t *testing.T) {
 	job.RecoveryRetryCount = 2
 	if canResetInterruptedSearch(job, task) {
 		t.Fatal("automatic budget was bypassed before exhaustion")
+	}
+}
+
+func TestAutoReviewSettlesDefinitiveModelNoMatch(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.Header.Get("X-MusicOps-Site") {
+		case "dicmusic":
+			io.WriteString(w, `{"status":"success","response":{"currentPage":1,"pages":1,"results":[{"groupId":10,"groupName":"Example & Test Live","artist":"Tribute Band","torrents":[{"torrentId":11,"format":"FLAC","encoding":"Lossless","seeders":3,"remasterTitle":"Live"}]}]}}`)
+		case "open.cd":
+			io.WriteString(w, `<html><a href="logout.php">logout</a><div>没有种子</div></html>`)
+		default:
+			io.WriteString(w, `{"status":"success","response":{"results":[],"pages":1}}`)
+		}
+	}))
+	defer server.Close()
+	application := newApp(t)
+	calls := atomic.Int32{}
+	application.setReviewCompleter(reviewCaller{calls: &calls, body: []byte(`{"decision":"review","reason":"not the same recording"}`)})
+	application.reviews = reviewai.NewCache(1)
+	post(t, application, "/v1/search", searchBody("album-auto-settle", server.URL, []string{"open.cd", "dicmusic", "orpheus"}, false))
+	waitJob(t, application, "search:album-auto-settle", "needs_review")
+	stats := application.autoReviewPass(context.Background())
+	if stats.Candidates != 1 || stats.Settled != 1 || stats.Held != 0 {
+		t.Fatalf("stats=%+v", stats)
+	}
+	job, err := application.flows.Job("search:album-auto-settle")
+	if err != nil || job == nil || job.Stage != "skipped" || job.ReviewKind != "" {
+		t.Fatalf("job=%+v err=%v", job, err)
 	}
 }

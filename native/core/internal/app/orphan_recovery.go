@@ -158,7 +158,10 @@ func (a *App) normalizeLegacyRetrySchedules(log StartupLogger) {
 // but never received a process follow-up. Only roots already present in the
 // verified audio catalogue are touched, and only after a ten-minute grace
 // period. This changes bookkeeping; it never copies, deletes or rewrites music.
-func (a *App) reconcilePublishedRoots(now time.Time, log StartupLogger) {
+func (a *App) reconcilePublishedRoots(stop <-chan struct{}, now time.Time, log StartupLogger) {
+	if stopped(stop) {
+		return
+	}
 	published, err := audiorelease.Albums(a.engine)
 	if err != nil {
 		if log != nil {
@@ -201,6 +204,19 @@ func (a *App) reconcilePublishedRoots(now time.Time, log StartupLogger) {
 		log("workflow_reconcile", "closed "+strconv.Itoa(reconciled)+" published root(s)")
 	}
 }
+
+func stopped(stop <-chan struct{}) bool {
+	if stop == nil {
+		return false
+	}
+	select {
+	case <-stop:
+		return true
+	default:
+		return false
+	}
+}
+
 func autoRecoverableCommand(command string) bool {
 	// Process is included so the workflow layer can decide on its narrow safe
 	// subset. RecoverInterrupted still refuses tracker acquire stages that may

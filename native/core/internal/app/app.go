@@ -281,8 +281,8 @@ func open(dir, backup, password string, logger StartupLogger) (*App, error) {
 		return nil, fmt.Errorf("start scheduler: %w", err)
 	}
 	app.runner = runner
-	app.startBackground(func() { app.reconcilePublishedRoots(time.Now(), progress) })
 	app.stopSubs = make(chan struct{})
+	app.startBackground(func() { app.reconcilePublishedRoots(app.stopSubs, time.Now(), progress) })
 	app.startBackground(func() { app.runSubscriptions(app.stopSubs) })
 	// Token reconciliation runs with the app: an unanswered spend must stop
 	// blocking its site on evidence, not only on a 30-minute deadline.

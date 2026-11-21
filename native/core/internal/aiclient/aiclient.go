@@ -139,10 +139,18 @@ func (c *Client) Complete(ctx context.Context, prompt []byte) ([]byte, error) {
 	if err != nil {
 		return nil, fmt.Errorf("%w: cannot encode recognition schema: %v", ErrContract, err)
 	}
-	text, err := c.call(ctx, []inputMessage{
+	input := []inputMessage{
 		{Role: "system", Content: recognitionSystemPrompt + " 只返回符合此 schema 的 JSON：" + string(schemaJSON)},
 		{Role: "user", Content: string(prompt)},
-	}, true)
+	}
+	text, err := c.call(ctx, input, true)
+	if errors.Is(err, ErrContract) {
+		// Some Responses-compatible gateways reject strict JSON-schema output
+		// even though they can answer the same system/user prompt. Retry once
+		// without the optional structured-output field and still enforce the
+		// local schema parser below.
+		text, err = c.call(ctx, input, false)
+	}
 	if err != nil {
 		return nil, err
 	}

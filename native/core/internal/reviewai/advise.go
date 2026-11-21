@@ -1,6 +1,6 @@
 // Package reviewai asks a configured model to point at one real candidate.
 // A pass is kept only when that candidate already satisfies reviewmatch.
-// Malformed output is retried once. Timeouts stay review and are not cached as success.
+// Malformed output and a transient model error are retried once. Timeouts stay review and are not cached as success.
 package reviewai
 
 import (
@@ -12,6 +12,7 @@ import (
 	"errors"
 	"sort"
 	"sync"
+	"time"
 
 	"github.com/wsdbb72/MusicOps/native/core/internal/reviewmatch"
 )
@@ -123,6 +124,12 @@ func (c *Cache) Advise(ctx context.Context, model Completer, request Request) Re
 			if errors.Is(err, context.DeadlineExceeded) || errors.Is(ctx.Err(), context.DeadlineExceeded) || errors.Is(ctx.Err(), context.Canceled) {
 				return Result{Reason: "timeout", Class: "infrastructure", Calls: calls}
 			}
+			if attempt == 0 {
+				if !waitForReviewRetry(ctx) {
+					return Result{Reason: "timeout", Class: "infrastructure", Calls: calls}
+				}
+				continue
+			}
 			return Result{Reason: "model_error", Class: "infrastructure", Calls: calls}
 		}
 		parsed, ok := parseVerdict(body)
@@ -147,6 +154,16 @@ func (c *Cache) Advise(ctx context.Context, model Completer, request Request) Re
 	return Result{Reason: "malformed", Class: "infrastructure", Calls: calls}
 }
 
+func waitForReviewRetry(ctx context.Context) bool {
+	timer := time.NewTimer(150 * time.Millisecond)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return false
+	case <-timer.C:
+		return true
+	}
+}
 func decide(request Request, parsed verdict) Result {
 	if parsed.Decision != "pass" {
 		return Result{Reason: "model_review", Class: "identity"}

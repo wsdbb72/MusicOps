@@ -2,6 +2,7 @@ package reviewai
 
 import (
 	"context"
+	"errors"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -107,5 +108,21 @@ func TestAdviceRejectsHallucinationConflictAndTimeout(t *testing.T) {
 	}}, timed)
 	if again.CacheHit || again.Pass || again.Calls != 1 || again.Class != "identity" {
 		t.Fatal(again)
+	}
+}
+
+func TestAdviceRetriesOneTransientModelError(t *testing.T) {
+	model := &script{reply: func(n int) ([]byte, error) {
+		if n == 1 {
+			return nil, errors.New("temporary upstream failure")
+		}
+		return []byte(`{"decision":"pass","candidate_id":"dic:1","reason":"exact recording"}`), nil
+	}}
+	result := NewCache(1).Advise(context.Background(), model, Request{
+		ExpectedTitle: "Blue", ExpectedArtist: "Artist",
+		Candidates: []Candidate{{ID: "dic:1", Title: "Blue", Artists: []string{"Artist"}}},
+	})
+	if !result.Pass || result.CandidateID != "dic:1" || result.Calls != 2 || model.calls.Load() != 2 {
+		t.Fatalf("result=%+v calls=%d", result, model.calls.Load())
 	}
 }

@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -315,6 +316,7 @@ func (a *App) reviewWithAI(w http.ResponseWriter, r *http.Request, id, requestID
 			}
 		}
 	}
+	pool = boundedReviewCandidates(pool, plan.ExpectedTitle, plan.ExpectedArtist)
 	advice := a.reviews.Advise(r.Context(), model, reviewai.Request{ExpectedTitle: plan.ExpectedTitle, ExpectedArtist: plan.ExpectedArtist, Candidates: pool})
 	if site := sites[advice.CandidateID]; advice.Pass && site != "" && inspection.Job.ReviewKind == "candidate" {
 		a.reviewAccept(w, id, requestID, site, advice.CandidateID, nowNS)
@@ -329,6 +331,65 @@ func (a *App) reviewWithAI(w http.ResponseWriter, r *http.Request, id, requestID
 		return
 	}
 	writeJSON(w, http.StatusConflict, map[string]any{"ok": false, "code": "AI_NO_CONFIRMED_MATCH", "reason": advice.Reason, "message": "AI 未能核实可下载的发行版"})
+}
+
+const reviewAICandidateLimit = 64
+
+func boundedReviewCandidates(pool []reviewai.Candidate, expectedTitle, expectedArtist string) []reviewai.Candidate {
+	if len(pool) <= reviewAICandidateLimit {
+		return pool
+	}
+	type rankedCandidate struct {
+		candidate reviewai.Candidate
+		score     int
+		index     int
+	}
+	seen := map[string]struct{}{}
+	ranked := make([]rankedCandidate, 0, len(pool))
+	wantTitle := normalizeKey(expectedTitle)
+	wantArtists := splitPlaylistArtists(expectedArtist)
+	for index, candidate := range pool {
+		if candidate.ID == "" {
+			continue
+		}
+		if _, exists := seen[candidate.ID]; exists {
+			continue
+		}
+		seen[candidate.ID] = struct{}{}
+		score := 0
+		if wantTitle != "" && normalizeKey(candidate.Title) == wantTitle {
+			score += 1000
+		} else if wantTitle != "" && strings.Contains(normalizeKey(candidate.Title), wantTitle) {
+			score += 500
+		}
+		for _, alias := range candidate.Aliases {
+			if wantTitle != "" && normalizeKey(alias) == wantTitle {
+				score += 450
+				break
+			}
+		}
+		if len(wantArtists) > 0 && playlistArtistsMatch(wantArtists, candidate.Artists) {
+			score += 250
+		}
+		if strings.EqualFold(strings.TrimSpace(candidate.Format), "FLAC") {
+			score += 20
+		}
+		ranked = append(ranked, rankedCandidate{candidate: candidate, score: score, index: index})
+	}
+	sort.SliceStable(ranked, func(i, j int) bool {
+		if ranked[i].score != ranked[j].score {
+			return ranked[i].score > ranked[j].score
+		}
+		return ranked[i].index < ranked[j].index
+	})
+	if len(ranked) > reviewAICandidateLimit {
+		ranked = ranked[:reviewAICandidateLimit]
+	}
+	out := make([]reviewai.Candidate, 0, len(ranked))
+	for _, item := range ranked {
+		out = append(out, item.candidate)
+	}
+	return out
 }
 
 // reviewSearchFromEvidence resolves the common no-candidate search checkpoint

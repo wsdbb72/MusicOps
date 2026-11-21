@@ -393,3 +393,18 @@ func TestPlaylistPresenceUsesFullTagsWhenFolderNameIsTruncated(t *testing.T) {
 		t.Fatal("full-tag fallback collapsed a different album or artist")
 	}
 }
+
+func TestPlaylistPresenceMatchesFeaturedCreditButKeepsVersionsDistinct(t *testing.T) {
+	a := newApp(t)
+	indexPlaylistTestFile(t, a, t.TempDir(), "CLIFF EDGE _ 中村舞子/Best Of Love/01 Endless Tears.flac",
+		"CLIFF EDGE / 中村舞子", "Best Of Love", "Endless Tears")
+	index := a.playlistLibrary()
+	if !index.hasTrack("CLIFF EDGE / 中村舞子", "Best of LOVE", "Endless Tears feat. 中村舞子") {
+		t.Fatal("a feature listed in the track credits should match")
+	}
+	for _, title := range []string{"Endless Tears feat. Other", "Endless Tears feat. 中村舞子 (Remix)"} {
+		if index.hasTrack("CLIFF EDGE / 中村舞子", "Best of LOVE", title) {
+			t.Fatalf("different recording matched: %s", title)
+		}
+	}
+}

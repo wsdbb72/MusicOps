@@ -21,6 +21,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -292,24 +293,53 @@ func (index playlistLibraryIndex) hasTrack(artist, album, title string) bool {
 	// accepted only when the embedded full album and every credited artist also
 	// match and the file snapshot is unchanged.
 	expectedAlbum := firstNonEmpty(album, title)
-	for _, id := range index.titleCandidates[want] {
-		if !index.isUnchanged(id) {
-			continue
-		}
-		path, found, err := audiorelease.PathFor(index.engine, id)
-		if err != nil || !found {
-			continue
-		}
-		artists, albumTag, titleTag := playlistTrackTags(path)
-		if libraryPathKey(titleTag) != want || !playlistAlbumTagMatches(expectedAlbum, albumTag) {
-			continue
-		}
-		if playlistArtistTagMatches(artist, artists) {
-			return true
+	titleKeys := []string{want}
+	featuredTitle := playlistFeaturedTitleKey(title, artist)
+	if featuredTitle != "" && featuredTitle != want {
+		titleKeys = append(titleKeys, featuredTitle)
+	}
+	for _, titleKey := range titleKeys {
+		for _, id := range index.titleCandidates[titleKey] {
+			if !index.isUnchanged(id) {
+				continue
+			}
+			path, found, err := audiorelease.PathFor(index.engine, id)
+			if err != nil || !found {
+				continue
+			}
+			artists, albumTag, titleTag := playlistTrackTags(path)
+			if libraryPathKey(titleTag) != titleKey || !playlistAlbumTagMatches(expectedAlbum, albumTag) {
+				continue
+			}
+			if playlistArtistTagMatches(artist, artists) {
+				return true
+			}
 		}
 	}
 	return false
 }
+
+// A title may repeat a guest already present in the playlist credits. Keep
+// every other version suffix and still require matching album and artist tags.
+func playlistFeaturedTitleKey(title, artist string) string {
+	marker := playlistFeaturing.FindStringIndex(title)
+	if marker == nil {
+		return ""
+	}
+	guest := libraryPathKey(strings.TrimSpace(strings.TrimSuffix(title[marker[1]:], ")")))
+	credits := splitPlaylistArtists(artist)
+	if len(credits) < 2 || guest == "" {
+		return ""
+	}
+	for _, credit := range credits {
+		if libraryPathKey(credit) == guest {
+			return libraryPathKey(strings.TrimSpace(strings.TrimSuffix(strings.TrimSpace(title[:marker[0]]), "(")))
+		}
+	}
+	return ""
+}
+
+var playlistFeaturing = regexp.MustCompile(`(?i) feat\. +`)
 
 func playlistTrackTags(path string) (artists []string, album, title string) {
 	if strings.EqualFold(filepath.Ext(path), ".flac") {

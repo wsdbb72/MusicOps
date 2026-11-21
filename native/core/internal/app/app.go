@@ -77,6 +77,8 @@ type App struct {
 	aiHTTPClient      *http.Client
 	mu                sync.Mutex
 	background        sync.WaitGroup
+	backgroundMu      sync.Mutex
+	backgroundActive  map[string]int
 	duplicateMu       sync.Mutex
 	neteaseRecoveryMu sync.Mutex
 	secrets           map[string]string
@@ -282,18 +284,18 @@ func open(dir, backup, password string, logger StartupLogger) (*App, error) {
 	}
 	app.runner = runner
 	app.stopSubs = make(chan struct{})
-	app.startBackground(func() { app.reconcilePublishedRoots(app.stopSubs, time.Now(), progress) })
-	app.startBackground(func() { app.runSubscriptions(app.stopSubs) })
+	app.startBackground("published-root-reconcile", func() { app.reconcilePublishedRoots(app.stopSubs, time.Now(), progress) })
+	app.startBackground("playlist-subscriptions", func() { app.runSubscriptions(app.stopSubs) })
 	// Token reconciliation runs with the app: an unanswered spend must stop
 	// blocking its site on evidence, not only on a 30-minute deadline.
 	app.stopReconcile = make(chan struct{})
-	app.startBackground(func() { app.runTokenReconciler(app.stopReconcile) })
+	app.startBackground("token-reconcile", func() { app.runTokenReconciler(app.stopReconcile) })
 	// Safe review items are retried by the core itself. Token holds remain
 	// excluded by aiReviewEligible and still require an explicit FL decision.
 	app.stopAutoReview = make(chan struct{})
-	app.startBackground(func() { app.runAutoReview(app.stopAutoReview) })
+	app.startBackground("auto-review", func() { app.runAutoReview(app.stopAutoReview) })
 	app.stopLibraryAuto = make(chan struct{})
-	app.startBackground(func() { app.runLibraryAutomationScheduler(app.stopLibraryAuto) })
+	app.startBackground("library-automation", func() { app.runLibraryAutomationScheduler(app.stopLibraryAuto) })
 	// A managed solver is started once, in the background: a slow browser
 	// start must not delay the UI, and the settings page reports the state.
 	go app.autoStartSolver()
@@ -348,15 +350,39 @@ func (a *App) whenPipelineRunning(handler scheduler.Handler) scheduler.Handler {
 	}
 }
 
-func (a *App) startBackground(fn func()) {
+func (a *App) startBackground(name string, fn func()) {
 	if a == nil || fn == nil {
 		return
 	}
+	a.backgroundMu.Lock()
+	if a.backgroundActive == nil {
+		a.backgroundActive = map[string]int{}
+	}
+	a.backgroundActive[name]++
+	a.backgroundMu.Unlock()
 	a.background.Add(1)
 	go func() {
-		defer a.background.Done()
+		defer func() {
+			a.backgroundMu.Lock()
+			a.backgroundActive[name]--
+			if a.backgroundActive[name] <= 0 {
+				delete(a.backgroundActive, name)
+			}
+			a.backgroundMu.Unlock()
+			a.background.Done()
+		}()
 		fn()
 	}()
+}
+
+func (a *App) backgroundSnapshot() map[string]int {
+	a.backgroundMu.Lock()
+	defer a.backgroundMu.Unlock()
+	out := make(map[string]int, len(a.backgroundActive))
+	for name, count := range a.backgroundActive {
+		out[name] = count
+	}
+	return out
 }
 
 // Close stops workers and closes Pebble. It does not delete imported rows.
@@ -403,7 +429,7 @@ func (a *App) Close() error {
 	select {
 	case <-backgroundDone:
 	case <-backgroundCtx.Done():
-		return scheduler.ErrShutdownPending
+		return fmt.Errorf("%w: background tasks still running: %v", scheduler.ErrShutdownPending, a.backgroundSnapshot())
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()

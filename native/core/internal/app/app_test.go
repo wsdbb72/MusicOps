@@ -262,7 +262,11 @@ func newApp(t *testing.T) *App {
 	if err = os.MkdirAll(application.Backup, 0700); err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { application.Close() })
+	t.Cleanup(func() {
+		if err := application.Close(); err != nil {
+			t.Errorf("close application: %v", err)
+		}
+	})
 	return application
 }
 

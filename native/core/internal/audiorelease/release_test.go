@@ -3,7 +3,9 @@ package audiorelease
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/binary"
+	"encoding/hex"
 	"errors"
 	"os"
 	"os/exec"
@@ -72,6 +74,204 @@ func TestExistingIdenticalLibraryFileCanBeAdoptedByAnotherRoot(t *testing.T) {
 	}
 }
 
+func TestUpgradeCanAtomicallyReplaceTheSameLibraryPath(t *testing.T) {
+	engine, incoming, library := openRelease(t)
+	folder := filepath.Join(library, "Artist", "Album")
+	if err := os.MkdirAll(folder, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	dest := filepath.Join(folder, "01 Title.wav")
+	oldBody := wav(16)
+	writeSource(t, folder, "01 Title.wav", oldBody)
+	newBody := wav(64)
+	writeSource(t, incoming, "song.wav", newBody)
+	request := sample(incoming, library, "song.wav")
+	request.RequestID, request.RootID = "rel-replace", "root-replace"
+	request.ReplacePath = dest
+	got, err := Release(context.Background(), engine, request)
+	if err != nil || !got.LibraryPublished || !got.Verified {
+		t.Fatalf("got=%+v err=%v", got, err)
+	}
+	body, err := os.ReadFile(dest)
+	if err != nil || !bytes.Equal(body, newBody) {
+		t.Fatalf("replacement bytes=%d err=%v", len(body), err)
+	}
+	if backups, _ := filepath.Glob(filepath.Join(folder, ".musicops-rel-replace.replaced")); len(backups) != 0 {
+		t.Fatalf("replacement backup was not committed: %v", backups)
+	}
+}
+
+func TestUpgradeRejectsAnUnauthorizedReplacementPath(t *testing.T) {
+	engine, incoming, library := openRelease(t)
+	folder := filepath.Join(library, "Artist", "Album")
+	if err := os.MkdirAll(folder, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	dest := filepath.Join(folder, "01 Title.wav")
+	current := wav(32)
+	writeSource(t, folder, filepath.Base(dest), current)
+	other := filepath.Join(folder, "other.wav")
+	otherBody := wav(16)
+	writeSource(t, folder, filepath.Base(other), otherBody)
+	writeSource(t, incoming, "song.wav", wav(64))
+	request := sample(incoming, library, "song.wav")
+	request.RequestID, request.RootID = "rel-replace-denied", "root-replace-denied"
+	request.ReplacePath = other
+	if _, err := Release(context.Background(), engine, request); !errors.Is(err, ErrConflict) {
+		t.Fatalf("unauthorized replacement error=%v", err)
+	}
+	if body, err := os.ReadFile(dest); err != nil || !bytes.Equal(body, current) {
+		t.Fatalf("authorized library file changed: %d %v", len(body), err)
+	}
+	if body, err := os.ReadFile(other); err != nil || !bytes.Equal(body, otherBody) {
+		t.Fatalf("unrelated file changed: %d %v", len(body), err)
+	}
+	if err := os.Remove(dest); err != nil {
+		t.Fatal(err)
+	}
+	recoveryDenied := request
+	recoveryDenied.RequestID = "rel-recovery-denied"
+	backup := replacementBackupPath(dest, recoveryDenied.RequestID)
+	writeSource(t, folder, filepath.Base(backup), current)
+	if _, err := Release(context.Background(), engine, recoveryDenied); !errors.Is(err, ErrConflict) {
+		t.Fatalf("unauthorized recovery error=%v", err)
+	}
+	if _, err := os.Stat(dest); !os.IsNotExist(err) {
+		t.Fatalf("unauthorized recovery created destination: %v", err)
+	}
+	if _, err := os.Stat(backup); err != nil {
+		t.Fatalf("unauthorized recovery consumed backup: %v", err)
+	}
+}
+
+func TestReleaseRecoversReplacementBackupBeforePublishing(t *testing.T) {
+	engine, incoming, library := openRelease(t)
+	folder := filepath.Join(library, "Artist", "Album")
+	if err := os.MkdirAll(folder, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	dest := filepath.Join(folder, "01 Title.wav")
+	request := sample(incoming, library, "song.wav")
+	request.RequestID, request.RootID = "rel-recover", "root-recover"
+	request.ReplacePath = dest
+	writeSource(t, folder, filepath.Base(replacementBackupPath(dest, request.RequestID)), wav(16))
+	newBody := wav(64)
+	writeSource(t, incoming, "song.wav", newBody)
+	if _, err := Release(context.Background(), engine, request); err != nil {
+		t.Fatal(err)
+	}
+	if body, err := os.ReadFile(dest); err != nil || !bytes.Equal(body, newBody) {
+		t.Fatalf("recovered destination=%d err=%v", len(body), err)
+	}
+	if _, err := os.Stat(replacementBackupPath(dest, request.RequestID)); !os.IsNotExist(err) {
+		t.Fatalf("recovery backup remains: %v", err)
+	}
+}
+
+func TestReplacementRecoveryKeepsBackupUntilCASCommits(t *testing.T) {
+	engine, incoming, library := openRelease(t)
+	folder := filepath.Join(library, "Artist", "Album")
+	if err := os.MkdirAll(folder, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	dest := filepath.Join(folder, "01 Title.wav")
+	writeSource(t, incoming, "old.wav", wav(16))
+	first := sample(incoming, library, "old.wav")
+	first.RequestID, first.RootID = "rel-cas-first", "root-cas-conflict"
+	if _, err := Release(context.Background(), engine, first); err != nil {
+		t.Fatal(err)
+	}
+	newBody := wav(64)
+	writeSource(t, incoming, "new.wav", newBody)
+	second := sample(incoming, library, "new.wav")
+	second.RequestID, second.RootID = "rel-cas-second", "root-cas-conflict"
+	second.ReplacePath = dest
+	original := wav(128)
+	writeSource(t, folder, filepath.Base(dest), newBody)
+	backup := replacementBackupPath(dest, second.RequestID)
+	writeSource(t, folder, filepath.Base(backup), original)
+	if _, err := Release(context.Background(), engine, second); !errors.Is(err, ErrConflict) {
+		t.Fatalf("CAS conflict error=%v", err)
+	}
+	if body, err := os.ReadFile(dest); err != nil || !bytes.Equal(body, original) {
+		t.Fatalf("original was not restored: bytes=%d err=%v", len(body), err)
+	}
+	if _, err := os.Stat(backup); !os.IsNotExist(err) {
+		t.Fatalf("recovered backup remains: %v", err)
+	}
+}
+
+func TestCommittedReplayMismatchPreservesBackup(t *testing.T) {
+	engine, incoming, library := openRelease(t)
+	folder := filepath.Join(library, "Artist", "Album")
+	if err := os.MkdirAll(folder, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	dest := filepath.Join(folder, "01 Title.wav")
+	writeSource(t, folder, filepath.Base(dest), wav(16))
+	writeSource(t, incoming, "song.wav", wav(64))
+	request := sample(incoming, library, "song.wav")
+	request.RequestID, request.RootID = "rel-replay-mismatch", "root-replay-mismatch"
+	request.ReplacePath = dest
+	if _, err := Release(context.Background(), engine, request); err != nil {
+		t.Fatal(err)
+	}
+	backup := replacementBackupPath(dest, request.RequestID)
+	writeSource(t, folder, filepath.Base(backup), wav(16))
+	writeSource(t, folder, filepath.Base(dest), wav(32))
+	if _, err := Release(context.Background(), engine, request); !errors.Is(err, ErrConflict) {
+		t.Fatalf("mismatched replay error=%v", err)
+	}
+	if _, err := os.Stat(backup); err != nil {
+		t.Fatalf("backup was deleted despite mismatch: %v", err)
+	}
+}
+func TestReleaseReplayCleansCommittedReplacementBackup(t *testing.T) {
+	engine, incoming, library := openRelease(t)
+	folder := filepath.Join(library, "Artist", "Album")
+	if err := os.MkdirAll(folder, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	dest := filepath.Join(folder, "01 Title.wav")
+	writeSource(t, folder, filepath.Base(dest), wav(16))
+	body := wav(64)
+	writeSource(t, incoming, "song.wav", body)
+	request := sample(incoming, library, "song.wav")
+	request.RequestID, request.RootID = "rel-cleanup", "root-cleanup"
+	request.ReplacePath = dest
+	if _, err := Release(context.Background(), engine, request); err != nil {
+		t.Fatal(err)
+	}
+	backup := replacementBackupPath(dest, request.RequestID)
+	writeSource(t, folder, filepath.Base(backup), wav(16))
+	replayed, err := Release(context.Background(), engine, request)
+	if err != nil || !replayed.Replayed {
+		t.Fatalf("replayed=%+v err=%v", replayed, err)
+	}
+	if _, err := os.Stat(backup); !os.IsNotExist(err) {
+		t.Fatalf("committed backup remains: %v", err)
+	}
+}
+func TestReplacementRollbackRestoresOriginalBytes(t *testing.T) {
+	folder := t.TempDir()
+	dest := filepath.Join(folder, "track.flac")
+	backup := filepath.Join(folder, "track.flac.replaced")
+	original := []byte("original lossy flac")
+	replacement := []byte("new lossless flac")
+	writeSource(t, folder, filepath.Base(dest), replacement)
+	writeSource(t, folder, filepath.Base(backup), original)
+	sum := sha256.Sum256(replacement)
+	if err := restoreReplacedFile(dest, backup, hex.EncodeToString(sum[:])); err != nil {
+		t.Fatal(err)
+	}
+	body, err := os.ReadFile(dest)
+	if err != nil || !bytes.Equal(body, original) {
+		t.Fatalf("restored=%q err=%v", body, err)
+	}
+	if _, err := os.Stat(backup); !os.IsNotExist(err) {
+		t.Fatalf("backup still exists: %v", err)
+	}
+}
 func TestTorrentAndFixtureNeverPublish(t *testing.T) {
 	engine, incoming, library := openRelease(t)
 	cases := []struct {

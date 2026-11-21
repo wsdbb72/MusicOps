@@ -273,19 +273,22 @@ func (a *App) acquireNeteaseAlbum(ctx context.Context, execution *scheduler.Exec
 	}
 	artist := publishComponent(firstNonEmpty(plan.AlbumArtist, plan.ExpectedArtist))
 	album := publishComponent(plan.ExpectedTitle)
-	directTrack := func(song *neteaseSong, fallbackReason string) (scheduler.Outcome, error) {
+	directTrack := func(song *neteaseSong, fallbackReason, fallbackClass string) (scheduler.Outcome, error) {
 		if plan.PlaylistTrack == "" {
 			plan.PlaylistTrack = neteasePlaylistTitle(plan)
 		}
+		var path, note, class string
 		if song == nil {
-			var err error
-			song, err = a.neteaseSearchSong(ctx, plan)
-			if err != nil || song == nil {
-				return review(fallbackReason, "NETEASE_ALBUM_UNCONFIRMED")
-			}
+			// The caller already performed the catalogue search. A second
+			// identical request only delays the source-specific engine fallback.
+			path, note, class, _ = a.stageNeteaseEngineFallback(ctx, plan, fallbackReason, fallbackClass)
+		} else {
+			path, note, class, _ = a.stageNeteaseSongWithEngine(ctx, plan, song)
 		}
-		path, note, class, _ := a.stageNeteaseSong(ctx, plan, song)
 		if path == "" {
+			if class == downloadpolicy.ClassNoResult {
+				return a.finishSkipAcquire(held, job, note+"；网易云内置接口与下载引擎均确认无可用音源，下一轮库维护会重新尝试")
+			}
 			if isTemporaryStreamFailure(class) {
 				message := "网易云音频暂时不可取：" + note
 				if job.SearchRetryCount >= 3 {
@@ -295,7 +298,7 @@ func (a *App) acquireNeteaseAlbum(ctx context.Context, execution *scheduler.Exec
 			}
 			return review(note, class)
 		}
-		if song.CatalogVerified {
+		if song != nil && song.CatalogVerified {
 			// When the album endpoint was unavailable, the exact source
 			// recording we just retrieved provides the comparison duration.
 			if tags, err := readFLACTagsPrefix(path); err == nil && tags.StreamInfo.SampleRate != 0 {
@@ -328,16 +331,19 @@ func (a *App) acquireNeteaseAlbum(ctx context.Context, execution *scheduler.Exec
 	} else {
 		anchor, err = a.neteaseSearchSong(ctx, plan)
 	}
-	if err != nil || anchor == nil || anchor.AlbumID <= 0 {
-		return directTrack(anchor, "未核实到包含目标曲目的网易云发行版")
+	if err != nil {
+		return directTrack(nil, "未核实到包含目标曲目的网易云发行版："+err.Error(), classifyNeteaseFailure(err))
+	}
+	if anchor == nil || anchor.AlbumID <= 0 {
+		return directTrack(anchor, "未核实到包含目标曲目的网易云发行版", downloadpolicy.ClassNoResult)
 	}
 	raw, err := a.neteaseGet(ctx, a.neteaseBase()+"/api/v1/album/"+strconv.FormatInt(anchor.AlbumID, 10), cookie)
 	if err != nil {
-		return directTrack(anchor, "无法读取网易云专辑清单")
+		return directTrack(anchor, "无法读取网易云专辑清单："+err.Error(), classifyNeteaseFailure(err))
 	}
 	tracks, err := decodeNeteaseAlbum(raw, anchor)
 	if err != nil {
-		return directTrack(anchor, err.Error())
+		return directTrack(anchor, err.Error(), downloadpolicy.ClassNoResult)
 	}
 	local := a.verifiedPlaylistAlbumTracks(a.libraryDir(), artist, album, plan.ExpectedTitle)
 	receipts := make([]publishReceipt, 0, len(tracks))
@@ -374,7 +380,7 @@ func (a *App) acquireNeteaseAlbum(ctx context.Context, execution *scheduler.Exec
 		trackPlan := plan
 		trackPlan.PlaylistTrack = song.Name
 		trackPlan.NeteaseSongID = song.ID
-		path, note, class, _ := a.stageNeteaseSong(ctx, trackPlan, song)
+		path, note, class, _ := a.stageNeteaseSongWithEngine(ctx, trackPlan, song)
 		if path == "" {
 			if isTemporaryStreamFailure(class) {
 				temporaryFailure = true
@@ -435,7 +441,7 @@ func verifiedNeteaseTrackPresent(local map[string][]string, song *neteaseSong) b
 		return false
 	}
 	tolerance := int64(1500)
-	if song.CatalogVerified {
+	if song != nil && song.CatalogVerified {
 		// Match padding differences only for an identified catalogue track.
 		// The folder, title and credited artists must still match.
 		tolerance = 3000

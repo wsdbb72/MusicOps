@@ -15,8 +15,24 @@ import (
 	"github.com/wsdbb72/MusicOps/native/core/internal/workflow"
 )
 
+func shouldPublishPlaylistStream(plan SearchPlan, validated string) bool {
+	return strings.TrimSpace(validated) != "" && strings.TrimSpace(plan.PlaylistTrack) != ""
+}
+func playlistStreamReplacementPath(plan SearchPlan) string {
+	if plan.Scene == "upgrade" && len(plan.LibraryTracks) > 0 {
+		return plan.LibraryTracks[0].Path
+	}
+	return ""
+}
+func playlistStreamPosition(plan SearchPlan) int {
+	if len(plan.LibraryTracks) > 0 {
+		return trackNumberFromName(filepath.Base(plan.LibraryTracks[0].Path))
+	}
+	return 1
+}
+
 func (a *App) publishPlaylistStream(ctx context.Context, held taskrepo.Token, job workflow.Job, plan SearchPlan, path string) (scheduler.Outcome, error) {
-	item, err := a.ingestPlaylistStream(ctx, job, plan, path, 1)
+	item, err := a.ingestPlaylistStream(ctx, job, plan, path, playlistStreamPosition(plan))
 	if err != nil {
 		return a.finishAcquire(held, job, "candidate", err.Error(), "STREAM_INGEST_FAILED", nil)
 	}
@@ -44,6 +60,7 @@ func (a *App) ingestPlaylistStream(ctx context.Context, job workflow.Job, plan S
 			return publishComponent(plan.AlbumArtist)
 		}(), Album: publishComponent(plan.ExpectedTitle), Title: publishComponent(diskTitle),
 		SourceName: name, Incoming: root, Library: a.libraryDir(), Decoder: audiorelease.SystemDecoder(), InternalDownload: true,
+		ReplacePath: playlistStreamReplacementPath(plan),
 	})
 	if err != nil {
 		return publishReceipt{}, playlistReleaseError(err, result)

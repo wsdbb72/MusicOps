@@ -18,6 +18,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -66,6 +67,10 @@ type Request struct {
 	Library          string
 	Decoder          Decoder
 	InternalDownload bool
+	// ReplacePath authorizes replacing this exact library file. The release path
+	// still computes the destination independently and will not overwrite any
+	// other existing file.
+	ReplacePath string
 }
 
 // Result is the file outcome. Downloaded stays false: the bytes were verified
@@ -152,6 +157,12 @@ func Release(ctx context.Context, engine *dataengine.Engine, input Request) (Res
 	if existing, found, err := readRelease(engine, input.RequestID); err != nil {
 		return empty, err
 	} else if found {
+		// Only a target that still matches the committed digest proves the
+		// replacement completed. Preserve a backup when the disk is inconsistent.
+		if sameFile(existing.Path, existing.SHA256) != nil {
+			return empty, fmt.Errorf("%w: committed release target no longer matches its record", ErrConflict)
+		}
+		_ = os.Remove(replacementBackupPath(existing.Path, input.RequestID))
 		return replay(existing, source)
 	}
 	limit := MaxAudioBytes
@@ -203,13 +214,69 @@ func Release(ctx context.Context, engine *dataengine.Engine, input Request) (Res
 	}
 	created := false
 	exists := false
-	if info, statErr := os.Lstat(dest); statErr == nil {
-		if !info.Mode().IsRegular() || sameFile(dest, digest) != nil {
+	replaceExisting := false
+	backup := ""
+	replacementBackup := replacementBackupPath(dest, input.RequestID)
+	if input.ReplacePath != "" {
+		if !replacementPathMatches(input.ReplacePath, dest) {
 			return empty, ErrConflict
 		}
-		exists = true
+		// Recover a process exit after the old file was moved but before the new
+		// file reached the authorized destination.
+		if _, destErr := os.Lstat(dest); os.IsNotExist(destErr) {
+			if _, backupErr := os.Lstat(replacementBackup); backupErr == nil {
+				if err = os.Rename(replacementBackup, dest); err != nil {
+					return empty, err
+				}
+			} else if !os.IsNotExist(backupErr) {
+				return empty, backupErr
+			}
+		} else if destErr != nil {
+			return empty, destErr
+		}
+	}
+	if info, statErr := os.Lstat(dest); statErr == nil {
+		if !info.Mode().IsRegular() {
+			return empty, ErrConflict
+		}
+		if sameFile(dest, digest) == nil {
+			exists = true
+			if input.ReplacePath != "" && replacementTargetMatches(input.ReplacePath, dest) {
+				if info, backupErr := os.Lstat(replacementBackup); backupErr == nil {
+					if !info.Mode().IsRegular() {
+						return empty, ErrConflict
+					}
+					// Keep the old file until the release record commits. This is
+					// the recovery state for an exit after the new rename but
+					// before CAS.
+					backup = replacementBackup
+				} else if !os.IsNotExist(backupErr) {
+					return empty, backupErr
+				}
+			}
+		} else if input.ReplacePath != "" && replacementTargetMatches(input.ReplacePath, dest) {
+			replaceExisting = true
+		} else {
+			return empty, ErrConflict
+		}
 	} else if !os.IsNotExist(statErr) {
 		return empty, statErr
+	}
+	restoreOriginal := func() error {
+		if backup == "" {
+			return nil
+		}
+		if restoreErr := restoreReplacedFile(dest, backup, digest); restoreErr != nil {
+			return restoreErr
+		}
+		backup = ""
+		return nil
+	}
+	commitReplacement := func() {
+		if backup != "" {
+			_ = os.Remove(backup)
+			backup = ""
+		}
 	}
 	if !exists {
 		temp := filepath.Join(folder, ".musicops-"+input.RequestID+".partial")
@@ -217,11 +284,29 @@ func Release(ctx context.Context, engine *dataengine.Engine, input Request) (Res
 			os.Remove(temp)
 			return empty, err
 		}
+		if replaceExisting {
+			backup = replacementBackup
+			if _, backupErr := os.Lstat(backup); backupErr == nil {
+				_ = os.Remove(temp)
+				return empty, ErrConflict
+			} else if !os.IsNotExist(backupErr) {
+				_ = os.Remove(temp)
+				return empty, backupErr
+			}
+			if err = os.Rename(dest, backup); err != nil {
+				_ = os.Remove(temp)
+				backup = ""
+				return empty, err
+			}
+		}
 		if err = os.Rename(temp, dest); err != nil {
-			os.Remove(temp)
+			_ = os.Remove(temp)
 			// A concurrent identical release may have won the rename after our
 			// existence check. Reuse it; a different file remains a conflict.
 			if sameFile(dest, digest) != nil {
+				if restoreErr := restoreOriginal(); restoreErr != nil {
+					return empty, errors.Join(ErrConflict, restoreErr)
+				}
 				return empty, ErrConflict
 			}
 		} else {
@@ -229,7 +314,10 @@ func Release(ctx context.Context, engine *dataengine.Engine, input Request) (Res
 		}
 		if err = sameFile(dest, digest); err != nil {
 			if created {
-				os.Remove(dest)
+				_ = os.Remove(dest)
+			}
+			if restoreErr := restoreOriginal(); restoreErr != nil {
+				return empty, errors.Join(err, restoreErr)
 			}
 			return empty, err
 		}
@@ -238,6 +326,9 @@ func Release(ctx context.Context, engine *dataengine.Engine, input Request) (Res
 	if statErr != nil {
 		if created {
 			_ = os.Remove(dest)
+		}
+		if restoreErr := restoreOriginal(); restoreErr != nil {
+			return empty, errors.Join(statErr, restoreErr)
 		}
 		return empty, statErr
 	}
@@ -249,7 +340,12 @@ func Release(ctx context.Context, engine *dataengine.Engine, input Request) (Res
 	}
 	encoded, err := json.Marshal(rec)
 	if err != nil {
-		os.Remove(dest)
+		if created {
+			_ = os.Remove(dest)
+		}
+		if restoreErr := restoreOriginal(); restoreErr != nil {
+			return empty, errors.Join(err, restoreErr)
+		}
 		return empty, err
 	}
 	ok, err := engine.CompareAndSwap(
@@ -263,14 +359,21 @@ func Release(ctx context.Context, engine *dataengine.Engine, input Request) (Res
 		},
 	)
 	if err != nil {
+		if restoreErr := restoreOriginal(); restoreErr != nil {
+			return empty, errors.Join(err, restoreErr)
+		}
 		return empty, err
 	}
 	if !ok {
 		current, found, readErr := readRelease(engine, input.RequestID)
 		if readErr != nil {
+			if restoreErr := restoreOriginal(); restoreErr != nil {
+				return empty, errors.Join(readErr, restoreErr)
+			}
 			return empty, readErr
 		}
 		if found && current.SHA256 == digest && current.RootID == input.RootID {
+			commitReplacement()
 			return replay(current, source)
 		}
 		// Our bytes are already in the library but no record claims them.
@@ -280,12 +383,16 @@ func Release(ctx context.Context, engine *dataengine.Engine, input Request) (Res
 		if created {
 			if data, readErr := os.ReadFile(dest); readErr == nil {
 				if sum := sha256.Sum256(data); hex.EncodeToString(sum[:]) == digest {
-					os.Remove(dest)
+					_ = os.Remove(dest)
 				}
 			}
 		}
+		if restoreErr := restoreOriginal(); restoreErr != nil {
+			return empty, errors.Join(ErrConflict, restoreErr)
+		}
 		return empty, ErrConflict
 	}
+	commitReplacement()
 	// The file and the record are committed. A source that vanished after the
 	// copy is reported as not preserved, never as a failed release.
 	return resultFrom(rec, sameFile(source, digest) == nil, false), nil
@@ -1126,6 +1233,49 @@ func writeNew(path string, body []byte) error {
 		return err
 	}
 	return file.Close()
+}
+
+func replacementBackupPath(dest, requestID string) string {
+	return filepath.Join(filepath.Dir(dest), ".musicops-"+requestID+".replaced")
+}
+
+func replacementPathMatches(authorized, dest string) bool {
+	authorizedAbs, err := filepath.Abs(filepath.Clean(authorized))
+	if err != nil {
+		return false
+	}
+	destAbs, err := filepath.Abs(filepath.Clean(dest))
+	if err != nil {
+		return false
+	}
+	if runtime.GOOS == "windows" {
+		return strings.EqualFold(authorizedAbs, destAbs)
+	}
+	return authorizedAbs == destAbs
+}
+func replacementTargetMatches(authorized, dest string) bool {
+	authorizedInfo, err := os.Stat(authorized)
+	if err != nil {
+		return false
+	}
+	destInfo, err := os.Stat(dest)
+	return err == nil && os.SameFile(authorizedInfo, destInfo)
+}
+func restoreReplacedFile(dest, backup, digest string) error {
+	var rollbackErr error
+	if _, err := os.Lstat(dest); err == nil {
+		if sameFile(dest, digest) == nil {
+			if removeErr := os.Remove(dest); removeErr != nil {
+				rollbackErr = errors.Join(rollbackErr, removeErr)
+			}
+		}
+	} else if !os.IsNotExist(err) {
+		rollbackErr = errors.Join(rollbackErr, err)
+	}
+	if err := os.Rename(backup, dest); err != nil {
+		rollbackErr = errors.Join(rollbackErr, err)
+	}
+	return rollbackErr
 }
 
 func sameFile(path, digest string) error {

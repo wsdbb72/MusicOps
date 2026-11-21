@@ -424,7 +424,7 @@ func (a *App) testStreamingEngine(w http.ResponseWriter, r *http.Request) {
 		out["bytes"] = len(audio)
 		out["format"] = format
 		if format != "fLaC" {
-			if flac, convErr := a.transcodeEngineAudio(audio, song.Source, SearchPlan{}); convErr != nil {
+			if flac, convErr := a.transcodeEngineAudio(r.Context(), audio, song.Source, SearchPlan{}); convErr != nil {
 				out["transcode"] = false
 				out["transcode_error"] = convErr.Error()
 			} else {

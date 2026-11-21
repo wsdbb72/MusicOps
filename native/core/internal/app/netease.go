@@ -535,12 +535,13 @@ func (a *App) tryNeteaseStream(ctx context.Context, plan SearchPlan) (string, st
 	}
 	song, err := a.neteaseSearchSong(ctx, plan)
 	if err != nil {
-		return "", "netease 没有连上（" + err.Error() + "）", classifyNeteaseFailure(err), true
+		note := "netease 没有连上（" + err.Error() + "）"
+		return a.stageNeteaseEngineFallback(ctx, plan, note, classifyNeteaseFailure(err))
 	}
 	if song == nil {
-		return "", "netease 没有找到标题与艺人同时对得上的曲目", downloadpolicy.ClassNoResult, true
+		return a.stageNeteaseEngineFallback(ctx, plan, "netease 没有找到标题与艺人同时对得上的曲目", downloadpolicy.ClassNoResult)
 	}
-	return a.stageNeteaseSong(ctx, plan, song)
+	return a.stageNeteaseSongWithEngine(ctx, plan, song)
 }
 
 func (a *App) stageNeteaseSong(ctx context.Context, plan SearchPlan, song *neteaseSong) (string, string, string, bool) {
@@ -562,9 +563,9 @@ func (a *App) stageNeteaseSong(ctx context.Context, plan SearchPlan, song *netea
 		// to the library's FLAC container while retaining the explicit lossy
 		// provenance, so the playlist can finish and a later quality-upgrade
 		// pass can still recognise the original as lossy.
-		converted, convErr := a.transcodeEngineAudio(body, "netease", plan)
+		converted, convErr := a.transcodeEngineAudio(ctx, body, "netease", plan)
 		if convErr != nil {
-			return "", "netease 有损源转换 FLAC 失败", downloadpolicy.ClassNoResult, true
+			return "", "netease 有损源转换 FLAC 失败：" + convErr.Error(), downloadpolicy.ClassRateLimited, true
 		}
 		body = converted
 	}
@@ -642,7 +643,7 @@ func (a *App) stageNeteaseSong(ctx context.Context, plan SearchPlan, song *netea
 	}
 	if err := flactags.Write(path, writeTags); err != nil {
 		_ = os.Remove(path)
-		return "", "netease 写入标签失败，文件已删除", downloadpolicy.ClassNoResult, true
+		return "", "netease 写入标签失败，文件已删除：" + err.Error(), downloadpolicy.ClassRateLimited, true
 	}
 	if lossySource {
 		return path, "netease 仅提供有损音频，已转换并校验为 FLAC（来源仍有损：" + song.Name + "）", downloadpolicy.ClassDownload, true
@@ -680,4 +681,32 @@ func neteaseDurationAccepted(drift int64, catalogVerified bool) bool {
 		return drift <= 30000
 	}
 	return drift <= 1500
+}
+func (a *App) stageNeteaseSongWithEngine(ctx context.Context, plan SearchPlan, song *neteaseSong) (string, string, string, bool) {
+	path, note, class, handled := a.stageNeteaseSong(ctx, plan, song)
+	if path != "" || !handled {
+		return path, note, class, handled
+	}
+	return a.stageNeteaseEngineFallback(ctx, plan, note, class)
+}
+
+func (a *App) stageNeteaseEngineFallback(ctx context.Context, plan SearchPlan, primaryNote, primaryClass string) (string, string, string, bool) {
+	enginePath, engineNote, engineClass := a.tryConfiguredStream(ctx, "netease", plan)
+	if enginePath != "" {
+		return enginePath, primaryNote + "；网易云内置下载引擎：" + engineNote, downloadpolicy.ClassDownload, true
+	}
+	return "", primaryNote + "；" + engineNote, preferStreamFailure(primaryClass, engineClass), true
+}
+
+func preferStreamFailure(primary, fallback string) string {
+	if isTemporaryStreamFailure(primary) {
+		return primary
+	}
+	if isTemporaryStreamFailure(fallback) {
+		return fallback
+	}
+	if primary != "" && primary != downloadpolicy.ClassNoResult {
+		return primary
+	}
+	return fallback
 }

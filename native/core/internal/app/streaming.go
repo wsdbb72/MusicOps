@@ -321,8 +321,12 @@ func (a *App) acquireFallback(ctx context.Context, execution *scheduler.Executio
 				}
 			}
 			if exclusiveNetease {
-				outcomes = append(outcomes, downloadpolicy.Outcome{Source: step.Name, Class: downloadpolicy.ClassAuth})
-				notes = append(notes, "本次明确要求仅使用网易云，当前没有可用账号或引擎")
+				path, note, class := a.tryConfiguredStream(ctx, step.Name, plan)
+				outcomes = append(outcomes, downloadpolicy.Outcome{Source: step.Name, Class: class})
+				notes = append(notes, note)
+				if path != "" {
+					validated = path
+				}
 				continue
 			}
 			// Without a configured engine the note stays "未接入". A saved
@@ -372,7 +376,7 @@ func (a *App) acquireFallback(ctx context.Context, execution *scheduler.Executio
 	if walk.Recoverable {
 		complete.Message += fmt.Sprintf("（%d 秒后可重试）", walk.RetryAfterSec)
 	}
-	if validated != "" && plan.PlaylistTrack != "" && normalizeKey(plan.PlaylistTrack) == normalizeKey(plan.ExpectedTitle) {
+	if shouldPublishPlaylistStream(plan, validated) {
 		return a.publishPlaylistStream(ctx, held, job, plan, validated)
 	}
 	complete.Evidence = []workflow.EvidenceInput{{

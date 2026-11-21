@@ -109,7 +109,10 @@ func (a *App) tryConfiguredStream(ctx context.Context, source string, plan Searc
 		if status == downloadpolicy.ClassAuth {
 			return "", source + " 需要用户自己的账号，没有绕过访问控制", downloadpolicy.ClassAuth
 		}
-		return "", source + " 没有连上本机引擎", downloadpolicy.ClassNoResult
+		if status == "" {
+			status = downloadpolicy.ClassNoResult
+		}
+		return "", source + " 没有连上本机引擎", status
 	}
 	if song == nil {
 		return "", source + " 未找到可通过校验的音频", downloadpolicy.ClassNoResult
@@ -119,7 +122,10 @@ func (a *App) tryConfiguredStream(ctx context.Context, source string, plan Searc
 		if status == downloadpolicy.ClassAuth {
 			return "", source + " 需要用户自己的账号，没有绕过访问控制", downloadpolicy.ClassAuth
 		}
-		return "", source + " 没有取到音频", downloadpolicy.ClassNoResult
+		if status == "" {
+			status = downloadpolicy.ClassNoResult
+		}
+		return "", source + " 没有取到音频", status
 	}
 	// The bundled engine hands back mp3 for the lossy sources. The library is
 	// FLAC-only, so a decodable lossy file is converted with the bundled
@@ -129,12 +135,12 @@ func (a *App) tryConfiguredStream(ctx context.Context, source string, plan Searc
 		return "", source + " 返回的内容没有通过音频校验", downloadpolicy.ClassNoResult
 	}
 	if string(body[:4]) != "fLaC" {
-		if plan.PlaylistTrack != "" {
+		if plan.PlaylistTrack != "" && source != "netease" {
 			return "", source + " 未提供可验证的无损音源", downloadpolicy.ClassNoResult
 		}
-		converted, convErr := a.transcodeEngineAudio(body, source, plan)
+		converted, convErr := a.transcodeEngineAudio(ctx, body, source, plan)
 		if convErr != nil {
-			return "", source + " 返回的是有损音频，转 FLAC 失败", downloadpolicy.ClassNoResult
+			return "", source + " 返回的是有损音频，转 FLAC 失败：" + convErr.Error(), downloadpolicy.ClassRateLimited
 		}
 		body = converted
 		lossySource = true
@@ -147,11 +153,11 @@ func (a *App) tryConfiguredStream(ctx context.Context, source string, plan Searc
 		return "", source + " 校验通过但没有写入", downloadpolicy.ClassNoResult
 	}
 	if err := os.MkdirAll(a.workPath("incoming"), 0o700); err != nil {
-		return "", source + " 校验通过但没有写入", downloadpolicy.ClassNoResult
+		return "", source + " 校验通过但没有写入：" + err.Error(), downloadpolicy.ClassRateLimited
 	}
 	dir, err := resolveInDir(a.workDir(), "incoming")
 	if err != nil {
-		return "", source + " 校验通过但没有写入", downloadpolicy.ClassNoResult
+		return "", source + " 校验通过但没有写入：" + err.Error(), downloadpolicy.ClassNoResult
 	}
 	path := filepath.Join(dir, name)
 	release, cacheErr := reserveAudioCache(dir, 2*int64(len(body))+65536)
@@ -160,15 +166,19 @@ func (a *App) tryConfiguredStream(ctx context.Context, source string, plan Searc
 	}
 	defer release()
 	if err := os.WriteFile(path, body, 0o600); err != nil {
-		return "", source + " 校验通过但没有写入", downloadpolicy.ClassNoResult
+		return "", source + " 校验通过但没有写入：" + err.Error(), downloadpolicy.ClassRateLimited
 	}
 	// The identity the engine reported is written into the file: ffmpeg's own
 	// output carries no tags, and the pipeline reads the album from them.
-	if err := flactags.Write(path, flactags.Tags{
+	tags := flactags.Tags{
 		Title: song.Name, Artists: []string{song.Artist}, Album: song.Album, AlbumArtist: song.Artist,
-	}); err != nil {
+	}
+	if lossySource {
+		tags.Raw = map[string][]string{"COMMENT": {"MusicOps source=" + source + "-lossy"}}
+	}
+	if err := flactags.Write(path, tags); err != nil {
 		_ = os.Remove(path)
-		return "", source + " 校验通过但没有写入", downloadpolicy.ClassNoResult
+		return "", source + " 校验通过但标签写入失败：" + err.Error(), downloadpolicy.ClassRateLimited
 	}
 	note := source + " 音频已通过校验并保存，尚未入库"
 	if lossySource {
@@ -199,7 +209,7 @@ func isKnownAudio(body []byte) bool {
 
 // transcodeEngineAudio converts the engine's lossy download into FLAC with the
 // bundled ffmpeg. The bytes are validated afterwards like any other source.
-func (a *App) transcodeEngineAudio(body []byte, source string, plan SearchPlan) ([]byte, error) {
+func (a *App) transcodeEngineAudio(ctx context.Context, body []byte, source string, plan SearchPlan) ([]byte, error) {
 	ffmpeg := ""
 	if tools, ok := a.bundledTools(); ok {
 		ffmpeg = filepath.Join(tools, "ffmpeg.exe")
@@ -225,7 +235,7 @@ func (a *App) transcodeEngineAudio(body []byte, source string, plan SearchPlan) 
 	input.Close()
 	output := input.Name() + ".flac"
 	defer os.Remove(output)
-	cmd := exec.Command(ffmpeg, "-y", "-v", "error", "-i", input.Name(), "-c:a", "flac", output)
+	cmd := exec.CommandContext(ctx, ffmpeg, "-y", "-v", "error", "-i", input.Name(), "-c:a", "flac", output)
 	prepareSolverCommand(cmd)
 	if err := cmd.Run(); err != nil {
 		return nil, err
@@ -242,6 +252,19 @@ type streamSong struct {
 	Duration int
 }
 
+func engineIDField(raw any) string {
+	switch value := raw.(type) {
+	case string:
+		return textField(value)
+	case float64:
+		if value >= 0 && math.Trunc(value) == value && value <= math.MaxInt64 {
+			return strconv.FormatInt(int64(value), 10)
+		}
+	case json.Number:
+		return value.String()
+	}
+	return ""
+}
 func (a *App) streamSearch(ctx context.Context, base, service string, plan SearchPlan, token string) (*streamSong, string, error) {
 	query := strings.TrimSpace(plan.Query)
 	if query == "" {
@@ -271,7 +294,7 @@ func (a *App) streamSearch(ctx context.Context, base, service string, plan Searc
 		if json.Unmarshal(trimmed, &decoded) == nil {
 			for _, row := range decoded.Songs {
 				cards = append(cards, streamSong{
-					ID: textField(row["id"]), Source: textField(row["source"]), Name: textField(row["name"]),
+					ID: engineIDField(row["id"]), Source: textField(row["source"]), Name: textField(row["name"]),
 					Artist: textField(row["artist"]), Album: textField(row["album"]), Duration: intField(row["duration"]),
 				})
 			}
@@ -283,13 +306,39 @@ func (a *App) streamSearch(ctx context.Context, base, service string, plan Searc
 		return nil, downloadpolicy.ClassNoResult, nil
 	}
 	wantTitle := foldTagText(plan.ExpectedTitle)
+	wantAlbum := ""
+	playlistTrack := neteasePlaylistTitle(plan)
+	if playlistTrack != "" {
+		wantTitle = foldTagText(playlistTrack)
+		if normalizeKey(playlistTrack) != normalizeKey(plan.ExpectedTitle) {
+			wantAlbum = normalizeKey(normalizePlaylistAlbumTitle(plan.ExpectedTitle))
+		}
+	}
 	wantArtist := foldTagText(plan.ExpectedArtist)
+	wantNeteaseID := ""
+	if service == "netease" && plan.NeteaseSongID > 0 {
+		wantNeteaseID = strconv.FormatInt(plan.NeteaseSongID, 10)
+	}
 	for i := range cards {
 		song := cards[i]
 		if song.Source == "" {
 			song.Source = service
 		}
-		if plan.PlaylistTrack != "" && (normalizeKey(song.Album) != normalizeKey(plan.ExpectedTitle) || !playlistArtistsMatch(strings.Split(plan.ExpectedArtist, "/"), strings.Split(song.Artist, "/"))) {
+		if !strings.EqualFold(strings.TrimSpace(song.Source), service) {
+			continue
+		}
+		if wantNeteaseID != "" {
+			// A durable NetEase recording id is stronger than a re-tagged album
+			// or compilation label. Never accept a different id heuristically.
+			if strings.TrimSpace(song.ID) == wantNeteaseID {
+				return &song, "", nil
+			}
+			continue
+		}
+		if wantAlbum != "" && normalizeKey(normalizePlaylistAlbumTitle(song.Album)) != wantAlbum {
+			continue
+		}
+		if playlistTrack != "" && !playlistArtistsMatch(strings.Split(plan.ExpectedArtist, "/"), strings.Split(song.Artist, "/")) {
 			continue
 		}
 		if wantTitle != "" && foldTagText(song.Name) != wantTitle {
@@ -375,18 +424,24 @@ func (a *App) engineGET(ctx context.Context, base, endpoint, token string) ([]by
 	}}
 	response, err := client.Do(request)
 	if err != nil {
-		return nil, downloadpolicy.ClassNoResult, err
+		return nil, downloadpolicy.ClassNetwork, err
 	}
 	defer response.Body.Close()
 	if response.StatusCode == http.StatusUnauthorized || response.StatusCode == http.StatusForbidden {
 		return nil, downloadpolicy.ClassAuth, errors.New("auth")
+	}
+	if response.StatusCode == http.StatusTooManyRequests {
+		return nil, downloadpolicy.ClassRateLimited, errors.New("rate limited")
+	}
+	if response.StatusCode == http.StatusRequestTimeout || response.StatusCode == http.StatusTooEarly || response.StatusCode >= 500 {
+		return nil, downloadpolicy.ClassNetwork, errors.New("temporary upstream failure")
 	}
 	if response.StatusCode != http.StatusOK {
 		return nil, downloadpolicy.ClassNoResult, errors.New("status")
 	}
 	body, err := io.ReadAll(io.LimitReader(response.Body, 80<<20))
 	if err != nil {
-		return nil, downloadpolicy.ClassNoResult, err
+		return nil, downloadpolicy.ClassNetwork, err
 	}
 	return body, "", nil
 }

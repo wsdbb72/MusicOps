@@ -66,8 +66,46 @@ func TestLibraryAutomationEnqueuesLossyUpgradeOnce(t *testing.T) {
 	if again.UpgradeJobs != 0 {
 		t.Fatalf("duplicate automation job: %+v", again)
 	}
+	stopCtx, cancelStop := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancelStop()
+	if err := application.runner.Stop(stopCtx); err != nil {
+		t.Fatalf("stop automation executor: %v", err)
+	}
 }
 
+func TestLibraryAutomationQueuesEveryLossyTrack(t *testing.T) {
+	ffmpeg, err := exec.LookPath("ffmpeg")
+	if err != nil {
+		t.Skip("ffmpeg unavailable")
+	}
+	application := newApp(t)
+	library := t.TempDir()
+	post(t, application, "/v1/settings/library", map[string]any{"library_dir": library})
+	folder := filepath.Join(library, "Artist", "Album")
+	if err := os.MkdirAll(folder, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	for _, title := range []string{"One", "Two"} {
+		track := filepath.Join(folder, title+".mp3")
+		command := exec.Command(ffmpeg, "-nostdin", "-v", "error", "-y", "-f", "lavfi", "-i", "sine=frequency=440:duration=1",
+			"-metadata", "artist=Artist", "-metadata", "album=Album", "-metadata", "title="+title, track)
+		if output, err := command.CombinedOutput(); err != nil {
+			t.Fatalf("generate %s: %v %s", title, err, output)
+		}
+	}
+	if err := application.runLibraryAutomationPass(context.Background(), libraryAutomationSettings{Enabled: true, Upgrade: true, IntervalHours: 6}); err != nil {
+		t.Fatal(err)
+	}
+	_, report := application.libraryAutomation.snapshot()
+	if report.UpgradeJobs != 2 {
+		t.Fatalf("two lossy tracks produced %d upgrade jobs: %+v", report.UpgradeJobs, report)
+	}
+	stopCtx, cancelStop := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancelStop()
+	if err := application.runner.Stop(stopCtx); err != nil {
+		t.Fatalf("stop automation executor: %v", err)
+	}
+}
 func TestSingleLossyTrackStillGetsAlbumCompletion(t *testing.T) {
 	tracks := []localWorkflowTrack{{Codec: "mp3", Artist: "Artist", Album: "Album", Title: "Song", Duration: 180}}
 	if !shouldExpandSingleAlbum(tracks, true, 0) {

@@ -45,12 +45,16 @@ func probeLocalWorkflowTrack(ctx context.Context, path string) (localWorkflowTra
 		return result, errors.New("本地文件缺少可核实的艺人、专辑、曲名或时长")
 	}
 	codec := strings.ToLower(data.Streams[0].Codec)
-	if codec == "flac" && strings.Contains(strings.ToLower(tags["comment"]), "musicops source=netease-lossy") {
+	if codec == "flac" && isLossyFLACProvenance(tags["comment"]) {
 		codec = "flac-lossy"
 	}
 	return localWorkflowTrack{Path: path, Artist: tags["artist"], Album: tags["album"], Title: tags["title"], Codec: codec, Duration: seconds}, nil
 }
 
+func isLossyFLACProvenance(comment string) bool {
+	comment = strings.ToLower(comment)
+	return strings.Contains(comment, "musicops source=") && strings.Contains(comment, "-lossy")
+}
 func isLossyUpgradeSource(codec string) bool {
 	switch codec {
 	case "mp3", "aac", "opus", "vorbis", "flac-lossy":

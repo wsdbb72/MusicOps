@@ -526,7 +526,7 @@ func scanAutomationFile(ctx context.Context, input libraryAutomationScanInput) l
 		entry.NeedsCatalog = maintenanceNeedsCatalogTags(tags)
 		entry.NeedsArtwork = maintenanceMissingArtwork(input.path, tags)
 		entry.Codec = "flac"
-		if strings.Contains(strings.ToLower(firstTagValue(tags.Raw, "COMMENT")), "musicops source=netease-lossy") {
+		if isLossyFLACProvenance(firstTagValue(tags.Raw, "COMMENT")) {
 			entry.Codec = "flac-lossy"
 		}
 		entry.Duration, _ = flacDuration(tags.StreamInfo)
@@ -1292,12 +1292,13 @@ func (a *App) enqueueLibraryMaintenanceWorkflows(ctx context.Context, byDir map[
 					lossy = append(lossy, track)
 				}
 			}
-			for start := 0; start < len(lossy) && jobs < libraryAutomationMaxJobs; start += 32 {
-				end := start + 32
-				if end > len(lossy) {
-					end = len(lossy)
+			for _, track := range lossy {
+				if jobs >= libraryAutomationMaxJobs {
+					break
 				}
-				if a.enqueueMaintenanceWorkflow(ctx, "upgrade", lossy[start:end], dir) {
+				// Each maintenance workflow carries one track so the single-track
+				// streaming plan cannot silently leave the other 31 tracks behind.
+				if a.enqueueMaintenanceWorkflow(ctx, "upgrade", []localWorkflowTrack{track}, dir) {
 					jobs++
 					state.update(func(report *libraryAutomationReport) { report.UpgradeJobs++ })
 				}

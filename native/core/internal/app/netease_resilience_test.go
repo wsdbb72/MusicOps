@@ -159,3 +159,119 @@ func TestNeteaseUnexpectedHTMLIsRetryable(t *testing.T) {
 		t.Fatalf("HTML/anti-bot response class = %q", got)
 	}
 }
+
+func TestNeteaseCancelAndMalformedJSONStayRetryable(t *testing.T) {
+	if got := classifyNeteaseFailure(context.Canceled); got != downloadpolicy.ClassNetwork {
+		t.Fatalf("cancellation class = %q; cancellation must not become a terminal no-result", got)
+	}
+	for _, body := range []string{"{\"data\":["} {
+		t.Run(body, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				_, _ = io.WriteString(w, body)
+			}))
+			defer server.Close()
+			a := newApp(t)
+			_, err := a.neteaseGet(context.Background(), server.URL+"/api", "")
+			if err == nil || classifyNeteaseFailure(err) != downloadpolicy.ClassNetwork {
+				t.Fatalf("malformed response err=%v class=%q", err, classifyNeteaseFailure(err))
+			}
+		})
+	}
+}
+
+func TestNeteaseGetRejectsNonObjectJSONAsRetryable(t *testing.T) {
+	for _, body := range []string{"null", "[]", `"ok"`} {
+		t.Run(body, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				_, _ = io.WriteString(w, body)
+			}))
+			defer server.Close()
+			a := newApp(t)
+			_, err := a.neteaseGet(context.Background(), server.URL+"/api", "")
+			if err == nil || classifyNeteaseFailure(err) != downloadpolicy.ClassNetwork {
+				t.Fatalf("non-object JSON err=%v class=%q", err, classifyNeteaseFailure(err))
+			}
+		})
+	}
+}
+
+func TestNeteaseSearchMissingShapeIsRetryableButEmptySongsIsNoResult(t *testing.T) {
+	cases := []struct {
+		name string
+		body string
+		none bool
+	}{
+		{name: "empty object", body: `{}`},
+		{name: "code without result", body: `{"code":200}`},
+		{name: "null result", body: `{"result":null}`},
+		{name: "missing songs", body: `{"result":{}}`},
+		{name: "null songs", body: `{"result":{"songs":null}}`},
+		{name: "explicit empty songs", body: `{"result":{"songs":[]}}`, none: true},
+	}
+	for _, test := range cases {
+		t.Run(test.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				_, _ = io.WriteString(w, test.body)
+			}))
+			defer server.Close()
+			a := newApp(t)
+			a.neteaseBases = map[string]string{"api": server.URL}
+			song, err := a.neteaseSearchSong(context.Background(), SearchPlan{ExpectedTitle: "Song", ExpectedArtist: "Artist"})
+			if test.none {
+				if err != nil || song != nil {
+					t.Fatalf("explicit empty songs should be a clean no-result: song=%+v err=%v", song, err)
+				}
+				return
+			}
+			if err == nil || classifyNeteaseFailure(err) != downloadpolicy.ClassNetwork {
+				t.Fatalf("missing contract err=%v class=%q", err, classifyNeteaseFailure(err))
+			}
+		})
+	}
+}
+
+func TestNeteaseAudioAndCoverMissingShapeAreRetryable(t *testing.T) {
+	audioBodies := []string{`{}`, `{"code":200}`, `{"data":null}`}
+	for _, body := range audioBodies {
+		t.Run("audio "+body, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				_, _ = io.WriteString(w, body)
+			}))
+			defer server.Close()
+			a := newApp(t)
+			a.neteaseBases = map[string]string{"api": server.URL}
+			_, _, err := a.neteaseURLFor(context.Background(), &neteaseSong{ID: 7})
+			if err == nil || classifyNeteaseFailure(err) != downloadpolicy.ClassNetwork {
+				t.Fatalf("audio contract err=%v class=%q", err, classifyNeteaseFailure(err))
+			}
+		})
+	}
+	coverBodies := []string{`{}`, `{"album":null}`, `{"album":{}}`}
+	for _, body := range coverBodies {
+		t.Run("cover "+body, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				_, _ = io.WriteString(w, body)
+			}))
+			defer server.Close()
+			a := newApp(t)
+			a.neteaseBases = map[string]string{"api": server.URL}
+			_, err := a.neteaseCoverURLFor(context.Background(), &neteaseSong{AlbumID: 42})
+			if err == nil || classifyNeteaseFailure(err) != downloadpolicy.ClassNetwork {
+				t.Fatalf("cover contract err=%v class=%q", err, classifyNeteaseFailure(err))
+			}
+		})
+	}
+}
+
+func TestNeteaseURLContractMismatchIsRetryable(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.WriteString(w, `{"data":"not-an-array"}`)
+	}))
+	defer server.Close()
+	a := newApp(t)
+	a.neteaseBases = map[string]string{"api": server.URL}
+	_, _, err := a.neteaseURLFor(context.Background(), &neteaseSong{ID: 7, CatalogVerified: true})
+	if err == nil || classifyNeteaseFailure(err) != downloadpolicy.ClassNetwork {
+		t.Fatalf("URL contract err=%v class=%q", err, classifyNeteaseFailure(err))
+	}
+}

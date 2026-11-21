@@ -558,6 +558,52 @@ func TestEngineTranscodeHonorsCancellation(t *testing.T) {
 	}
 }
 
+func TestEngineTranscodeReservesBoundedCacheFiles(t *testing.T) {
+	application := newApp(t)
+	ffmpeg, err := exec.LookPath("ffmpeg")
+	if err != nil {
+		if tools, bundled := application.bundledTools(); bundled {
+			ffmpeg = filepath.Join(tools, "ffmpeg.exe")
+		} else {
+			t.Skip("ffmpeg unavailable")
+		}
+	}
+	source := filepath.Join(t.TempDir(), "source.wav")
+	command := exec.Command(ffmpeg, "-nostdin", "-v", "error", "-y", "-f", "lavfi", "-i", "sine=frequency=440:duration=0.1", "-c:a", "pcm_s16le", source)
+	if output, runErr := command.CombinedOutput(); runErr != nil {
+		t.Fatalf("generate WAV: %v %s", runErr, output)
+	}
+	body, err := os.ReadFile(source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	converted, err := application.transcodeEngineAudio(context.Background(), body, "netease", SearchPlan{})
+	if err != nil || len(converted) < 4 || string(converted[:4]) != "fLaC" {
+		t.Fatalf("converted=%d err=%v", len(converted), err)
+	}
+	entries, err := os.ReadDir(application.workPath("incoming", "engine-transcode"))
+	if err != nil || len(entries) != 0 {
+		t.Fatalf("transcode left SSD cache files: entries=%d err=%v", len(entries), err)
+	}
+}
+
+func TestEngineTranscodeChecksCacheLimitBeforeCreatingFiles(t *testing.T) {
+	application := newApp(t)
+	if _, err := exec.LookPath("ffmpeg"); err != nil {
+		if _, bundled := application.bundledTools(); !bundled {
+			t.Skip("ffmpeg unavailable")
+		}
+	}
+	t.Setenv("MUSICOPS_AUDIO_CACHE_BYTES", "1048576")
+	_, err := application.transcodeEngineAudio(context.Background(), []byte("ID3"), "netease", SearchPlan{})
+	if !isTemporaryAudioCacheError(err) {
+		t.Fatalf("cache limit error=%T %v", err, err)
+	}
+	if _, statErr := os.Stat(application.workPath("incoming", "engine-transcode")); !os.IsNotExist(statErr) {
+		t.Fatalf("transcode wrote cache staging before the limit check: %v", statErr)
+	}
+}
+
 func TestStreamSearchRejectsCardsFromAnotherProvider(t *testing.T) {
 	var downloadCalls int
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

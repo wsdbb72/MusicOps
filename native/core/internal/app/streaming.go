@@ -303,7 +303,14 @@ func (a *App) acquireFallback(ctx context.Context, execution *scheduler.Executio
 			// remain tied to the original release. Explicit netease_only mode
 			// reaches this branch immediately through playlistFallbackSteps.
 			if step.Name == "netease" && neteaseAlbum && a.neteaseCookie() != "" {
-				return a.acquireNeteaseAlbum(ctx, execution, held, job, plan)
+				outcome, err := a.acquireNeteaseAlbum(ctx, execution, held, job, plan)
+				if err != nil {
+					return scheduler.Outcome{}, err
+				}
+				if err := ctx.Err(); err != nil {
+					return scheduler.Outcome{}, err
+				}
+				return outcome, nil
 			}
 			// Without a built-in NetEase session, a configured engine may still
 			// provide this source.
@@ -339,9 +346,15 @@ func (a *App) acquireFallback(ctx context.Context, execution *scheduler.Executio
 				validated = path
 			}
 		}
+		if err := ctx.Err(); err != nil {
+			return scheduler.Outcome{}, err
+		}
 		if validated != "" {
 			break
 		}
+	}
+	if err := ctx.Err(); err != nil {
+		return scheduler.Outcome{}, err
 	}
 	walk, err := downloadpolicy.Apply(steps, outcomes, int(job.SearchRetryCount))
 	if err != nil {

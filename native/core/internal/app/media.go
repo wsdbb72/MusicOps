@@ -415,35 +415,49 @@ func writeFLACTags(path string, updates map[string][]string) error {
 	if err != nil {
 		return &tagWriteError{code: "TAG_UNAVAILABLE", status: http.StatusInternalServerError, err: err}
 	}
-	defer os.Remove(backup)
 	if err := flactags.Write(path, flactags.Tags{Raw: merged}); err != nil {
+		// flactags.Write itself uses a same-directory temporary file and does
+		// not replace the original until the complete rewrite is durable.
+		_ = os.Remove(backup)
 		return &tagWriteError{code: "TAG_WRITE_FAILED", status: http.StatusUnprocessableEntity, restore: true, err: err}
 	}
 	after, err := flactags.ReadFile(path)
 	if err != nil {
-		restoreBackup(path, backup)
+		if restoreErr := restoreBackup(path, backup); restoreErr != nil {
+			err = errors.Join(err, restoreErr)
+		}
 		return &tagWriteError{code: "TAG_READBACK_MISMATCH", status: http.StatusInternalServerError, restore: true, err: err}
 	}
 	for key, want := range updates {
 		got := after.Raw[key]
 		if len(want) == 0 {
 			if len(got) != 0 {
-				restoreBackup(path, backup)
-				return &tagWriteError{code: "TAG_READBACK_MISMATCH", status: http.StatusInternalServerError, restore: true, err: fmt.Errorf("field %s was not deleted", key)}
+				err := fmt.Errorf("field %s was not deleted", key)
+				if restoreErr := restoreBackup(path, backup); restoreErr != nil {
+					err = errors.Join(err, restoreErr)
+				}
+				return &tagWriteError{code: "TAG_READBACK_MISMATCH", status: http.StatusInternalServerError, restore: true, err: err}
 			}
 			continue
 		}
 		if len(got) != len(want) {
-			restoreBackup(path, backup)
-			return &tagWriteError{code: "TAG_READBACK_MISMATCH", status: http.StatusInternalServerError, restore: true, err: fmt.Errorf("field %s read back differently", key)}
+			err := fmt.Errorf("field %s read back differently", key)
+			if restoreErr := restoreBackup(path, backup); restoreErr != nil {
+				err = errors.Join(err, restoreErr)
+			}
+			return &tagWriteError{code: "TAG_READBACK_MISMATCH", status: http.StatusInternalServerError, restore: true, err: err}
 		}
 		for i := range want {
 			if got[i] != want[i] {
-				restoreBackup(path, backup)
-				return &tagWriteError{code: "TAG_READBACK_MISMATCH", status: http.StatusInternalServerError, restore: true, err: fmt.Errorf("field %s read back differently", key)}
+				err := fmt.Errorf("field %s read back differently", key)
+				if restoreErr := restoreBackup(path, backup); restoreErr != nil {
+					err = errors.Join(err, restoreErr)
+				}
+				return &tagWriteError{code: "TAG_READBACK_MISMATCH", status: http.StatusInternalServerError, restore: true, err: err}
 			}
 		}
 	}
+	_ = os.Remove(backup)
 	return nil
 }
 
@@ -463,45 +477,63 @@ func backupFile(path string) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	info, err := os.Stat(path)
+	if err != nil {
+		return "", err
+	}
+	if !info.Mode().IsRegular() {
+		return "", fmt.Errorf("backup: %s is not a regular file", path)
+	}
 	tmp, err := os.CreateTemp(filepath.Dir(path), ".musicops-backup-*")
 	if err != nil {
 		return "", err
 	}
-	defer tmp.Close()
-	if _, err := tmp.Write(data); err != nil {
-		os.Remove(tmp.Name())
-		return "", err
+	tmpName := tmp.Name()
+	cleanup := func(cause error) (string, error) {
+		_ = tmp.Close()
+		_ = os.Remove(tmpName)
+		return "", cause
+	}
+	if written, err := tmp.Write(data); err != nil {
+		return cleanup(err)
+	} else if written != len(data) {
+		return cleanup(fmt.Errorf("backup: wrote %d of %d bytes", written, len(data)))
+	}
+	if err := tmp.Chmod(info.Mode().Perm()); err != nil {
+		return cleanup(err)
 	}
 	if err := tmp.Sync(); err != nil {
-		os.Remove(tmp.Name())
-		return "", err
-	}
-	return tmp.Name(), nil
-}
-
-// restoreBackup atomically replaces path with the backup copy.
-func restoreBackup(path, backup string) {
-	data, err := os.ReadFile(backup)
-	if err != nil {
-		return
-	}
-	tmp, err := os.CreateTemp(filepath.Dir(path), ".musicops-restore-*")
-	if err != nil {
-		return
-	}
-	defer os.Remove(tmp.Name())
-	if _, err := tmp.Write(data); err != nil {
-		tmp.Close()
-		return
-	}
-	if err := tmp.Sync(); err != nil {
-		tmp.Close()
-		return
+		return cleanup(err)
 	}
 	if err := tmp.Close(); err != nil {
-		return
+		_ = os.Remove(tmpName)
+		return "", err
 	}
-	_ = os.Rename(tmp.Name(), path)
+	return tmpName, nil
+}
+
+// restoreBackup atomically replaces path with the backup copy. A failed
+// restore leaves both the current path and the backup untouched. On success
+// the backup is removed, so callers never delete it before restoration has
+// actually committed.
+func restoreBackup(path, backup string) error {
+	data, err := os.ReadFile(backup)
+	if err != nil {
+		return fmt.Errorf("restore backup: read %s: %w", backup, err)
+	}
+	mode := os.FileMode(0o600)
+	if info, err := os.Stat(backup); err == nil {
+		mode = info.Mode().Perm()
+	} else {
+		return fmt.Errorf("restore backup: stat %s: %w", backup, err)
+	}
+	if err := replaceFileAtomically(path, data, mode); err != nil {
+		return fmt.Errorf("restore backup: %w", err)
+	}
+	if err := os.Remove(backup); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("restore backup: remove committed backup %s: %w", backup, err)
+	}
+	return nil
 }
 
 // ---------------------------------------------------------------------------

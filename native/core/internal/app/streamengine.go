@@ -19,6 +19,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/wsdbb72/MusicOps/native/core/internal/audiorelease"
 	"github.com/wsdbb72/MusicOps/native/core/internal/downloadpolicy"
 	"github.com/wsdbb72/MusicOps/native/core/internal/flactags"
 )
@@ -208,7 +209,9 @@ func isKnownAudio(body []byte) bool {
 }
 
 // transcodeEngineAudio converts the engine's lossy download into FLAC with the
-// bundled ffmpeg. The bytes are validated afterwards like any other source.
+// bundled ffmpeg. The temporary input and output are reserved against the
+// shared SSD cache limit before either file is created, and ffmpeg is bounded
+// to the same maximum output size used by the rest of the download pipeline.
 func (a *App) transcodeEngineAudio(ctx context.Context, body []byte, source string, plan SearchPlan) ([]byte, error) {
 	ffmpeg := ""
 	if tools, ok := a.bundledTools(); ok {
@@ -219,8 +222,20 @@ func (a *App) transcodeEngineAudio(ctx context.Context, body []byte, source stri
 	if ffmpeg == "" {
 		return nil, errors.New("没有可用的 ffmpeg")
 	}
-	dir := filepath.Join(a.workPath("incoming"), "engine-transcode")
-	if err := os.MkdirAll(dir, 0o700); err != nil {
+	incoming := a.workPath("incoming")
+	if err := os.MkdirAll(incoming, 0o700); err != nil {
+		return nil, err
+	}
+	// Reserve the actual input plus the hard maximum for FLAC output before
+	// creating either temporary. The reservation stays held until both files
+	// are gone, so concurrent transcodes cannot each pass the old usage check.
+	release, err := reserveAudioCache(incoming, int64(len(body))+int64(audiorelease.MaxStagedAudioBytes)+65536)
+	if err != nil {
+		return nil, err
+	}
+	defer release()
+	dir := filepath.Join(incoming, "engine-transcode")
+	if err = os.MkdirAll(dir, 0o700); err != nil {
 		return nil, err
 	}
 	input, err := os.CreateTemp(dir, "engine-*.audio")
@@ -232,13 +247,22 @@ func (a *App) transcodeEngineAudio(ctx context.Context, body []byte, source stri
 		input.Close()
 		return nil, err
 	}
-	input.Close()
+	if err := input.Close(); err != nil {
+		return nil, err
+	}
 	output := input.Name() + ".flac"
 	defer os.Remove(output)
-	cmd := exec.CommandContext(ctx, ffmpeg, "-y", "-v", "error", "-i", input.Name(), "-c:a", "flac", output)
+	cmd := exec.CommandContext(ctx, ffmpeg, "-y", "-v", "error", "-i", input.Name(), "-fs", strconv.Itoa(audiorelease.MaxStagedAudioBytes), "-c:a", "flac", output)
 	prepareSolverCommand(cmd)
 	if err := cmd.Run(); err != nil {
 		return nil, err
+	}
+	info, err := os.Stat(output)
+	if err != nil {
+		return nil, err
+	}
+	if !info.Mode().IsRegular() || info.Size() <= 0 || info.Size() > audiorelease.MaxStagedAudioBytes {
+		return nil, errors.New("转 FLAC 输出超过暂存上限")
 	}
 	return os.ReadFile(output)
 }

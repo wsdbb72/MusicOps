@@ -22,6 +22,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 	"unicode/utf8"
 
@@ -34,6 +35,14 @@ const MaxAudioBytes = 32 << 20
 
 // MaxStagedAudioBytes is the separate ceiling for internal download staging.
 const MaxStagedAudioBytes = 160 << 20
+
+var (
+	releasePathLocks sync.Map
+	// Test seams. Production leaves both nil. They are assigned before a test
+	// starts its goroutines and cleared after they finish.
+	releaseAfterPathScan      func()
+	restoreAfterTargetRemoved func()
+)
 
 var (
 	ErrRejected = errors.New("audio rejected")
@@ -157,6 +166,10 @@ func Release(ctx context.Context, engine *dataengine.Engine, input Request) (Res
 	if existing, found, err := readRelease(engine, input.RequestID); err != nil {
 		return empty, err
 	} else if found {
+		// A committed replay can race a replacement of the same library path.
+		// Serialize the verification and backup cleanup with every Release call.
+		unlock := lockReleasePath(existing.Path)
+		defer unlock()
 		// Only a target that still matches the committed digest proves the
 		// replacement completed. Preserve a backup when the disk is inconsistent.
 		if sameFile(existing.Path, existing.SHA256) != nil {
@@ -201,9 +214,6 @@ func Release(ctx context.Context, engine *dataengine.Engine, input Request) (Res
 		folderArtist = filepath.Clean(strings.TrimSpace(input.FolderArtist))
 	}
 	folder := filepath.Join(library, folderArtist, album)
-	if err = os.MkdirAll(folder, 0o700); err != nil {
-		return empty, err
-	}
 	if !inside(library, folder) {
 		return empty, dataengine.ErrInvalidRequest
 	}
@@ -211,6 +221,13 @@ func Release(ctx context.Context, engine *dataengine.Engine, input Request) (Res
 	dest := filepath.Join(folder, name)
 	if !inside(library, dest) || inside(incoming, dest) {
 		return empty, dataengine.ErrInvalidRequest
+	}
+	// Different roots can still resolve to the same artist/album/track path.
+	// Lock from the first filesystem check through CAS, rollback and cleanup.
+	unlockPath := lockReleasePath(dest)
+	defer unlockPath()
+	if err = os.MkdirAll(folder, 0o700); err != nil {
+		return empty, err
 	}
 	created := false
 	exists := false
@@ -225,7 +242,7 @@ func Release(ctx context.Context, engine *dataengine.Engine, input Request) (Res
 		// file reached the authorized destination.
 		if _, destErr := os.Lstat(dest); os.IsNotExist(destErr) {
 			if _, backupErr := os.Lstat(replacementBackup); backupErr == nil {
-				if err = os.Rename(replacementBackup, dest); err != nil {
+				if err = restoreBackupNoReplace(replacementBackup, dest); err != nil {
 					return empty, err
 				}
 			} else if !os.IsNotExist(backupErr) {
@@ -262,6 +279,9 @@ func Release(ctx context.Context, engine *dataengine.Engine, input Request) (Res
 	} else if !os.IsNotExist(statErr) {
 		return empty, statErr
 	}
+	if releaseAfterPathScan != nil {
+		releaseAfterPathScan()
+	}
 	restoreOriginal := func() error {
 		if backup == "" {
 			return nil
@@ -286,12 +306,19 @@ func Release(ctx context.Context, engine *dataengine.Engine, input Request) (Res
 		}
 		if replaceExisting {
 			backup = replacementBackup
-			if _, backupErr := os.Lstat(backup); backupErr == nil {
-				_ = os.Remove(temp)
-				return empty, ErrConflict
-			} else if !os.IsNotExist(backupErr) {
+			consumed, backupErr := consumeRestoredReplacementBackup(dest, backup)
+			if backupErr != nil {
 				_ = os.Remove(temp)
 				return empty, backupErr
+			}
+			if !consumed {
+				if _, statBackupErr := os.Lstat(backup); statBackupErr == nil {
+					_ = os.Remove(temp)
+					return empty, ErrConflict
+				} else if !os.IsNotExist(statBackupErr) {
+					_ = os.Remove(temp)
+					return empty, statBackupErr
+				}
 			}
 			if err = os.Rename(dest, backup); err != nil {
 				_ = os.Remove(temp)
@@ -373,8 +400,7 @@ func Release(ctx context.Context, engine *dataengine.Engine, input Request) (Res
 			return empty, readErr
 		}
 		if found && current.SHA256 == digest && current.RootID == input.RootID {
-			commitReplacement()
-			return replay(current, source)
+			return replayCommittedReplacement(current, source, dest, commitReplacement, restoreOriginal)
 		}
 		// Our bytes are already in the library but no record claims them.
 		// Remove our file when it still holds our bytes, so a lost CAS race
@@ -1005,6 +1031,29 @@ func replay(rec record, source string) (Result, error) {
 	return resultFrom(rec, preserved, true), nil
 }
 
+// replayCommittedReplacement handles a release record which won the CAS race
+// after this process moved the old file aside. The backup is only cleanup once
+// the committed record and its target both verify; otherwise restore the old
+// file so an invalid record cannot turn a safe rollback into data loss.
+func replayCommittedReplacement(rec record, source, dest string, commitReplacement func(), restoreOriginal func() error) (Result, error) {
+	if !replacementPathMatches(rec.Path, dest) {
+		err := fmt.Errorf("%w: committed release target moved from the replacement path", ErrConflict)
+		if restoreErr := restoreOriginal(); restoreErr != nil {
+			return Result{}, errors.Join(err, restoreErr)
+		}
+		return Result{}, err
+	}
+	replayed, err := replay(rec, source)
+	if err != nil {
+		if restoreErr := restoreOriginal(); restoreErr != nil {
+			return Result{}, errors.Join(err, restoreErr)
+		}
+		return Result{}, err
+	}
+	commitReplacement()
+	return replayed, nil
+}
+
 // replayMissing returns the stored receipt when the source file is gone but
 // the library file still hashes to the stored digest. The release is
 // committed; the missing source is reported as not preserved, never as a
@@ -1239,6 +1288,20 @@ func replacementBackupPath(dest, requestID string) string {
 	return filepath.Join(filepath.Dir(dest), ".musicops-"+requestID+".replaced")
 }
 
+func lockReleasePath(path string) func() {
+	key, err := filepath.Abs(filepath.Clean(path))
+	if err != nil {
+		key = filepath.Clean(path)
+	}
+	if runtime.GOOS == "windows" {
+		key = strings.ToLower(key)
+	}
+	value, _ := releasePathLocks.LoadOrStore(key, &sync.Mutex{})
+	mu := value.(*sync.Mutex)
+	mu.Lock()
+	return mu.Unlock
+}
+
 func replacementPathMatches(authorized, dest string) bool {
 	authorizedAbs, err := filepath.Abs(filepath.Clean(authorized))
 	if err != nil {
@@ -1262,20 +1325,94 @@ func replacementTargetMatches(authorized, dest string) bool {
 	return err == nil && os.SameFile(authorizedInfo, destInfo)
 }
 func restoreReplacedFile(dest, backup, digest string) error {
-	var rollbackErr error
-	if _, err := os.Lstat(dest); err == nil {
-		if sameFile(dest, digest) == nil {
-			if removeErr := os.Remove(dest); removeErr != nil {
-				rollbackErr = errors.Join(rollbackErr, removeErr)
-			}
+	backupInfo, err := os.Lstat(backup)
+	if err != nil {
+		return err
+	}
+	if !backupInfo.Mode().IsRegular() {
+		return fmt.Errorf("%w: replacement backup is not a regular file", ErrConflict)
+	}
+
+	destInfo, destErr := os.Lstat(dest)
+	switch {
+	case destErr == nil:
+		if !destInfo.Mode().IsRegular() {
+			return fmt.Errorf("%w: replacement target is not a regular file", ErrConflict)
 		}
-	} else if !os.IsNotExist(err) {
-		rollbackErr = errors.Join(rollbackErr, err)
+		if os.SameFile(destInfo, backupInfo) {
+			// The prior process restored with a hard link and exited before
+			// removing the redundant backup. Recovery already committed.
+			return os.Remove(backup)
+		}
+		if err := sameFile(dest, digest); err != nil {
+			return fmt.Errorf("%w: replacement target changed before rollback", ErrConflict)
+		}
+		if err := os.Remove(dest); err != nil {
+			return err
+		}
+		if restoreAfterTargetRemoved != nil {
+			restoreAfterTargetRemoved()
+		}
+	case !os.IsNotExist(destErr):
+		return destErr
 	}
-	if err := os.Rename(backup, dest); err != nil {
-		rollbackErr = errors.Join(rollbackErr, err)
+
+	// Link creates the restored path atomically only when it is still absent.
+	// Unlike rename(2), it cannot overwrite a different publish that appears
+	// after the check above.
+	if err := os.Link(backup, dest); err != nil {
+		if errors.Is(err, os.ErrExist) {
+			return fmt.Errorf("%w: replacement target appeared during rollback", ErrConflict)
+		}
+		return err
 	}
-	return rollbackErr
+	return os.Remove(backup)
+}
+
+func restoreBackupNoReplace(backup, dest string) error {
+	info, err := os.Lstat(backup)
+	if err != nil {
+		return err
+	}
+	if !info.Mode().IsRegular() {
+		return fmt.Errorf("%w: replacement backup is not a regular file", ErrConflict)
+	}
+	if err := os.Link(backup, dest); err != nil {
+		if errors.Is(err, os.ErrExist) {
+			return fmt.Errorf("%w: replacement target appeared during recovery", ErrConflict)
+		}
+		return err
+	}
+	return os.Remove(backup)
+}
+
+// consumeRestoredReplacementBackup recognizes the crash window where a rollback
+// linked the old file back to dest but exited before removing the backup name.
+func consumeRestoredReplacementBackup(dest, backup string) (bool, error) {
+	backupInfo, err := os.Lstat(backup)
+	if os.IsNotExist(err) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	if !backupInfo.Mode().IsRegular() {
+		return false, fmt.Errorf("%w: replacement backup is not a regular file", ErrConflict)
+	}
+	destInfo, err := os.Lstat(dest)
+	if err != nil {
+		return false, err
+	}
+	if !destInfo.Mode().IsRegular() {
+		return false, fmt.Errorf("%w: replacement target is not a regular file", ErrConflict)
+	}
+	if !os.SameFile(destInfo, backupInfo) {
+		return false, nil
+	}
+	if err := os.Remove(backup); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 func sameFile(path, digest string) error {

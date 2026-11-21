@@ -8,6 +8,7 @@ package app
 import (
 	"bytes"
 	"context"
+	"errors"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -266,6 +267,11 @@ func (a *App) scrapeLibrary(w http.ResponseWriter, r *http.Request) {
 						updates, extra = a.applyFieldLocks(filepath.Dir(entry.full), updates)
 						for _, field := range extra {
 							result.LockedFields = append(result.LockedFields, field)
+							if field == "lyrics" {
+								// The tag and sidecar are one user-visible field. A
+								// lock on LYRICS must suppress both writes.
+								lyricsText = ""
+							}
 						}
 						if len(extra) > 0 {
 							written := completion.Written[:0]
@@ -302,55 +308,95 @@ func (a *App) scrapeLibrary(w http.ResponseWriter, r *http.Request) {
 					continue
 				}
 			}
+			sidecar := strings.TrimSuffix(entry.full, filepath.Ext(entry.full)) + ".jpg"
+			sidecarPaths := []string{}
+			if lyricsText != "" {
+				sidecarPaths = append(sidecarPaths, lyricsSidecarPath(entry.full), entry.full+".lrc")
+			}
+			if cover != nil {
+				sidecarPaths = append(sidecarPaths, sidecar)
+			}
+			sidecars, snapshotErr := snapshotFiles(sidecarPaths...)
+			if snapshotErr != nil {
+				if backup != "" {
+					_ = os.Remove(backup)
+				}
+				result.Status, result.Code, result.Note = "failed", "TAG_UNAVAILABLE", "sidecar 备份失败，文件没有改"
+				continue
+			}
+			rollback := func(cause error) (bool, error) {
+				restored := true
+				resultErr := cause
+				if backup != "" {
+					restored, resultErr = restoreBackupOnFailure(entry.full, backup, cause)
+				}
+				if sidecarErr := restoreFileSnapshots(sidecars); sidecarErr != nil {
+					return false, errors.Join(resultErr, sidecarErr)
+				}
+				return restored, resultErr
+			}
+			fail := func(code string, cause error) {
+				restored, resultErr := rollback(cause)
+				result.Status, result.Code = "failed", code
+				if restored {
+					result.Note = "操作失败，原文件已恢复：" + resultErr.Error()
+				} else {
+					result.Note = "操作失败且恢复未完成；原文件备份已保留：" + resultErr.Error()
+				}
+			}
 			if len(updates) > 0 {
 				if err := writeFLACTags(entry.full, updates); err != nil {
-					if backup != "" {
-						restoreBackup(entry.full, backup)
-						_ = os.Remove(backup)
-					}
-					result.Status, result.Code, result.Note = "failed", "TAG_WRITE_FAILED", "写标签失败，文件已恢复"
+					fail("TAG_WRITE_FAILED", err)
 					continue
 				}
 			}
 			if cover != nil {
 				updated, readErr := os.ReadFile(entry.full)
-				var embedded []byte
-				if readErr == nil {
-					embedded, err = flactags.EmbedFrontCover(updated, cover)
-				}
-				if readErr != nil || err != nil || os.WriteFile(entry.full, embedded, 0o600) != nil || !bytes.Equal(flactags.FrontCover(embedded), cover) {
-					restoreBackup(entry.full, backup)
-					_ = os.Remove(backup)
-					result.Status, result.Code, result.Note = "failed", "COVER_WRITE_FAILED", "封面没有写入，文件已恢复"
+				if readErr != nil {
+					fail("COVER_WRITE_FAILED", readErr)
 					continue
 				}
-				sidecar := strings.TrimSuffix(entry.full, filepath.Ext(entry.full)) + ".jpg"
+				embedded, embedErr := flactags.EmbedFrontCover(updated, cover)
+				if embedErr != nil || !bytes.Equal(flactags.FrontCover(embedded), cover) {
+					if embedErr == nil {
+						embedErr = errors.New("front cover readback mismatch")
+					}
+					fail("COVER_WRITE_FAILED", embedErr)
+					continue
+				}
+				if err := replaceFileAtomically(entry.full, embedded, 0); err != nil {
+					fail("COVER_WRITE_FAILED", err)
+					continue
+				}
+			}
+			if lyricsText != "" {
+				if err := writeLyricsSidecar(entry.full, lyricsText); err != nil {
+					fail("LYRICS_WRITE_FAILED", err)
+					continue
+				}
+			}
+			// Apply the cover sidecar only after every operation that can fail
+			// on the audio. Atomic sidecar writes preserve an existing jpg when
+			// the final rename cannot commit.
+			if cover != nil {
 				if coverMode == "sidecar" {
-					if err := os.WriteFile(sidecar, cover, 0o600); err != nil {
-						restoreBackup(entry.full, backup)
-						_ = os.Remove(backup)
-						_ = os.Remove(sidecar)
-						result.Status, result.Code, result.Note = "failed", "COVER_WRITE_FAILED", "封面没有写入，文件已恢复"
+					if err := replaceFileAtomically(sidecar, cover, 0o600); err != nil {
+						fail("COVER_WRITE_FAILED", err)
 						continue
 					}
 				} else {
-					_ = os.Remove(sidecar)
+					if err := os.Remove(sidecar); err != nil && !os.IsNotExist(err) {
+						fail("COVER_WRITE_FAILED", err)
+						continue
+					}
 				}
 				result.Cover = true
 				coverWritten++
 			}
-			if lyricsText != "" {
-				if err := writeLyricsSidecar(entry.full, lyricsText); err != nil {
-					restoreBackup(entry.full, backup)
-					_ = os.Remove(lyricsSidecarPath(entry.full))
-					_ = os.Remove(backup)
-					result.Status, result.Code, result.Note = "failed", "LYRICS_WRITE_FAILED", "歌词文件没有写入，文件已恢复"
-					continue
-				}
-			}
 			if backup != "" {
 				_ = os.Remove(backup)
 			}
+			_ = commitFileSnapshots(sidecars)
 			result.Status = "written"
 			result.WrittenFields = completion.Written
 			result.KeptFields = completion.Kept

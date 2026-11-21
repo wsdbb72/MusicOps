@@ -2,6 +2,8 @@ package app
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -85,6 +87,108 @@ func TestPlaylistPresenceRequiresMatchingUnchangedAudio(t *testing.T) {
 	}
 	if application.playlistLibrary().hasTrack("Artist A", "Album X", "Song One") {
 		t.Fatal("a changed file was reported present")
+	}
+}
+
+func indexPlaylistTestFile(t *testing.T, application *App, library, relative, artist, album, title string) string {
+	t.Helper()
+	path := filepath.Join(library, filepath.FromSlash(relative))
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	body, err := flactags.WriteBytes(syntheticFLAC(t, false), flactags.Tags{
+		Artists: splitPlaylistArtists(artist), Album: album, Title: title,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, body, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	sum := sha256.Sum256([]byte(relative))
+	requestID := "playlist-layout-" + hex.EncodeToString(sum[:8])
+	if added, err := audiorelease.IndexExisting(application.engine, audiorelease.Existing{
+		RequestID: requestID, RootID: requestID + "-root", Track: 1,
+		Path: path, Library: library, Format: "flac", SourceName: "reindex", MetadataOnly: true,
+	}); err != nil || !added {
+		t.Fatalf("index %s: added=%v err=%v", path, added, err)
+	}
+	return path
+}
+
+func TestPlaylistPresenceUsesEmbeddedIdentityForFlatArtistAlbumFolder(t *testing.T) {
+	application := newApp(t)
+	library := t.TempDir()
+	indexPlaylistTestFile(t, application, library,
+		"郑智化 - 岁月风华之恋曲典藏/郑智化 - 水手.flac",
+		"郑智化", "岁月风华之恋曲典藏", "水手")
+	application.invalidatePlaylistLibraryCache()
+	index := application.playlistLibrary()
+	if !index.hasTrack("郑智化", "岁月风华之恋曲典藏", "水手") {
+		t.Fatal("an embedded artist/title match was reported missing because of the folder layout")
+	}
+	if index.hasTrack("郑智化", "另一张专辑", "水手") {
+		t.Fatal("a different embedded album was accepted")
+	}
+	application.invalidatePlaylistLibraryCache()
+	report, err := application.enqueuePlaylistTracks(context.Background(), "pl-layout-duplicate", []playlistTrack{{
+		Artist: "郑智化", Album: "岁月风华之恋曲典藏", Title: "水手", NeteaseSongID: 375,
+	}}, []int{0}, playlistEnqueueOptions{AlbumCompletion: true})
+	if err != nil || len(report.Created) != 0 || len(report.Skipped) != 1 {
+		t.Fatalf("an existing embedded track was re-queued: report=%+v err=%v", report, err)
+	}
+}
+
+func TestPlaylistPresenceRejectsWrongCreditsAndDamagedCandidate(t *testing.T) {
+	for _, tc := range []struct {
+		name, fileArtist, tagArtist, tagAlbum string
+	}{
+		{name: "wrong artist", fileArtist: "郑智化", tagArtist: "Other Artist", tagAlbum: "岁月风华之恋曲典藏"},
+		{name: "wrong album", fileArtist: "郑智化", tagArtist: "郑智化", tagAlbum: "另一张专辑"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			application := newApp(t)
+			library := t.TempDir()
+			indexPlaylistTestFile(t, application, library,
+				tc.fileArtist+" - 岁月风华之恋曲典藏/"+tc.fileArtist+" - 水手.flac",
+				tc.tagArtist, tc.tagAlbum, "水手")
+			application.invalidatePlaylistLibraryCache()
+			if application.playlistLibrary().hasTrack("郑智化", "岁月风华之恋曲典藏", "水手") {
+				t.Fatal("filename-only evidence was accepted despite conflicting embedded identity")
+			}
+		})
+	}
+
+	application := newApp(t)
+	library := t.TempDir()
+	path := filepath.Join(library, "郑智化 - 岁月风华之恋曲典藏", "郑智化 - 水手.flac")
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte("not a readable FLAC"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if added, err := audiorelease.IndexExisting(application.engine, audiorelease.Existing{
+		RequestID: "playlist-layout-damaged", RootID: "playlist-layout-damaged-root", Track: 1,
+		Path: path, Library: library, Format: "flac", SourceName: "reindex", MetadataOnly: true,
+	}); err != nil || !added {
+		t.Fatal(added, err)
+	}
+	application.invalidatePlaylistLibraryCache()
+	if application.playlistLibrary().hasTrack("郑智化", "岁月风华之恋曲典藏", "水手") {
+		t.Fatal("a damaged file whose embedded identity could not be read was accepted")
+	}
+}
+
+func TestPlaylistPresenceAcceptsVariousArtistsWithEmbeddedTrackCredit(t *testing.T) {
+	application := newApp(t)
+	library := t.TempDir()
+	indexPlaylistTestFile(t, application, library,
+		"群星/合辑/群星 - Shared Song.flac",
+		"Guest Singer", "Shared Album", "Shared Song")
+	application.invalidatePlaylistLibraryCache()
+	if !application.playlistLibrary().hasTrack("Various Artists", "Shared Album", "Shared Song") {
+		t.Fatal("Various Artists did not accept embedded track-credit evidence")
 	}
 }
 

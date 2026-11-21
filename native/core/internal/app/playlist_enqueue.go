@@ -102,6 +102,14 @@ type playlistLibraryIndex struct {
 	pendingSnapshots map[string]audiorelease.VerifiedPresence
 }
 
+var playlistTitleSeparators = strings.NewReplacer(
+	" – ", "\x00",
+	" — ", "\x00",
+	" - ", "\x00",
+	"｜", "\x00",
+	" | ", "\x00",
+)
+
 func normalizeKey(s string) string {
 	s = strings.ToLower(strings.TrimSpace(s))
 	replacer := strings.NewReplacer("_", " ", "-", " ", "/", " ", "　", " ", "’", "'", "‘", "'", "“", "\"", "”", "\"")
@@ -159,6 +167,32 @@ func trackPathKeyOfPath(file string) (artist, album, title string) {
 	return libraryPathKey(artist), libraryPathKey(album), libraryPathKey(title)
 }
 
+// playlistTitleCandidateKeys indexes both the complete stem and the possible
+// title suffixes after an "Artist - Title" separator. The suffix is only a
+// lookup optimization: hasTrack still verifies the embedded title, album and
+// credited artists before treating a file as the same recording.
+func playlistTitleCandidateKeys(raw string) []string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil
+	}
+	seen := map[string]bool{}
+	out := make([]string, 0, 3)
+	add := func(value string) {
+		key := libraryPathKey(value)
+		if key != "" && !seen[key] {
+			seen[key] = true
+			out = append(out, key)
+		}
+	}
+	add(raw)
+	parts := strings.Split(playlistTitleSeparators.Replace(raw), "\x00")
+	for i := 1; i < len(parts); i++ {
+		add(strings.Join(parts[i:], " - "))
+	}
+	return out
+}
+
 const playlistLibraryCacheTTL = 2 * time.Minute
 
 func (a *App) playlistLibrary() playlistLibraryIndex {
@@ -200,11 +234,14 @@ func indexPlaylistLibrary(engine *dataengine.Engine, entries []audiorelease.Entr
 			continue
 		}
 		index.records[entry.RequestID] = entry
-		artist, album, title := trackPathKeyOfPath(entry.File)
+		rawArtist, rawAlbum, rawTitle := trackPathOf(entry.File)
+		artist, album, title := libraryPathKey(rawArtist), libraryPathKey(rawAlbum), libraryPathKey(rawTitle)
 		if artist != "" && artist != "." && album != "" && album != "." && title != "" {
 			key := [3]string{artist, album, title}
 			index.tracks[key] = append(index.tracks[key], entry.RequestID)
-			index.titleCandidates[title] = append(index.titleCandidates[title], entry.RequestID)
+			for _, candidate := range playlistTitleCandidateKeys(rawTitle) {
+				index.titleCandidates[candidate] = append(index.titleCandidates[candidate], entry.RequestID)
+			}
 			albumKey := [2]string{artist, album}
 			index.albums[albumKey] = append(index.albums[albumKey], entry.RequestID)
 			index.albumMembers[album] = append(index.albumMembers[album], entry.RequestID)
@@ -254,23 +291,72 @@ func (index playlistLibraryIndex) hasTrack(artist, album, title string) bool {
 	// catalogue identity was written. Candidate files are found by title, then
 	// accepted only when the embedded full album and every credited artist also
 	// match and the file snapshot is unchanged.
+	expectedAlbum := firstNonEmpty(album, title)
 	for _, id := range index.titleCandidates[want] {
 		if !index.isUnchanged(id) {
 			continue
 		}
 		path, found, err := audiorelease.PathFor(index.engine, id)
-		if err != nil || !found || !strings.EqualFold(filepath.Ext(path), ".flac") {
+		if err != nil || !found {
 			continue
 		}
-		tags, err := readFLACTagsPrefix(path)
-		if err != nil || libraryPathKey(tags.Title) != want || libraryPathKey(tags.Album) != key[1] {
+		artists, albumTag, titleTag := playlistTrackTags(path)
+		if libraryPathKey(titleTag) != want || !playlistAlbumTagMatches(expectedAlbum, albumTag) {
 			continue
 		}
-		if playlistArtistsMatch(splitPlaylistArtists(artist), tags.Artists) {
+		if playlistArtistTagMatches(artist, artists) {
 			return true
 		}
 	}
 	return false
+}
+
+func playlistTrackTags(path string) (artists []string, album, title string) {
+	if strings.EqualFold(filepath.Ext(path), ".flac") {
+		if tags, err := readFLACTagsPrefix(path); err == nil {
+			return tags.Artists, tags.Album, tags.Title
+		}
+		return nil, "", ""
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if info, err := probeGenericAudio(ctx, path); err == nil {
+		artist := firstNonEmpty(info.Artist, info.AlbumArtist, info.Tags["artist"], info.Tags["artists"])
+		return splitPlaylistArtists(artist), firstNonEmpty(info.Album, info.Tags["album"]), firstNonEmpty(info.Title, info.Tags["title"])
+	}
+	return nil, "", ""
+}
+
+func playlistAlbumTagMatches(expected, actual string) bool {
+	want := libraryPathKey(expected)
+	got := libraryPathKey(actual)
+	if want == "" || got == "" {
+		return false
+	}
+	if got == want {
+		return true
+	}
+	// Some tools prepend the release artist to the album tag while the
+	// playlist carries only the release title. Artist evidence is checked
+	// separately, so a complete word-boundary suffix is safe here.
+	return strings.HasSuffix(got, " "+want)
+}
+
+func playlistArtistTagMatches(expected string, actual []string) bool {
+	if len(actual) == 0 {
+		return false
+	}
+	switch libraryPathKey(expected) {
+	case "various artists", "群星":
+		for _, artist := range actual {
+			if libraryPathKey(artist) != "" {
+				return true
+			}
+		}
+		return false
+	default:
+		return playlistArtistsMatch(splitPlaylistArtists(expected), actual)
+	}
 }
 
 // Compilation folders share an album artist, so only the embedded track
@@ -324,18 +410,7 @@ func compilationArtistKey(values []string) string {
 }
 
 func compilationTrackTags(path string) (artists []string, album, title string) {
-	if strings.EqualFold(filepath.Ext(path), ".flac") {
-		if tags, err := readFLACTagsPrefix(path); err == nil {
-			return tags.Artists, tags.Album, tags.Title
-		}
-		return nil, "", ""
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	if info, err := probeGenericAudio(ctx, path); err == nil {
-		return []string{firstNonEmpty(info.Tags["artist"], info.Tags["artists"])}, info.Tags["album"], info.Tags["title"]
-	}
-	return nil, "", ""
+	return playlistTrackTags(path)
 }
 
 func (index playlistLibraryIndex) isUnchanged(id string) bool {

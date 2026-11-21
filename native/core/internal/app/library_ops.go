@@ -345,11 +345,6 @@ func (a *App) completeMetadata(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "code": "INVALID_REQUEST"})
 		return
 	}
-	before, err := os.ReadFile(path)
-	if err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "code": "INVALID_REQUEST"})
-		return
-	}
 	// The file supplies what the caller left empty and the real duration the
 	// catalogue comparison needs. A hardcoded duration made the 3-second
 	// match fail for every real track (P1-15).
@@ -393,7 +388,6 @@ func (a *App) completeMetadata(w http.ResponseWriter, r *http.Request) {
 		Tracks: []catalogTrackRequest{{Title: title, Artists: []string{artist}, Duration: &duration}},
 	}, catalogBudget, catalogTTL)
 	if err != nil {
-		_ = os.WriteFile(path, before, 0o600)
 		writeJSON(w, http.StatusBadGateway, map[string]any{"ok": false, "code": "CATALOG_UNAVAILABLE", "written": false})
 		return
 	}
@@ -478,61 +472,93 @@ func (a *App) completeMetadata(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "code": "TAG_UNAVAILABLE", "written": false})
 		return
 	}
-	// A cover-only completion must not rewrite the comment block.
-	if len(updates) > 0 {
-		if err = writeFLACTags(path, updates); err != nil {
-			_ = os.WriteFile(path, before, 0o600)
-			_ = os.Remove(backup)
-			writeJSON(w, http.StatusUnprocessableEntity, map[string]any{"ok": false, "code": "TAG_WRITE_FAILED", "written": false, "restored": true})
-			return
-		}
-	}
-	settings, _ := a.loadLyricsSettings()
-	mode := coverWriteMode(body.CoverMode, settings)
-	sidecar := strings.TrimSuffix(path, filepath.Ext(path)) + ".jpg"
-	if cover != nil {
-		updated, readErr := os.ReadFile(path)
-		var embedded []byte
-		if readErr == nil {
-			embedded, err = flactags.EmbedFrontCover(updated, cover)
-		}
-		if readErr != nil || err != nil || os.WriteFile(path, embedded, 0o600) != nil || !bytes.Equal(flactags.FrontCover(embedded), cover) {
-			restoreBackup(path, backup)
-			_ = os.Remove(sidecar)
-			_ = os.Remove(backup)
-			writeJSON(w, http.StatusUnprocessableEntity, map[string]any{"ok": false, "code": "COVER_WRITE_FAILED", "written": false, "restored": true})
-			return
-		}
-		if mode == "sidecar" {
-			if err = os.WriteFile(sidecar, cover, 0o600); err != nil {
-				restoreBackup(path, backup)
-				_ = os.Remove(sidecar)
-				_ = os.Remove(backup)
-				writeJSON(w, http.StatusUnprocessableEntity, map[string]any{"ok": false, "code": "COVER_WRITE_FAILED", "written": false, "restored": true})
-				return
-			}
-		} else {
-			_ = os.Remove(sidecar)
-		}
-	}
 	lyricsWritten := false
 	for _, name := range completion.Written {
 		if name == "lyrics" {
 			lyricsWritten = true
 		}
 	}
-	// Both copies are written: the tag and the .lrc beside the file.
+	settings, _ := a.loadLyricsSettings()
+	mode := coverWriteMode(body.CoverMode, settings)
+	sidecar := strings.TrimSuffix(path, filepath.Ext(path)) + ".jpg"
+	sidecarPaths := []string{}
 	if lyricsWritten {
-		if err := writeLyricsSidecar(path, lyrics); err != nil {
-			restoreBackup(path, backup)
-			_ = os.Remove(lyricsSidecarPath(path))
-			_ = os.Remove(sidecar)
-			_ = os.Remove(backup)
-			writeJSON(w, http.StatusUnprocessableEntity, map[string]any{"ok": false, "code": "LYRICS_WRITE_FAILED", "written": false, "restored": true})
+		sidecarPaths = append(sidecarPaths, lyricsSidecarPath(path), path+".lrc")
+	}
+	if cover != nil {
+		sidecarPaths = append(sidecarPaths, sidecar)
+	}
+	sidecars, snapshotErr := snapshotFiles(sidecarPaths...)
+	if snapshotErr != nil {
+		_ = os.Remove(backup)
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "code": "TAG_UNAVAILABLE", "written": false, "error": snapshotErr.Error()})
+		return
+	}
+	rollback := func(cause error) (bool, error) {
+		audioRestored, resultErr := restoreBackupOnFailure(path, backup, cause)
+		if sidecarErr := restoreFileSnapshots(sidecars); sidecarErr != nil {
+			return false, errors.Join(resultErr, sidecarErr)
+		}
+		return audioRestored, resultErr
+	}
+	// A cover-only completion must not rewrite the comment block.
+	if len(updates) > 0 {
+		if err = writeFLACTags(path, updates); err != nil {
+			restored, resultErr := rollback(err)
+			writeJSON(w, http.StatusUnprocessableEntity, map[string]any{"ok": false, "code": "TAG_WRITE_FAILED", "written": false, "restored": restored, "error": resultErr.Error()})
 			return
 		}
 	}
+	if cover != nil {
+		updated, readErr := os.ReadFile(path)
+		if readErr != nil {
+			restored, resultErr := rollback(readErr)
+			writeJSON(w, http.StatusUnprocessableEntity, map[string]any{"ok": false, "code": "COVER_WRITE_FAILED", "written": false, "restored": restored, "error": resultErr.Error()})
+			return
+		}
+		embedded, embedErr := flactags.EmbedFrontCover(updated, cover)
+		if embedErr != nil || !bytes.Equal(flactags.FrontCover(embedded), cover) {
+			if embedErr == nil {
+				embedErr = errors.New("front cover readback mismatch")
+			}
+			restored, resultErr := rollback(embedErr)
+			writeJSON(w, http.StatusUnprocessableEntity, map[string]any{"ok": false, "code": "COVER_WRITE_FAILED", "written": false, "restored": restored, "error": resultErr.Error()})
+			return
+		}
+		if err = replaceFileAtomically(path, embedded, 0); err != nil {
+			restored, resultErr := rollback(err)
+			writeJSON(w, http.StatusUnprocessableEntity, map[string]any{"ok": false, "code": "COVER_WRITE_FAILED", "written": false, "restored": restored, "error": resultErr.Error()})
+			return
+		}
+	}
+	// Both copies are written: the tag and the .lrc beside the file.
+	if lyricsWritten {
+		if err := writeLyricsSidecar(path, lyrics); err != nil {
+			restored, resultErr := rollback(err)
+			writeJSON(w, http.StatusUnprocessableEntity, map[string]any{"ok": false, "code": "LYRICS_WRITE_FAILED", "written": false, "restored": restored, "error": resultErr.Error()})
+			return
+		}
+	}
+	// Sidecar selection is applied only after every operation that can fail
+	// on the audio. The jpg write itself is atomic, so a failed write leaves
+	// the previous sidecar untouched while the audio backup is restored.
+	if cover != nil {
+		if mode == "sidecar" {
+			if err := replaceFileAtomically(sidecar, cover, 0o600); err != nil {
+				restored, resultErr := rollback(err)
+				writeJSON(w, http.StatusUnprocessableEntity, map[string]any{"ok": false, "code": "COVER_WRITE_FAILED", "written": false, "restored": restored, "error": resultErr.Error()})
+				return
+			}
+		} else {
+			if err := os.Remove(sidecar); err != nil && !os.IsNotExist(err) {
+				restored, resultErr := rollback(err)
+				writeJSON(w, http.StatusUnprocessableEntity, map[string]any{"ok": false, "code": "COVER_WRITE_FAILED", "written": false, "restored": restored, "error": resultErr.Error()})
+				return
+			}
+		}
+	}
 	_ = os.Remove(backup)
+	_ = commitFileSnapshots(sidecars)
 	written := []string{}
 	if len(completion.Written) > 0 {
 		written = append(written, "标签 "+strings.Join(completion.Written, "、"))

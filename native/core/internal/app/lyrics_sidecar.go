@@ -40,11 +40,13 @@ func writeLyricsSidecar(audioPath, lyrics string) error {
 	if body == "" {
 		return nil
 	}
-	if err := os.WriteFile(lrc.SidecarPath(audioPath), []byte(body+"\n"), 0o600); err != nil {
+	if err := replaceFileAtomically(lrc.SidecarPath(audioPath), []byte(body+"\n"), 0); err != nil {
 		return err
 	}
 	if legacy := audioPath + ".lrc"; legacy != lrc.SidecarPath(audioPath) {
-		_ = os.Remove(legacy)
+		if err := os.Remove(legacy); err != nil && !os.IsNotExist(err) {
+			return err
+		}
 	}
 	return nil
 }

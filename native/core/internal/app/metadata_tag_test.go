@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/binary"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -336,5 +337,71 @@ func TestCompleteMetadataWritesCoverWhenTagsAlreadyMatch(t *testing.T) {
 	}
 	if tags := readTags(t, full); tags.Genre != "Ambient" {
 		t.Fatal("a cover-only write changed the tags:", tags.Genre)
+	}
+}
+
+func TestCompleteMetadataRestoresSidecarsWhenCoverWriteFails(t *testing.T) {
+	application := newApp(t)
+	fake := newFakeCompletionCatalog(t, catalogCompletionDetail, "")
+	apiPath, full := writeTaggedFLAC(t, application, "sidecar-transaction.flac", flactags.Tags{
+		Title: "Opening", Artists: []string{"Some Artist"}, Album: "First Album", TrackNumber: 1,
+	})
+	originalAudio, err := os.ReadFile(full)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lyricsPath := lyricsSidecarPath(full)
+	coverPath := strings.TrimSuffix(full, filepath.Ext(full)) + ".jpg"
+	oldLyrics := []byte("[00:01.00]user lyrics\n")
+	oldCover := []byte("user cover")
+	if err := os.WriteFile(lyricsPath, oldLyrics, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(coverPath, oldCover, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	lyrics := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"lyrics":"[00:02.00]catalog lyrics"}`))
+	}))
+	defer lyrics.Close()
+	newCover := jpegBody()
+	cover := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write(newCover)
+	}))
+	defer cover.Close()
+
+	previousRename := atomicReplaceRename
+	blockCoverOnce := true
+	atomicReplaceRename = func(oldPath, newPath string) error {
+		if blockCoverOnce && strings.EqualFold(filepath.Ext(newPath), ".jpg") {
+			blockCoverOnce = false
+			return errors.New("injected sidecar rename failure")
+		}
+		return os.Rename(oldPath, newPath)
+	}
+	t.Cleanup(func() { atomicReplaceRename = previousRename })
+
+	code, decoded := mediaPost(t, application, "/v1/library/metadata", map[string]any{
+		"path": apiPath, "artist": "Some Artist", "album": "First Album", "title": "Opening",
+		"catalog_base_url": fake.server.URL, "lyrics_base_url": lyrics.URL,
+		"cover_base_url": cover.URL, "cover_mode": "sidecar", "overwrite": true,
+	})
+	if code != http.StatusUnprocessableEntity || decoded["restored"] != true {
+		t.Fatal(code, decoded)
+	}
+	if body, err := os.ReadFile(full); err != nil || !bytes.Equal(body, originalAudio) {
+		t.Fatal("audio was not restored", err)
+	}
+	if body, err := os.ReadFile(lyricsPath); err != nil || !bytes.Equal(body, oldLyrics) {
+		t.Fatalf("old lyrics were not restored: %q err=%v", body, err)
+	}
+	if body, err := os.ReadFile(coverPath); err != nil || !bytes.Equal(body, oldCover) {
+		t.Fatalf("old cover was not restored: %q err=%v", body, err)
+	}
+	for _, pattern := range []string{".musicops-backup-*", ".musicops-atomic-*"} {
+		matches, globErr := filepath.Glob(filepath.Join(filepath.Dir(full), pattern))
+		if globErr != nil || len(matches) != 0 {
+			t.Fatalf("temporary files remain for %s: %v err=%v", pattern, matches, globErr)
+		}
 	}
 }

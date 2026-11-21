@@ -2,6 +2,7 @@ package app
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -98,6 +99,64 @@ func TestScrapeBatchArtworkFailureLeavesTheFile(t *testing.T) {
 	after, err := os.ReadFile(full)
 	if err != nil || !bytes.Equal(after, before) {
 		t.Fatal("a refused batch changed the file")
+	}
+}
+
+func TestScrapeBatchRestoresSidecarsWhenCoverWriteFails(t *testing.T) {
+	application := newApp(t)
+	catalog := newFakeMusicBrainz(t, catalogCompletionSearch, scrapeDetailJSON, http.StatusOK)
+	path, full := writeScrapeFLAC(t, application, "sidecar-rollback.flac", 240.25, flactags.Tags{
+		Title: "Opening", Artists: []string{"Some Artist"}, Album: "First Album", TrackNumber: 1,
+	})
+	originalAudio, err := os.ReadFile(full)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lyricsPath := lyricsSidecarPath(full)
+	coverPath := strings.TrimSuffix(full, filepath.Ext(full)) + ".jpg"
+	oldLyrics := []byte("[00:01.00]old batch lyrics\n")
+	oldCover := []byte("old batch cover")
+	if err := os.WriteFile(lyricsPath, oldLyrics, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(coverPath, oldCover, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	newCover := jpegBody()
+	service, _ := lrcAPIFake(t, "[00:02.00]new batch lyrics", newCover, "Authorization", "")
+	saveLyricsService(t, application, service.URL, "Authorization", "")
+
+	previousRename := atomicReplaceRename
+	blockCoverOnce := true
+	atomicReplaceRename = func(oldPath, newPath string) error {
+		if blockCoverOnce && strings.EqualFold(filepath.Ext(newPath), ".jpg") {
+			blockCoverOnce = false
+			return errors.New("injected batch sidecar rename failure")
+		}
+		return os.Rename(oldPath, newPath)
+	}
+	t.Cleanup(func() { atomicReplaceRename = previousRename })
+
+	code, decoded := scrapePost(t, application, map[string]any{
+		"paths": []string{path}, "catalog_base_url": catalog.server.URL,
+		"overwrite": true, "with_artwork": true,
+	})
+	if code != http.StatusOK || decoded["failed"] != float64(1) {
+		t.Fatal(code, decoded)
+	}
+	files, _ := decoded["files"].([]any)
+	row, _ := files[0].(map[string]any)
+	if row["code"] != "COVER_WRITE_FAILED" {
+		t.Fatal(row)
+	}
+	if body, err := os.ReadFile(full); err != nil || !bytes.Equal(body, originalAudio) {
+		t.Fatal("batch audio was not restored", err)
+	}
+	if body, err := os.ReadFile(lyricsPath); err != nil || !bytes.Equal(body, oldLyrics) {
+		t.Fatalf("old batch lyrics were not restored: %q err=%v", body, err)
+	}
+	if body, err := os.ReadFile(coverPath); err != nil || !bytes.Equal(body, oldCover) {
+		t.Fatalf("old batch cover was not restored: %q err=%v", body, err)
 	}
 }
 

@@ -198,8 +198,9 @@ func writeGenericTags(ctx context.Context, path string, updates map[string][]str
 		return nil, err
 	}
 	if err := os.Rename(tempPath, path); err != nil {
-		restoreBackup(path, backup)
-		_ = os.Remove(backup)
+		if restoreErr := restoreBackup(path, backup); restoreErr != nil {
+			return nil, errors.Join(err, restoreErr)
+		}
 		return nil, err
 	}
 	_ = os.Remove(backup)

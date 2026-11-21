@@ -10,7 +10,10 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/wsdbb72/MusicOps/native/core/internal/dataengine"
 	"github.com/wsdbb72/MusicOps/native/core/internal/flactags"
@@ -252,6 +255,44 @@ func TestReleaseReplayCleansCommittedReplacementBackup(t *testing.T) {
 		t.Fatalf("committed backup remains: %v", err)
 	}
 }
+
+func TestReplayCommittedReplacementRestoresBackupWhenTargetIsMissing(t *testing.T) {
+	folder := t.TempDir()
+	source := filepath.Join(folder, "source.wav")
+	dest := filepath.Join(folder, "track.wav")
+	backup := filepath.Join(folder, "track.replaced")
+	original := wav(16)
+	replacement := wav(64)
+	writeSource(t, folder, filepath.Base(source), replacement)
+	writeSource(t, folder, filepath.Base(backup), original)
+	sum := sha256.Sum256(replacement)
+	digest := hex.EncodeToString(sum[:])
+	rec := record{
+		RequestID: "rel-cas-replay", RootID: "root-cas-replay", Path: dest, SHA256: digest,
+		State: "published", Verified: true, LibraryPublished: true,
+	}
+	committed := false
+	restore := func() error {
+		return restoreReplacedFile(dest, backup, digest)
+	}
+	commit := func() {
+		committed = true
+		_ = os.Remove(backup)
+	}
+	if _, err := replayCommittedReplacement(rec, source, dest, commit, restore); err == nil {
+		t.Fatal("missing committed target was accepted")
+	}
+	if committed {
+		t.Fatal("backup was committed before the target verified")
+	}
+	if body, err := os.ReadFile(dest); err != nil || !bytes.Equal(body, original) {
+		t.Fatalf("original was not restored: bytes=%d err=%v", len(body), err)
+	}
+	if _, err := os.Stat(backup); !os.IsNotExist(err) {
+		t.Fatalf("restored backup remains: %v", err)
+	}
+}
+
 func TestReplacementRollbackRestoresOriginalBytes(t *testing.T) {
 	folder := t.TempDir()
 	dest := filepath.Join(folder, "track.flac")
@@ -272,6 +313,174 @@ func TestReplacementRollbackRestoresOriginalBytes(t *testing.T) {
 		t.Fatalf("backup still exists: %v", err)
 	}
 }
+func TestReplacementRollbackDoesNotOverwriteConcurrentPublish(t *testing.T) {
+	folder := t.TempDir()
+	dest := filepath.Join(folder, "track.flac")
+	backup := filepath.Join(folder, "track.flac.replaced")
+	original := []byte("original lossy flac")
+	replacement := []byte("replacement lossless flac")
+	concurrent := []byte("concurrent publish")
+	writeSource(t, folder, filepath.Base(dest), concurrent)
+	writeSource(t, folder, filepath.Base(backup), original)
+	sum := sha256.Sum256(replacement)
+	err := restoreReplacedFile(dest, backup, hex.EncodeToString(sum[:]))
+	if !errors.Is(err, ErrConflict) {
+		t.Fatalf("want conflict, got %v", err)
+	}
+	body, readErr := os.ReadFile(dest)
+	if readErr != nil || !bytes.Equal(body, concurrent) {
+		t.Fatalf("concurrent publish was overwritten: bytes=%q err=%v", body, readErr)
+	}
+	body, readErr = os.ReadFile(backup)
+	if readErr != nil || !bytes.Equal(body, original) {
+		t.Fatalf("backup was not preserved: bytes=%q err=%v", body, readErr)
+	}
+}
+
+func TestReleasePathLockSerializesSameDestination(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "Artist", "Album", "01 Title.wav")
+	unlockFirst := lockReleasePath(path)
+	acquired := make(chan struct{})
+	go func() {
+		unlockSecond := lockReleasePath(path)
+		close(acquired)
+		unlockSecond()
+	}()
+	select {
+	case <-acquired:
+		unlockFirst()
+		t.Fatal("second release entered while the first held the same destination")
+	case <-time.After(150 * time.Millisecond):
+	}
+	unlockFirst()
+	select {
+	case <-acquired:
+	case <-time.After(2 * time.Second):
+		t.Fatal("second release did not acquire after the first released the destination")
+	}
+}
+
+func TestConcurrentReleasesDoNotInterleaveAfterDestinationScan(t *testing.T) {
+	engine, incoming, library := openRelease(t)
+	writeSource(t, incoming, "first.wav", wav(24))
+	writeSource(t, incoming, "second.wav", wav(72))
+	first := sample(incoming, library, "first.wav")
+	first.RequestID, first.RootID = "rel-concurrent-first", "root-concurrent-first"
+	second := sample(incoming, library, "second.wav")
+	second.RequestID, second.RootID = "rel-concurrent-second", "root-concurrent-second"
+
+	firstEntered := make(chan struct{})
+	var scanCalls atomic.Int32
+	var unblockOnce sync.Once
+	unblock := make(chan struct{})
+	stop := func() { unblockOnce.Do(func() { close(unblock) }) }
+	defer stop()
+	releaseAfterPathScan = func() {
+		if scanCalls.Add(1) == 1 {
+			close(firstEntered)
+			<-unblock
+		}
+	}
+	defer func() { releaseAfterPathScan = nil }()
+
+	type outcome struct {
+		result Result
+		err    error
+	}
+	firstDone := make(chan outcome, 1)
+	go func() {
+		result, err := Release(context.Background(), engine, first)
+		firstDone <- outcome{result: result, err: err}
+	}()
+	select {
+	case <-firstEntered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("first release did not reach the destination scan")
+	}
+
+	secondDone := make(chan outcome, 1)
+	go func() {
+		result, err := Release(context.Background(), engine, second)
+		secondDone <- outcome{result: result, err: err}
+	}()
+	select {
+	case got := <-secondDone:
+		stop()
+		t.Fatalf("second release passed the path lock before the first committed: result=%+v err=%v", got.result, got.err)
+	case <-time.After(200 * time.Millisecond):
+	}
+	stop()
+	firstOutcome := <-firstDone
+	secondOutcome := <-secondDone
+	if firstOutcome.err != nil || !firstOutcome.result.LibraryPublished {
+		t.Fatalf("first release result=%+v err=%v", firstOutcome.result, firstOutcome.err)
+	}
+	if !errors.Is(secondOutcome.err, ErrConflict) {
+		t.Fatalf("second release must conflict with the first destination, got result=%+v err=%v", secondOutcome.result, secondOutcome.err)
+	}
+	dest := filepath.Join(library, "Artist", "Album", "01 Title.wav")
+	if body, err := os.ReadFile(dest); err != nil || !bytes.Equal(body, wav(24)) {
+		t.Fatalf("first destination was overwritten: bytes=%d err=%v", len(body), err)
+	}
+}
+
+func TestReleaseConsumesBackupAfterHardLinkRollbackExit(t *testing.T) {
+	engine, incoming, library := openRelease(t)
+	folder := filepath.Join(library, "Artist", "Album")
+	if err := os.MkdirAll(folder, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	dest := filepath.Join(folder, "01 Title.wav")
+	original := wav(16)
+	writeSource(t, folder, filepath.Base(dest), original)
+	request := sample(incoming, library, "song.wav")
+	request.RequestID, request.RootID = "rel-hardlink-recovery", "root-hardlink-recovery"
+	request.ReplacePath = dest
+	backup := replacementBackupPath(dest, request.RequestID)
+	if err := os.Link(dest, backup); err != nil {
+		t.Fatal(err)
+	}
+	newBody := wav(80)
+	writeSource(t, incoming, "song.wav", newBody)
+	if _, err := Release(context.Background(), engine, request); err != nil {
+		t.Fatal(err)
+	}
+	if body, err := os.ReadFile(dest); err != nil || !bytes.Equal(body, newBody) {
+		t.Fatalf("destination bytes=%d err=%v", len(body), err)
+	}
+	if _, err := os.Stat(backup); !os.IsNotExist(err) {
+		t.Fatalf("redundant restored backup remains: %v", err)
+	}
+}
+
+func TestReplacementRollbackDoesNotOverwriteAfterIdentityCheck(t *testing.T) {
+	folder := t.TempDir()
+	dest := filepath.Join(folder, "track.flac")
+	backup := filepath.Join(folder, "track.flac.replaced")
+	original := []byte("original lossy flac")
+	replacement := []byte("replacement lossless flac")
+	concurrent := []byte("concurrent publish after remove")
+	writeSource(t, folder, filepath.Base(dest), replacement)
+	writeSource(t, folder, filepath.Base(backup), original)
+	restoreAfterTargetRemoved = func() {
+		if err := os.WriteFile(dest, concurrent, 0o600); err != nil {
+			t.Errorf("write concurrent publish: %v", err)
+		}
+	}
+	defer func() { restoreAfterTargetRemoved = nil }()
+	sum := sha256.Sum256(replacement)
+	err := restoreReplacedFile(dest, backup, hex.EncodeToString(sum[:]))
+	if !errors.Is(err, ErrConflict) {
+		t.Fatalf("want conflict, got %v", err)
+	}
+	if body, readErr := os.ReadFile(dest); readErr != nil || !bytes.Equal(body, concurrent) {
+		t.Fatalf("new target was overwritten: bytes=%q err=%v", body, readErr)
+	}
+	if body, readErr := os.ReadFile(backup); readErr != nil || !bytes.Equal(body, original) {
+		t.Fatalf("backup was not preserved: bytes=%q err=%v", body, readErr)
+	}
+}
+
 func TestTorrentAndFixtureNeverPublish(t *testing.T) {
 	engine, incoming, library := openRelease(t)
 	cases := []struct {

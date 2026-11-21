@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"image/color"
 	"io"
 	"net/http"
@@ -17,7 +18,9 @@ import (
 	"time"
 
 	"github.com/wsdbb72/MusicOps/native/core/internal/cookies"
+	"github.com/wsdbb72/MusicOps/native/core/internal/downloadpolicy"
 	"github.com/wsdbb72/MusicOps/native/core/internal/flactags"
+	"github.com/wsdbb72/MusicOps/native/core/internal/taskrepo"
 	"github.com/wsdbb72/MusicOps/native/core/internal/workflow"
 )
 
@@ -44,6 +47,47 @@ func TestNeteaseAlbumRejectsMissingTracksOrWrongEdition(t *testing.T) {
 	song.AlbumID = 81
 	if _, err = decodeNeteaseAlbum([]byte(`{"code":200,"album":{"id":81,"name":"Album","size":2},"songs":[{"id":10,"name":"One","ar":[{"name":"Artist"}],"dt":3000}]}`), song); err == nil {
 		t.Fatal("truncated tracklist accepted")
+	}
+}
+
+func TestNeteaseAlbumContractFailuresRemainRetryable(t *testing.T) {
+	song := &neteaseSong{ID: 10, Name: "One", Album: "Album", AlbumID: 81}
+	cases := map[string]string{
+		"type mismatch": `{"code":200,"album":{"id":"81","name":"Album","size":1},"songs":[{"id":10,"name":"One","ar":[{"name":"Artist"}],"dt":3000}]}`,
+		"truncated":     `{"code":200,"album":{"id":81,"name":"Album","size":2},"songs":[{"id":10,"name":"One","ar":[{"name":"Artist"}],"dt":3000}]}`,
+		"invalid row":   `{"code":200,"album":{"id":81,"name":"Album","size":1},"songs":[{"id":0,"name":"","ar":[],"dt":0}]}`,
+	}
+	for name, raw := range cases {
+		t.Run(name, func(t *testing.T) {
+			_, err := decodeNeteaseAlbum([]byte(raw), song)
+			if err == nil || classifyNeteaseFailure(err) != downloadpolicy.ClassNetwork {
+				t.Fatalf("err=%v class=%q", err, classifyNeteaseFailure(err))
+			}
+		})
+	}
+	wrongEdition := `{"code":200,"album":{"id":82,"name":"Another Album","size":1},"songs":[{"id":10,"name":"One","ar":[{"name":"Artist"}],"dt":3000}]}`
+	if _, err := decodeNeteaseAlbum([]byte(wrongEdition), song); err == nil || classifyNeteaseFailure(err) != downloadpolicy.ClassNoResult {
+		t.Fatalf("wrong edition err=%v class=%q", err, classifyNeteaseFailure(err))
+	}
+}
+
+func TestAcquireNeteaseAlbumPropagatesCancellationBeforeTerminalCommit(t *testing.T) {
+	vaultKey(t)
+	a := newApp(t)
+	saveNeteaseTestCookie(t, a)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		cancel()
+		_, _ = io.WriteString(w, `{"code":200,"result":{"songs":[]}}`)
+	}))
+	defer server.Close()
+	a.neteaseBases = map[string]string{"api": server.URL}
+	plan := SearchPlan{Query: "Artist One", ExpectedTitle: "Album", ExpectedArtist: "Artist", PlaylistTrack: "One"}
+	var held taskrepo.Token
+	_, err := a.acquireNeteaseAlbum(ctx, nil, held, workflow.Job{}, plan)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("cancellation err=%v", err)
 	}
 }
 
@@ -83,7 +127,7 @@ func TestNeteaseAlbumCompletesOnlyMissingTracks(t *testing.T) {
 	})
 	mux.HandleFunc("/api/song/enhance/player/url/v1", func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Query().Get("ids") == "[12]" {
-			io.WriteString(w, "{}")
+			io.WriteString(w, `{"code":200,"data":[]}`)
 			return
 		}
 		if r.URL.Query().Get("ids") != "[11]" {

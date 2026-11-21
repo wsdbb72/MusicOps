@@ -38,7 +38,7 @@ func decodeNeteaseAlbum(raw []byte, anchor *neteaseSong) ([]neteaseSong, error) 
 		Songs []neteaseAlbumRow
 	}
 	if err := json.Unmarshal(raw, &data); err != nil {
-		return nil, err
+		return nil, neteaseContractError("发行版 JSON 结构异常：%v", err)
 	}
 	if data.Code != 200 || data.Album.ID != anchor.AlbumID || normalizeKey(data.Album.Name) != normalizeKey(anchor.Album) {
 		return nil, errors.New("网易云返回的发行版与已匹配曲目不一致")
@@ -48,14 +48,14 @@ func decodeNeteaseAlbum(raw []byte, anchor *neteaseSong) ([]neteaseSong, error) 
 		rows = data.Album.Songs
 	}
 	if len(rows) < 1 || len(rows) > 100 || len(rows) != data.Album.Size {
-		return nil, errors.New("网易云专辑轨道清单不完整或超过 100 首")
+		return nil, neteaseContractError("专辑轨道清单不完整或超过 100 首")
 	}
 	seen := map[int64]bool{}
 	found := false
 	out := make([]neteaseSong, 0, len(rows))
 	for _, row := range rows {
 		if row.ID <= 0 || seen[row.ID] || strings.TrimSpace(row.Name) == "" {
-			return nil, errors.New("网易云专辑含无效曲目")
+			return nil, neteaseContractError("专辑含无效曲目")
 		}
 		seen[row.ID] = true
 		artists := row.Artists
@@ -86,7 +86,7 @@ func decodeNeteaseAlbum(raw []byte, anchor *neteaseSong) ([]neteaseSong, error) 
 			duration = row.DT
 		}
 		if len(credited) == 0 || duration <= 0 {
-			return nil, errors.New("网易云专辑曲目缺少艺人或时长")
+			return nil, neteaseContractError("专辑曲目缺少艺人或时长")
 		}
 		out = append(out, neteaseSong{ID: row.ID, Name: row.Name, Artists: credited, Album: data.Album.Name, AlbumID: data.Album.ID, DurationMS: duration, CoverURL: data.Album.PicURL, CatalogVerified: true})
 	}
@@ -102,7 +102,7 @@ func decodeNeteaseAlbum(raw []byte, anchor *neteaseSong) ([]neteaseSong, error) 
 // the user's saved NetEase credential and merges IDs by title, artist and
 // album without changing the selected track order.
 func (a *App) recoverNeteasePlaylistIDs(ctx context.Context, batchID string, plan *SearchPlan) bool {
-	if plan == nil || !strings.HasPrefix(batchID, "pl-netease-") {
+	if ctx == nil || ctx.Err() != nil || plan == nil || !strings.HasPrefix(batchID, "pl-netease-") {
 		return false
 	}
 	if plan.NeteaseSongID > 0 {
@@ -110,7 +110,7 @@ func (a *App) recoverNeteasePlaylistIDs(ctx context.Context, batchID string, pla
 	}
 	a.neteaseRecoveryMu.Lock()
 	defer a.neteaseRecoveryMu.Unlock()
-	if plan.NeteaseSongID > 0 {
+	if ctx.Err() != nil || plan.NeteaseSongID > 0 {
 		return true
 	}
 	rows, name, err := a.playlistTrackRows(batchID)
@@ -118,11 +118,11 @@ func (a *App) recoverNeteasePlaylistIDs(ctx context.Context, batchID string, pla
 		return true
 	}
 	remoteID := neteasePlaylistIDFromBatch(batchID)
-	if remoteID == "" {
+	if ctx.Err() != nil || remoteID == "" {
 		return false
 	}
 	remote, err := a.fetchRemotePlaylist(ctx, "netease", remoteID, "")
-	if err != nil || len(remote.Tracks) == 0 {
+	if ctx.Err() != nil || err != nil || len(remote.Tracks) == 0 {
 		return false
 	}
 	if len(rows) == 0 {
@@ -136,6 +136,9 @@ func (a *App) recoverNeteasePlaylistIDs(ctx context.Context, batchID string, pla
 		if name == "" {
 			name = remote.Name
 		}
+		if ctx.Err() != nil {
+			return false
+		}
 		data := encodeM3U(name, rows)
 		path := a.workPath("incoming", playlistFileName(batchID))
 		temp, createErr := os.CreateTemp(filepath.Dir(path), ".playlist-ids-*.tmp")
@@ -146,6 +149,10 @@ func (a *App) recoverNeteasePlaylistIDs(ctx context.Context, batchID string, pla
 		_, writeErr := temp.Write(data)
 		closeErr := temp.Close()
 		if writeErr != nil || closeErr != nil {
+			_ = os.Remove(tempName)
+			return false
+		}
+		if ctx.Err() != nil {
 			_ = os.Remove(tempName)
 			return false
 		}
@@ -267,13 +274,37 @@ func splitPlaylistArtists(raw string) []string {
 }
 
 func (a *App) acquireNeteaseAlbum(ctx context.Context, execution *scheduler.Execution, held taskrepo.Token, job workflow.Job, plan SearchPlan) (scheduler.Outcome, error) {
+	if err := ctx.Err(); err != nil {
+		return scheduler.Outcome{}, err
+	}
 	a.recoverNeteasePlaylistIDs(ctx, job.BatchID, &plan)
+	if err := ctx.Err(); err != nil {
+		return scheduler.Outcome{}, err
+	}
 	review := func(message, class string) (scheduler.Outcome, error) {
+		if err := ctx.Err(); err != nil {
+			return scheduler.Outcome{}, err
+		}
 		return a.finishAcquire(held, job, "candidate", message, class, nil)
+	}
+	finishSkip := func(message string) (scheduler.Outcome, error) {
+		if err := ctx.Err(); err != nil {
+			return scheduler.Outcome{}, err
+		}
+		return a.finishSkipAcquire(held, job, message)
+	}
+	finishPlaylist := func(message string, receipts []publishReceipt, missing ...string) (scheduler.Outcome, error) {
+		if err := ctx.Err(); err != nil {
+			return scheduler.Outcome{}, err
+		}
+		return a.finishPlaylistStreams(held, job, receipts, message, missing...)
 	}
 	artist := publishComponent(firstNonEmpty(plan.AlbumArtist, plan.ExpectedArtist))
 	album := publishComponent(plan.ExpectedTitle)
 	directTrack := func(song *neteaseSong, fallbackReason, fallbackClass string) (scheduler.Outcome, error) {
+		if err := ctx.Err(); err != nil {
+			return scheduler.Outcome{}, err
+		}
 		if plan.PlaylistTrack == "" {
 			plan.PlaylistTrack = neteasePlaylistTitle(plan)
 		}
@@ -285,14 +316,17 @@ func (a *App) acquireNeteaseAlbum(ctx context.Context, execution *scheduler.Exec
 		} else {
 			path, note, class, _ = a.stageNeteaseSongWithEngine(ctx, plan, song)
 		}
+		if err := ctx.Err(); err != nil {
+			return scheduler.Outcome{}, err
+		}
 		if path == "" {
 			if class == downloadpolicy.ClassNoResult {
-				return a.finishSkipAcquire(held, job, note+"；网易云内置接口与下载引擎均确认无可用音源，下一轮库维护会重新尝试")
+				return finishSkip(note + "；网易云内置接口与下载引擎均确认无可用音源，下一轮库维护会重新尝试")
 			}
 			if isTemporaryStreamFailure(class) {
 				message := "网易云音频暂时不可取：" + note
 				if job.SearchRetryCount >= 3 {
-					return a.finishSkipAcquire(held, job, message+"；已有限重试三轮")
+					return finishSkip(message + "；已有限重试三轮")
 				}
 				return review(message+"；将由自动核对重试", "STREAM_RETRY")
 			}
@@ -307,15 +341,18 @@ func (a *App) acquireNeteaseAlbum(ctx context.Context, execution *scheduler.Exec
 				local := a.verifiedPlaylistAlbumTracks(a.libraryDir(), artist, album, plan.ExpectedTitle)
 				if verifiedNeteaseTrackPresent(local, &source) {
 					removeNeteaseStaging(a.workPath("incoming"), path, "scraped-"+filepath.Base(path))
-					return a.finishSkipAcquire(held, job, "已核实目标曲目在库；网易云暂未提供可验证的专辑清单")
+					return finishSkip("已核实目标曲目在库；网易云暂未提供可验证的专辑清单")
 				}
 			}
 		}
 		item, err := a.ingestPlaylistStream(ctx, job, plan, path, 1)
 		if err != nil {
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				return scheduler.Outcome{}, ctxErr
+			}
 			return review(err.Error(), "STREAM_INGEST_FAILED")
 		}
-		return a.finishPlaylistStreams(held, job, []publishReceipt{item}, "网易云发行版未确认，已按原曲兜底取到可用音频；等待发布校验")
+		return finishPlaylist("网易云发行版未确认，已按原曲兜底取到可用音频；等待发布校验", []publishReceipt{item})
 	}
 	if plan.PlaylistTrack == "" {
 		plan.PlaylistTrack = neteasePlaylistTitle(plan)
@@ -331,6 +368,9 @@ func (a *App) acquireNeteaseAlbum(ctx context.Context, execution *scheduler.Exec
 	} else {
 		anchor, err = a.neteaseSearchSong(ctx, plan)
 	}
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return scheduler.Outcome{}, ctxErr
+	}
 	if err != nil {
 		return directTrack(nil, "未核实到包含目标曲目的网易云发行版："+err.Error(), classifyNeteaseFailure(err))
 	}
@@ -338,12 +378,18 @@ func (a *App) acquireNeteaseAlbum(ctx context.Context, execution *scheduler.Exec
 		return directTrack(anchor, "未核实到包含目标曲目的网易云发行版", downloadpolicy.ClassNoResult)
 	}
 	raw, err := a.neteaseGet(ctx, a.neteaseBase()+"/api/v1/album/"+strconv.FormatInt(anchor.AlbumID, 10), cookie)
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return scheduler.Outcome{}, ctxErr
+	}
 	if err != nil {
 		return directTrack(anchor, "无法读取网易云专辑清单："+err.Error(), classifyNeteaseFailure(err))
 	}
 	tracks, err := decodeNeteaseAlbum(raw, anchor)
 	if err != nil {
-		return directTrack(anchor, err.Error(), downloadpolicy.ClassNoResult)
+		return directTrack(anchor, err.Error(), classifyNeteaseFailure(err))
+	}
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return scheduler.Outcome{}, ctxErr
 	}
 	local := a.verifiedPlaylistAlbumTracks(a.libraryDir(), artist, album, plan.ExpectedTitle)
 	receipts := make([]publishReceipt, 0, len(tracks))
@@ -367,6 +413,9 @@ func (a *App) acquireNeteaseAlbum(ctx context.Context, execution *scheduler.Exec
 		}
 	}
 	for processed, index := range order {
+		if err := ctx.Err(); err != nil {
+			return scheduler.Outcome{}, err
+		}
 		song := &tracks[index]
 		if plan.NeteaseTrackOnly && song.ID != anchor.ID {
 			continue
@@ -381,6 +430,9 @@ func (a *App) acquireNeteaseAlbum(ctx context.Context, execution *scheduler.Exec
 		trackPlan.PlaylistTrack = song.Name
 		trackPlan.NeteaseSongID = song.ID
 		path, note, class, _ := a.stageNeteaseSongWithEngine(ctx, trackPlan, song)
+		if err := ctx.Err(); err != nil {
+			return scheduler.Outcome{}, err
+		}
 		if path == "" {
 			if isTemporaryStreamFailure(class) {
 				temporaryFailure = true
@@ -392,6 +444,9 @@ func (a *App) acquireNeteaseAlbum(ctx context.Context, execution *scheduler.Exec
 		// in incoming/ exhausted the SSD cache before publication could begin.
 		item, err := a.ingestPlaylistStream(ctx, job, trackPlan, path, index+1)
 		if err != nil {
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				return scheduler.Outcome{}, ctxErr
+			}
 			if !errors.Is(err, audiorelease.ErrConflict) && !errors.Is(err, audiorelease.ErrRejected) {
 				return review(err.Error(), "STREAM_INGEST_FAILED")
 			}
@@ -410,9 +465,9 @@ func (a *App) acquireNeteaseAlbum(ctx context.Context, execution *scheduler.Exec
 			return review(message+"；将由自动核对重试", "STREAM_RETRY")
 		}
 		if len(receipts) == 0 {
-			return a.finishSkipAcquire(held, job, message+"；已有限重试三轮")
+			return finishSkip(message + "；已有限重试三轮")
 		}
-		return a.finishPlaylistStreams(held, job, receipts, message+"；已有限重试三轮，先校验本轮已入库曲目", missing...)
+		return finishPlaylist(message+"；已有限重试三轮，先校验本轮已入库曲目", receipts, missing...)
 	}
 	if len(receipts) == 0 {
 		if ingestFailure != nil {
@@ -424,16 +479,16 @@ func (a *App) acquireNeteaseAlbum(ctx context.Context, execution *scheduler.Exec
 			// row terminal instead of returning the same unavailable track to
 			// human review on every scheduler pass.
 			if plan.NeteaseSongID > 0 && plan.NeteaseAlbumID > 0 {
-				return a.finishSkipAcquire(held, job, "网易云已核实该发行版但未提供可用音频，已自动结束："+missing[0])
+				return finishSkip("网易云已核实该发行版但未提供可用音频，已自动结束：" + missing[0])
 			}
 			return review("没有可入库的可用缺轨："+missing[0], "NETEASE_ALBUM_INCOMPLETE")
 		}
 		if plan.NeteaseTrackOnly {
-			return a.finishSkipAcquire(held, job, "网易云歌单目标曲目已在库")
+			return finishSkip("网易云歌单目标曲目已在库")
 		}
-		return a.finishSkipAcquire(held, job, "网易云专辑的全部曲目已在库")
+		return finishSkip("网易云专辑的全部曲目已在库")
 	}
-	return a.finishPlaylistStreams(held, job, receipts, fmt.Sprintf("网易云发行版共 %d 首，取到 %d 首可用音频，%d 首未取得；等待发布校验", len(tracks), len(receipts), len(missing)), missing...)
+	return finishPlaylist(fmt.Sprintf("网易云发行版共 %d 首，取到 %d 首可用音频，%d 首未取得；等待发布校验", len(tracks), len(receipts), len(missing)), receipts, missing...)
 }
 
 func verifiedNeteaseTrackPresent(local map[string][]string, song *neteaseSong) bool {

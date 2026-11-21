@@ -12,9 +12,11 @@ package app
 // library that is FLAC-only by design.
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -43,7 +45,14 @@ const (
 // cookie serves both reading a playlist and falling back to one track.
 const neteaseStreamingRef = "vault://streaming/netease"
 
-var errNeteaseUnexpectedHTML = errors.New("netease: 返回了网页而不是 JSON")
+var (
+	errNeteaseUnexpectedHTML = errors.New("netease: 返回了网页而不是 JSON")
+	errNeteaseUnexpectedJSON = errors.New("netease: 返回的 JSON 为空、截断或结构不符合预期")
+)
+
+func neteaseContractError(format string, args ...any) error {
+	return fmt.Errorf("%w: %s", errNeteaseUnexpectedJSON, fmt.Sprintf(format, args...))
+}
 
 // neteaseBases lets a test point the client at a local server. Production
 // leaves it nil and uses the official origin.
@@ -92,10 +101,20 @@ func (e *neteaseHTTPError) Error() string {
 }
 
 func classifyNeteaseFailure(err error) string {
-	if err == nil || errors.Is(err, context.Canceled) {
+	if err == nil {
 		return downloadpolicy.ClassNoResult
 	}
-	if errors.Is(err, errNeteaseUnexpectedHTML) {
+	// Cancellation is not a terminal no-result. acquireFallback rechecks the
+	// context after every source and propagates it before committing a skip.
+	if errors.Is(err, context.Canceled) {
+		return downloadpolicy.ClassNetwork
+	}
+	if errors.Is(err, errNeteaseUnexpectedHTML) || errors.Is(err, errNeteaseUnexpectedJSON) {
+		return downloadpolicy.ClassNetwork
+	}
+	var syntaxError *json.SyntaxError
+	var typeError *json.UnmarshalTypeError
+	if errors.As(err, &syntaxError) || errors.As(err, &typeError) {
 		return downloadpolicy.ClassNetwork
 	}
 	var httpErr *neteaseHTTPError
@@ -149,8 +168,18 @@ func (a *App) neteaseGet(ctx context.Context, endpoint, cookie string) ([]byte, 
 	if err != nil {
 		return nil, err
 	}
-	if len(body) == 0 || body[0] == '<' {
+	body = bytes.TrimSpace(body)
+	if len(body) == 0 {
+		return nil, errNeteaseUnexpectedJSON
+	}
+	if body[0] == '<' {
 		return nil, errNeteaseUnexpectedHTML
+	}
+	if !json.Valid(body) {
+		return nil, errNeteaseUnexpectedJSON
+	}
+	if body[0] != '{' {
+		return nil, neteaseContractError("顶层必须是 JSON 对象")
 	}
 	return body, nil
 }
@@ -165,6 +194,67 @@ type neteaseSong struct {
 	AlbumID         int64
 	CoverURL        string
 	CatalogVerified bool
+}
+
+// neteaseSearchItem is the search shape shared by direct-song lookup and
+// original-release artwork lookup.
+type neteaseSearchItem struct {
+	ID      int64  `json:"id"`
+	Name    string `json:"name"`
+	Artists []struct {
+		Name string `json:"name"`
+	} `json:"artists"`
+	Album struct {
+		Name   string `json:"name"`
+		ID     int64  `json:"id"`
+		Size   int    `json:"size"`
+		PicURL string `json:"picUrl"`
+	} `json:"album"`
+	Duration int `json:"duration"`
+}
+
+// requiredNeteaseField separates a missing/null JSON member from a valid empty
+// value. A malformed contract is retryable; an explicit empty songs array is a
+// genuine no-result answer.
+func requiredNeteaseField(raw []byte, field, operation string) (json.RawMessage, error) {
+	var object map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &object); err != nil {
+		return nil, neteaseContractError("%s响应不是 JSON 对象：%v", operation, err)
+	}
+	value, ok := object[field]
+	if !ok {
+		return nil, neteaseContractError("%s响应缺少 %s 字段", operation, field)
+	}
+	if bytes.Equal(bytes.TrimSpace(value), []byte("null")) {
+		return nil, neteaseContractError("%s响应的 %s 字段为 null", operation, field)
+	}
+	return value, nil
+}
+
+func decodeNeteaseSearch(body []byte) (int, []neteaseSearchItem, error) {
+	var envelope struct {
+		Code *int `json:"code"`
+	}
+	if err := json.Unmarshal(body, &envelope); err != nil {
+		return 0, nil, neteaseContractError("搜索响应结构异常：%v", err)
+	}
+	code := 0
+	if envelope.Code != nil {
+		code = *envelope.Code
+	}
+	resultRaw, err := requiredNeteaseField(body, "result", "搜索")
+	if err != nil {
+		return 0, nil, err
+	}
+	songsRaw, err := requiredNeteaseField(resultRaw, "songs", "搜索")
+	if err != nil {
+		return 0, nil, err
+	}
+	var songs []neteaseSearchItem
+	if err := json.Unmarshal(songsRaw, &songs); err != nil {
+		return 0, nil, neteaseContractError("搜索 songs 结构异常：%v", err)
+	}
+	return code, songs, nil
 }
 
 // neteaseSearchSong finds the best match for a query. A hit counts only when
@@ -196,30 +286,12 @@ func (a *App) neteaseSearchSong(ctx context.Context, plan SearchPlan) (*neteaseS
 	if err != nil {
 		return nil, err
 	}
-	var decoded struct {
-		Code   int `json:"code"`
-		Result struct {
-			Songs []struct {
-				ID      int64  `json:"id"`
-				Name    string `json:"name"`
-				Artists []struct {
-					Name string `json:"name"`
-				} `json:"artists"`
-				Album struct {
-					Name   string `json:"name"`
-					ID     int64  `json:"id"`
-					Size   int    `json:"size"`
-					PicURL string `json:"picUrl"`
-				} `json:"album"`
-				Duration int `json:"duration"`
-			} `json:"songs"`
-		} `json:"result"`
-	}
-	if err := json.Unmarshal(body, &decoded); err != nil {
+	code, songs, err := decodeNeteaseSearch(body)
+	if err != nil {
 		return nil, err
 	}
-	if decoded.Code != 0 && decoded.Code != 200 {
-		return nil, errors.New("netease: 搜索被拒绝")
+	if code != 0 && code != 200 {
+		return nil, &neteaseHTTPError{operation: "搜索", status: code}
 	}
 	wantTitle := foldTagText(firstNonEmpty(plan.PlaylistTrack, plan.ExpectedTitle))
 	if wantTitle == "" {
@@ -227,7 +299,7 @@ func (a *App) neteaseSearchSong(ctx context.Context, plan SearchPlan) (*neteaseS
 	}
 	wantParts := splitPlaylistArtists(plan.ExpectedArtist)
 	best := (*neteaseSong)(nil)
-	for _, item := range decoded.Result.Songs {
+	for _, item := range songs {
 		if item.ID <= 0 || strings.TrimSpace(item.Name) == "" {
 			continue
 		}
@@ -287,18 +359,23 @@ func (a *App) neteaseURLFor(ctx context.Context, song *neteaseSong) (string, str
 			continue
 		}
 		sawResponse = true
-		var decoded struct {
-			Data []struct {
-				URL   string `json:"url"`
-				Type  string `json:"type"`
-				Code  int    `json:"code"`
-				Level string `json:"level"`
-			} `json:"data"`
+		dataRaw, contractErr := requiredNeteaseField(body, "data", "音源地址")
+		if contractErr != nil {
+			return "", "", contractErr
 		}
-		if json.Unmarshal(body, &decoded) != nil || len(decoded.Data) == 0 {
+		var data []struct {
+			URL   string `json:"url"`
+			Type  string `json:"type"`
+			Code  int    `json:"code"`
+			Level string `json:"level"`
+		}
+		if contractErr := json.Unmarshal(dataRaw, &data); contractErr != nil {
+			return "", "", neteaseContractError("音源地址 data 结构异常：%v", contractErr)
+		}
+		if len(data) == 0 {
 			continue
 		}
-		item := decoded.Data[0]
+		item := data[0]
 		if item.Code != 0 && item.Code != 200 {
 			continue
 		}
@@ -352,30 +429,16 @@ func (a *App) neteaseOriginalCoverSong(ctx context.Context, song *neteaseSong) (
 	if err != nil {
 		return nil, err
 	}
-	var decoded struct {
-		Code   int `json:"code"`
-		Result struct {
-			Songs []struct {
-				ID      int64  `json:"id"`
-				Name    string `json:"name"`
-				Artists []struct {
-					Name string `json:"name"`
-				} `json:"artists"`
-				Album struct {
-					ID     int64  `json:"id"`
-					Name   string `json:"name"`
-					PicURL string `json:"picUrl"`
-				} `json:"album"`
-				Duration int `json:"duration"`
-			} `json:"songs"`
-		} `json:"result"`
+	code, songs, err := decodeNeteaseSearch(body)
+	if err != nil {
+		return nil, err
 	}
-	if json.Unmarshal(body, &decoded) != nil || (decoded.Code != 0 && decoded.Code != 200) {
-		return nil, errors.New("网易云原发行版封面检索失败")
+	if code != 0 && code != 200 {
+		return nil, &neteaseHTTPError{operation: "原发行版封面搜索", status: code}
 	}
 	var best *neteaseSong
 	bestDelta := 5001
-	for _, item := range decoded.Result.Songs {
+	for _, item := range songs {
 		if item.ID <= 0 || item.Album.ID <= 0 || normalizeKey(item.Name) != normalizeKey(song.Name) || isHotSlowCompilationAlbum(item.Album.Name) {
 			continue
 		}
@@ -418,37 +481,44 @@ func playlistArtistsOverlap(want, got []string) bool {
 // neteaseCoverURLFor resolves the selected song's album artwork. Album
 // tracks carry the release cover from the album document; direct song
 // fallbacks recover it from the same album id.
-func (a *App) neteaseCoverURLFor(ctx context.Context, song *neteaseSong) string {
+func (a *App) neteaseCoverURLFor(ctx context.Context, song *neteaseSong) (string, error) {
 	if song == nil {
-		return ""
+		return "", nil
 	}
 	if strings.TrimSpace(song.CoverURL) != "" {
-		return strings.TrimSpace(song.CoverURL)
+		return strings.TrimSpace(song.CoverURL), nil
 	}
 	if song.AlbumID <= 0 {
-		return ""
+		return "", nil
 	}
 	raw, err := a.neteaseGet(ctx, a.neteaseBase()+"/api/v1/album/"+strconv.FormatInt(song.AlbumID, 10), a.neteaseCookie())
 	if err != nil {
-		return ""
+		return "", err
 	}
-	var data struct {
-		Album struct {
-			PicURL string `json:"picUrl"`
-		} `json:"album"`
+	albumRaw, err := requiredNeteaseField(raw, "album", "专辑封面")
+	if err != nil {
+		return "", err
 	}
-	if json.Unmarshal(raw, &data) != nil {
-		return ""
+	picRaw, err := requiredNeteaseField(albumRaw, "picUrl", "专辑封面")
+	if err != nil {
+		return "", err
 	}
-	song.CoverURL = strings.TrimSpace(data.Album.PicURL)
-	return song.CoverURL
+	var picURL string
+	if err := json.Unmarshal(picRaw, &picURL); err != nil {
+		return "", neteaseContractError("专辑封面 picUrl 结构异常：%v", err)
+	}
+	song.CoverURL = strings.TrimSpace(picURL)
+	return song.CoverURL, nil
 }
 
 // neteaseCoverBytes downloads and fully decodes the selected track's artwork.
 // A valid image header is not enough: truncated CDN responses produced half
 // covers in older releases.
 func (a *App) neteaseCoverBytes(ctx context.Context, song *neteaseSong) ([]byte, error) {
-	rawURL := a.neteaseCoverURLFor(ctx, song)
+	rawURL, err := a.neteaseCoverURLFor(ctx, song)
+	if err != nil {
+		return nil, err
+	}
 	if rawURL == "" || !a.neteaseMediaAllowed(rawURL) {
 		return nil, errors.New("网易云歌曲封面地址为空或不在网易云域名下")
 	}

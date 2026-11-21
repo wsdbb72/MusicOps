@@ -39,8 +39,19 @@ func TestPlaylistPresenceRequiresMatchingUnchangedAudio(t *testing.T) {
 		t.Fatal(err)
 	}
 	index := application.playlistLibrary()
-	if !index.hasTrack("Artist A", "Album X", "Song One") || index.hasTrack("Artist A", "Album Y", "Song One") {
+	if !index.hasTrack("Artist A", "Album X", "Song One") || index.hasTrack("Artist A", "Album Y", "Song One") || index.hasTrack("Artist A", "", "Song One") {
 		t.Fatal("presence must match the album")
+	}
+	if _, err := audiorelease.Release(context.Background(), application.engine, audiorelease.Request{
+		RequestID: "playlist-single-presence", RootID: "playlist-single", Artist: "Artist A", Album: "Song One",
+		Title: "Song One", Track: 1, SourceName: "track.wav", Incoming: incoming, Library: library,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	application.invalidatePlaylistLibraryCache()
+	report, err := application.enqueuePlaylistTracks(context.Background(), "pl-netease-single", []playlistTrack{{Artist: "Artist A", Title: "Song One", NeteaseSongID: 12}}, []int{0}, playlistEnqueueOptions{AlbumCompletion: true})
+	if err != nil || len(report.Skipped) != 1 || len(report.Created) != 0 {
+		t.Fatalf("a published single without source album metadata was requeued: %+v, %v", report, err)
 	}
 	tagged := filepath.Join(incoming, "hot.flac")
 	if _, err := wavflac.ConvertFile(filepath.Join(incoming, "track.wav"), tagged, true); err != nil {

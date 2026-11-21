@@ -179,7 +179,9 @@ func indexPlaylistLibrary(engine *dataengine.Engine, entries []audiorelease.Entr
 }
 
 func (index playlistLibraryIndex) hasTrack(artist, album, title string) bool {
-	key := [2]string{normalizeKey(artist), normalizeKey(album)}
+	// A source row without an album is published under its own title.
+	// Use that same folder when checking whether it has already been filed.
+	key := [2]string{normalizeKey(artist), normalizeKey(firstNonEmpty(album, title))}
 	want := normalizeKey(title)
 	if key[0] == "" || key[1] == "" || want == "" {
 		return false
@@ -381,7 +383,7 @@ func (a *App) enqueuePlaylistTracks(ctx context.Context, playlistJobID string, r
 		seenTracks[trackKey] = true
 		report.Tracks++
 		album := normalizePlaylistAlbumTitle(row.Album)
-		albumCompletion := opts.AlbumCompletion && !isHotSlowCompilationAlbum(album)
+		albumCompletion := opts.AlbumCompletion && album != "" && !isHotSlowCompilationAlbum(album)
 		if library.hasTrack(artist, row.Album, title) && (!albumCompletion || !library.hasAlbumGap(artist, album)) {
 			report.Skipped = append(report.Skipped, artist+" - "+title)
 			continue
@@ -501,7 +503,7 @@ func (a *App) startPlaylistAlbumJob(ctx context.Context, client *musicbrainz.Cli
 		RootJobID: jobID, Scene: "expand",
 		Query: strings.TrimSpace(artist + " " + firstNonEmpty(title, expected)), ExpectedTitle: expected, ExpectedArtist: artist,
 		EnabledSites: sites, StreamingEnabled: true, Identity: identity, Budget: budget, PlaylistTrack: title,
-		NeteaseOnly: neteaseOnly, NeteaseTrackOnly: isHotSlowCompilationAlbum(album) || neteaseOnly && !albumCompletion, NeteaseSongID: row.NeteaseSongID, NeteaseAlbumID: row.NeteaseAlbumID,
+		NeteaseOnly: neteaseOnly, NeteaseTrackOnly: album == "" || isHotSlowCompilationAlbum(album) || neteaseOnly && !albumCompletion, NeteaseSongID: row.NeteaseSongID, NeteaseAlbumID: row.NeteaseAlbumID,
 		AlbumArtist: func() string {
 			if isHotSlowCompilationAlbum(album) {
 				return hotSlowCompilationArtist

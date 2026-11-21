@@ -757,11 +757,24 @@ func (a *App) stageNeteaseSongWithEngine(ctx context.Context, plan SearchPlan, s
 	if path != "" || !handled {
 		return path, note, class, handled
 	}
+	if song.CatalogVerified && song.ID > 0 && song.ID == plan.NeteaseSongID {
+		// The playlist already supplied the identity. Text search can omit the
+		// exact ID even when the engine's download endpoint can serve it.
+		exact := &streamSong{
+			ID: strconv.FormatInt(song.ID, 10), Source: "netease", Name: song.Name,
+			Artist: strings.Join(song.Artists, " / "), Album: song.Album, Duration: (song.DurationMS + 500) / 1000,
+		}
+		return a.finishNeteaseEngineFallback(ctx, plan, note, class, exact)
+	}
 	return a.stageNeteaseEngineFallback(ctx, plan, note, class)
 }
 
 func (a *App) stageNeteaseEngineFallback(ctx context.Context, plan SearchPlan, primaryNote, primaryClass string) (string, string, string, bool) {
-	enginePath, engineNote, engineClass := a.tryConfiguredStream(ctx, "netease", plan)
+	return a.finishNeteaseEngineFallback(ctx, plan, primaryNote, primaryClass, nil)
+}
+
+func (a *App) finishNeteaseEngineFallback(ctx context.Context, plan SearchPlan, primaryNote, primaryClass string, exact *streamSong) (string, string, string, bool) {
+	enginePath, engineNote, engineClass := a.tryConfiguredStreamSong(ctx, "netease", plan, exact)
 	if enginePath != "" {
 		return enginePath, primaryNote + "；网易云内置下载引擎：" + engineNote, downloadpolicy.ClassDownload, true
 	}

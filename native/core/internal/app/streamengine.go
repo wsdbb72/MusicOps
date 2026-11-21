@@ -85,6 +85,10 @@ func streamServiceName(source string) (string, bool) {
 // the note stays the historical "未接入" text. A file is returned only after
 // validStreamAudio accepts it.
 func (a *App) tryConfiguredStream(ctx context.Context, source string, plan SearchPlan) (string, string, string) {
+	return a.tryConfiguredStreamSong(ctx, source, plan, nil)
+}
+
+func (a *App) tryConfiguredStreamSong(ctx context.Context, source string, plan SearchPlan, knownSong *streamSong) (string, string, string) {
 	service, ok := streamServiceName(source)
 	if !ok {
 		return "", source + " 未接入（无凭证与引擎）", downloadpolicy.ClassNoResult
@@ -105,7 +109,11 @@ func (a *App) tryConfiguredStream(ctx context.Context, source string, plan Searc
 		}
 		base, token = managedBase, managedToken
 	}
-	song, status, err := a.streamSearch(ctx, base, service, plan, token)
+	song := knownSong
+	var status string
+	if song == nil {
+		song, status, err = a.streamSearch(ctx, base, service, plan, token)
+	}
 	if err != nil {
 		if status == downloadpolicy.ClassAuth {
 			return "", source + " 需要用户自己的账号，没有绕过访问控制", downloadpolicy.ClassAuth

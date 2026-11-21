@@ -816,3 +816,32 @@ func TestNeteaseAlbumSearchFailureStaysRetryableWhenEngineAlsoFails(t *testing.T
 		t.Fatalf("temporary failures lost their retry classification: %+v", job)
 	}
 }
+
+func TestNeteaseEngineUsesVerifiedPlaylistIDWithoutSearch(t *testing.T) {
+	vaultKey(t)
+	a := newApp(t)
+	saveNeteaseTestCookie(t, a)
+	audio := oneSecondFLAC(t, "Artist", "Song")
+	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"code":200,"data":[]}`))
+	}))
+	defer api.Close()
+	a.neteaseBases = map[string]string{"api": api.URL}
+	engine := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		q := r.URL.Query()
+		if r.URL.Path != "/download" || q.Get("id") != "42" || q.Get("source") != "netease" {
+			t.Errorf("unexpected engine route: %s %s", r.URL.Path, q.Encode())
+			http.NotFound(w, r)
+			return
+		}
+		_, _ = w.Write(audio)
+	}))
+	defer engine.Close()
+	t.Setenv("MUSICOPS_ENGINE_URL", engine.URL)
+	plan := SearchPlan{RootJobID: "playlist-exact-engine-id", ExpectedTitle: "Album", PlaylistTrack: "Song", NeteaseSongID: 42}
+	song := &neteaseSong{ID: 42, Name: "Song", Album: "Album", Artists: []string{"Artist"}, DurationMS: 1000, CatalogVerified: true}
+	path, note, class, handled := a.stageNeteaseSongWithEngine(t.Context(), plan, song)
+	if path == "" || class != downloadpolicy.ClassDownload || !handled {
+		t.Fatalf("verified ID did not download: path=%q class=%q note=%q", path, class, note)
+	}
+}

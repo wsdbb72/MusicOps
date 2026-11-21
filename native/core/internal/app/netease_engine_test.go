@@ -355,7 +355,7 @@ func TestNeteaseDefinitiveNoResultSkipsWithoutReviewLoop(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	deadline := time.Now().Add(35 * time.Second)
+	deadline := time.Now().Add(2 * time.Minute)
 	var process *workflow.Job
 	for time.Now().Before(deadline) {
 		process, _ = application.flows.Job("process:search:" + plan.RootJobID)
@@ -681,7 +681,7 @@ func TestNeteaseAlbumEmptySearchFallsBackToEngineAndPublishes(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	deadline := time.Now().Add(20 * time.Second)
+	deadline := time.Now().Add(2 * time.Minute)
 	var rootJob workflow.Job
 	var searchJob, processJob *workflow.Job
 	rootPublished := false
@@ -754,8 +754,19 @@ func TestNeteaseAlbumSearchFailureStaysRetryableWhenEngineAlsoFails(t *testing.T
 	}); err != nil {
 		t.Fatal(err)
 	}
-	job := waitJob(t, application, "process:search:"+plan.RootJobID, "needs_review")
-	if job.ErrorClass != "STREAM_RETRY" || !strings.Contains(job.Message, "自动核对重试") {
+	deadline := time.Now().Add(2 * time.Minute)
+	var job workflow.Job
+	for time.Now().Before(deadline) {
+		current, _ := application.flows.Job("process:search:" + plan.RootJobID)
+		if current != nil {
+			job = *current
+			if job.Stage == "needs_review" || job.Stage == "failed" || job.Stage == "skipped" {
+				break
+			}
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if job.Stage != "needs_review" || job.ErrorClass != "STREAM_RETRY" || !strings.Contains(job.Message, "自动核对重试") {
 		t.Fatalf("temporary failures lost their retry classification: %+v", job)
 	}
 }

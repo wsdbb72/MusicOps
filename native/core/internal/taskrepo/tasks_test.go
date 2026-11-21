@@ -480,6 +480,21 @@ func TestClockRollbackDoesNotBreakPauseOrRecentOrder(t *testing.T) {
 	}
 }
 
+func TestCancelFinalizesAnAlreadyInterruptedTaskWithoutPriorIntent(t *testing.T) {
+	r, _ := fixture(t)
+	token := start(t, r, "interrupted-direct-cancel", "aux")
+	if _, err := r.Interrupt("interrupt-direct", token, 2200, "owned process exited"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.Control("cancel-direct", "interrupted-direct-cancel", "cancel", 2300); err != nil {
+		t.Fatal(err)
+	}
+	task := state(t, r, "interrupted-direct-cancel", "cancelled")
+	if !task.CancelRequested || task.Execution != "finished" || task.CancelOutcome != "cancelled_after_interrupt" {
+		t.Fatalf("task=%+v", task)
+	}
+}
+
 func TestCancelFinalizesAlreadyInterruptedRequest(t *testing.T) {
 	r, _ := fixture(t)
 	token := start(t, r, "a", "aux")

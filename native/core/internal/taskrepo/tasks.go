@@ -445,10 +445,12 @@ func controlDecision(v *dataengine.View, current *Task, id, action string, nowNS
 		if current.State == "cancelled" {
 			return &next, nil, nil
 		}
-		if current.CancelRequested && current.State == "recovery_required" && current.Owner == "" {
-			// A running executor keeps its request until its safe boundary.
-			// Once interruption has removed the owner, there is no execution
-			// left to acknowledge it: finalize the cancelled terminal state now.
+		if current.State == "recovery_required" && current.Owner == "" {
+			// No executor remains. A cancel issued before or after interruption
+			// only abandons the unresolved work; it never replays an external
+			// effect, so it can finalize immediately instead of looping through
+			// another review action.
+			next.CancelRequested = true
 			next.State = "cancelled"
 			next.Execution = "finished"
 			next.PauseRequested = false

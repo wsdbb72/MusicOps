@@ -550,6 +550,51 @@ func interruptDecision(v *dataengine.View, current *Task, token Token, nowNS int
 	return &next, []dataengine.Mutation{{Key: attemptKey(token), Value: raw}}, nil
 }
 
+// RequeueOwned returns a still-owned read-only workflow task to the queue in
+// one CAS with its workflow condition. It is used only after an executor sees
+// a local stale conflict but the task token itself is still valid: no external
+// effect has to be replayed and no review is warranted.
+func (r *Repository) RequeueOwned(requestID string, token Token, nowNS int64, extra []byte, domain Domain) (Result, error) {
+	if !validToken(token) || nowNS <= 0 || domain == nil {
+		return Result{}, dataengine.ErrInvalidRequest
+	}
+	intent := struct {
+		Operation string
+		Token     Token
+		Extra     []byte
+	}{"workflow_requeue", token, extra}
+	return r.apply(requestID, token.ID, intent, func(v *dataengine.View, current *Task) (*Task, []dataengine.Mutation, error) {
+		if !matches(current, token) || current.Execution != "started" || (current.State != "running" && current.State != "paused") || current.CancelRequested || current.WorkflowJobID == "" {
+			return nil, nil, ErrStale
+		}
+		if current.Fence == math.MaxUint64 {
+			return nil, nil, ErrIntegrity
+		}
+		next := *current
+		next.State = "queued"
+		next.Owner = ""
+		next.Execution = ""
+		next.Fence++
+		next.PauseRequested = false
+		next.CancelOutcome = ""
+		next.Progress = 0
+		next.ProgressSequence = 0
+		next.ProgressHash = ""
+		next.Phase = ""
+		next.ErrorClass = ""
+		next.ResultHash = ""
+		next.UpdatedNS = effectiveTime(nowNS, current)
+		attempt, err := readAttempt(v, token)
+		if err != nil {
+			return nil, nil, err
+		}
+		attempt.State = "released_for_replay"
+		attempt.FinishedNS = next.UpdatedNS
+		raw, _ := json.Marshal(attempt)
+		return &next, []dataengine.Mutation{{Key: attemptKey(token), Value: raw}}, nil
+	}, domain)
+}
+
 // ReleaseClaim yields a ticket that never reached Begin. No external action may
 // start before Begin, so this transition is safe without effect reconciliation.
 func (r *Repository) ReleaseClaim(requestID string, token Token, nowNS int64) (Result, error) {

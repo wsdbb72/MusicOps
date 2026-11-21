@@ -432,6 +432,36 @@ func TestBeginOwnedAtomicallyIncludesDomainCondition(t *testing.T) {
 	}
 }
 
+func TestRequeueOwnedQueuesSameTaskWithoutExternalReview(t *testing.T) {
+	r, _ := fixture(t)
+	empty := func(_ *dataengine.View, _, _ *Task, _ []Task) ([]dataengine.Condition, []dataengine.Mutation, json.RawMessage, error) {
+		return nil, nil, nil, nil
+	}
+	s := spec("replay", "identify", 1)
+	if _, err := r.CreateOwned("create-replay", s, []byte("arguments"), "replay", nil, empty); err != nil {
+		t.Fatal(err)
+	}
+	claim, err := r.Claim("replay-claim", "identify", "owner", 2000)
+	if err != nil || claim.Task == nil {
+		t.Fatalf("claim=%+v err=%v", claim, err)
+	}
+	token := Token{ID: "replay", Owner: "owner", Fence: claim.Task.Fence}
+	if _, err := r.Begin("replay-begin", token, 2100); err != nil {
+		t.Fatal(err)
+	}
+	domain := func(_ *dataengine.View, _, _ *Task, _ []Task) ([]dataengine.Condition, []dataengine.Mutation, json.RawMessage, error) {
+		return nil, nil, nil, nil
+	}
+	result, err := r.RequeueOwned("replay-requeue", token, 2200, nil, domain)
+	if err != nil || result.Task == nil || result.Task.State != "queued" || result.Task.Owner != "" || result.Task.Execution != "" || result.Task.Fence <= token.Fence {
+		t.Fatalf("result=%+v err=%v", result.Task, err)
+	}
+	claim, err = r.Claim("replay-claim-2", "identify", "owner-2", 2300)
+	if err != nil || claim.Task == nil || claim.Task.ID != "replay" || claim.Task.Fence != result.Task.Fence+1 {
+		t.Fatalf("claim=%+v err=%v", claim, err)
+	}
+}
+
 func TestClockRollbackDoesNotBreakPauseOrRecentOrder(t *testing.T) {
 	r, _ := fixture(t)
 	token := start(t, r, "a", "identify")

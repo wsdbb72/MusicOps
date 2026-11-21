@@ -40,6 +40,43 @@ func searchReviewJob(t *testing.T, repo *Repository, tasks *taskrepo.Repository,
 	}
 }
 
+func TestReplayStaleSearchKeepsSameWorkflowAndBoundsRetries(t *testing.T) {
+	repo, tasks := fixture(t)
+	startPlaylist(t, repo)
+	token := begin(t, tasks, "album1", "identify")
+	if _, err := repo.Complete("handoff-replay", token, handoff(3000)); err != nil {
+		t.Fatal(err)
+	}
+	for attempt := uint8(0); attempt < 3; attempt++ {
+		claim, err := tasks.Claim(fmt.Sprintf("replay-claim-%d", attempt), "identify", fmt.Sprintf("owner-%d", attempt), int64(3100)+int64(attempt))
+		if err != nil || claim.Task == nil {
+			t.Fatalf("claim attempt %d: %+v %v", attempt, claim, err)
+		}
+		token = taskrepo.Token{ID: claim.Task.ID, Owner: claim.Task.Owner, Fence: claim.Task.Fence}
+		if _, err := tasks.Begin(fmt.Sprintf("replay-begin-%d", attempt), token, int64(3101)+int64(attempt)); err != nil {
+			t.Fatalf("begin attempt %d: %v", attempt, err)
+		}
+		if _, err := repo.ReplayStaleSearch(fmt.Sprintf("replay-search-%d", attempt), token, int64(3102)+int64(attempt), "本地 CAS 冲突"); err != nil {
+			t.Fatalf("attempt %d: %v", attempt, err)
+		}
+		job, err := repo.Job("search:album1")
+		if err != nil || job == nil || job.ActiveTaskID != "search:album1" || job.RecoveryRetryCount != attempt+1 || job.Stage != "searching" {
+			t.Fatalf("attempt %d job=%+v err=%v", attempt, job, err)
+		}
+	}
+	claim, err := tasks.Claim("replay-claim-exhausted", "identify", "owner-exhausted", 3300)
+	if err != nil || claim.Task == nil {
+		t.Fatalf("claim exhausted: %+v %v", claim, err)
+	}
+	token = taskrepo.Token{ID: claim.Task.ID, Owner: claim.Task.Owner, Fence: claim.Task.Fence}
+	if _, err := tasks.Begin("replay-begin-exhausted", token, 3301); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := repo.ReplayStaleSearch("replay-search-exhausted", token, 3302, "本地 CAS 冲突"); err == nil {
+		t.Fatal("stale replay exceeded its bounded retry budget")
+	}
+}
+
 func TestRequeueTokenFallbackClosesBlockedNeteaseProcess(t *testing.T) {
 	repo, tasks := fixture(t)
 	if _, err := repo.Start("start-token-fallback", Start{

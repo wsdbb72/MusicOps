@@ -20,6 +20,7 @@ import (
 )
 
 var ErrCancelled = errors.New("cancelled at an execution checkpoint")
+var ErrRequeued = errors.New("read-only execution requeued after a local stale conflict")
 
 // secretShape matches the credential query keys an upstream error string can
 // quote. The task store never holds the secret itself; only the shape.

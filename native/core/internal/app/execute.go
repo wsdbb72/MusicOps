@@ -155,6 +155,18 @@ func (a *App) identify(ctx context.Context, execution *scheduler.Execution, payl
 }
 
 func (a *App) search(ctx context.Context, execution *scheduler.Execution, payload []byte) (scheduler.Outcome, error) {
+	outcome, err := a.searchOnce(ctx, execution, payload)
+	if err != nil && errors.Is(err, taskrepo.ErrStale) {
+		token := execution.Token()
+		requestID := intentID("replay-search", token.ID, token.Fence)
+		if _, replayErr := a.flows.ReplayStaleSearch(requestID, token, a.now().UnixNano(), "只读检索遇到本地并发冲突，已自动重排；未下载、未入库"); replayErr == nil {
+			return scheduler.Outcome{}, scheduler.ErrRequeued
+		}
+	}
+	return outcome, err
+}
+
+func (a *App) searchOnce(ctx context.Context, execution *scheduler.Execution, payload []byte) (scheduler.Outcome, error) {
 	if err := a.cancelled(ctx, execution); err != nil {
 		return scheduler.Outcome{}, err
 	}
@@ -255,7 +267,7 @@ func (a *App) search(ctx context.Context, execution *scheduler.Execution, payloa
 	complete.Search = &report
 	complete.NowNS = a.now().UnixNano()
 	if _, err = a.flows.Complete(intentID("search", token.ID, token.Fence), token, complete); err != nil {
-		return scheduler.Outcome{}, err
+		return scheduler.Outcome{}, fmt.Errorf("complete search workflow: %w", err)
 	}
 	if complete.Edge != workflow.EdgeDefer && complete.Edge != workflow.EdgeQueueProcess {
 		// The search secret stays while the job tree can still use it: a job
@@ -309,7 +321,7 @@ func (a *App) observe(ctx context.Context, execution *scheduler.Execution, job w
 		}
 		phase := "search_" + strings.ReplaceAll(site, ".", "_")
 		if err := execution.Checkpoint(ctx, phase, 0, site); err != nil {
-			return report, nil, "", err
+			return report, nil, "", fmt.Errorf("checkpoint %s: %w", phase, err)
 		}
 		observation, err := a.searcher.Search(ctx, trackersearch.Query{
 			Site: site, Text: plan.Query, Cookie: a.cookieFor(plan.RootJobID, site), Synthetic: plan.Synthetic, BaseURL: plan.BaseURL, SolverURL: solverURL, SolverToken: solverToken,
@@ -474,7 +486,10 @@ func releaseYear(release map[string]any) int {
 func (a *App) cancelled(ctx context.Context, execution *scheduler.Execution) error {
 	err := execution.Checkpoint(ctx, "tracker_read", 0, "只读检索")
 	if err == nil || !errors.Is(err, scheduler.ErrCancelled) {
-		return err
+		if err != nil {
+			return fmt.Errorf("checkpoint tracker_read: %w", err)
+		}
+		return nil
 	}
 	return a.stop(execution)
 }

@@ -43,6 +43,7 @@ package workflow
 
 import (
 	"encoding/json"
+	"fmt"
 	"strings"
 
 	"github.com/wsdbb72/MusicOps/native/core/internal/dataengine"
@@ -330,11 +331,74 @@ func (r *Repository) interruptedRecoveryStage(job Job, task *taskrepo.Task) (str
 	return r.retryStage(job, task)
 }
 
+// ReplayStaleSearch requeues a read-only search after a local CAS conflict.
+// The task token must still be live and the workflow must still own this exact
+// search task. RecoveryRetryCount bounds repeated local conflicts; at that
+// point the ordinary interruption path is allowed to surface the issue.
+func (r *Repository) ReplayStaleSearch(requestID string, token taskrepo.Token, nowNS int64, reason string) (Result, error) {
+	if !validID(token.ID) || token.Owner == "" || len(token.Owner) > 128 || requestID == "" || len(requestID) > 128 || nowNS <= 0 || len(reason) > 4000 {
+		return Result{}, dataengine.ErrInvalidRequest
+	}
+	task, err := r.tasks.Get(token.ID)
+	if err != nil || task == nil {
+		if err != nil {
+			return Result{}, err
+		}
+		return Result{}, ErrNotFound
+	}
+	if task.Command != cmdSearch || task.WorkflowJobID == "" || task.CancelRequested {
+		return Result{}, ErrStale
+	}
+	extra, _ := json.Marshal(struct{ JobID, Action string }{task.WorkflowJobID, "stale_replay"})
+	result, err := r.tasks.RequeueOwned(requestID, token, nowNS, extra, func(v *dataengine.View, _, after *taskrepo.Task, _ []taskrepo.Task) ([]dataengine.Condition, []dataengine.Mutation, json.RawMessage, error) {
+		if after == nil || after.State != "queued" || after.Owner != "" || after.Execution != "" || after.WorkflowJobID != task.WorkflowJobID {
+			return nil, nil, nil, ErrStale
+		}
+		live, raw, err := readJob(v, task.WorkflowJobID)
+		if err != nil || live == nil {
+			if err != nil {
+				return nil, nil, nil, err
+			}
+			return nil, nil, nil, ErrNotFound
+		}
+		if live.CancelRequested || live.RecoveryRetryCount >= 3 || !queuedTaskStillCurrent(v, *live, after) {
+			return nil, nil, nil, fmt.Errorf("%w: replay job stage=%s active=%s retry=%d task=%s", ErrStale, live.Stage, live.ActiveTaskID, live.RecoveryRetryCount, after.ID)
+		}
+		if live.RootID != live.ID {
+			root, _, err := readJob(v, live.RootID)
+			if err != nil || root == nil || root.CancelRequested {
+				if err != nil {
+					return nil, nil, nil, err
+				}
+				return nil, nil, nil, ErrStale
+			}
+		}
+		next := *live
+		next.RecoveryRetryCount = live.RecoveryRetryCount + 1
+		next.Message = messageOr(reason, "只读检索遇到本地并发冲突，已自动重排；未下载、未入库")
+		updated, err := bump(next, nowNS, false)
+		if err != nil {
+			return nil, nil, nil, err
+		}
+		condition, writes, err := putJob(raw, updated)
+		if err != nil {
+			return nil, nil, nil, err
+		}
+		attached, err := json.Marshal(Result{Job: &updated})
+		return []dataengine.Condition{condition}, writes, attached, err
+	})
+	if err != nil {
+		return Result{}, fmt.Errorf("requeue stale search: %w", err)
+	}
+	return decode(result, err)
+}
+
 // RequeueTokenFallback sends an unresolved NetEase playlist token acquisition
 // to the source-platform fallback. It never replays usetoken and never uses a
 // normal tracker download. This is the terminal reconciliation path for a
 // request whose external token effect cannot be proved: falling back avoids a
 // second charge while still allowing the playlist row to finish.
+
 func (r *Repository) RequeueTokenFallback(requestID, jobID string, nowNS int64, reason string) (Result, error) {
 	if !validID(jobID) || requestID == "" || len(requestID) > 128 || nowNS <= 0 || len(reason) > 4000 {
 		return Result{}, dataengine.ErrInvalidRequest

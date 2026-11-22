@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -45,6 +46,10 @@ func TestParseRequestCarriesTheService(t *testing.T) {
 func TestClientAnswersPingWhileRegistering(t *testing.T) {
 	upgrader := websocket.Upgrader{}
 	seen := make(chan string, 4)
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+	releaseServer := func() { releaseOnce.Do(func() { close(release) }) }
+	defer releaseServer()
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		conn, err := upgrader.Upgrade(w, r, nil)
 		if err != nil {
@@ -98,6 +103,10 @@ func TestClientAnswersPingWhileRegistering(t *testing.T) {
 				}
 				send("MOO/1 CONTINUE Registered\nRequest-Id: 2\nContent-Type: application/json\n\n" +
 					`{"core_id":"core-1","token":"token-1","provided_services":["com.roonlabs.transport:2"]}`)
+				// A real Roon core keeps the registration socket open. Closing
+				// immediately after the write lets an abrupt TCP close race the
+				// final WebSocket frame on loaded Windows runners.
+				<-release
 				return
 			}
 		}
@@ -124,6 +133,7 @@ func TestClientAnswersPingWhileRegistering(t *testing.T) {
 	if registration.Token != "token-1" {
 		t.Fatal(registration)
 	}
+	releaseServer()
 	close(seen)
 	for message := range seen {
 		if strings.HasPrefix(message, "unexpected") || strings.HasPrefix(message, "bad") ||

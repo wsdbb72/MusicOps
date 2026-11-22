@@ -845,3 +845,25 @@ func TestNeteaseEngineUsesVerifiedPlaylistIDWithoutSearch(t *testing.T) {
 		t.Fatalf("verified ID did not download: path=%q class=%q note=%q", path, class, note)
 	}
 }
+
+func TestManagedNeteaseCookieUsesAuthenticatedLoopbackWithoutRedirect(t *testing.T) {
+	var forwarded atomic.Bool
+	other := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		forwarded.Store(true)
+	}))
+	defer other.Close()
+	engine := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/music/cookies" || r.Header.Get(engineTokenHeader) != "test-token" {
+			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+		}
+		var body map[string]string
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body["netease"] != "session=test" {
+			t.Errorf("missing test credential: %v", err)
+		}
+		http.Redirect(w, r, other.URL, http.StatusTemporaryRedirect)
+	}))
+	defer engine.Close()
+	if err := setManagedNeteaseCookie(t.Context(), engine.URL+"/music", "test-token", "session=test"); err == nil || forwarded.Load() {
+		t.Fatal("credential request followed a redirect or accepted it")
+	}
+}

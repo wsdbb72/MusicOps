@@ -108,6 +108,13 @@ func (a *App) tryConfiguredStreamSong(ctx context.Context, source string, plan S
 			return "", source + " 未接入（内置引擎未能启动）", downloadpolicy.ClassNoResult
 		}
 		base, token = managedBase, managedToken
+		finish := a.beginEngineRequest(base)
+		defer finish()
+		if service == "netease" {
+			if err := setManagedNeteaseCookie(ctx, base, token, a.neteaseCookie()); err != nil {
+				return "", source + " 本机引擎凭证同步失败", downloadpolicy.ClassNetwork
+			}
+		}
 	}
 	song := knownSong
 	var status string
@@ -439,6 +446,35 @@ func (a *App) streamDownload(ctx context.Context, base string, song *streamSong,
 	values.Set("album", song.Album)
 	endpoint.RawQuery = values.Encode()
 	return a.engineGET(ctx, base, endpoint.String(), token)
+}
+
+func setManagedNeteaseCookie(ctx context.Context, base, token, cookie string) error {
+	target, err := url.Parse(base)
+	if err != nil || target.Scheme != "http" || target.Hostname() != "127.0.0.1" || token == "" {
+		return errors.New("invalid managed engine endpoint")
+	}
+	body, err := json.Marshal(map[string]string{"netease": cookie})
+	if err != nil {
+		return err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, strings.TrimRight(base, "/")+"/cookies", bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set(engineTokenHeader, token)
+	client := &http.Client{Timeout: 5 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error {
+		return http.ErrUseLastResponse
+	}}
+	resp, err := client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return errors.New("managed engine refused credentials")
+	}
+	return nil
 }
 
 func (a *App) engineGET(ctx context.Context, base, endpoint, token string) ([]byte, string, error) {

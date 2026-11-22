@@ -87,6 +87,7 @@ func TestLibrarySelectionSupportsPageAndWholeLibrary(t *testing.T) {
 		`function setLibrarySelectionAll(selected)`, `librarySelectAll = false`,
 		`/v1/library/upgrade/whole`, `/v1/library/scrape/whole`,
 		`id="run-library-upgrade-now"`, `id="auto-maintenance-status"`,
+		`running ? 3000 : 10000`,
 	} {
 		if !strings.Contains(appJS, want) {
 			t.Fatal("missing library selection behavior:", want)

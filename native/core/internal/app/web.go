@@ -1448,7 +1448,7 @@ const appJS = `(function () {
     document.querySelectorAll("#run-auto-maintenance, #run-library-upgrade-now, #run-library-scrape-now").forEach(function (button) { button.disabled = !!running; });
     var stop = document.getElementById("stop-auto-maintenance");
     if (stop) stop.disabled = !running;
-    if (!running || !statusBox) return;
+    if (!statusBox) return;
     libraryRunTimer = setTimeout(async function () {
       if (view !== "library") return;
       try {
@@ -1466,7 +1466,7 @@ const appJS = `(function () {
       } catch (err) {
         libraryRunTimer = setTimeout(function () { scheduleLibraryRunRefresh(true); }, 5000);
       }
-    }, 3000);
+    }, running ? 3000 : 10000);
   }
   function renderLibrary() {
     var auto = libraryAutomation && libraryAutomation.settings ? libraryAutomation.settings : {enabled:true, scrape:true, dedupe:true, upgrade:true, expand:true, interval_hours:6};

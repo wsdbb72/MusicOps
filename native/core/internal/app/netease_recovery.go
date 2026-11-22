@@ -8,18 +8,23 @@ import (
 	"os"
 	"sort"
 	"strings"
+	"time"
+	"unicode"
 
+	"github.com/wsdbb72/MusicOps/native/core/internal/downloadpolicy"
 	"github.com/wsdbb72/MusicOps/native/core/internal/flactags"
 )
 
 const (
 	// A playlist recording can disappear from one catalogue row while another
 	// release of the same recording remains playable. Keep that recovery
-	// narrow: exact folded title, a compatible subset of the durable artist
-	// credits, and no more than five seconds of duration drift.
+// narrow: a compatible folded title/version signature, durable artist
+// evidence, and no more than five seconds of duration drift.
 	neteaseAlternateCandidateLimit          = 6
+	neteaseAlternateSearchLimit             = 100
 	neteaseAlternateDurationTolerance       = int64(5_000)
 	neteaseAlternateSubsetDurationTolerance = int64(2_000)
+	neteaseAlternateSearchSpacing           = 1200 * time.Millisecond
 )
 
 // neteaseAlternateSongs returns deterministic alternative catalogue rows for
@@ -34,19 +39,48 @@ func (a *App) neteaseAlternateSongs(ctx context.Context, plan SearchPlan, anchor
 	if anchor == nil || anchor.ID <= 0 || strings.TrimSpace(plan.PlaylistTrack) == "" {
 		return nil, nil
 	}
-	query := strings.TrimSpace(strings.Join(anchor.Artists, " ") + " " + firstNonEmpty(anchor.Name, plan.PlaylistTrack))
-	if query == "" {
+	title := strings.TrimSpace(firstNonEmpty(anchor.Name, plan.PlaylistTrack))
+	if title == "" {
 		return nil, nil
 	}
-	_, songs, err := a.neteaseSearchSongs(ctx, query, 30)
+	queries := []string{strings.TrimSpace(strings.Join(anchor.Artists, " ") + " " + title), title}
+	seenQueries := map[string]bool{}
+	var searchErr error
+	for index, query := range queries {
+		key := strings.ToLower(strings.TrimSpace(query))
+		if key == "" || seenQueries[key] {
+			continue
+		}
+		seenQueries[key] = true
+		if index > 0 {
+			if err := a.wait(ctx, neteaseAlternateSearchSpacing); err != nil {
+				return nil, err
+			}
+		}
+		candidates, err := a.neteaseAlternateCandidates(ctx, plan, anchor, query)
+		if err != nil {
+			if searchErr == nil || classifyNeteaseFailure(err) == downloadpolicy.ClassRateLimited {
+				searchErr = err
+			}
+			continue
+		}
+		if len(candidates) > 0 {
+			return candidates, nil
+		}
+	}
+	return nil, searchErr
+}
+
+func (a *App) neteaseAlternateCandidates(ctx context.Context, plan SearchPlan, anchor *neteaseSong, query string) ([]neteaseSong, error) {
+	_, songs, err := a.neteaseSearchSongs(ctx, query, neteaseAlternateSearchLimit)
 	if err != nil {
 		return nil, err
 	}
-	wantTitle := foldTagText(firstNonEmpty(anchor.Name, plan.PlaylistTrack))
 	wantArtists := splitPlaylistArtists(plan.ExpectedArtist)
 	if len(wantArtists) == 0 {
 		wantArtists = anchor.Artists
 	}
+	compilationArtist := neteasePlaylistArtistsAreGeneric(wantArtists)
 	type ranked struct {
 		song          neteaseSong
 		sameAlbumID   bool
@@ -58,7 +92,7 @@ func (a *App) neteaseAlternateSongs(ctx context.Context, plan SearchPlan, anchor
 	candidates := make([]ranked, 0, len(songs))
 	seen := map[int64]bool{}
 	for order, item := range songs {
-		if item.ID <= 0 || item.ID == anchor.ID || seen[item.ID] || foldTagText(item.Name) != wantTitle {
+		if item.ID <= 0 || item.ID == anchor.ID || seen[item.ID] || !neteaseAlternateTitleMatches(firstNonEmpty(anchor.Name, plan.PlaylistTrack), item.Name) {
 			continue
 		}
 		artists := make([]string, 0, len(item.Artists))
@@ -66,9 +100,6 @@ func (a *App) neteaseAlternateSongs(ctx context.Context, plan SearchPlan, anchor
 			if name := strings.TrimSpace(artist.Name); name != "" {
 				artists = append(artists, name)
 			}
-		}
-		if !neteaseAlternateArtistsMatch(wantArtists, artists) {
-			continue
 		}
 		sameAlbumID := anchor.AlbumID > 0 && item.Album.ID == anchor.AlbumID
 		exactArtists := sameNeteaseArtists(wantArtists, artists)
@@ -87,7 +118,17 @@ func (a *App) neteaseAlternateSongs(ctx context.Context, plan SearchPlan, anchor
 			// album is specific enough to replace an unavailable recording.
 			continue
 		}
-		if !exactArtists && !neteaseAlternateSubsetEvidenceAllowed(sameAlbumID, drift, comparableDuration) {
+		if compilationArtist {
+			// "Various Artists" and "群星" are compilation labels rather than
+			// durable performer credits. Require a compatible title/version and
+			// an almost identical duration, while rejecting missing artists.
+			if len(artists) == 0 || !comparableDuration || drift > neteaseAlternateSubsetDurationTolerance {
+				continue
+			}
+		} else if !neteaseAlternateArtistsMatch(wantArtists, artists) {
+			continue
+		}
+		if !exactArtists && !compilationArtist && !neteaseAlternateSubsetEvidenceAllowed(sameAlbumID, drift, comparableDuration) {
 			// An omitted featured credit is only safe on the same album with a
 			// near-identical duration. A different release needs the full set.
 			continue
@@ -140,21 +181,21 @@ func (a *App) neteaseAlternateSongs(ctx context.Context, plan SearchPlan, anchor
 // that retains the primary artist. This covers releases which drop a featured
 // credit while rejecting an unrelated cover or remix artist.
 func neteaseAlternateArtistsMatch(want, got []string) bool {
-	want = splitPlaylistArtists(strings.Join(want, " / "))
-	got = splitPlaylistArtists(strings.Join(got, " / "))
+	want = flattenPlaylistArtists(want)
+	got = flattenPlaylistArtists(got)
 	if len(want) == 0 || len(got) == 0 {
 		return false
 	}
-	primary := normalizeKey(want[0])
+	primary := normalizeNeteaseArtist(want[0])
 	hasPrimary := false
 	for _, actual := range got {
-		normalized := normalizeKey(actual)
+		normalized := normalizeNeteaseArtist(actual)
 		if normalized == primary {
 			hasPrimary = true
 		}
 		found := false
 		for _, expected := range want {
-			if normalized != "" && normalized == normalizeKey(expected) {
+			if normalized != "" && normalized == normalizeNeteaseArtist(expected) {
 				found = true
 				break
 			}
@@ -174,15 +215,15 @@ func neteaseAlternateSubsetEvidenceAllowed(sameAlbumID bool, drift int64, compar
 }
 
 func sameNeteaseArtists(want, got []string) bool {
-	want = splitPlaylistArtists(strings.Join(want, " / "))
-	got = splitPlaylistArtists(strings.Join(got, " / "))
+	want = flattenPlaylistArtists(want)
+	got = flattenPlaylistArtists(got)
 	if len(want) != len(got) {
 		return false
 	}
 	for _, expected := range want {
 		found := false
 		for _, actual := range got {
-			if normalizeKey(expected) == normalizeKey(actual) && normalizeKey(expected) != "" {
+			if normalizeNeteaseArtist(expected) == normalizeNeteaseArtist(actual) && normalizeNeteaseArtist(expected) != "" {
 				found = true
 				break
 			}
@@ -192,6 +233,89 @@ func sameNeteaseArtists(want, got []string) bool {
 		}
 	}
 	return len(want) > 0
+}
+
+func normalizeNeteaseArtist(value string) string {
+	var builder strings.Builder
+	for _, char := range foldTagText(value) {
+		switch {
+		case unicode.IsLetter(char), unicode.IsNumber(char):
+			builder.WriteRune(char)
+		case unicode.IsSpace(char):
+			builder.WriteRune(' ')
+		}
+	}
+	return strings.Join(strings.Fields(builder.String()), " ")
+}
+
+func neteasePlaylistArtistsAreGeneric(artists []string) bool {
+	if len(artists) == 0 {
+		return false
+	}
+	for _, artist := range artists {
+		switch normalizeNeteaseArtist(artist) {
+		case "various artists", "various artist", "various", "va", "群星", "合辑":
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+func neteaseAlternateTitleMatches(want, got string) bool {
+	if foldTagText(want) == foldTagText(got) {
+		return true
+	}
+	if foldTagText(stripNeteaseTitleQualifiers(want)) != foldTagText(stripNeteaseTitleQualifiers(got)) {
+		return false
+	}
+	wantVersions := neteaseTitleVersionTokens(want)
+	gotVersions := neteaseTitleVersionTokens(got)
+	if len(wantVersions) != len(gotVersions) {
+		return false
+	}
+	for token := range wantVersions {
+		if _, ok := gotVersions[token]; !ok {
+			return false
+		}
+	}
+	return true
+}
+
+func stripNeteaseTitleQualifiers(title string) string {
+	pairs := map[rune]rune{'(': ')', '（': '）', '[': ']', '【': '】'}
+	var builder strings.Builder
+	stack := make([]rune, 0, 2)
+	for _, char := range title {
+		if close, ok := pairs[char]; ok {
+			stack = append(stack, close)
+			continue
+		}
+		if len(stack) > 0 && char == stack[len(stack)-1] {
+			stack = stack[:len(stack)-1]
+			continue
+		}
+		if len(stack) == 0 {
+			builder.WriteRune(char)
+		}
+	}
+	return strings.Join(strings.Fields(builder.String()), " ")
+}
+
+func neteaseTitleVersionTokens(title string) map[string]struct{} {
+	normalized := foldTagText(title)
+	tokens := map[string]struct{}{}
+	for _, token := range []string{
+		"remix", "mix", "instrumental", "karaoke", "off vocal", "伴奏", "纯音乐",
+		"acoustic", "live", "现场", "cover", "翻唱", "demo", "sped", "slowed",
+		"nightcore", "extended", "radio edit", "radio version", "edit", "version",
+		"remaster", "完整版", "铃声",
+	} {
+		if strings.Contains(normalized, token) {
+			tokens[token] = struct{}{}
+		}
+	}
+	return tokens
 }
 
 func (a *App) finalizeNeteaseAlternate(ctx context.Context, path string, plan SearchPlan, alternate, anchor *neteaseSong, anchorDurationMS int) error {

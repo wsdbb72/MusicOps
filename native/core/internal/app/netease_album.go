@@ -263,12 +263,24 @@ func neteasePlaylistIDFromBatch(batchID string) string {
 }
 
 func splitPlaylistArtists(raw string) []string {
-	normalized := strings.NewReplacer("／", "/", "、", "/", ",", "/", ";", "/", "；", "/").Replace(raw)
+	// Commas frequently belong to one performer name (for example
+	// "Grover Washington, Jr."), so only explicit multi-artist separators are
+	// split here. NetEase itself supplies a discrete artist array once a hit is
+	// available.
+	normalized := strings.NewReplacer("／", "/", "、", "/", ";", "/", "；", "/").Replace(raw)
 	out := []string{}
 	for _, part := range strings.Split(normalized, "/") {
 		if part = strings.TrimSpace(part); part != "" {
 			out = append(out, part)
 		}
+	}
+	return out
+}
+
+func flattenPlaylistArtists(values []string) []string {
+	out := make([]string, 0, len(values))
+	for _, value := range values {
+		out = append(out, splitPlaylistArtists(value)...)
 	}
 	return out
 }

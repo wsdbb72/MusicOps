@@ -456,9 +456,11 @@ func (a *App) neteaseOriginalCoverSong(ctx context.Context, song *neteaseSong) (
 }
 
 func playlistArtistsOverlap(want, got []string) bool {
+	want = flattenPlaylistArtists(want)
+	got = flattenPlaylistArtists(got)
 	for _, expected := range want {
 		for _, actual := range got {
-			if normalizeKey(expected) != "" && normalizeKey(expected) == normalizeKey(actual) {
+			if normalizeNeteaseArtist(expected) != "" && normalizeNeteaseArtist(expected) == normalizeNeteaseArtist(actual) {
 				return true
 			}
 		}
@@ -710,12 +712,12 @@ func (a *App) stageNeteaseSong(ctx context.Context, plan SearchPlan, song *netea
 }
 
 func playlistArtistsMatch(want, got []string) bool {
-	wantParts := splitPlaylistArtists(strings.Join(want, " / "))
-	gotParts := splitPlaylistArtists(strings.Join(got, " / "))
-	for _, expected := range wantParts {
+	want = flattenPlaylistArtists(want)
+	got = flattenPlaylistArtists(got)
+	for _, expected := range want {
 		found := false
-		for _, actual := range gotParts {
-			if normalizeKey(expected) == normalizeKey(actual) && normalizeKey(expected) != "" {
+		for _, actual := range got {
+			if normalizeNeteaseArtist(expected) == normalizeNeteaseArtist(actual) && normalizeNeteaseArtist(expected) != "" {
 				found = true
 				break
 			}
@@ -724,7 +726,7 @@ func playlistArtistsMatch(want, got []string) bool {
 			return false
 		}
 	}
-	return len(wantParts) > 0
+	return len(want) > 0
 }
 
 // A catalog-verified NetEase song id is stronger identity evidence than a

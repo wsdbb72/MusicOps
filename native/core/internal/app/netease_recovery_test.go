@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/wsdbb72/MusicOps/native/core/internal/downloadpolicy"
 	"github.com/wsdbb72/MusicOps/native/core/internal/flactags"
@@ -118,6 +119,7 @@ func TestNeteaseAlternateArtistsRequirePrimaryAndRejectUnknownCredits(t *testing
 		{name: "substring tribute artist", want: []string{"Artist"}, got: []string{"Artist Tribute"}},
 		{name: "featured artist only", want: []string{"Artist", "Guest"}, got: []string{"Guest"}},
 		{name: "empty credits", want: []string{"Artist"}, got: nil},
+		{name: "punctuation in stage name", want: []string{"Bill Withers", "Grover Washington Jr."}, got: []string{"Grover Washington, Jr.", "Bill Withers"}, ok: true},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -125,6 +127,61 @@ func TestNeteaseAlternateArtistsRequirePrimaryAndRejectUnknownCredits(t *testing
 				t.Fatalf("neteaseAlternateArtistsMatch(%v, %v)=%v want %v", test.want, test.got, got, test.ok)
 			}
 		})
+	}
+}
+
+func TestNeteaseAlternateTitleKeepsContextButRejectsVersionDrift(t *testing.T) {
+	tests := []struct {
+		name string
+		want string
+		got  string
+		ok   bool
+	}{
+		{name: "exact", want: "Song", got: "Song", ok: true},
+		{name: "contextual film credit", want: "星光下的梦想", got: "星光下的梦想(《喜羊羊与灰太狼》动画电影插曲)", ok: true},
+		{name: "unexpected remix", want: "Monsters", got: "Monsters (Remix)"},
+		{name: "instrumental is a different recording", want: "Shed a Light (Like Instrumental Mix)", got: "Shed a Light"},
+		{name: "live version is different", want: "Song", got: "Song (Live)"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := neteaseAlternateTitleMatches(test.want, test.got); got != test.ok {
+				t.Fatalf("neteaseAlternateTitleMatches(%q, %q)=%v want %v", test.want, test.got, got, test.ok)
+			}
+		})
+	}
+}
+
+func TestNeteaseAlternateSongsUsesTitleOnlySearchAndStageNamePunctuation(t *testing.T) {
+	vaultKey(t)
+	application := newApp(t)
+	saveNeteaseTestCookie(t, application)
+	application.Wait = func(_ context.Context, _ time.Duration) error { return nil }
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		query := r.URL.Query().Get("s")
+		songs := []map[string]any{}
+		if query == "Just the Two of Us" {
+			songs = append(songs, map[string]any{
+				"id": 5053002, "name": "Just the Two of Us", "duration": 237609,
+				"album":   map[string]any{"id": 42, "name": "Bandits (Motion Picture Soundtrack)"},
+				"artists": []map[string]any{{"name": "Grover Washington, Jr."}, {"name": "Bill Withers"}},
+			})
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"code": 200, "result": map[string]any{"songs": songs}})
+	}))
+	defer server.Close()
+	application.neteaseBases = map[string]string{"api": server.URL}
+	anchor := &neteaseSong{
+		ID: 1090226, Name: "Just the Two of Us",
+		Artists: []string{"Bill Withers", "Grover Washington Jr."}, Album: "Greatest Hits: Lean On Me",
+		DurationMS: 237609, AlbumID: 9, CatalogVerified: true,
+	}
+	candidates, err := application.neteaseAlternateSongs(context.Background(), SearchPlan{
+		ExpectedArtist: "Bill Withers / Grover Washington Jr.", ExpectedTitle: "Greatest Hits: Lean On Me", PlaylistTrack: "Just the Two of Us",
+	}, anchor)
+	if err != nil || len(candidates) != 1 || candidates[0].ID != 5053002 {
+		t.Fatalf("candidates=%+v err=%v", candidates, err)
 	}
 }
 

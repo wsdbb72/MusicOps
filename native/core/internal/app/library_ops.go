@@ -305,8 +305,12 @@ func (a *App) libraryWorkflow(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "code": "INVALID_REQUEST"})
 		return
 	}
+	priority := 1
+	if value, ok := r.Context().Value(automationWorkflowPriorityKey{}).(int); ok && value > 0 {
+		priority = value
+	}
 	_, err = a.flows.Start(id, workflow.Start{
-		JobID: id, BatchID: id, Scene: body.Scene, Stage: "snapshotting", Label: label, Payload: raw, NowNS: a.now().UnixNano(),
+		JobID: id, BatchID: id, Scene: body.Scene, Stage: "snapshotting", Label: label, Priority: priority, Payload: raw, NowNS: a.now().UnixNano(),
 	})
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "code": "INVALID_REQUEST", "error": "没有创建任务，也没有下载"})

@@ -90,6 +90,7 @@ type Job struct {
 	TaskGroup           string `json:"task_group"`
 	BatchID             string `json:"batch_id"`
 	RootID              string `json:"root_id"`
+	Priority            int    `json:"priority,omitempty"`
 	ParentJobID         string `json:"parent_job_id,omitempty"`
 	IdentificationJobID string `json:"identification_job_id,omitempty"`
 	SearchJobID         string `json:"search_job_id,omitempty"`
@@ -150,6 +151,7 @@ type Start struct {
 	SourceTrackIDs   []string        `json:"source_track_ids,omitempty"`
 	LibraryFileCount uint64          `json:"library_file_count,omitempty"`
 	MatchedCount     uint64          `json:"matched_count,omitempty"`
+	Priority         int             `json:"priority,omitempty"`
 	Payload          []byte          `json:"payload,omitempty"`
 	Evidence         []EvidenceInput `json:"evidence,omitempty"`
 	NowNS            int64           `json:"now_ns"`
@@ -360,4 +362,18 @@ func validJob(job Job) bool {
 		return false
 	}
 	return true
+}
+
+func jobPriority(job Job) int {
+	if job.Priority <= 0 {
+		return 1
+	}
+	return job.Priority
+}
+
+func normalizedPriority(priority int) int {
+	if priority == 0 {
+		return 1
+	}
+	return priority
 }

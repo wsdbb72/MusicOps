@@ -23,7 +23,10 @@ import (
 var libraryAutomationSettingsKey = []byte("app/settings/library-automation")
 var libraryAutomationScanKey = []byte("app/library/automation-scan-cache")
 
+type automationWorkflowPriorityKey struct{}
+
 const (
+	automationWorkflowPriority    = 50
 	libraryAutomationInitialDelay = 5 * time.Minute
 	libraryAutomationMaxMerges    = 5
 	libraryAutomationMaxJobs      = 200
@@ -1365,7 +1368,8 @@ func (a *App) libraryMaintenancePost(ctx context.Context, path string, handler h
 	if err != nil {
 		return 0, nil, err
 	}
-	request := httptest.NewRequest(http.MethodPost, path, bytes.NewReader(raw)).WithContext(ctx)
+	requestCtx := context.WithValue(ctx, automationWorkflowPriorityKey{}, automationWorkflowPriority)
+	request := httptest.NewRequest(http.MethodPost, path, bytes.NewReader(raw)).WithContext(requestCtx)
 	request.Header.Set("Content-Type", "application/json")
 	recorder := httptest.NewRecorder()
 	handler(recorder, request)

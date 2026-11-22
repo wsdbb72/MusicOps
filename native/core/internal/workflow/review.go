@@ -512,7 +512,7 @@ func (r *Repository) reviewAccept(requestID string, job Job, task *taskrepo.Task
 	if child.Stage == "fallback" {
 		child.Message = "站点候选未确认，等待配置的流媒体回退；尚未下载、尚未入库"
 	}
-	followup := taskrepo.NewTask{Spec: taskrepo.Spec{ID: childID, Command: cmdProcess, Lane: "aux", Priority: 1, CreatedNS: nowNS}, Payload: in.Plan}
+	followup := taskrepo.NewTask{Spec: taskrepo.Spec{ID: childID, Command: cmdProcess, Lane: "aux", Priority: jobPriority(job), CreatedNS: nowNS}, Payload: in.Plan}
 	end := taskrepo.Completion{State: "completed", NowNS: nowNS, Message: child.Message, Payload: in.Plan}
 	extra, _ := json.Marshal(struct{ JobID, Action string }{job.ID, "accept"})
 	result, err := r.tasks.ResolveOwned(requestID, task.ID, end, []taskrepo.NewTask{followup}, map[string]string{childID: childID}, extra, func(v *dataengine.View, _, after *taskrepo.Task, children []taskrepo.Task) ([]dataengine.Condition, []dataengine.Mutation, json.RawMessage, error) {

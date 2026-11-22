@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/wsdbb72/MusicOps/native/core/internal/musicbrainz"
+	"github.com/wsdbb72/MusicOps/native/core/internal/workflow"
 )
 
 func TestLibraryAutomationSettingsCanBeConfigured(t *testing.T) {
@@ -99,6 +100,22 @@ func TestLibraryAutomationQueuesEveryLossyTrack(t *testing.T) {
 	_, report := application.libraryAutomation.snapshot()
 	if report.UpgradeJobs != 2 {
 		t.Fatalf("two lossy tracks produced %d upgrade jobs: %+v", report.UpgradeJobs, report)
+	}
+	recent, err := application.tasks.Recent(nil, 200)
+	if err != nil {
+		t.Fatal(err)
+	}
+	seenSnapshot := 0
+	for _, task := range recent.Tasks {
+		if task.Command == workflow.CommandSnapshot {
+			seenSnapshot++
+			if task.Priority != automationWorkflowPriority {
+				t.Fatalf("automation task priority=%d, want %d", task.Priority, automationWorkflowPriority)
+			}
+		}
+	}
+	if seenSnapshot != 2 {
+		t.Fatalf("snapshot tasks=%d, want 2", seenSnapshot)
 	}
 	stopCtx, cancelStop := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancelStop()

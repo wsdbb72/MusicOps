@@ -38,6 +38,32 @@ func startPlaylist(t *testing.T, repo *Repository) {
 	}
 }
 
+func TestWorkflowPriorityPropagatesToFollowupStages(t *testing.T) {
+	repo, tasks := fixture(t)
+	start := playlist(1000)
+	start.Priority = 50
+	result, err := repo.Start("start-priority", start)
+	if err != nil || result.Job == nil || result.Job.Priority != 50 {
+		t.Fatalf("start=%+v err=%v", result.Job, err)
+	}
+	first, err := tasks.Get("album1")
+	if err != nil || first == nil || first.Priority != 50 {
+		t.Fatalf("first=%+v err=%v", first, err)
+	}
+	token := begin(t, tasks, "album1", "identify")
+	if _, err := repo.Complete("complete-priority", token, handoff(3000)); err != nil {
+		t.Fatal(err)
+	}
+	followup, err := tasks.Get("search:album1")
+	if err != nil || followup == nil || followup.Priority != 50 {
+		t.Fatalf("followup=%+v err=%v", followup, err)
+	}
+	job, err := repo.Job("search:album1")
+	if err != nil || job == nil || job.Priority != 50 {
+		t.Fatalf("job=%+v err=%v", job, err)
+	}
+}
+
 func begin(t *testing.T, tasks *taskrepo.Repository, id, lane string) taskrepo.Token {
 	t.Helper()
 	claimAt := int64(2000)

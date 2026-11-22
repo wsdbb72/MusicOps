@@ -166,7 +166,14 @@ func (r *Repository) RecordRelease(in RecordReleaseInput) (Result, error) {
 	if payload == nil {
 		payload = []byte(`{"schema":1}`)
 	}
-	spec := taskrepo.Spec{ID: stageTaskID(in.JobID, "publishing"), Command: cmdPublish, Lane: "publish", Priority: 1, CreatedNS: in.NowNS}
+	live, liveErr := r.Job(in.JobID)
+	if liveErr != nil || live == nil {
+		if liveErr != nil {
+			return Result{}, liveErr
+		}
+		return Result{}, ErrNotFound
+	}
+	spec := taskrepo.Spec{ID: stageTaskID(in.JobID, "publishing"), Command: cmdPublish, Lane: "publish", Priority: jobPriority(*live), CreatedNS: in.NowNS}
 	result, err := r.tasks.CreateFollowup(in.RequestID, spec, payload, in.JobID, nil, func(v *dataengine.View, _, after *taskrepo.Task, _ []taskrepo.Task) ([]dataengine.Condition, []dataengine.Mutation, json.RawMessage, error) {
 		live, raw, err := readJob(v, in.JobID)
 		if err != nil || live == nil {
@@ -231,7 +238,11 @@ func planStart(in Start) (taskrepo.Spec, Job, error) {
 	if in.Scene == "playlist" && (count == 0 || in.MatchedCount > count) || in.Scene != "playlist" && (count != 0 || in.MatchedCount != 0) {
 		return taskrepo.Spec{}, Job{}, dataengine.ErrInvalidRequest
 	}
-	job := Job{ID: in.JobID, BatchID: in.BatchID, Scene: in.Scene, Stage: in.Stage, RootID: in.JobID, ActiveTaskID: in.JobID, Label: in.Label, Message: "等待执行", SourceTrackCount: count, SourceTrackDigest: digest, LibraryFileCount: in.LibraryFileCount, MatchedCount: in.MatchedCount, Revision: 1, CreatedNS: in.NowNS, UpdatedNS: in.NowNS, StageStartedNS: in.NowNS}
+	priority := normalizedPriority(in.Priority)
+	if priority < 1 || priority > 9999 {
+		return taskrepo.Spec{}, Job{}, dataengine.ErrInvalidRequest
+	}
+	job := Job{ID: in.JobID, BatchID: in.BatchID, Scene: in.Scene, Stage: in.Stage, RootID: in.JobID, Priority: priority, ActiveTaskID: in.JobID, Label: in.Label, Message: "等待执行", SourceTrackCount: count, SourceTrackDigest: digest, LibraryFileCount: in.LibraryFileCount, MatchedCount: in.MatchedCount, Revision: 1, CreatedNS: in.NowNS, UpdatedNS: in.NowNS, StageStartedNS: in.NowNS}
 	var command, lane string
 	switch in.Stage {
 	case "identifying":
@@ -257,7 +268,7 @@ func planStart(in Start) (taskrepo.Spec, Job, error) {
 	if !validJob(job) {
 		return taskrepo.Spec{}, Job{}, dataengine.ErrInvalidRequest
 	}
-	return taskrepo.Spec{ID: job.ID, Command: command, Lane: lane, Priority: 1, CreatedNS: in.NowNS}, job, nil
+	return taskrepo.Spec{ID: job.ID, Command: command, Lane: lane, Priority: priority, CreatedNS: in.NowNS}, job, nil
 }
 
 func (r *Repository) Complete(requestID string, token taskrepo.Token, in Complete) (Result, error) {
@@ -474,7 +485,7 @@ func planFollowups(job Job, in Complete, decision *searchdecision.Decision) ([]t
 	if payload == nil {
 		payload = []byte(`{"schema":1}`)
 	}
-	followup := taskrepo.NewTask{Spec: taskrepo.Spec{ID: id, Command: command, Lane: lane, Priority: 1, CreatedNS: in.NowNS}, Payload: payload}
+	followup := taskrepo.NewTask{Spec: taskrepo.Spec{ID: id, Command: command, Lane: lane, Priority: jobPriority(job), CreatedNS: in.NowNS}, Payload: payload}
 	if in.Edge == edgeDefer && decision != nil && decision.Action == searchdecision.ActionRetry && decision.RetryAfterSec > 0 {
 		followup.Spec.NotBeforeNS = in.NowNS + int64(decision.RetryAfterSec)*int64(time.Second)
 	}

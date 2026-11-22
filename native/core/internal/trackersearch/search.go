@@ -716,7 +716,7 @@ func groupCandidates(q Query, group map[string]any) ([]Candidate, error) {
 			"complete_tracklist": false, "release_type": numberOrRaw(group["releaseType"]),
 		}
 		row.Media = map[string]any{}
-		for _, key := range []string{"format", "encoding", "media", "fileCount", "size"} {
+		for _, key := range []string{"format", "encoding", "media", "fileCount", "size", "bitrate", "bitRate", "sampleRate", "samplingRate", "bitDepth", "bitsPerSample", "resolution"} {
 			if value, ok := torrent[key]; ok {
 				row.Media[key] = numberOrRaw(value)
 			}

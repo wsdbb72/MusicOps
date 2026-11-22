@@ -78,6 +78,25 @@ func TestShellHasLandmarksAndGroupedActions(t *testing.T) {
 	}
 }
 
+// Library maintenance supports page selection and an explicit whole-library
+// mode. Both actions must call real backend jobs rather than pretending to
+// select tens of thousands of paths in the browser.
+func TestLibrarySelectionSupportsPageAndWholeLibrary(t *testing.T) {
+	for _, want := range []string{
+		`id="library-select-page"`, `id="library-select-all"`, `id="library-clear-selection"`,
+		`function setLibrarySelectionAll(selected)`, `librarySelectAll = false`,
+		`/v1/library/upgrade/whole`, `/v1/library/scrape/whole`,
+		`id="run-library-upgrade-now"`, `id="auto-maintenance-status"`,
+	} {
+		if !strings.Contains(appJS, want) {
+			t.Fatal("missing library selection behavior:", want)
+		}
+	}
+	if !strings.Contains(appCSS, ".selection-toolbar") || !strings.Contains(appCSS, ".maintenance-status.running") {
+		t.Fatal("library selection and live run state need visible styles")
+	}
+}
+
 // The torrent controls were rendered but never shown: a job in downloading had
 // no way to pause or remove the torrent from the page. The detail panel now
 // reveals them for the stages that own one.

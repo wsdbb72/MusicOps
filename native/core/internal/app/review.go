@@ -11,6 +11,7 @@ import (
 
 	"github.com/wsdbb72/MusicOps/native/core/internal/dataengine"
 	"github.com/wsdbb72/MusicOps/native/core/internal/reviewai"
+	"github.com/wsdbb72/MusicOps/native/core/internal/reviewmatch"
 	"github.com/wsdbb72/MusicOps/native/core/internal/searchdecision"
 	"github.com/wsdbb72/MusicOps/native/core/internal/taskrepo"
 	"github.com/wsdbb72/MusicOps/native/core/internal/trackersearch"
@@ -30,6 +31,11 @@ type reviewCandidateView struct {
 	Year        int      `json:"year,omitempty"`
 	Edition     string   `json:"edition,omitempty"`
 	Format      string   `json:"format,omitempty"`
+	Quality     string   `json:"quality,omitempty"`
+	Exact       bool     `json:"exact"`
+	Available   bool     `json:"available"`
+	Free        bool     `json:"free,omitempty"`
+	rank        candidateQualityRank
 }
 
 type reviewSiteView struct {
@@ -96,11 +102,30 @@ func (a *App) reviewObservations(inspection workflow.Inspection, plan SearchPlan
 			if hit.Title == "" {
 				continue
 			}
-			candidates = append(candidates, reviewCandidateView{Site: site, CandidateID: candidate.CandidateID, Title: hit.Title, Artists: hit.Artists, Seeders: candidate.Seeders, GroupID: hit.GroupID, Year: hit.Year, Edition: hit.Edition, Format: hit.Format})
+			quality, available := candidateQuality(plan, site, candidate)
+			match := reviewmatch.CompareSource(site, plan.ExpectedTitle, plan.ExpectedArtist, hit)
+			candidates = append(candidates, reviewCandidateView{
+				Site: site, CandidateID: candidate.CandidateID, Title: hit.Title, Artists: hit.Artists,
+				Seeders: candidate.Seeders, GroupID: hit.GroupID, Year: hit.Year, Edition: hit.Edition,
+				Format: hit.Format, Quality: candidateQualityLabel(quality, candidate), Exact: match.Pass,
+				Available: available, Free: quality.Free > 0, rank: quality,
+			})
 		}
-		if len(candidates) > 100 {
-			candidates = candidates[:100]
+	}
+	sort.SliceStable(candidates, func(i, j int) bool {
+		if candidates[i].Exact != candidates[j].Exact {
+			return candidates[i].Exact
 		}
+		if candidates[i].Available != candidates[j].Available {
+			return candidates[i].Available
+		}
+		if order := compareCandidateQuality(candidates[i].rank, candidates[j].rank); order != 0 {
+			return order > 0
+		}
+		return candidates[i].Title < candidates[j].Title
+	})
+	if len(candidates) > 100 {
+		candidates = candidates[:100]
 	}
 	return observations, sites, candidates, nil
 }

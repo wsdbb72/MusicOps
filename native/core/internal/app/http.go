@@ -144,6 +144,7 @@ func (a *App) Handler() http.Handler {
 	mux.HandleFunc("POST /v1/library/metadata", a.completeMetadata)
 	mux.HandleFunc("POST /v1/library/scrape", a.scrapeLibrary)
 	mux.HandleFunc("POST /v1/library/scrape/whole", a.runLibraryScrapeHandler)
+	mux.HandleFunc("POST /v1/library/upgrade/whole", a.runLibraryUpgradeHandler)
 	mux.HandleFunc("GET /v1/library/automation", a.libraryAutomationHandler)
 	mux.HandleFunc("POST /v1/library/automation", a.saveLibraryAutomationHandler)
 	mux.HandleFunc("POST /v1/library/automation/run", a.runLibraryAutomationHandler)

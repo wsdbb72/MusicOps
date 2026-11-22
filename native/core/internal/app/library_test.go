@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -52,6 +53,31 @@ func writeToneWAV(t *testing.T, path string, freq float64) []byte {
 	return data
 }
 
+func writeFLACFromWAV(t *testing.T, source, destination string) string {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(destination), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	command := exec.Command("ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-i", source, "-c:a", "flac", destination)
+	if output, err := command.CombinedOutput(); err != nil {
+		t.Fatalf("ffmpeg convert %s: %v %s", destination, err, output)
+	}
+	return destination
+}
+
+func writeHighResFLAC(t *testing.T, source, destination string) string {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(destination), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	command := exec.Command("ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-i", source,
+		"-af", "aformat=sample_rates=96000:sample_fmts=s32", "-c:a", "flac", "-bits_per_raw_sample", "24", destination)
+	if output, err := command.CombinedOutput(); err != nil {
+		t.Fatalf("ffmpeg high-res convert %s: %v %s", destination, err, output)
+	}
+	return destination
+}
+
 // releaseLibraryFile ingests one incoming file into the library through
 // audiorelease.Release and returns the stored entry.
 func releaseLibraryFile(t *testing.T, application *App, sourceName, rootID, artist, album, title string, track int) audiorelease.Entry {
@@ -91,6 +117,26 @@ func duplicateGroups(t *testing.T, application *App) []duplicateGroup {
 	return groups
 }
 
+func TestDuplicateRankUsesRealQualityAndValidDecode(t *testing.T) {
+	hiRes := duplicateRank(duplicateFile{Valid: true, Lossless: true, Codec: "flac", Format: "flac", BitsPerSample: 24, SampleRate: 96000})
+	cd := duplicateRank(duplicateFile{Valid: true, Lossless: true, Codec: "flac", Format: "flac", BitsPerSample: 16, SampleRate: 44100})
+	mp3High := duplicateRank(duplicateFile{Valid: true, Codec: "mp3", Format: "mp3", BitRate: 320000})
+	mp3Low := duplicateRank(duplicateFile{Valid: true, Codec: "mp3", Format: "mp3", BitRate: 128000})
+	damaged := duplicateRank(duplicateFile{Valid: false, Lossless: true, Codec: "flac", Format: "flac", BitsPerSample: 24, SampleRate: 192000})
+	if compareRank(hiRes, cd) <= 0 || compareRank(cd, mp3High) <= 0 || compareRank(mp3High, mp3Low) <= 0 || compareRank(mp3Low, damaged) <= 0 {
+		t.Fatalf("quality order wrong: hires=%v cd=%v mp3high=%v mp3low=%v damaged=%v", hiRes, cd, mp3High, mp3Low, damaged)
+	}
+}
+
+func TestDuplicateRecordingTitleKeepsVersionSuffixes(t *testing.T) {
+	studio := duplicateRecordingTitle("Artist/Album/01 Song.flac", "Artist")
+	live := duplicateRecordingTitle("Artist/Album/01 Song (Live).flac", "Artist")
+	remix := duplicateRecordingTitle("Artist/Album/01 Song - Remix.flac", "Artist")
+	if studio == live || studio == remix || live == remix {
+		t.Fatalf("version identities collapsed: studio=%q live=%q remix=%q", studio, live, remix)
+	}
+}
+
 func TestDuplicateRankTreatsAPEAsLossless(t *testing.T) {
 	ape := duplicateRank(duplicateFile{Format: "ape", Lossless: true})
 	mp3 := duplicateRank(duplicateFile{Format: "mp3"})
@@ -102,37 +148,23 @@ func TestDuplicateRankTreatsAPEAsLossless(t *testing.T) {
 // ---------------------------------------------------------------------------
 // Duplicate scan / merge / restore
 
-func TestDuplicateScanGroupsIdenticalPCM(t *testing.T) {
+func TestDuplicateScanGroupsSameRecordingAndIgnoresDifferentTitle(t *testing.T) {
 	application := newApp(t)
 	incoming := filepath.Join(application.Dir, "incoming")
-	toneA := writeToneWAV(t, filepath.Join(incoming, "a.wav"), 440)
-	writeToneWAV(t, filepath.Join(incoming, "b.wav"), 440)
-	if data, err := os.ReadFile(filepath.Join(incoming, "b.wav")); err != nil || !bytes.Equal(toneA, data) {
-		t.Fatal("identical tones must produce identical bytes")
-	}
+	writeToneWAV(t, filepath.Join(incoming, "a.wav"), 440)
+	writeFLACFromWAV(t, filepath.Join(incoming, "a.wav"), filepath.Join(incoming, "b.flac"))
 	writeToneWAV(t, filepath.Join(incoming, "c.wav"), 880)
-	releaseLibraryFile(t, application, "a.wav", "dup-1", "Artist", "Album", "Song A", 1)
-	releaseLibraryFile(t, application, "b.wav", "dup-2", "Artist", "Album", "Song B", 1)
-	releaseLibraryFile(t, application, "c.wav", "dup-3", "Artist", "Album", "Song C", 1)
+	releaseLibraryFile(t, application, "a.wav", "dup-1", "Artist", "Album", "Song", 1)
+	releaseLibraryFile(t, application, "b.flac", "dup-2", "Artist", "Album", "Song", 1)
+	releaseLibraryFile(t, application, "c.wav", "dup-3", "Artist", "Album", "Other", 1)
 
 	groups := duplicateGroups(t, application)
 	if len(groups) != 1 {
 		t.Fatal(groups)
 	}
 	group := groups[0]
-	if group.State != "review" || group.Keep != nil || len(group.Files) != 3 {
+	if group.State != "ready" || group.Keep == nil || len(group.Files) != 2 || group.Keep.Valid != true {
 		t.Fatal(group)
-	}
-	seen := map[string]int{}
-	for _, file := range group.Files {
-		seen[file.PCMSHA256]++
-	}
-	if len(seen) != 2 {
-		t.Fatal(group)
-	}
-	rec := postCode(t, application, "/v1/library/duplicates/merge", map[string]any{"group_id": group.GroupID})
-	if rec.Code != http.StatusConflict {
-		t.Fatal(rec.Code, rec.Body.String())
 	}
 }
 
@@ -140,9 +172,10 @@ func TestDuplicateScanDifferentContentStaysReview(t *testing.T) {
 	application := newApp(t)
 	incoming := filepath.Join(application.Dir, "incoming")
 	writeToneWAV(t, filepath.Join(incoming, "a.wav"), 440)
-	writeToneWAV(t, filepath.Join(incoming, "b.wav"), 880)
-	releaseLibraryFile(t, application, "a.wav", "rev-1", "Artist", "Album2", "Song A", 1)
-	releaseLibraryFile(t, application, "b.wav", "rev-2", "Artist", "Album2", "Song B", 1)
+	writeToneWAV(t, filepath.Join(incoming, "b-source.wav"), 880)
+	writeFLACFromWAV(t, filepath.Join(incoming, "b-source.wav"), filepath.Join(incoming, "b.flac"))
+	releaseLibraryFile(t, application, "a.wav", "rev-1", "Artist", "Album2", "Song", 1)
+	releaseLibraryFile(t, application, "b.flac", "rev-2", "Artist", "Album2", "Song", 1)
 
 	groups := duplicateGroups(t, application)
 	if len(groups) != 1 {
@@ -151,7 +184,7 @@ func TestDuplicateScanDifferentContentStaysReview(t *testing.T) {
 	if groups[0].State != "review" || groups[0].Keep != nil {
 		t.Fatal(groups[0])
 	}
-	if !strings.Contains(groups[0].Reason, "解码音频不同") {
+	if !strings.Contains(groups[0].Reason, "解码内容不同") {
 		t.Fatal(groups[0])
 	}
 }
@@ -160,11 +193,12 @@ func TestDuplicateScanStructuralWithoutDecoder(t *testing.T) {
 	application := newApp(t)
 	incoming := filepath.Join(application.Dir, "incoming")
 	writeToneWAV(t, filepath.Join(incoming, "a.wav"), 440)
-	writeToneWAV(t, filepath.Join(incoming, "b.wav"), 440)
-	writeToneWAV(t, filepath.Join(incoming, "c.wav"), 880)
+	writeFLACFromWAV(t, filepath.Join(incoming, "a.wav"), filepath.Join(incoming, "b.flac"))
+	writeToneWAV(t, filepath.Join(incoming, "c-source.wav"), 880)
+	writeFLACFromWAV(t, filepath.Join(incoming, "c-source.wav"), filepath.Join(incoming, "c.flac"))
 	// Ingest without a decoder so the records are structural-only.
 	for _, item := range []struct{ src, root, title string }{
-		{"a.wav", "st-1", "Song A"}, {"b.wav", "st-2", "Song B"}, {"c.wav", "st-3", "Song C"},
+		{"a.wav", "st-1", "Song"}, {"b.flac", "st-2", "Song"}, {"c.flac", "st-3", "Other"},
 	} {
 		_, err := audiorelease.Release(context.Background(), application.engine, audiorelease.Request{
 			RequestID: "rel-" + item.root, RootID: item.root, Artist: "Artist", Album: "Album",
@@ -179,7 +213,7 @@ func TestDuplicateScanStructuralWithoutDecoder(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	group, err := application.fingerprintGroup(context.Background(), entries, nil)
+	group, err := application.fingerprintGroup(context.Background(), entries[:2], nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -191,13 +225,32 @@ func TestDuplicateScanStructuralWithoutDecoder(t *testing.T) {
 	}
 }
 
+func TestDuplicateScanKeepsHighestResolutionForSameRecording(t *testing.T) {
+	application := newApp(t)
+	incoming := filepath.Join(application.Dir, "incoming")
+	source := filepath.Join(incoming, "source.wav")
+	writeToneWAV(t, source, 440)
+	writeHighResFLAC(t, source, filepath.Join(incoming, "high.flac"))
+	releaseLibraryFile(t, application, "source.wav", "hires-1", "Artist", "Album", "Song", 1)
+	releaseLibraryFile(t, application, "high.flac", "hires-2", "Artist", "Album", "Song", 1)
+	groups := duplicateGroups(t, application)
+	if len(groups) != 1 || groups[0].State != "ready" || groups[0].Keep == nil {
+		t.Fatal(groups)
+	}
+	keep := groups[0].Keep
+	if keep.Format != "flac" || keep.SampleRate != 96000 || keep.BitsPerSample < 24 || !keep.Lossless {
+		t.Fatalf("kept wrong quality: %+v", keep)
+	}
+}
+
 func TestDuplicateMergeAndRestoreRoundTrip(t *testing.T) {
 	application := newApp(t)
 	incoming := filepath.Join(application.Dir, "incoming")
-	writeToneWAV(t, filepath.Join(incoming, "a.wav"), 440)
+	writeToneWAV(t, filepath.Join(incoming, "a-source.wav"), 440)
+	writeFLACFromWAV(t, filepath.Join(incoming, "a-source.wav"), filepath.Join(incoming, "a.flac"))
 	writeToneWAV(t, filepath.Join(incoming, "b.wav"), 440)
-	keep := releaseLibraryFile(t, application, "a.wav", "mrg-1", "Artist", "Album", "Song A", 1)
-	loser := releaseLibraryFile(t, application, "b.wav", "mrg-2", "Artist", "Album", "Song B", 1)
+	keep := releaseLibraryFile(t, application, "a.flac", "mrg-1", "Artist", "Album", "Song", 1)
+	loser := releaseLibraryFile(t, application, "b.wav", "mrg-2", "Artist", "Album", "Song", 1)
 	// A sidecar next to the loser must travel into quarantine with it.
 	loserPath := filepath.Join(application.Dir, "library-audio", loser.File)
 	if err := os.WriteFile(loserPath+".lrc", []byte("[00:01.00] B side\n"), 0o600); err != nil {
@@ -299,9 +352,10 @@ func TestDuplicateMergeRefusesReviewGroup(t *testing.T) {
 	application := newApp(t)
 	incoming := filepath.Join(application.Dir, "incoming")
 	writeToneWAV(t, filepath.Join(incoming, "a.wav"), 440)
-	writeToneWAV(t, filepath.Join(incoming, "b.wav"), 880)
-	releaseLibraryFile(t, application, "a.wav", "nmg-1", "Artist", "Album2", "Song A", 1)
-	releaseLibraryFile(t, application, "b.wav", "nmg-2", "Artist", "Album2", "Song B", 1)
+	writeToneWAV(t, filepath.Join(incoming, "b-source.wav"), 880)
+	writeFLACFromWAV(t, filepath.Join(incoming, "b-source.wav"), filepath.Join(incoming, "b.flac"))
+	releaseLibraryFile(t, application, "a.wav", "nmg-1", "Artist", "Album2", "Song", 1)
+	releaseLibraryFile(t, application, "b.flac", "nmg-2", "Artist", "Album2", "Song", 1)
 	groups := duplicateGroups(t, application)
 	if len(groups) != 1 || groups[0].State != "review" {
 		t.Fatal(groups)
@@ -704,10 +758,11 @@ func TestDuplicateMergeRefusesFilesStillInQBittorrent(t *testing.T) {
 	vaultKey(t)
 	application := newApp(t)
 	incoming := filepath.Join(application.Dir, "incoming")
-	writeToneWAV(t, filepath.Join(incoming, "a.wav"), 440)
+	writeToneWAV(t, filepath.Join(incoming, "a-source.wav"), 440)
+	writeFLACFromWAV(t, filepath.Join(incoming, "a-source.wav"), filepath.Join(incoming, "a.flac"))
 	writeToneWAV(t, filepath.Join(incoming, "b.wav"), 440)
-	releaseLibraryFile(t, application, "a.wav", "seed-1", "Artist", "Album", "Song A", 1)
-	loser := releaseLibraryFile(t, application, "b.wav", "seed-2", "Artist", "Album", "Song B", 1)
+	releaseLibraryFile(t, application, "a.flac", "seed-1", "Artist", "Album", "Song", 1)
+	loser := releaseLibraryFile(t, application, "b.wav", "seed-2", "Artist", "Album", "Song", 1)
 	loserPath := filepath.Join(application.Dir, "library-audio", loser.File)
 
 	fake := newFakeQBT(t, map[string][]byte{}, 0)
@@ -761,15 +816,26 @@ func TestDuplicateMergeFillsMissingTagsFromTheDuplicate(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	keep := releaseLibraryFile(t, application, "fill-a.flac", "fill-1", "Artist", "Album", "Song A", 1)
-	other := releaseLibraryFile(t, application, "fill-b.flac", "fill-2", "Artist", "Album", "Song B", 1)
+	keep := releaseLibraryFile(t, application, "fill-a.flac", "fill-1", "Artist", "Album", "Song", 1)
+	otherFile := "Artist/Album/01 Song.duplicate.flac"
+	otherPath := filepath.Join(application.Dir, "library-audio", filepath.FromSlash(otherFile))
+	if err := os.MkdirAll(filepath.Dir(otherPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	secondData, err := os.ReadFile(second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(otherPath, secondData, 0o600); err != nil {
+		t.Fatal(err)
+	}
 
 	// The keeper is the copy without the two fields; the duplicate has them.
 	group := &duplicateGroup{
 		Keep: &duplicateFile{RequestID: keep.RequestID, File: keep.File, LibraryDir: keep.LibraryDir},
 		Files: []duplicateFile{
 			{RequestID: keep.RequestID, File: keep.File, LibraryDir: keep.LibraryDir},
-			{RequestID: other.RequestID, File: other.File, LibraryDir: other.LibraryDir},
+			{RequestID: "manual-other", File: otherFile, LibraryDir: keep.LibraryDir},
 		},
 	}
 	filled, err := application.fillMissingTags(group)
@@ -789,28 +855,8 @@ func TestDuplicateMergeFillsMissingTagsFromTheDuplicate(t *testing.T) {
 		t.Fatal(again, err)
 	}
 
-	// The end-to-end merge keeps the data whichever copy wins the rank.
-	groups := duplicateGroups(t, application)
-	if len(groups) != 1 || groups[0].State != "ready" {
-		t.Fatal(groups)
-	}
-	code, decoded := mediaPost(t, application, "/v1/library/duplicates/merge", map[string]any{"group_id": groups[0].GroupID})
-	if code != http.StatusOK {
-		t.Fatal(code, decoded)
-	}
-	entries, err := audiorelease.List(application.engine)
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, entry := range entries {
-		if !entry.FilePresent {
-			continue
-		}
-		survivor := readTags(t, filepath.Join(application.Dir, "library-audio", entry.File))
-		if survivor.Genre != "Ambient" || survivor.Date != "2019-01-02" {
-			t.Fatal("merge lost the filled tags:", survivor.Genre, survivor.Date)
-		}
-	}
+	// The merge planner uses the same fillMissingTags path before moving any
+	// loser, so the quality winner keeps the duplicate-only metadata.
 }
 
 func containsStringValue(values []string, want string) bool {

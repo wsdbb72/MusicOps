@@ -413,22 +413,29 @@ func summarizeSite(plan SearchPlan, site string, observation trackersearch.Obser
 			continue
 		}
 		row.Exact = true
-		row.ObservedTitle = candidate.Title
-		if candidate.Seeders != nil {
-			row.Seeders = *candidate.Seeders
-			row.SeedersKnown = true
+		quality, available := candidateQuality(plan, site, candidate)
+		if !available || candidate.CandidateID == "" {
+			continue
 		}
-		if seeded == nil && (site == "open.cd" || row.SeedersKnown && row.Seeders > 0) {
-			seeded = &identityPick{site: site, id: candidate.CandidateID, hit: hit}
+		pick := identityPick{site: site, id: candidate.CandidateID, hit: hit, quality: quality}
+		if seeded == nil || compareCandidateQuality(quality, seeded.quality) > 0 {
+			copy := pick
+			seeded = &copy
+			row.ObservedTitle = candidate.Title
+			if candidate.Seeders != nil {
+				row.Seeders = *candidate.Seeders
+				row.SeedersKnown = true
+			}
 		}
 	}
 	return row, seeded, pool
 }
 
 type identityPick struct {
-	site string
-	id   string
-	hit  reviewmatch.Hit
+	site    string
+	id      string
+	hit     reviewmatch.Hit
+	quality candidateQualityRank
 }
 
 func selectIdentity(picks []identityPick) (string, string) {
@@ -440,7 +447,13 @@ func selectIdentity(picks []identityPick) (string, string) {
 			return "", ""
 		}
 	}
-	return picks[0].site, picks[0].id
+	best := picks[0]
+	for _, item := range picks[1:] {
+		if compareCandidateQuality(item.quality, best.quality) > 0 {
+			best = item
+		}
+	}
+	return best.site, best.id
 }
 
 func releaseHit(candidate trackersearch.Candidate) reviewmatch.Hit {

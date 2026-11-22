@@ -1,22 +1,13 @@
 // Library maintenance: duplicate scan/merge/restore and artist-folder
-// 整理. Both follow the Python contracts in app/duplicates.py and
-// app/artist_folders.py, reduced to what the Go library records actually
-// carry: a record has a root id, a track number, a file tail
-// (Artist/Album/NN Title.ext), a format and a file SHA-256 — no release
-// id, no per-track artist list, no duration. Grouping therefore uses
-// (artist folder, album folder, track slot) from the record, and the
-// PCM identity is the decoded-audio hash from _pcm_identity, not a
-// filename guess.
+// organization. A duplicate is the same recording in one album: artist,
+// album, complete normalized title, compatible duration and channel count.
+// Version-bearing titles (live, remix, instrumental, demo, TV size) remain
+// distinct. ffprobe supplies codec, bit depth, sample rate and bitrate; a
+// successful ffmpeg decode is required before a file may win.
 //
-// Safety rules carried over from Python:
-//   - merge never deletes: losers move into a quarantine directory under
-//     the state directory, with a durable receipt, and restore moves
-//     them back; a merge whose files changed since the scan is refused.
-//   - relocate never overwrites an existing target and never follows a
-//     symlink out of the library (resolveInDir on both ends).
-//   - a scan that cannot decode (no ffmpeg) still runs, but only on
-//     structural identity (format + file SHA-256) and says so: same PCM
-//     in two different encodings will not group without a decoder.
+// Merge never deletes: losers move into quarantine with a durable receipt,
+// and restore verifies and moves them back. A changed source or a file still
+// held by qBittorrent refuses the entire merge before anything moves.
 package app
 
 import (
@@ -27,8 +18,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"sort"
@@ -49,29 +42,30 @@ import (
 //
 // GET /v1/library/duplicates
 //
-// Groups library records by (artist, album, track slot); inside a group,
-// files sharing one PCM identity are duplicates. The identity is
-// (pcm_sha256, sample_rate, channels, codec) after Python _pcm_identity:
-// the PCM hash is the ffmpeg decode to s16le 44.1 kHz stereo — the same
-// normalization transcode uses — and rate/channels come from the file's
-// own stream info (FLAC STREAMINFO, WAV fmt chunk), so the same audio at
-// a different sample rate does not group. DSD and multi-stream files
-// cannot occur here: audiorelease only ever ingests PCM WAV and FLAC.
-// Without ffmpeg the scan falls back to structural identity (format +
-// file SHA-256) and reports method "structural".
+// A candidate is one artist, album and complete normalized title. Version
+// suffixes stay part of the title, and duration/channel checks run before a
+// group is ready. ffprobe supplies codec, bit depth, sample rate and bitrate;
+// ffmpeg must decode every eligible winner. Same-resolution lossless files
+// with different PCM stay in review as likely different masters. Without
+// ffmpeg the scan reports structural identity and never auto-merges.
 
 // duplicateFile is one library file inside a duplicate group.
 type duplicateFile struct {
-	RequestID     string `json:"request_id"`
-	File          string `json:"file"`
-	Format        string `json:"format"`
-	SHA256        string `json:"sha256"`
-	PCMSHA256     string `json:"pcm_sha256"`
-	SampleRate    uint32 `json:"sample_rate"`
-	Channels      int    `json:"channels"`
-	BitsPerSample int    `json:"bits_per_sample"`
-	Lossless      bool   `json:"lossless"`
-	Rank          []int  `json:"rank"`
+	RequestID     string  `json:"request_id"`
+	File          string  `json:"file"`
+	Format        string  `json:"format"`
+	Codec         string  `json:"codec"`
+	SHA256        string  `json:"sha256"`
+	PCMSHA256     string  `json:"pcm_sha256"`
+	SampleRate    uint32  `json:"sample_rate"`
+	Channels      int     `json:"channels"`
+	BitsPerSample int     `json:"bits_per_sample"`
+	BitRate       int64   `json:"bit_rate"`
+	Duration      float64 `json:"duration"`
+	Lossless      bool    `json:"lossless"`
+	Valid         bool    `json:"valid"`
+	ProbeError    string  `json:"probe_error,omitempty"`
+	Rank          []int   `json:"rank"`
 	// LibraryDir is the absolute library root the file was published
 	// under, empty for records written before it was stored.
 	LibraryDir string `json:"library_dir,omitempty"`
@@ -109,7 +103,7 @@ func (a *App) duplicateScan(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{
 		"ok": true, "method": method, "groups": visible, "count": len(visible),
 		"suppressed": suppressed, "truncated": truncated,
-		"policy": "同名不等于重复；不同发行/母带/声道保留。执行后旧副本进入可恢复隔离区。",
+		"policy": "同一专辑的同一录音只保留可完整解码的最高音质版本；现场、混音、伴奏、Demo、TV size、不同母带或声道保留。旧版本进入可恢复隔离区。",
 	})
 }
 
@@ -130,52 +124,33 @@ func (a *App) scanDuplicatesWithProgress(ctx context.Context, progress func(chec
 	if decoder == nil {
 		method = "structural"
 	}
-	// Group by (artist, album, track slot) from the record.
-	bySlot := map[string][]audiorelease.Entry{}
+	// A recording is identified by album, artist and the complete normalized
+	// title. Version words such as live, remix, instrumental, demo and TV size
+	// remain part of the title, so those releases never collapse together.
+	byRecording := map[string][]audiorelease.Entry{}
 	for _, entry := range entries {
 		if !entry.FilePresent {
 			continue
 		}
 		artist, album := splitLibraryTail(entry.File)
-		if artist == "" || album == "" {
+		title := duplicateRecordingTitle(entry.File, artist)
+		if artist == "" || album == "" || title == "" {
 			continue
 		}
-		slot := strconv.Itoa(entry.Track)
-		if entry.Track <= 0 {
-			slot = "title:" + trackTitle(entry.File)
-		}
-		key := artist + "\x00" + album + "\x00" + slot
-		bySlot[key] = append(bySlot[key], entry)
-		// Some releases and older imports use different track positions.
-		// A common title is only a scan candidate; the audio gate still
-		// compares the original decoded samples before anything can move.
-		_, _, title := trackKeyOfPath(entry.File)
-		stem := trackTitle(entry.File)
-		if credit, track, ok := strings.Cut(stem, " - "); ok && normalizeKey(credit) == normalizeKey(artist) {
-			title = normalizeKey(track)
-		}
-		if title != "" {
-			titleKey := normalizeKey(artist) + "\x00" + normalizeKey(album) + "\x00title:" + title
-			if titleKey != key {
-				bySlot[titleKey] = append(bySlot[titleKey], entry)
-			}
-		}
-
+		key := normalizeKey(artist) + "\x00" + normalizeKey(album) + "\x00" + title
+		byRecording[key] = append(byRecording[key], entry)
 	}
-	candidateKeys := make([]string, 0, len(bySlot))
-	for key, rows := range bySlot {
+	candidateKeys := make([]string, 0, len(byRecording))
+	for key, rows := range byRecording {
 		if len(rows) >= 2 {
 			candidateKeys = append(candidateKeys, key)
 		}
 	}
 	sort.Strings(candidateKeys)
 	groups := []duplicateGroup{}
-	seenGroups := map[string]bool{}
 	truncated := false
 	checkedCount := 0
 	for checked, key := range candidateKeys {
-		checkedCount = checked
-		rows := bySlot[key]
 		if progress != nil {
 			if err := ctx.Err(); err != nil {
 				return nil, "", false, err
@@ -186,12 +161,7 @@ func (a *App) scanDuplicatesWithProgress(ctx context.Context, progress func(chec
 			truncated = true
 			break
 		}
-		id := duplicateGroupID(rows)
-		if seenGroups[id] {
-			continue
-		}
-		seenGroups[id] = true
-		group, err := a.fingerprintGroup(ctx, rows, decoder)
+		group, err := a.fingerprintGroup(ctx, byRecording[key], decoder)
 		if err != nil {
 			return nil, "", false, err
 		}
@@ -207,105 +177,280 @@ func (a *App) scanDuplicatesWithProgress(ctx context.Context, progress func(chec
 	return groups, method, truncated, nil
 }
 
-// fingerprintGroup fingerprints one slot's files and reports the group.
-// Files that fail to fingerprint are listed with the failure as the
-// group reason instead of being silently dropped.
+type duplicateAudioInfo struct {
+	Codec         string
+	SampleRate    uint32
+	Channels      int
+	BitsPerSample int
+	BitRate       int64
+	Duration      float64
+}
+
+// probeDuplicateAudio uses ffprobe as the source of truth for the fields that
+// decide quality. The container suffix is never treated as proof of lossless:
+// FLAC provenance tags, PCM codecs and other lossless codecs are checked.
+func probeDuplicateAudio(ctx context.Context, path, format string) (duplicateAudioInfo, error) {
+	var info duplicateAudioInfo
+	raw, err := exec.CommandContext(ctx, "ffprobe", "-v", "error", "-select_streams", "a:0",
+		"-show_entries", "stream=codec_name,sample_rate,channels,bits_per_sample,bits_per_raw_sample,bit_rate:format=duration,bit_rate",
+		"-of", "json", path).Output()
+	if err == nil {
+		var data struct {
+			Streams []struct {
+				Codec            string `json:"codec_name"`
+				SampleRate       string `json:"sample_rate"`
+				Channels         int    `json:"channels"`
+				BitsPerSample    int    `json:"bits_per_sample"`
+				BitsPerRawSample int    `json:"bits_per_raw_sample"`
+				BitRate          string `json:"bit_rate"`
+			} `json:"streams"`
+			Format struct {
+				Duration string `json:"duration"`
+				BitRate  string `json:"bit_rate"`
+			} `json:"format"`
+		}
+		if json.Unmarshal(raw, &data) == nil && len(data.Streams) == 1 {
+			stream := data.Streams[0]
+			info.Codec = strings.ToLower(strings.TrimSpace(stream.Codec))
+			info.SampleRate = uint32(parseFlexibleInt(stream.SampleRate))
+			info.Channels = stream.Channels
+			info.BitsPerSample = stream.BitsPerSample
+			if info.BitsPerSample == 0 {
+				info.BitsPerSample = stream.BitsPerRawSample
+			}
+			info.BitRate = parseFlexibleInt(stream.BitRate)
+			if info.BitRate == 0 {
+				info.BitRate = parseFlexibleInt(data.Format.BitRate)
+			}
+			info.Duration, _ = strconv.ParseFloat(data.Format.Duration, 64)
+		}
+	}
+	if info.Codec == "" || info.SampleRate == 0 || info.Channels == 0 {
+		rate, channels, bits, streamErr := streamInfoFor(path, format)
+		if streamErr != nil {
+			if err != nil {
+				return info, err
+			}
+			return info, streamErr
+		}
+		info.SampleRate, info.Channels, info.BitsPerSample = rate, channels, bits
+		if info.Codec == "" {
+			info.Codec = format
+		}
+	}
+	if info.Duration <= 0 && strings.EqualFold(format, "flac") {
+		if tags, tagErr := flactags.ReadFile(path); tagErr == nil && tags.StreamInfo.SampleRate > 0 {
+			info.Duration = float64(tags.StreamInfo.TotalSamples) / float64(tags.StreamInfo.SampleRate)
+		}
+	}
+	if info.Duration <= 0 && strings.EqualFold(format, "wav") {
+		if stat, statErr := os.Stat(path); statErr == nil && info.SampleRate > 0 && info.Channels > 0 && info.BitsPerSample > 0 {
+			bytesPerSecond := int64(info.SampleRate) * int64(info.Channels) * int64(info.BitsPerSample) / 8
+			if bytesPerSecond > 0 && stat.Size() > 44 {
+				info.Duration = float64(stat.Size()-44) / float64(bytesPerSecond)
+			}
+		}
+	}
+	if info.BitRate == 0 && info.Duration > 0 {
+		if stat, statErr := os.Stat(path); statErr == nil {
+			info.BitRate = int64(float64(stat.Size()*8) / info.Duration)
+		}
+	}
+	if info.Codec == "" {
+		info.Codec = strings.ToLower(format)
+	}
+	return info, nil
+}
+
+func parseFlexibleInt(value string) int64 {
+	if value == "" || value == "N/A" {
+		return 0
+	}
+	n, _ := strconv.ParseInt(value, 10, 64)
+	return n
+}
+
+func losslessAudioCodec(codec string) bool {
+	codec = strings.ToLower(strings.TrimSpace(codec))
+	switch codec {
+	case "flac", "alac", "ape", "wavpack", "tta", "truehd", "mlp", "dsd_lsbf", "dsd_msbf", "dsd_lsbf_planar", "dsd_msbf_planar":
+		return true
+	}
+	return strings.HasPrefix(codec, "pcm_")
+}
+
+// fingerprintGroup computes real technical quality for every candidate. A
+// failed decode makes that file ineligible to win; it is still listed so the
+// merge can quarantine it with a readable reason. Files only become a ready
+// group when they have one title, compatible duration and channel count, and
+// at least one independently decodable copy.
 func (a *App) fingerprintGroup(ctx context.Context, rows []audiorelease.Entry, decoder audiorelease.Decoder) (*duplicateGroup, error) {
 	artist, album := splitLibraryTail(rows[0].File)
 	files := make([]duplicateFile, 0, len(rows))
-	byIdentity := map[string][]int{}
+	valid := make([]duplicateFile, 0, len(rows))
 	for _, entry := range rows {
 		full := a.entryFilePath(entry)
-		digest, err := hashFile(full)
-		if err != nil {
-			return nil, err
-		}
-		rate, channels, bits, streamErr := streamInfoFor(full, entry.Format)
-		pcm := ""
-		identity := ""
-		if decoder != nil && streamErr == nil {
-			digest, err := pcmHashWithFormat(ctx, full, []string{"-f", "s32le"})
-			if err != nil {
-				return &duplicateGroup{
-					GroupID: duplicateGroupID(rows), Album: album, Artists: []string{artist},
-					Files: files, State: "review", Reason: "音频内容校验未完成，原文件保留: " + err.Error(), IdentityUsed: "pcm",
-				}, nil
-			}
-			pcm = digest
-			identity = fmt.Sprintf("pcm:%s:%d:%d", digest, rate, channels)
-		} else {
-			identity = fmt.Sprintf("structural:%s:%s", entry.Format, digest)
-		}
-		if streamErr != nil {
-			// Stream info is advisory for ranking; a missing rate never
-			// blocks the identity, which is the decoded hash.
-			rate, channels, bits = 0, 0, 0
-		}
+		fileSHA, hashErr := hashFile(full)
+		info, probeErr := probeDuplicateAudio(ctx, full, entry.Format)
 		file := duplicateFile{
-			RequestID: entry.RequestID, File: entry.File, Format: entry.Format, SHA256: digest,
-			PCMSHA256: pcm, SampleRate: rate, Channels: channels, BitsPerSample: bits,
-			Lossless: entry.Format == "flac" || entry.Format == "wav" || entry.Format == "ape", LibraryDir: entry.LibraryDir,
+			RequestID: entry.RequestID, File: entry.File, Format: strings.ToLower(entry.Format),
+			Codec: info.Codec, SHA256: fileSHA, SampleRate: info.SampleRate, Channels: info.Channels,
+			BitsPerSample: info.BitsPerSample, BitRate: info.BitRate, Duration: info.Duration,
+			Lossless: losslessAudioCodec(info.Codec), LibraryDir: entry.LibraryDir,
 		}
+		if strings.EqualFold(file.Format, "flac") {
+			if tags, err := readFLACTagsPrefix(full); err == nil && isLossyFLACProvenance(firstTagValue(tags.Raw, "COMMENT")) {
+				file.Lossless = false
+				file.Codec = "flac-lossy"
+			}
+		}
+		var pcmHash string
+		if decoder != nil && hashErr == nil && probeErr == nil {
+			pcmHash, hashErr = pcmHashWithFormat(ctx, full, []string{"-f", "s32le"})
+			if hashErr != nil {
+				probeErr = fmt.Errorf("音频解码校验失败: %w", hashErr)
+			}
+		}
+		file.PCMSHA256 = pcmHash
+		if hashErr != nil {
+			probeErr = fmt.Errorf("文件哈希读取失败: %w", hashErr)
+		}
+		if probeErr != nil {
+			file.ProbeError = scrub(probeErr.Error())
+		}
+		file.Valid = decoder != nil && probeErr == nil && file.SampleRate > 0 && file.Channels > 0 && file.Duration > 0
 		file.Rank = duplicateRank(file)
-		byIdentity[identity] = append(byIdentity[identity], len(files))
 		files = append(files, file)
-	}
-	// A group is ready only when at least two files share one identity.
-	// Python _prepare raises when the same slot decodes differently and
-	// the release is unconfirmed, so a mixed-identity slot stays review.
-	shared := false
-	for _, members := range byIdentity {
-		if len(members) > 1 {
-			shared = true
+		if file.Valid {
+			valid = append(valid, file)
 		}
 	}
 	group := &duplicateGroup{
-		GroupID: duplicateGroupID(rows), Album: album, Artists: []string{artist},
-		Files: files, IdentityUsed: "pcm",
+		GroupID: duplicateGroupID(rows), Album: album, Artists: []string{artist}, Files: files,
+		IdentityUsed: "album-title-duration",
 	}
-	if decoder == nil {
+	if decoder != nil {
+		group.IdentityUsed = "album-title-duration+pcm-check"
+	} else {
 		group.IdentityUsed = "structural"
 	}
-	if !shared || len(byIdentity) != 1 {
+	switch {
+	case len(valid) == 0:
 		group.State = "review"
 		if decoder == nil {
-			group.Reason = "结构级比对：无解码器，相同 PCM、不同编码的文件不会分进同一组"
+			group.Reason = "结构级比对：没有 ffmpeg，无法证明音频可完整解码；不同编码不会自动合并"
 		} else {
-			group.Reason = "同曲号文件解码音频不同，需要先确认发行身份"
+			group.Reason = "没有可完整解码的版本，原文件全部保留"
 		}
 		return group, nil
+	case duplicateSameResolutionLosslessMismatch(valid):
+		group.State = "review"
+		group.Reason = "同为无损且位深与采样率相同的版本解码内容不同，可能是不同母带，原文件保留"
+		return group, nil
+	case !duplicateDurationsCompatible(valid):
+		group.State = "review"
+		group.Reason = "同名曲目的时长差异超过容差，可能是不同版本，原文件保留"
+		return group, nil
+	case !duplicateChannelsCompatible(valid):
+		group.State = "review"
+		group.Reason = "同名曲目的声道数不同，可能是不同母带，原文件保留"
+		return group, nil
 	}
-	// Keep the best-ranked file among the largest identical-identity set.
-	bestIdentity := ""
-	bestCount := 0
-	for identity, members := range byIdentity {
-		if len(members) > bestCount {
-			bestIdentity, bestCount = identity, len(members)
-		}
-	}
-	keep := files[byIdentity[bestIdentity][0]]
-	for _, idx := range byIdentity[bestIdentity] {
-		if compareRank(files[idx].Rank, keep.Rank) > 0 {
-			keep = files[idx]
+	keep := valid[0]
+	for _, file := range valid[1:] {
+		if compareRank(file.Rank, keep.Rank) > 0 {
+			keep = file
 		}
 	}
 	keepCopy := keep
 	group.Keep = &keepCopy
 	group.State = "ready"
-	if decoder == nil {
-		group.Reason = "文件内容完全一致，合并重复歌曲（结构级比对：无解码器）"
-	} else {
-		group.Reason = "文件内容完全一致，合并重复歌曲"
-	}
+	group.Reason = "同一专辑、曲名、时长和声道；保留最高音质 " + duplicateQualityLabel(keep) + "，其余版本进入可恢复隔离区"
 	return group, nil
 }
 
-// duplicateRank mirrors Python _rank: (lossless, bits if lossless,
-// sample rate if lossless, format preference). Bitrate is not in the Go
-// record, so lossy files rank on preference alone; the library only
-// holds lossless WAV/FLAC, so this never decides a real merge today.
+func duplicateRecordingTitle(tail, artist string) string {
+	title := strings.TrimSpace(trackTitle(tail))
+	if credit, track, ok := strings.Cut(title, " - "); ok && normalizeKey(credit) == normalizeKey(artist) {
+		title = track
+	}
+	return normalizeKey(title)
+}
+
+func duplicateDurationsCompatible(files []duplicateFile) bool {
+	if len(files) < 2 {
+		return true
+	}
+	minDuration, maxDuration := files[0].Duration, files[0].Duration
+	for _, file := range files[1:] {
+		if file.Duration < minDuration {
+			minDuration = file.Duration
+		}
+		if file.Duration > maxDuration {
+			maxDuration = file.Duration
+		}
+	}
+	tolerance := math.Max(2, minDuration*.02)
+	return maxDuration-minDuration <= tolerance
+}
+
+func duplicateSameResolutionLosslessMismatch(files []duplicateFile) bool {
+	byResolution := map[string]map[string]bool{}
+	for _, file := range files {
+		if !file.Lossless || file.PCMSHA256 == "" {
+			continue
+		}
+		key := fmt.Sprintf("%d/%d/%d", file.BitsPerSample, file.SampleRate, file.Channels)
+		if byResolution[key] == nil {
+			byResolution[key] = map[string]bool{}
+		}
+		byResolution[key][file.PCMSHA256] = true
+		if len(byResolution[key]) > 1 {
+			return true
+		}
+	}
+	return false
+}
+
+func duplicateChannelsCompatible(files []duplicateFile) bool {
+	channels := 0
+	for _, file := range files {
+		if file.Channels <= 0 {
+			continue
+		}
+		if channels == 0 {
+			channels = file.Channels
+			continue
+		}
+		if file.Channels != channels {
+			return false
+		}
+	}
+	return true
+}
+
+func duplicateQualityLabel(file duplicateFile) string {
+	codec := strings.ToUpper(firstNonEmpty(file.Codec, file.Format))
+	if file.Lossless {
+		if file.BitsPerSample > 0 {
+			return fmt.Sprintf("%s %d-bit/%d Hz", codec, file.BitsPerSample, file.SampleRate)
+		}
+		return fmt.Sprintf("%s 无损/%d Hz", codec, file.SampleRate)
+	}
+	if file.BitRate > 0 {
+		return fmt.Sprintf("%s %d kbps", codec, (file.BitRate+500)/1000)
+	}
+	return codec
+}
+
+// duplicateRank puts a fully decodable file first, then real lossless audio,
+// bit depth, sample rate, lossy bitrate, codec preference and container. A
+// higher container preference can never beat a better resolution.
 func duplicateRank(file duplicateFile) []int {
-	lossless := 0
+	valid, lossless := 0, 0
+	if file.Valid {
+		valid = 1
+	}
 	if file.Lossless {
 		lossless = 1
 	}
@@ -313,14 +458,42 @@ func duplicateRank(file duplicateFile) []int {
 	if file.Lossless {
 		bits, rate = file.BitsPerSample, int(file.SampleRate)
 	}
-	preference := 0
-	switch file.Format {
-	case "flac":
-		preference = 2
-	case "wav":
-		preference = 1
+	bitRate := 0
+	if !file.Lossless && file.BitRate > 0 && file.BitRate < 2_000_000_000 {
+		bitRate = int(file.BitRate)
 	}
-	return []int{lossless, bits, rate, preference}
+	codec := 0
+	switch strings.ToLower(file.Codec) {
+	case "flac":
+		codec = 7
+	case "alac":
+		codec = 6
+	case "ape", "wavpack":
+		codec = 5
+	case "opus":
+		codec = 4
+	case "aac", "vorbis":
+		codec = 3
+	case "mp3":
+		codec = 2
+	}
+	if strings.HasPrefix(strings.ToLower(file.Codec), "pcm_") || strings.EqualFold(file.Format, "wav") {
+		codec = 5
+	}
+	format := 0
+	switch strings.ToLower(file.Format) {
+	case "flac":
+		format = 5
+	case "m4a", "alac":
+		format = 4
+	case "ape", "wv":
+		format = 3
+	case "wav", "aiff":
+		format = 2
+	case "opus":
+		format = 1
+	}
+	return []int{valid, lossless, bits, rate, bitRate, codec, format}
 }
 
 func compareRank(a, b []int) int {

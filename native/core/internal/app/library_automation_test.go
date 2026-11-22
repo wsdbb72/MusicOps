@@ -213,6 +213,19 @@ func TestLibraryWholeScrapeAndStopEndpoints(t *testing.T) {
 	}
 }
 
+func TestLibraryWholeUpgradeAndStopEndpoints(t *testing.T) {
+	application := newApp(t)
+	post(t, application, "/v1/settings/library", map[string]any{"library_dir": t.TempDir()})
+	start := postCode(t, application, "/v1/library/upgrade/whole", map[string]any{})
+	if start.Code != http.StatusAccepted && start.Code != http.StatusOK {
+		t.Fatalf("start status=%d body=%s", start.Code, start.Body.String())
+	}
+	stop := postCode(t, application, "/v1/library/automation/stop", map[string]any{})
+	if stop.Code != http.StatusAccepted {
+		t.Fatalf("stop status=%d body=%s", stop.Code, stop.Body.String())
+	}
+}
+
 func TestLibraryIndexReportsIncrementalProgress(t *testing.T) {
 	application := newApp(t)
 	library := t.TempDir()
@@ -265,32 +278,14 @@ func TestUnconfirmedTrackMatchStillRequiresAnExactTitle(t *testing.T) {
 	}
 }
 
-func TestLibraryAutomationMergesOnlyReadyPCMDuplicates(t *testing.T) {
+func TestLibraryAutomationMergesBestQualityDuplicate(t *testing.T) {
 	application := newApp(t)
-	firstDir := t.TempDir()
-	secondDir := t.TempDir()
-	first := genTestFLAC(t, firstDir, "first.flac")
-	second := genTestFLAC(t, secondDir, "second.flac")
-	firstData, err := os.ReadFile(first)
-	if err != nil {
-		t.Fatal(err)
-	}
-	secondData, err := os.ReadFile(second)
-	if err != nil {
-		t.Fatal(err)
-	}
 	incoming := filepath.Join(application.Dir, "incoming")
-	if err := os.MkdirAll(incoming, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(incoming, "first.flac"), firstData, 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(incoming, "second.flac"), secondData, 0o600); err != nil {
-		t.Fatal(err)
-	}
-	releaseLibraryFile(t, application, "first.flac", "auto-dup-1", "Artist", "Album", "Song A", 1)
-	releaseLibraryFile(t, application, "second.flac", "auto-dup-2", "Artist", "Album", "Song B", 1)
+	wave := filepath.Join(incoming, "second.wav")
+	writeToneWAV(t, wave, 440)
+	writeFLACFromWAV(t, wave, filepath.Join(incoming, "first.flac"))
+	releaseLibraryFile(t, application, "first.flac", "auto-dup-1", "Artist", "Album", "Song", 1)
+	releaseLibraryFile(t, application, "second.wav", "auto-dup-2", "Artist", "Album", "Song", 1)
 	settings := libraryAutomationSettings{Enabled: true, Dedupe: true, IntervalHours: 6}
 	if err := application.runLibraryAutomationPass(context.Background(), settings); err != nil {
 		t.Fatal(err)

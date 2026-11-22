@@ -112,6 +112,16 @@ func Run(opts Options) error {
 				Quit:         func() { wailsruntime.Quit(ctx) },
 			})
 		},
+		OnDomReady: func(ctx context.Context) {
+			// Wails 2.17's Windows backend asks the PE image for icon resource
+			// ID 3 before the app-defined icon can be attached. Correct it once
+			// the HWND exists, with a bounded retry for slow WebView2 startup.
+			go func() {
+				if err := applyNativeWindowIconWithRetry(ctx, applyNativeWindowIcon, 30, 100*time.Millisecond); err != nil {
+					logger.Printf("native window icon unavailable: %v", err)
+				}
+			}()
+		},
 		OnShutdown: func(ctx context.Context) {
 			_ = sup.Stop()
 		},
@@ -125,6 +135,34 @@ func Run(opts Options) error {
 	}
 	_ = sup.Stop()
 	return nil
+}
+
+// applyNativeWindowIconWithRetry waits for the platform window to become
+// available without blocking Wails' UI thread. It is a separate function so
+// the startup retry policy can be tested without Win32.
+func applyNativeWindowIconWithRetry(ctx context.Context, apply func() error, attempts int, delay time.Duration) error {
+	if attempts < 1 {
+		attempts = 1
+	}
+	var lastErr error
+	for attempt := 0; attempt < attempts; attempt++ {
+		if err := apply(); err == nil {
+			return nil
+		} else {
+			lastErr = err
+		}
+		if attempt+1 == attempts {
+			break
+		}
+		timer := time.NewTimer(delay)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return fmt.Errorf("%w (before retry: %v)", ctx.Err(), lastErr)
+		case <-timer.C:
+		}
+	}
+	return lastErr
 }
 
 // singleInstanceKey isolates QA, portable and alternate-profile runs without

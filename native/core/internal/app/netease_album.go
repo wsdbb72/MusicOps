@@ -492,6 +492,10 @@ func (a *App) acquireNeteaseAlbum(ctx context.Context, execution *scheduler.Exec
 }
 
 func verifiedNeteaseTrackPresent(local map[string][]string, song *neteaseSong) bool {
+	return verifiedNeteaseTrackPresentWithPrecision(local, song, 0)
+}
+
+func verifiedNeteaseTrackPresentWithPrecision(local map[string][]string, song *neteaseSong, truncatedMS int64) bool {
 	if song == nil || song.DurationMS <= 0 {
 		return false
 	}
@@ -508,7 +512,7 @@ func verifiedNeteaseTrackPresent(local map[string][]string, song *neteaseSong) b
 		}
 		duration := int64(tags.StreamInfo.TotalSamples) * 1000 / int64(tags.StreamInfo.SampleRate)
 		delta := duration - int64(song.DurationMS)
-		if delta >= -tolerance && delta <= tolerance {
+		if delta >= -tolerance && delta <= tolerance+truncatedMS {
 			return true
 		}
 	}

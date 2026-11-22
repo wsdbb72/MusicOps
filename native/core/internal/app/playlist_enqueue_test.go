@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -441,5 +442,37 @@ func TestNeteasePlaylistPresenceUsesManagedFolderAndMeasuredDuration(t *testing.
 	row.Duration, row.Title = "1", title+" (Remix)"
 	if index.hasPlaylistRow(row) {
 		t.Fatal("accepted a different title")
+	}
+}
+
+func TestNeteasePlaylistPresenceAccountsForWholeSecondDuration(t *testing.T) {
+	a := newApp(t)
+	library := t.TempDir()
+	post(t, a, "/v1/settings/library", map[string]any{"library_dir": library})
+	folder := filepath.Join(library, "ClariS", "Song")
+	if err := os.MkdirAll(folder, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(folder, "ClariS - Song.flac")
+	ffmpeg, err := exec.LookPath("ffmpeg")
+	if err != nil {
+		t.Skip("ffmpeg unavailable")
+	}
+	cmd := exec.Command(ffmpeg, "-nostdin", "-v", "error", "-f", "lavfi", "-i", "sine=frequency=440:duration=4.1",
+		"-metadata", "artist=ClariS", "-metadata", "album=Song (Anime Edition)", "-metadata", "title=Song", path)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("generate FLAC: %v: %s", err, out)
+	}
+	if err := a.indexReleasedPath(path); err != nil {
+		t.Fatal(err)
+	}
+	index := a.playlistLibrary()
+	row := playlistTrack{Artist: "ClariS", Title: "Song", Album: "Song", Duration: "1", NeteaseSongID: 123}
+	if !index.hasPlaylistRow(row) {
+		t.Fatal("a whole-second playlist duration lost its precision margin")
+	}
+	row.Duration = "1.050"
+	if index.hasPlaylistRow(row) {
+		t.Fatal("a precise duration should retain the original tolerance")
 	}
 }

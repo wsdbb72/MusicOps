@@ -283,9 +283,15 @@ func (index playlistLibraryIndex) hasPlaylistRow(row playlistTrack) bool {
 		}
 		candidates[key] = append(candidates[key], path)
 	}
-	return verifiedNeteaseTrackPresent(candidates, &neteaseSong{
+	// Existing NetEase M3U entries store floor(duration_ms / 1000).
+	// Only whole seconds need that extra precision margin.
+	var truncatedMS int64
+	if _, err := strconv.Atoi(row.Duration); err == nil {
+		truncatedMS = 999
+	}
+	return verifiedNeteaseTrackPresentWithPrecision(candidates, &neteaseSong{
 		Name: row.Title, Artists: splitPlaylistArtists(row.Artist), DurationMS: int(seconds * 1000), CatalogVerified: true,
-	})
+	}, truncatedMS)
 }
 
 func (index playlistLibraryIndex) hasTrack(artist, album, title string) bool {

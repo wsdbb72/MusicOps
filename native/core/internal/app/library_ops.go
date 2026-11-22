@@ -263,7 +263,13 @@ func (a *App) libraryWorkflow(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 20*time.Second)
 	defer cancel()
 	for _, path := range chosen {
-		track, err := probeLocalWorkflowTrack(ctx, path)
+		var track localWorkflowTrack
+		var err error
+		if body.Scene == "upgrade" {
+			track, err = probeLocalWorkflowTrackForRepair(ctx, path)
+		} else {
+			track, err = probeLocalWorkflowTrack(ctx, path)
+		}
 		if err != nil {
 			writeJSON(w, http.StatusUnprocessableEntity, map[string]any{"ok": false, "code": "LOCAL_IDENTITY_UNAVAILABLE", "error": err.Error()})
 			return

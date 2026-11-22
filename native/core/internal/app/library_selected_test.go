@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -43,6 +44,12 @@ func TestUpgradeSelectsOnlyMatchingRealFLAC(t *testing.T) {
 	if _, err := selectUpgradeTracks(plan, set, dir); err == nil {
 		t.Fatal("a different recording was accepted")
 	}
+	plan.UpgradeTracks[0].Codec = "invalid"
+	plan.UpgradeTracks[0].Duration = 0
+	got, err = selectUpgradeTracks(plan, set, dir)
+	if err != nil || len(got) != 1 || !got["song.flac"] {
+		t.Fatalf("corrupt source without duration did not select the exact FLAC: %v %v", got, err)
+	}
 }
 
 func TestUpgradeDoesNotTreatContainerChangeAsImprovement(t *testing.T) {
@@ -53,6 +60,10 @@ func TestUpgradeDoesNotTreatContainerChangeAsImprovement(t *testing.T) {
 	plan.LibraryTracks[0].Codec = "mp3"
 	if localUpgradeAdmits(plan, reviewmatch.Hit{Format: "MP3"}) || !localUpgradeAdmits(plan, reviewmatch.Hit{Format: "FLAC"}) {
 		t.Fatal("format gate failed")
+	}
+	plan.LibraryTracks[0].Codec = "invalid"
+	if !localUpgradeAdmits(plan, reviewmatch.Hit{Format: "FLAC"}) {
+		t.Fatal("corrupt source was not eligible for exact replacement")
 	}
 }
 
@@ -82,6 +93,74 @@ func TestLossyNeteaseFLACContainerRemainsUpgradeEligible(t *testing.T) {
 		t.Fatal(track, err)
 	}
 }
+
+func TestLocalWorkflowIdentityFromPathRecoversRepairCandidates(t *testing.T) {
+	tests := []struct {
+		name          string
+		path          string
+		artist, album string
+		title         string
+	}{
+		{
+			name: "flat artist album folder", path: filepath.Join("library", "Katy Perry - Prism", "09 Ghost.flac"),
+			artist: "Katy Perry", album: "Prism", title: "Ghost",
+		},
+		{
+			name: "nested artist album folder", path: filepath.Join("library", "周慧敏", "离开忧郁的习惯", "周慧敏 - 陪在你身边.flac"),
+			artist: "周慧敏", album: "离开忧郁的习惯", title: "陪在你身边",
+		},
+		{
+			name: "compilation album folder", path: filepath.Join("library", "Various Artists - One Day OST", "06. Rocks.flac"),
+			artist: "Various Artists", album: "One Day OST", title: "Rocks",
+		},
+		{
+			name: "track number without separating space", path: filepath.Join("library", "苏打绿 - 十年一刻", "16.I Don't Care (苏打绿版).flac"),
+			artist: "苏打绿", album: "十年一刻", title: "I Don't Care (苏打绿版)",
+		},
+		{
+			name: "per-track artist in compilation name", path: filepath.Join("library", "Various - Kamen Rider", "01. Artist - Song.flac"),
+			artist: "Artist", album: "Kamen Rider", title: "Song",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			artist, album, title, ok := localWorkflowIdentityFromPath(test.path)
+			if !ok || artist != test.artist || album != test.album || title != test.title {
+				t.Fatalf("identity=(%q,%q,%q,%v)", artist, album, title, ok)
+			}
+		})
+	}
+}
+
+func TestCorruptFLACPathStillCreatesUpgradeIdentity(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "Artist - Album")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, "03 Song.flac")
+	if err := os.WriteFile(path, make([]byte, 128), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	track, err := localWorkflowTrackFromPath(path, "invalid", 0)
+	if err != nil || track.Artist != "Artist" || track.Album != "Album" || track.Title != "Song" || track.Codec != "invalid" {
+		t.Fatalf("track=%+v err=%v", track, err)
+	}
+	if !isLossyUpgradeSource(track.Codec) {
+		t.Fatal("corrupt FLAC was not eligible for replacement")
+	}
+}
+
+func TestTransientProbeFailureIsNotTreatedAsCorruption(t *testing.T) {
+	for _, message := range []string{"Access is denied.", "sharing violation", "The process cannot access the file because it is being used by another process."} {
+		if !transientAudioProbeFailure(errors.New(message)) {
+			t.Fatalf("transient failure was treated as corruption: %q", message)
+		}
+	}
+	if transientAudioProbeFailure(errors.New("invalid data found when processing input")) {
+		t.Fatal("a genuine decode failure was treated as transient")
+	}
+}
+
 func TestLibrarySelectionBuildsDurableSnapshotPlan(t *testing.T) {
 	ffmpeg, err := exec.LookPath("ffmpeg")
 	if err != nil {

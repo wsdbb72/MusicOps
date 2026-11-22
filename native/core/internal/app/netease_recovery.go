@@ -18,8 +18,8 @@ import (
 const (
 	// A playlist recording can disappear from one catalogue row while another
 	// release of the same recording remains playable. Keep that recovery
-// narrow: a compatible folded title/version signature, durable artist
-// evidence, and no more than five seconds of duration drift.
+	// narrow: a compatible folded title/version signature, durable artist
+	// evidence, and no more than five seconds of duration drift.
 	neteaseAlternateCandidateLimit          = 6
 	neteaseAlternateSearchLimit             = 100
 	neteaseAlternateDurationTolerance       = int64(5_000)
@@ -129,9 +129,13 @@ func (a *App) neteaseAlternateCandidates(ctx context.Context, plan SearchPlan, a
 			continue
 		}
 		if !exactArtists && !compilationArtist && !neteaseAlternateSubsetEvidenceAllowed(sameAlbumID, drift, comparableDuration) {
-			// An omitted featured credit is only safe on the same album with a
-			// near-identical duration. A different release needs the full set.
-			continue
+			// A different release can omit a featured credit from structured
+			// metadata when its title explicitly carries that credit (for example
+			// "Song (with Featured Artist)"). Without either form of evidence,
+			// reject the subset.
+			if !neteaseAlternateMissingArtistsNamedInTitle(item.Name, wantArtists, artists) {
+				continue
+			}
 		}
 		seen[item.ID] = true
 		song := neteaseSong{
@@ -260,6 +264,34 @@ func neteasePlaylistArtistsAreGeneric(artists []string) bool {
 		}
 	}
 	return true
+}
+
+func neteaseAlternateMissingArtistsNamedInTitle(title string, want, got []string) bool {
+	want = flattenPlaylistArtists(want)
+	got = flattenPlaylistArtists(got)
+	if len(want) == 0 || len(got) == 0 {
+		return false
+	}
+	titleKey := " " + normalizeNeteaseArtist(title) + " "
+	missing := false
+	for _, expected := range want {
+		expectedKey := normalizeNeteaseArtist(expected)
+		found := false
+		for _, actual := range got {
+			if expectedKey != "" && expectedKey == normalizeNeteaseArtist(actual) {
+				found = true
+				break
+			}
+		}
+		if found {
+			continue
+		}
+		missing = true
+		if expectedKey == "" || !strings.Contains(titleKey, " "+expectedKey+" ") {
+			return false
+		}
+	}
+	return missing
 }
 
 func neteaseAlternateTitleMatches(want, got string) bool {

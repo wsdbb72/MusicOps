@@ -389,10 +389,85 @@ func (a *App) neteaseURLFor(ctx context.Context, song *neteaseSong) (string, str
 		}
 		return item.URL, strings.ToLower(item.Type), nil
 	}
+	if outerURL, outerErr := a.neteaseOuterMediaURL(ctx, song.ID); outerErr == nil && outerURL != "" {
+		return outerURL, "mp3", nil
+	} else if outerErr != nil && (lastErr == nil || classifyNeteaseFailure(outerErr) != downloadpolicy.ClassNoResult) {
+		lastErr = outerErr
+	}
 	if lastErr != nil && !sawResponse {
 		return "", "", lastErr
 	}
 	return "", "", errors.New("netease: 没有取到音源地址")
+}
+
+// neteaseOuterMediaURL is the official legacy playback redirect used by the
+// web player. Some free catalogue rows expose a 302 here even when the JSON
+// player endpoint returns an empty url. Only NetEase's own hosts (or the
+// explicit test origin) are accepted before the media download follows it.
+func (a *App) neteaseOuterMediaURL(ctx context.Context, songID int64) (string, error) {
+	if songID <= 0 {
+		return "", nil
+	}
+	endpoint := a.neteaseBase() + "/song/media/outer/url?id=" + strconv.FormatInt(songID, 10) + ".mp3"
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	if err != nil {
+		return "", err
+	}
+	request.Header.Set("Accept", "audio/*,application/json;q=0.8,*/*;q=0.5")
+	request.Header.Set("Referer", "https://"+neteaseHost+"/")
+	request.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36")
+	if cookie := a.neteaseCookie(); cookie != "" {
+		request.Header.Set("Cookie", cookie)
+	}
+	client := &http.Client{Timeout: 15 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error {
+		return http.ErrUseLastResponse
+	}}
+	response, err := client.Do(request)
+	if err != nil {
+		return "", err
+	}
+	defer response.Body.Close()
+	switch response.StatusCode {
+	case http.StatusMovedPermanently, http.StatusFound, http.StatusSeeOther, http.StatusTemporaryRedirect, http.StatusPermanentRedirect:
+		location, parseErr := url.Parse(strings.TrimSpace(response.Header.Get("Location")))
+		if parseErr != nil || location == nil {
+			return "", neteaseContractError("outer 跳转地址无效")
+		}
+		location = request.URL.ResolveReference(location)
+		if !a.neteaseMediaURLAllowed(location) || strings.TrimSpace(location.Path) == "/404" {
+			return "", nil
+		}
+		return location.String(), nil
+	case http.StatusOK:
+		if strings.HasPrefix(strings.ToLower(response.Header.Get("Content-Type")), "audio/") {
+			return endpoint, nil
+		}
+		return "", nil
+	case http.StatusNotFound:
+		return "", nil
+	case http.StatusTooManyRequests, http.StatusMethodNotAllowed, http.StatusUnauthorized, http.StatusForbidden, http.StatusRequestTimeout:
+		return "", &neteaseHTTPError{operation: "outer", status: response.StatusCode}
+	default:
+		if response.StatusCode >= 500 {
+			return "", &neteaseHTTPError{operation: "outer", status: response.StatusCode}
+		}
+		return "", nil
+	}
+}
+
+func (a *App) neteaseMediaURLAllowed(target *url.URL) bool {
+	if target == nil || (target.Scheme != "http" && target.Scheme != "https") || target.Host == "" {
+		return false
+	}
+	host := strings.ToLower(target.Hostname())
+	if host == neteaseHost || host == "www."+neteaseHost || strings.HasSuffix(host, ".music.126.net") || strings.HasSuffix(host, ".126.net") {
+		return true
+	}
+	if rawBase := strings.TrimSpace(a.neteaseBases["api"]); rawBase != "" {
+		base, err := url.Parse(rawBase)
+		return err == nil && base != nil && strings.EqualFold(target.Scheme, base.Scheme) && strings.EqualFold(target.Host, base.Host)
+	}
+	return false
 }
 
 // neteasePreferredCoverBytes prefers the original release artwork for a

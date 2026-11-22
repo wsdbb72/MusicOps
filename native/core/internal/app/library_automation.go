@@ -452,7 +452,7 @@ func (a *App) runLibraryAutomationPass(ctx context.Context, settings libraryAuto
 	}
 	if settings.Scrape {
 		state.setPhase("scrape")
-		a.runAutomatedScrape(ctx, root, paths)
+		a.runAutomatedScrape(ctx, root, paths, settings.Upgrade)
 	}
 	if ctx.Err() != nil {
 		return ctx.Err()
@@ -575,7 +575,7 @@ func automationCacheKey(root, path string) string {
 	return filepath.ToSlash(rel)
 }
 
-func (a *App) runAutomatedScrape(ctx context.Context, root string, paths []string) {
+func (a *App) runAutomatedScrape(ctx context.Context, root string, paths []string, repairInvalid bool) {
 	state := a.libraryAutomation
 	cache := a.loadLibraryAutomationScanCache(root)
 	nextCache := libraryAutomationScanDocument{Version: libraryAutomationScanVersion, Root: filepath.Clean(root), Files: make(map[string]cachedLibraryScan, len(cache.Files))}
@@ -631,6 +631,8 @@ func (a *App) runAutomatedScrape(ctx context.Context, root string, paths []strin
 	}()
 
 	seen := make(map[string]bool, len(inputs))
+	repairTracks := make([]localWorkflowTrack, 0)
+	repairSeen := map[string]bool{}
 	checked, reused, failed := 0, 0, 0
 	for result := range results {
 		checked++
@@ -644,6 +646,12 @@ func (a *App) runAutomatedScrape(ctx context.Context, root string, paths []strin
 			delete(nextCache.Files, result.input.key)
 			failed++
 			state.addError(result.err)
+			if repairInvalid && strings.EqualFold(filepath.Ext(result.input.path), ".flac") && !repairSeen[result.input.path] {
+				if track, probeErr := probeLocalWorkflowTrackForRepair(ctx, result.input.path); probeErr == nil && isLossyUpgradeSource(track.Codec) {
+					repairSeen[result.input.path] = true
+					repairTracks = append(repairTracks, track)
+				}
+			}
 		}
 		if checked%100 == 0 || checked == len(inputs) {
 			state.update(func(report *libraryAutomationReport) {
@@ -671,6 +679,11 @@ func (a *App) runAutomatedScrape(ctx context.Context, root string, paths []strin
 	}
 	if ctx.Err() != nil {
 		return
+	}
+	for _, track := range repairTracks {
+		if a.enqueueMaintenanceWorkflow(ctx, "upgrade", []localWorkflowTrack{track}, filepath.Dir(track.Path)) {
+			state.update(func(report *libraryAutomationReport) { report.UpgradeJobs++ })
+		}
 	}
 
 	catalogByDir := map[string][]string{}
@@ -1292,7 +1305,7 @@ func (a *App) enqueueLibraryMaintenanceWorkflows(ctx context.Context, byDir map[
 					continue
 				}
 			}
-			track, err := probeLocalWorkflowTrack(ctx, path)
+			track, err := probeLocalWorkflowTrackForRepair(ctx, path)
 			if err == nil {
 				tracks = append(tracks, track)
 			}

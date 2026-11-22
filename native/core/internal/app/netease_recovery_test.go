@@ -163,9 +163,9 @@ func TestNeteaseAlternateSongsUsesTitleOnlySearchAndStageNamePunctuation(t *test
 		songs := []map[string]any{}
 		if query == "Just the Two of Us" {
 			songs = append(songs, map[string]any{
-				"id": 5053002, "name": "Just the Two of Us", "duration": 237609,
-				"album":   map[string]any{"id": 42, "name": "Bandits (Motion Picture Soundtrack)"},
-				"artists": []map[string]any{{"name": "Grover Washington, Jr."}, {"name": "Bill Withers"}},
+				"id": 26850810, "name": "Just The Two Of Us (with Grover Washington Jr.)", "duration": 237100,
+				"album":   map[string]any{"id": 42, "name": "Ultimate Collection"},
+				"artists": []map[string]any{{"name": "Bill Withers"}},
 			})
 		}
 		_ = json.NewEncoder(w).Encode(map[string]any{"code": 200, "result": map[string]any{"songs": songs}})
@@ -180,7 +180,7 @@ func TestNeteaseAlternateSongsUsesTitleOnlySearchAndStageNamePunctuation(t *test
 	candidates, err := application.neteaseAlternateSongs(context.Background(), SearchPlan{
 		ExpectedArtist: "Bill Withers / Grover Washington Jr.", ExpectedTitle: "Greatest Hits: Lean On Me", PlaylistTrack: "Just the Two of Us",
 	}, anchor)
-	if err != nil || len(candidates) != 1 || candidates[0].ID != 5053002 {
+	if err != nil || len(candidates) != 1 || candidates[0].ID != 26850810 {
 		t.Fatalf("candidates=%+v err=%v", candidates, err)
 	}
 }

@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -201,5 +202,63 @@ func TestNeteaseSearchAcceptsCurrentResponseWithoutCode(t *testing.T) {
 	song, err := application.neteaseSearchSong(context.Background(), SearchPlan{ExpectedTitle: "Havana", ExpectedArtist: "Camila Cabello;Young Thug"})
 	if err != nil || song == nil || song.ID != 42 || song.AlbumID != 35829532 {
 		t.Fatalf("song=%+v err=%v", song, err)
+	}
+}
+
+func TestNeteaseURLForFallsBackToOfficialOuterRedirect(t *testing.T) {
+	vaultKey(t)
+	application := newApp(t)
+	saveNeteaseTestCookie(t, application)
+	var server *httptest.Server
+	server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/song/enhance/player/url/v1", "/api/song/enhance/player/url":
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{"code": 200, "data": []map[string]any{{"id": 42, "url": "", "code": 200}}})
+		case "/song/media/outer/url":
+			if r.URL.Query().Get("id") == "43.mp3" {
+				http.Redirect(w, r, "http://music.163.com/404", http.StatusFound)
+				return
+			}
+			http.Redirect(w, r, server.URL+"/media/42.mp3", http.StatusFound)
+		case "/media/42.mp3":
+			w.Header().Set("Content-Type", "audio/mpeg")
+			_, _ = w.Write([]byte("audio"))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+	application.neteaseBases = map[string]string{"api": server.URL}
+	mediaURL, format, err := application.neteaseURLFor(context.Background(), &neteaseSong{ID: 42})
+	if err != nil || format != "mp3" || mediaURL != server.URL+"/media/42.mp3" {
+		t.Fatalf("mediaURL=%q format=%q err=%v", mediaURL, format, err)
+	}
+	mediaURL, _, err = application.neteaseURLFor(context.Background(), &neteaseSong{ID: 43})
+	if err == nil || mediaURL != "" {
+		t.Fatalf("a 404 outer redirect was accepted: mediaURL=%q err=%v", mediaURL, err)
+	}
+}
+
+func TestNeteaseMediaURLAllowlistRejectsUntrustedHosts(t *testing.T) {
+	application := &App{neteaseBases: map[string]string{"api": "http://127.0.0.1:12345"}}
+	tests := []struct {
+		raw  string
+		want bool
+	}{
+		{raw: "http://m701.music.126.net/media.mp3", want: true},
+		{raw: "https://music.163.com/song.mp3", want: true},
+		{raw: "http://127.0.0.1:12345/media.mp3", want: true},
+		{raw: "https://example.com/song.mp3"},
+		{raw: "javascript:alert(1)"},
+	}
+	for _, test := range tests {
+		target, err := url.Parse(test.raw)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := application.neteaseMediaURLAllowed(target); got != test.want {
+			t.Errorf("allowed(%q)=%v want %v", test.raw, got, test.want)
+		}
 	}
 }

@@ -1429,7 +1429,7 @@ func selectUpgradeTracks(plan downloadPlan, meta qbittorrent.Metainfo, seedDir s
 				continue
 			}
 			seconds := float64(tags.StreamInfo.TotalSamples) / float64(tags.StreamInfo.SampleRate)
-			if seconds-old.Duration < -1.5 || seconds-old.Duration > 1.5 {
+			if old.Duration > 0 && (seconds-old.Duration < -1.5 || seconds-old.Duration > 1.5) {
 				continue
 			}
 			if matched != "" {

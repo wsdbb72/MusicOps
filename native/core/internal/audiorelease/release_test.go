@@ -104,6 +104,35 @@ func TestUpgradeCanAtomicallyReplaceTheSameLibraryPath(t *testing.T) {
 	}
 }
 
+func TestUpgradeCanPreserveOriginalPathWhenCorrectedTagsChangeTheTarget(t *testing.T) {
+	engine, incoming, library := openRelease(t)
+	oldFolder := filepath.Join(library, "Old Artist", "Old Album")
+	if err := os.MkdirAll(oldFolder, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	dest := filepath.Join(oldFolder, "07 Old Title.wav")
+	oldBody := wav(16)
+	writeSource(t, oldFolder, filepath.Base(dest), oldBody)
+	newBody := wav(64)
+	writeSource(t, incoming, "song.wav", newBody)
+	request := sample(incoming, library, "song.wav")
+	request.RequestID, request.RootID = "rel-replace-pinned", "root-replace-pinned"
+	request.Artist, request.FolderArtist, request.Album, request.Title, request.Track = "New Artist", "", "New Album", "New Title", 2
+	request.ReplacePath = dest
+	request.TargetPath = dest
+	got, err := Release(context.Background(), engine, request)
+	if err != nil || !got.LibraryPublished || !got.Verified {
+		t.Fatalf("got=%+v err=%v", got, err)
+	}
+	if body, err := os.ReadFile(dest); err != nil || !bytes.Equal(body, newBody) {
+		t.Fatalf("pinned replacement bytes=%d err=%v", len(body), err)
+	}
+	computed := filepath.Join(library, "New Artist", "New Album", "02 New Title.wav")
+	if _, err := os.Stat(computed); !os.IsNotExist(err) {
+		t.Fatalf("upgrade created a second path instead of replacing the pinned file: %v", err)
+	}
+}
+
 func TestUpgradeRejectsAnUnauthorizedReplacementPath(t *testing.T) {
 	engine, incoming, library := openRelease(t)
 	folder := filepath.Join(library, "Artist", "Album")

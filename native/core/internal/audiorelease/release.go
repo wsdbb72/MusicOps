@@ -80,6 +80,11 @@ type Request struct {
 	// still computes the destination independently and will not overwrite any
 	// other existing file.
 	ReplacePath string
+	// TargetPath pins an authorized replacement to its existing library path.
+	// Upgrades may improve tags and therefore compute a different artist/album
+	// folder; the caller explicitly chooses the old path to keep one recording
+	// identity while replacing its bytes.
+	TargetPath string
 }
 
 // Result is the file outcome. Downloaded stays false: the bytes were verified
@@ -219,6 +224,14 @@ func Release(ctx context.Context, engine *dataengine.Engine, input Request) (Res
 	}
 	name := trackName(input.Track, title, format)
 	dest := filepath.Join(folder, name)
+	if target := strings.TrimSpace(input.TargetPath); target != "" {
+		dest, err = filepath.Abs(filepath.Clean(target))
+		if err != nil || !inside(library, dest) || inside(incoming, dest) || !strings.EqualFold(filepath.Ext(dest), "."+format) {
+			return empty, dataengine.ErrInvalidRequest
+		}
+		folder = filepath.Dir(dest)
+		name = filepath.Base(dest)
+	}
 	if !inside(library, dest) || inside(incoming, dest) {
 		return empty, dataengine.ErrInvalidRequest
 	}

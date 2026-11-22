@@ -123,6 +123,36 @@ func TestLibraryAutomationQueuesEveryLossyTrack(t *testing.T) {
 		t.Fatalf("stop automation executor: %v", err)
 	}
 }
+
+func TestLibraryAutomationQueuesCorruptFLACReplacement(t *testing.T) {
+	if _, err := exec.LookPath("ffprobe"); err != nil {
+		t.Skip("ffprobe unavailable")
+	}
+	application := newApp(t)
+	library := t.TempDir()
+	post(t, application, "/v1/settings/library", map[string]any{"library_dir": library})
+	folder := filepath.Join(library, "Artist - Album")
+	if err := os.MkdirAll(folder, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(folder, "03 Song.flac")
+	if err := os.WriteFile(path, make([]byte, 256), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := application.runLibraryAutomationPass(context.Background(), libraryAutomationSettings{Enabled: true, Scrape: true, Upgrade: true, IntervalHours: 6}); err != nil {
+		t.Fatal(err)
+	}
+	_, report := application.libraryAutomation.snapshot()
+	if report.UpgradeJobs != 1 {
+		t.Fatalf("corrupt FLAC produced %d upgrade jobs: %+v", report.UpgradeJobs, report)
+	}
+	stopCtx, cancelStop := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancelStop()
+	if err := application.runner.Stop(stopCtx); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestSingleLossyTrackStillGetsAlbumCompletion(t *testing.T) {
 	tracks := []localWorkflowTrack{{Codec: "mp3", Artist: "Artist", Album: "Album", Title: "Song", Duration: 180}}
 	if !shouldExpandSingleAlbum(tracks, true, 0) {
@@ -200,7 +230,7 @@ func TestLibraryAutomationReusesUnchangedScanCache(t *testing.T) {
 		t.Fatal(err)
 	}
 	application.libraryAutomation.update(func(report *libraryAutomationReport) { *report = libraryAutomationReport{} })
-	application.runAutomatedScrape(context.Background(), library, []string{path})
+	application.runAutomatedScrape(context.Background(), library, []string{path}, false)
 	_, report := application.libraryAutomation.snapshot()
 	if report.ScanChecked != 1 || report.ScanReused != 1 || report.ScanFailed != 0 || len(report.Errors) != 0 {
 		t.Fatalf("unchanged cached file was probed or failed: %+v", report)
@@ -210,7 +240,7 @@ func TestLibraryAutomationReusesUnchangedScanCache(t *testing.T) {
 		t.Fatal(err)
 	}
 	application.libraryAutomation.update(func(report *libraryAutomationReport) { *report = libraryAutomationReport{} })
-	application.runAutomatedScrape(context.Background(), library, []string{path})
+	application.runAutomatedScrape(context.Background(), library, []string{path}, false)
 	_, changed := application.libraryAutomation.snapshot()
 	if changed.ScanChecked != 1 || changed.ScanFailed != 1 || changed.ScanReused != 0 {
 		t.Fatalf("changed file was not re-probed: %+v", changed)

@@ -60,7 +60,7 @@ func (a *App) ingestPlaylistStream(ctx context.Context, job workflow.Job, plan S
 			return publishComponent(plan.AlbumArtist)
 		}(), Album: publishComponent(plan.ExpectedTitle), Title: publishComponent(diskTitle),
 		SourceName: name, Incoming: root, Library: a.libraryDir(), Decoder: audiorelease.SystemDecoder(), InternalDownload: true,
-		ReplacePath: playlistStreamReplacementPath(plan),
+		ReplacePath: playlistStreamReplacementPath(plan), TargetPath: playlistStreamReplacementPath(plan),
 	})
 	if err != nil {
 		return publishReceipt{}, playlistReleaseError(err, result)

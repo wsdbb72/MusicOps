@@ -119,7 +119,7 @@ func classifyNeteaseFailure(err error) string {
 	}
 	var httpErr *neteaseHTTPError
 	if errors.As(err, &httpErr) {
-		if httpErr.status == http.StatusTooManyRequests {
+		if httpErr.status == http.StatusTooManyRequests || httpErr.status == http.StatusMethodNotAllowed {
 			return downloadpolicy.ClassRateLimited
 		}
 		if httpErr.status == http.StatusUnauthorized || httpErr.status == http.StatusForbidden {
@@ -242,6 +242,11 @@ func decodeNeteaseSearch(body []byte) (int, []neteaseSearchItem, error) {
 	if envelope.Code != nil {
 		code = *envelope.Code
 	}
+	if code != 0 && code != 200 {
+		// Surface NetEase's embedded application code (notably 405 rate limiting)
+		// before looking for fields that such a response omits.
+		return code, nil, &neteaseHTTPError{operation: "搜索", status: code}
+	}
 	resultRaw, err := requiredNeteaseField(body, "result", "搜索")
 	if err != nil {
 		return 0, nil, err
@@ -272,26 +277,9 @@ func (a *App) neteaseSearchSong(ctx context.Context, plan SearchPlan) (*neteaseS
 	if query == "" {
 		return nil, nil
 	}
-	endpoint, err := url.Parse(a.neteaseBase() + "/api/search/get/web")
+	_, songs, err := a.neteaseSearchSongs(ctx, query, 10)
 	if err != nil {
 		return nil, err
-	}
-	values := endpoint.Query()
-	values.Set("s", query)
-	values.Set("type", "1")
-	values.Set("offset", "0")
-	values.Set("limit", "10")
-	endpoint.RawQuery = values.Encode()
-	body, err := a.neteaseGet(ctx, endpoint.String(), a.neteaseCookie())
-	if err != nil {
-		return nil, err
-	}
-	code, songs, err := decodeNeteaseSearch(body)
-	if err != nil {
-		return nil, err
-	}
-	if code != 0 && code != 200 {
-		return nil, &neteaseHTTPError{operation: "搜索", status: code}
 	}
 	wantTitle := foldTagText(firstNonEmpty(plan.PlaylistTrack, plan.ExpectedTitle))
 	if wantTitle == "" {
@@ -432,26 +420,9 @@ func (a *App) neteaseOriginalCoverSong(ctx context.Context, song *neteaseSong) (
 	if song == nil || strings.TrimSpace(song.Name) == "" || len(song.Artists) == 0 {
 		return nil, errors.New("网易云歌曲缺少原发行版检索信息")
 	}
-	endpoint, err := url.Parse(a.neteaseBase() + "/api/search/get/web")
+	_, songs, err := a.neteaseSearchSongs(ctx, strings.Join(song.Artists, " ")+" "+song.Name, 30)
 	if err != nil {
 		return nil, err
-	}
-	values := endpoint.Query()
-	values.Set("s", strings.Join(song.Artists, " ")+" "+song.Name)
-	values.Set("type", "1")
-	values.Set("offset", "0")
-	values.Set("limit", "30")
-	endpoint.RawQuery = values.Encode()
-	body, err := a.neteaseGet(ctx, endpoint.String(), a.neteaseCookie())
-	if err != nil {
-		return nil, err
-	}
-	code, songs, err := decodeNeteaseSearch(body)
-	if err != nil {
-		return nil, err
-	}
-	if code != 0 && code != 200 {
-		return nil, &neteaseHTTPError{operation: "原发行版封面搜索", status: code}
 	}
 	var best *neteaseSong
 	bestDelta := 5001
@@ -800,7 +771,7 @@ func (a *App) stageNeteaseSongWithEngine(ctx context.Context, plan SearchPlan, s
 	}
 	alternates, alternateErr := a.neteaseAlternateSongs(ctx, plan, song)
 	if alternateErr != nil {
-		return "", primaryNote + "；网易云替代录音检索失败：" + alternateErr.Error(), primaryClass, true
+		return "", primaryNote + "；网易云替代录音检索失败：" + alternateErr.Error(), preferStreamFailure(primaryClass, classifyNeteaseFailure(alternateErr)), true
 	}
 	if len(alternates) == 0 {
 		return "", primaryNote + "；没有找到曲名、歌手和时长都匹配的安全替代录音", primaryClass, true

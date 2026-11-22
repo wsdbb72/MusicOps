@@ -36,6 +36,9 @@ func TestNeteasePlaylistUsesSafeAlternateRecordingWhenExactURLMissing(t *testing
 	var netease *httptest.Server
 	netease = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
+		case "/api/search/get":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"msg":"操作频繁，请稍候再试","code":405}`))
 		case "/api/search/get/web":
 			w.Header().Set("Content-Type", "application/json")
 			_ = json.NewEncoder(w).Encode(map[string]any{"code": 200, "result": map[string]any{"songs": []map[string]any{

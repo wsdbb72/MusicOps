@@ -5,7 +5,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"net/url"
 	"os"
 	"sort"
 	"strings"
@@ -39,28 +38,10 @@ func (a *App) neteaseAlternateSongs(ctx context.Context, plan SearchPlan, anchor
 	if query == "" {
 		return nil, nil
 	}
-	endpoint, err := url.Parse(a.neteaseBase() + "/api/search/get/web")
+	_, songs, err := a.neteaseSearchSongs(ctx, query, 30)
 	if err != nil {
 		return nil, err
 	}
-	values := endpoint.Query()
-	values.Set("s", query)
-	values.Set("type", "1")
-	values.Set("offset", "0")
-	values.Set("limit", "30")
-	endpoint.RawQuery = values.Encode()
-	body, err := a.neteaseGet(ctx, endpoint.String(), a.neteaseCookie())
-	if err != nil {
-		return nil, err
-	}
-	code, songs, err := decodeNeteaseSearch(body)
-	if err != nil {
-		return nil, err
-	}
-	if code != 0 && code != 200 {
-		return nil, &neteaseHTTPError{operation: "替代录音搜索", status: code}
-	}
-
 	wantTitle := foldTagText(firstNonEmpty(anchor.Name, plan.PlaylistTrack))
 	wantArtists := splitPlaylistArtists(plan.ExpectedArtist)
 	if len(wantArtists) == 0 {

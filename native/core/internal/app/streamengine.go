@@ -237,7 +237,10 @@ func (a *App) transcodeEngineAudio(ctx context.Context, body []byte, source stri
 	// Reserve the actual input plus the hard maximum for FLAC output before
 	// creating either temporary. The reservation stays held until both files
 	// are gone, so concurrent transcodes cannot each pass the old usage check.
-	release, err := reserveAudioCache(incoming, int64(len(body))+int64(audiorelease.MaxStagedAudioBytes)+65536)
+	// ffmpeg may finish the current frame after reaching -fs. Keep room for
+	// the muxer and stop above the accepted size so a capped FLAC is rejected.
+	const stopAt = audiorelease.MaxStagedAudioBytes + (1 << 20)
+	release, err := reserveAudioCache(incoming, int64(len(body))+stopAt+(1<<20))
 	if err != nil {
 		return nil, err
 	}
@@ -260,7 +263,7 @@ func (a *App) transcodeEngineAudio(ctx context.Context, body []byte, source stri
 	}
 	output := input.Name() + ".flac"
 	defer os.Remove(output)
-	cmd := exec.CommandContext(ctx, ffmpeg, "-y", "-v", "error", "-i", input.Name(), "-fs", strconv.Itoa(audiorelease.MaxStagedAudioBytes), "-c:a", "flac", output)
+	cmd := exec.CommandContext(ctx, ffmpeg, "-y", "-v", "error", "-nostdin", "-i", input.Name(), "-map", "0:a:0", "-fs", strconv.Itoa(stopAt), "-c:a", "flac", output)
 	prepareSolverCommand(cmd)
 	if err := cmd.Run(); err != nil {
 		return nil, err

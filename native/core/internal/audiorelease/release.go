@@ -34,7 +34,7 @@ import (
 const MaxAudioBytes = 32 << 20
 
 // MaxStagedAudioBytes is the separate ceiling for internal download staging.
-const MaxStagedAudioBytes = 160 << 20
+const MaxStagedAudioBytes = 320 << 20
 
 var (
 	releasePathLocks sync.Map

@@ -466,10 +466,8 @@ func ptrFloat(v float64) *float64 { return &v }
 func TestIdentifyCatalogRateLimiterSharedAcrossRequests(t *testing.T) {
 	application := newApp(t)
 	fake := newFakeMusicBrainz(t, catalogSearchJSON, catalogDetailJSON, http.StatusOK)
-	// A fixed clock: the client's own limiter has to enforce the 1 req/s
-	// spacing with real sleeps; the test itself never sleeps.
-	fixed := time.Date(2026, 11, 9, 5, 0, 0, 0, time.UTC)
-	client := newCatalogTestClient(t, fake, func() time.Time { return fixed })
+
+	client := newCatalogTestClient(t, fake, nil)
 	withCatalogClient(t, client)
 
 	body := catalogBody(catalogTrack("Opening", 200))

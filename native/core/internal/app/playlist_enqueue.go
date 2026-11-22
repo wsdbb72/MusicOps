@@ -701,7 +701,7 @@ func (a *App) startPlaylistAlbumJob(ctx context.Context, client *musicbrainz.Cli
 			return "", err
 		}
 	}
-	identity := a.playlistIdentity(client, jobID, artist, album, title)
+	identity := a.playlistIdentity(ctx, client, jobID, artist, album, title)
 	if err := ctx.Err(); err != nil {
 		return "", err
 	}
@@ -746,12 +746,12 @@ func (a *App) startPlaylistAlbumJob(ctx context.Context, client *musicbrainz.Cli
 // is a valid identity on its own: waiting for a catalogue that may not answer
 // would park every track at a manual checkpoint, which is the behaviour this
 // whole path exists to remove.
-func (a *App) playlistIdentity(client *musicbrainz.Client, jobID, artist, album, title string) Identity {
+func (a *App) playlistIdentity(ctx context.Context, client *musicbrainz.Client, jobID, artist, album, title string) Identity {
 	if artist == "" || album == "" {
 		return Identity{}
 	}
 	if client != nil {
-		if lookup, err := identifyCatalogLookup(client, a.engine, catalogIdentifyRequest{
+		if lookup, err := identifyCatalogLookup(ctx, client, a.engine, catalogIdentifyRequest{
 			Artist: artist, Album: album, Title: title,
 			Tracks: []catalogTrackRequest{{Title: title, Artists: []string{artist}}},
 		}, catalogBudget, catalogTTL); err == nil && lookup.MusicBrainz != nil && lookup.MusicBrainz.ReleaseID != "" {

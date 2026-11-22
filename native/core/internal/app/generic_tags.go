@@ -284,7 +284,7 @@ func (a *App) scrapeGenericFiles(ctx context.Context, paths []string, client *mu
 			duration := info.Duration
 			tracks = append(tracks, catalogTrackRequest{Title: info.Title, Artists: []string{info.Artist}, Duration: &duration})
 		}
-		lookup, err := identifyCatalogLookup(client, a.engine, catalogIdentifyRequest{Artist: group.artist, Album: group.album, Tracks: tracks}, catalogBudget, catalogTTL)
+		lookup, err := identifyCatalogLookup(ctx, client, a.engine, catalogIdentifyRequest{Artist: group.artist, Album: group.album, Tracks: tracks}, catalogBudget, catalogTTL)
 		if err != nil || lookup.MusicBrainz == nil {
 			for _, info := range group.files {
 				results[info.Path].Status, results[info.Path].Code = "failed", "CATALOG_UNCONFIRMED"

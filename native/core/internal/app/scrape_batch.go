@@ -181,7 +181,7 @@ func (a *App) scrapeLibrary(w http.ResponseWriter, r *http.Request) {
 			duration := entry.duration
 			tracks = append(tracks, catalogTrackRequest{Title: entry.title, Artists: []string{entry.artist}, Duration: &duration})
 		}
-		lookup, err := identifyCatalogLookup(client, a.engine, catalogIdentifyRequest{
+		lookup, err := identifyCatalogLookup(r.Context(), client, a.engine, catalogIdentifyRequest{
 			Artist: group.artist, Album: group.album, Tracks: tracks,
 		}, catalogBudget, catalogTTL)
 		if err != nil {

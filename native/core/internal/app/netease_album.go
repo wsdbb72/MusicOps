@@ -340,7 +340,7 @@ func (a *App) acquireNeteaseAlbum(ctx context.Context, execution *scheduler.Exec
 				source.DurationMS = int(tags.StreamInfo.TotalSamples * 1000 / uint64(tags.StreamInfo.SampleRate))
 				local := a.verifiedPlaylistAlbumTracks(a.libraryDir(), artist, album, plan.ExpectedTitle)
 				if verifiedNeteaseTrackPresent(local, &source) {
-					removeNeteaseStaging(a.workPath("incoming"), path, "scraped-"+filepath.Base(path))
+					removePublishedStreamStaging(a.workPath("incoming"), path, "scraped-"+filepath.Base(path))
 					return finishSkip("已核实目标曲目在库；网易云暂未提供可验证的专辑清单")
 				}
 			}

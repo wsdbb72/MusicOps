@@ -685,7 +685,7 @@ func (a *App) stageNeteaseSong(ctx context.Context, plan SearchPlan, song *netea
 	if lossySource {
 		quality = "lossy-"
 	}
-	name := "netease-" + quality + safeStreamID(plan.RootJobID) + "-" + strconv.FormatInt(song.ID, 10) + ".flac"
+	name := fmt.Sprintf("netease-%s%s-%x-%d.flac", quality, safeStreamID(plan.RootJobID), streamStagingDigest(body, plan.RootJobID, song.Name, song.Album, strings.Join(song.Artists, " / ")), song.ID)
 	path := filepath.Join(dir, name)
 	release, err := reserveAudioCache(dir, 2*int64(len(body))+65536)
 	if err != nil {

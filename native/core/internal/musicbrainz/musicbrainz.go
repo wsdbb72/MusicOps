@@ -16,6 +16,7 @@
 package musicbrainz
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -133,7 +134,6 @@ func NewClient() *Client {
 		UserAgent:  DefaultUserAgent,
 		HTTPClient: &http.Client{Timeout: defaultTimeout},
 		Now:        time.Now,
-		sleep:      time.Sleep,
 	}
 }
 
@@ -165,29 +165,41 @@ func (c *Client) now() time.Time {
 	return time.Now()
 }
 
-func (c *Client) doSleep(d time.Duration) {
+func (c *Client) wait(ctx context.Context, delay time.Duration) error {
 	if c.sleep != nil {
-		c.sleep(d)
-		return
+		c.sleep(delay)
+		return ctx.Err()
 	}
-	time.Sleep(d)
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
 }
 
-// waitForRateLimit blocks until at least rateLimitInterval has passed since
-// the previous request. It holds the mutex while waiting so concurrent
-// callers serialize instead of bursting. The timestamp is re-read after the
-// wait so a fake clock advanced by the sleep is honoured.
-func (c *Client) waitForRateLimit() {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if c.lastCall.IsZero() {
-		c.lastCall = c.now()
-		return
+// Do not hold the limiter lock while waiting. Cancellation can release a
+// caller immediately even while several other catalogue jobs are queued.
+func (c *Client) waitForRateLimit(ctx context.Context) error {
+	for {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		c.mu.Lock()
+		now := c.now()
+		delay := rateLimitInterval - now.Sub(c.lastCall)
+		if c.lastCall.IsZero() || delay <= 0 {
+			c.lastCall = now
+			c.mu.Unlock()
+			return nil
+		}
+		c.mu.Unlock()
+		if err := c.wait(ctx, delay); err != nil {
+			return err
+		}
 	}
-	if wait := rateLimitInterval - c.now().Sub(c.lastCall); wait > 0 {
-		c.doSleep(wait)
-	}
-	c.lastCall = c.now()
 }
 
 // get performs one GET against path (relative to BaseURL) with the given
@@ -199,15 +211,17 @@ func (c *Client) waitForRateLimit() {
 //   - any other 4xx: no retry.
 //   - malformed JSON is the caller's problem: get returns the raw body and
 //     the caller decodes it, so a decode failure is a ParseError there.
-func (c *Client) get(path string, params url.Values) ([]byte, error) {
+func (c *Client) get(ctx context.Context, path string, params url.Values) ([]byte, error) {
 	params.Set("fmt", "json")
 	endpoint := c.baseURL() + path + "?" + params.Encode()
 
 	var lastErr error
 	for attempt := 0; attempt < 2; attempt++ {
-		c.waitForRateLimit()
+		if err := c.waitForRateLimit(ctx); err != nil {
+			return nil, err
+		}
 
-		req, err := http.NewRequest(http.MethodGet, endpoint, nil)
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
 		if err != nil {
 			return nil, fmt.Errorf("musicbrainz: building request: %w", err)
 		}
@@ -217,7 +231,9 @@ func (c *Client) get(path string, params url.Values) ([]byte, error) {
 		resp, err := c.httpClient().Do(req)
 		if err != nil {
 			lastErr = fmt.Errorf("musicbrainz: request failed: %w", err)
-			c.doSleep(rateLimitInterval)
+			if err := c.wait(ctx, rateLimitInterval); err != nil {
+				return nil, err
+			}
 			continue
 		}
 		body, readErr := io.ReadAll(io.LimitReader(resp.Body, maxResponseBytes+1))
@@ -235,7 +251,9 @@ func (c *Client) get(path string, params url.Values) ([]byte, error) {
 		case resp.StatusCode == http.StatusTooManyRequests:
 			retryAfter := parseRetryAfter(resp.Header.Get("Retry-After"), c.now())
 			if attempt == 0 {
-				c.doSleep(retryAfter)
+				if err := c.wait(ctx, retryAfter); err != nil {
+					return nil, err
+				}
 				lastErr = &RateLimitError{RetryAfter: retryAfter, StatusCode: resp.StatusCode}
 				continue
 			}
@@ -243,7 +261,9 @@ func (c *Client) get(path string, params url.Values) ([]byte, error) {
 		case resp.StatusCode >= 500:
 			if attempt == 0 {
 				lastErr = &ServerError{StatusCode: resp.StatusCode}
-				c.doSleep(rateLimitInterval)
+				if err := c.wait(ctx, rateLimitInterval); err != nil {
+					return nil, err
+				}
 				continue
 			}
 			return nil, &ServerError{StatusCode: resp.StatusCode}

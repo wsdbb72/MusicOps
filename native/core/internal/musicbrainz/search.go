@@ -1,6 +1,7 @@
 package musicbrainz
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/url"
@@ -42,13 +43,13 @@ type DetailTrack struct {
 // has at least one track and every track has a title and a positive length;
 // anything less means the tracklist cannot be trusted as complete.
 type ReleaseDetail struct {
-	MBID              string
-	Title             string
-	Date              string
-	Country           string
-	Status            string
-	Artists           []string
-	ReleaseGroupID    string
+	MBID           string
+	Title          string
+	Date           string
+	Country        string
+	Status         string
+	Artists        []string
+	ReleaseGroupID string
 	// Genres are the release-level genre names, most-voted first. They are
 	// only what the service returned: an empty list means "not tagged on
 	// MusicBrainz", never a guess.
@@ -83,6 +84,10 @@ type searchResponse struct {
 // never reach the caller. An empty result set is not an error: it returns
 // an empty (non-nil) slice. Results are sorted by score descending.
 func (c *Client) SearchRelease(artist, album, title string) ([]Release, error) {
+	return c.SearchReleaseContext(context.Background(), artist, album, title)
+}
+
+func (c *Client) SearchReleaseContext(ctx context.Context, artist, album, title string) ([]Release, error) {
 	query, err := buildQuery(artist, album, title)
 	if err != nil {
 		return nil, err
@@ -91,7 +96,7 @@ func (c *Client) SearchRelease(artist, album, title string) ([]Release, error) {
 		"query": {query},
 		"limit": {strconv.Itoa(searchLimit)},
 	}
-	body, err := c.get("/ws/2/release", params)
+	body, err := c.get(ctx, "/ws/2/release", params)
 	if err != nil {
 		return nil, err
 	}
@@ -165,6 +170,10 @@ type detailResponse struct {
 // MBID is validated before any request is sent. A response whose id does
 // not match the requested MBID is a ParseError, never a result.
 func (c *Client) GetRelease(mbid string) (ReleaseDetail, error) {
+	return c.GetReleaseContext(context.Background(), mbid)
+}
+
+func (c *Client) GetReleaseContext(ctx context.Context, mbid string) (ReleaseDetail, error) {
 	normalised, err := normalizeMBID(mbid)
 	if err != nil {
 		return ReleaseDetail{}, err
@@ -172,7 +181,7 @@ func (c *Client) GetRelease(mbid string) (ReleaseDetail, error) {
 	// genres is part of the same lookup: a separate request would double the
 	// rate-limit cost of every completion for one field.
 	params := url.Values{"inc": {"artists+recordings+genres"}}
-	body, err := c.get("/ws/2/release/"+normalised, params)
+	body, err := c.get(ctx, "/ws/2/release/"+normalised, params)
 	if err != nil {
 		return ReleaseDetail{}, err
 	}
@@ -270,11 +279,15 @@ func genreNames(rows []genreRow) []string {
 // caller uses this only as a fallback. A missing group id is an error; an
 // empty list is a valid "not tagged" answer.
 func (c *Client) GetReleaseGroupGenres(mbid string) ([]string, error) {
+	return c.GetReleaseGroupGenresContext(context.Background(), mbid)
+}
+
+func (c *Client) GetReleaseGroupGenresContext(ctx context.Context, mbid string) ([]string, error) {
 	normalised, err := normalizeMBID(mbid)
 	if err != nil {
 		return nil, err
 	}
-	body, err := c.get("/ws/2/release-group/"+normalised, url.Values{"inc": {"genres"}})
+	body, err := c.get(ctx, "/ws/2/release-group/"+normalised, url.Values{"inc": {"genres"}})
 	if err != nil {
 		return nil, err
 	}

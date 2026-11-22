@@ -959,7 +959,7 @@ func (a *App) runAutomatedGenericScrapeDir(ctx context.Context, dir string, path
 			duration := info.Duration
 			tracks = append(tracks, catalogTrackRequest{Title: info.Title, Artists: []string{info.Artist}, Duration: &duration})
 		}
-		lookup, err := identifyCatalogLookup(catalogClient, a.engine, catalogIdentifyRequest{
+		lookup, err := identifyCatalogLookup(ctx, catalogClient, a.engine, catalogIdentifyRequest{
 			Artist: artist, Album: album, Tracks: tracks,
 		}, catalogBudget, catalogTTL)
 		if err != nil {

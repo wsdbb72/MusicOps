@@ -1,6 +1,7 @@
 package musicbrainz
 
 import (
+	"context"
 	"errors"
 	"net/http"
 	"net/http/httptest"
@@ -472,5 +473,37 @@ func TestGetReleaseIDMismatch(t *testing.T) {
 	var parseErr *ParseError
 	if !errors.As(err, &parseErr) {
 		t.Errorf("err = %v, want *ParseError for an id mismatch", err)
+	}
+}
+
+func TestSearchReleaseContextCancelsAnInFlightRequest(t *testing.T) {
+	started := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+		close(started)
+		<-r.Context().Done()
+	}))
+	defer srv.Close()
+	client := NewClient()
+	client.BaseURL = srv.URL
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	result := make(chan error, 1)
+	go func() {
+		_, err := client.SearchReleaseContext(ctx, "Artist", "Album", "Track")
+		result <- err
+	}()
+	select {
+	case <-started:
+	case <-time.After(5 * time.Second):
+		t.Fatal("request did not start")
+	}
+	cancel()
+	select {
+	case err := <-result:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("expected cancellation, got %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("request or retry waited after cancellation")
 	}
 }

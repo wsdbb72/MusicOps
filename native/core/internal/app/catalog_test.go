@@ -441,7 +441,7 @@ func TestIdentifyCatalogBudgetExhaustion(t *testing.T) {
 			{Title: "Opening (Live)", Artists: []string{"Some Artist"}, Duration: ptrFloat(200)},
 		},
 	}
-	resp, err := identifyCatalogLookup(client, application.engine, req, 1, time.Hour)
+	resp, err := identifyCatalogLookup(t.Context(), client, application.engine, req, 1, time.Hour)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -452,7 +452,7 @@ func TestIdentifyCatalogBudgetExhaustion(t *testing.T) {
 	// A budget of 0 defers everything and confirms nothing. A fresh App
 	// is used so the first call's cached verdict cannot answer instead.
 	fresh := newApp(t)
-	resp, err = identifyCatalogLookup(client, fresh.engine, req, 0, time.Hour)
+	resp, err = identifyCatalogLookup(t.Context(), client, fresh.engine, req, 0, time.Hour)
 	if err != nil {
 		t.Fatal(err)
 	}

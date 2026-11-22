@@ -383,7 +383,7 @@ func (a *App) completeMetadata(w http.ResponseWriter, r *http.Request) {
 		client = musicbrainz.NewClient()
 		client.BaseURL = body.CatalogBaseURL
 	}
-	lookup, err := identifyCatalogLookup(client, a.engine, catalogIdentifyRequest{
+	lookup, err := identifyCatalogLookup(r.Context(), client, a.engine, catalogIdentifyRequest{
 		Artist: artist, Album: album, Title: title,
 		Tracks: []catalogTrackRequest{{Title: title, Artists: []string{artist}, Duration: &duration}},
 	}, catalogBudget, catalogTTL)

@@ -76,7 +76,10 @@ func (a *App) confirmSelectedLibrary(ctx context.Context, plan *SearchPlan) erro
 		duration := track.Duration
 		req.Tracks = append(req.Tracks, catalogTrackRequest{Title: track.Title, Artists: []string{track.Artist}, Duration: &duration})
 	}
-	resolved, err := identifyCatalogLookup(catalogClient, a.engine, req, catalogBudget, catalogTTL)
+	resolved, err := identifyCatalogLookup(ctx, catalogClient, a.engine, req, catalogBudget, catalogTTL)
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return ctxErr
+	}
 	confirmed := err == nil && resolved.MusicBrainz != nil && len(resolved.Results) == len(req.Tracks)
 	if confirmed {
 		for _, row := range resolved.Results {

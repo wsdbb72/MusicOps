@@ -3,8 +3,10 @@ package app
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"html"
 	"io"
 	"math"
@@ -164,7 +166,9 @@ func (a *App) tryConfiguredStreamSong(ctx context.Context, source string, plan S
 	if err := validStreamAudio(body, "", "", song.Duration); err != nil {
 		return "", source + " 返回的内容没有通过音频校验", downloadpolicy.ClassNoResult
 	}
-	name := "stream-" + safeStreamID(plan.RootJobID) + "-" + source + ".flac"
+	// The same album job acquires several recordings. Account for both
+	// identity and bytes so a retry cannot adopt an older scraped copy.
+	name := fmt.Sprintf("stream-%s-%x-%s.flac", safeStreamID(plan.RootJobID), streamStagingDigest(body, plan.RootJobID, source, song.ID, song.Name, song.Artist, song.Album), source)
 	if strings.Contains(name, string(filepath.Separator)) || strings.Contains(name, "..") {
 		return "", source + " 校验通过但没有写入", downloadpolicy.ClassNoResult
 	}
@@ -541,6 +545,15 @@ func validStreamAudio(data []byte, artist, title string, wantSeconds int) error 
 		}
 	}
 	return nil
+}
+
+func streamStagingDigest(body []byte, fields ...string) []byte {
+	digest := sha256.New()
+	for _, field := range fields {
+		fmt.Fprintf(digest, "%q ", field)
+	}
+	_, _ = digest.Write(body)
+	return digest.Sum(nil)[:16]
 }
 
 func safeStreamID(id string) string {

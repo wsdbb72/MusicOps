@@ -4,7 +4,6 @@ import (
 	"encoding/binary"
 	"net/http"
 	"net/http/httptest"
-	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -65,8 +64,8 @@ func TestStreamEngineAcceptsOnlyValidatedAudio(t *testing.T) {
 	if !strings.Contains(job.Message, "tidal 音频已通过校验并保存") || !strings.Contains(job.Message, "算作下载") || !strings.Contains(job.Message, "尚未入库") || strings.Contains(job.Message, "已入库") {
 		t.Fatal(job.Message)
 	}
-	saved := filepath.Join(application.Dir, "incoming", "stream-album-engine-tidal.flac")
-	if _, err := os.Stat(saved); err != nil || tidalCalls == 0 || appleCalls != 0 {
+	saved, err := filepath.Glob(filepath.Join(application.Dir, "incoming", "stream-album-engine-*-tidal.flac"))
+	if err != nil || len(saved) != 1 || tidalCalls == 0 || appleCalls != 0 {
 		t.Fatal(err, tidalCalls, appleCalls)
 	}
 	// The address field is retired: whatever the page sends is dropped and the
@@ -143,4 +142,36 @@ func bytesRepeat(n int, b byte) []byte {
 		out[i] = b
 	}
 	return out
+}
+
+func TestStreamEngineScrapesEachTrackInAnAlbumIndependently(t *testing.T) {
+	first := oneSecondFLAC(t, "Artist", "First")
+	second := oneSecondFLAC(t, "Artist", "Second")
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Query().Get("id") {
+		case "1":
+			_, _ = w.Write(first)
+		case "2":
+			_, _ = w.Write(second)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+	t.Setenv("MUSICOPS_ENGINE_URL", server.URL)
+	a := newApp(t)
+	plan := SearchPlan{RootJobID: "same-album-root", ExpectedArtist: "Artist", ExpectedTitle: "First Album"}
+	for i, song := range []*streamSong{
+		{ID: "1", Source: "netease", Artist: "Artist", Name: "First", Album: "First Album", Duration: 1},
+		{ID: "2", Source: "netease", Artist: "Artist", Name: "Second", Album: "First Album", Duration: 1},
+	} {
+		path, note, _ := a.tryConfiguredStreamSong(t.Context(), "netease", plan, song)
+		if path == "" {
+			t.Fatal(note)
+		}
+		_, title, _, err := a.scrapePlaylistIncoming(t.Context(), filepath.Dir(path), filepath.Base(path), song.Artist, "", song.Album, song.Name, i+1)
+		if err != nil || title != song.Name {
+			t.Fatalf("scraped %q for %q: %v", title, song.Name, err)
+		}
+	}
 }

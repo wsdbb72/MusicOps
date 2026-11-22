@@ -211,9 +211,9 @@ func pruneStaleAudioCache(dir string, need int64, maxAge time.Duration, now time
 	return freed, nil
 }
 
-func removeNeteaseStaging(dir, source, staged string) {
+func removePublishedStreamStaging(dir, source, staged string) {
 	base := filepath.Base(source)
-	if !strings.HasPrefix(base, "netease-") || !strings.HasSuffix(base, ".flac") || staged != "scraped-"+base {
+	if !(strings.HasPrefix(base, "netease-") || strings.HasPrefix(base, "stream-")) || !strings.HasSuffix(base, ".flac") || staged != "scraped-"+base {
 		return
 	}
 	audioCacheMu.Lock()

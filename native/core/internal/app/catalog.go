@@ -20,6 +20,7 @@
 package app
 
 import (
+	"context"
 	"errors"
 	"net/http"
 	"sort"
@@ -160,7 +161,7 @@ func (a *App) identifyCatalog(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "code": "INVALID_REQUEST"})
 		return
 	}
-	resp, err := identifyCatalogLookup(catalogClient, a.engine, body, catalogBudget, catalogTTL)
+	resp, err := identifyCatalogLookup(r.Context(), catalogClient, a.engine, body, catalogBudget, catalogTTL)
 	if err != nil {
 		status, code := http.StatusBadGateway, "CATALOG_UNAVAILABLE"
 		if errors.Is(err, errCatalogInvalidRequest) || errors.Is(err, musicbrainz.ErrInvalidMBID) || errors.Is(err, musicbrainz.ErrEmptyQuery) {
@@ -177,7 +178,7 @@ func (a *App) identifyCatalog(w http.ResponseWriter, r *http.Request) {
 // client and a Catalogue backed by engine. It is split out of the handler
 // so tests can drive it with a small budget (to observe exhaustion) without
 // going through HTTP.
-func identifyCatalogLookup(client *musicbrainz.Client, engine *dataengine.Engine, req catalogIdentifyRequest, budget int, ttl time.Duration) (catalogIdentifyResponse, error) {
+func identifyCatalogLookup(ctx context.Context, client *musicbrainz.Client, engine *dataengine.Engine, req catalogIdentifyRequest, budget int, ttl time.Duration) (catalogIdentifyResponse, error) {
 	artist := strings.TrimSpace(req.Artist)
 	album := strings.TrimSpace(req.Album)
 	if artist == "" || album == "" || len(req.Tracks) > catalogMaxTracks {
@@ -196,7 +197,10 @@ func identifyCatalogLookup(client *musicbrainz.Client, engine *dataengine.Engine
 		return catalogIdentifyResponse{}, errCatalogInvalidRequest
 	}
 
-	detail, fallback, searchTop, lookupErr, err := catalogLookup(client, req, artist, album)
+	detail, fallback, searchTop, lookupErr, err := catalogLookup(ctx, client, req, artist, album)
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return catalogIdentifyResponse{}, ctxErr
+	}
 	if err != nil {
 		return catalogIdentifyResponse{}, err
 	}
@@ -332,22 +336,22 @@ func catalogCleanArtists(artists []string) []string {
 // group only, and a completion that writes no GENRE is the bug this exists to
 // close. The fallback never fails the lookup: an untagged group is reported as
 // an empty list.
-func fetchReleaseWithGenres(client *musicbrainz.Client, mbid string) (musicbrainz.ReleaseDetail, error) {
-	detail, err := client.GetRelease(mbid)
+func fetchReleaseWithGenres(ctx context.Context, client *musicbrainz.Client, mbid string) (musicbrainz.ReleaseDetail, error) {
+	detail, err := client.GetReleaseContext(ctx, mbid)
 	if err != nil {
 		return detail, err
 	}
 	if len(detail.Genres) == 0 && detail.ReleaseGroupID != "" {
-		if genres, genreErr := client.GetReleaseGroupGenres(detail.ReleaseGroupID); genreErr == nil && len(genres) > 0 {
+		if genres, genreErr := client.GetReleaseGroupGenresContext(ctx, detail.ReleaseGroupID); genreErr == nil && len(genres) > 0 {
 			detail.Genres = genres
 		}
 	}
 	return detail, nil
 }
 
-func catalogLookup(client *musicbrainz.Client, req catalogIdentifyRequest, artist, album string) (detail, fallback *musicbrainz.ReleaseDetail, searchTop *musicbrainz.Release, lookupErr error, err error) {
+func catalogLookup(ctx context.Context, client *musicbrainz.Client, req catalogIdentifyRequest, artist, album string) (detail, fallback *musicbrainz.ReleaseDetail, searchTop *musicbrainz.Release, lookupErr error, err error) {
 	if strings.TrimSpace(req.MBID) != "" {
-		got, fetchErr := fetchReleaseWithGenres(client, req.MBID)
+		got, fetchErr := fetchReleaseWithGenres(ctx, client, req.MBID)
 		if fetchErr != nil {
 			if errors.Is(fetchErr, musicbrainz.ErrInvalidMBID) {
 				return nil, nil, nil, nil, fetchErr
@@ -356,7 +360,7 @@ func catalogLookup(client *musicbrainz.Client, req catalogIdentifyRequest, artis
 		}
 		return &got, nil, nil, nil, nil
 	}
-	releases, searchErr := client.SearchRelease(artist, album, strings.TrimSpace(req.Title))
+	releases, searchErr := client.SearchReleaseContext(ctx, artist, album, strings.TrimSpace(req.Title))
 	if searchErr != nil {
 		return nil, nil, nil, nil, searchErr
 	}
@@ -369,7 +373,7 @@ func catalogLookup(client *musicbrainz.Client, req catalogIdentifyRequest, artis
 		if i >= catalogMaxCandidates {
 			break
 		}
-		got, fetchErr := fetchReleaseWithGenres(client, candidate.MBID)
+		got, fetchErr := fetchReleaseWithGenres(ctx, client, candidate.MBID)
 		if fetchErr != nil {
 			lookupErr = fetchErr
 			continue

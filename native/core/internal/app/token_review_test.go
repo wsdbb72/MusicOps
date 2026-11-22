@@ -151,6 +151,12 @@ func seedProcessReviewJobWithPlan(t *testing.T, streaming bool, reviewKind, clas
 		t.Fatal(err)
 	}
 	token = claimAndBeginWorkflowTask(t, application, processID, "aux", now+500)
+	if reviewKind == "interrupted" {
+		if _, err := application.flows.Interrupt("interrupt-"+rootID, token, now+600, "处理核对测试"); err != nil {
+			t.Fatal(err)
+		}
+		return application, rootID, processID
+	}
 	if _, err := application.flows.Complete("block-"+rootID, token, workflow.Complete{
 		JobID: processID, Edge: workflow.EdgeTerminal, NextStage: "needs_review", ReviewKind: reviewKind, TaskState: "blocked",
 		ErrorClass: class, Message: "处理核对测试", NowNS: now + 600,

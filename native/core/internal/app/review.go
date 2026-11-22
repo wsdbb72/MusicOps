@@ -271,6 +271,23 @@ func (a *App) reviewWithAI(w http.ResponseWriter, r *http.Request, id, requestID
 		return
 	}
 	if inspection.Job.ReviewKind == "interrupted" {
+		if inspection.Task != nil && inspection.Task.Command == workflow.CommandProcess {
+			// A process can disappear after sending a token request. Never replay
+			// it. Streaming fallback is safe; without a configured fallback the
+			// interrupted task is abandoned as an explicit terminal result.
+			plan := a.tokenReviewPlan(inspection.Job)
+			var result workflow.Result
+			var recoverErr error
+			if tokenReviewFallbackUsable(inspection.Job, plan) {
+				result, recoverErr = a.flows.RequeueTokenFallback(requestID, id, nowNS,
+					"旧进程遗留的获取任务可能已跨过令牌边界；已自动切换流媒体回退，未重放追踪器")
+			} else {
+				result, recoverErr = a.flows.AbandonInterrupted(requestID, id, nowNS,
+					"旧进程遗留的获取结果无法安全重放，且没有配置流媒体回退；已自动结束，未重复下载或使用令牌")
+			}
+			a.writeReviewResult(w, result, recoverErr, "ai")
+			return
+		}
 		result, recoverErr := a.flows.RecoverInterrupted(requestID, id, nowNS)
 		if errors.Is(recoverErr, workflow.ErrStale) && canResetInterruptedSearch(inspection.Job, inspection.Task) {
 			// Automatic recovery is bounded. Once that budget is exhausted, the
@@ -504,7 +521,13 @@ func (a *App) aiReviewEligible(job workflow.Job) bool {
 	}
 	if job.ReviewKind == "interrupted" {
 		task, err := a.tasks.Get(job.ActiveTaskID)
-		return err == nil && interruptedReviewSafe(job, task)
+		if err != nil {
+			return false
+		}
+		if interruptedProcessConverges(job, task) {
+			return true
+		}
+		return interruptedReviewSafe(job, task)
 	}
 	// Search checkpoints first replay the persisted site evidence. This can
 	// retry an expired rate limit or choose the configured fallback without a
@@ -514,6 +537,11 @@ func (a *App) aiReviewEligible(job workflow.Job) bool {
 		return true
 	}
 	return a.reviewCompleter() != nil && a.reviews != nil
+}
+
+func interruptedProcessConverges(job workflow.Job, task *taskrepo.Task) bool {
+	return job.ReviewKind == "interrupted" && !job.CancelRequested && task != nil &&
+		task.Command == workflow.CommandProcess && task.State == "recovery_required" && !task.CancelRequested
 }
 
 func canResetInterruptedSearch(job workflow.Job, task *taskrepo.Task) bool {

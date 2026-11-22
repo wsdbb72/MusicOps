@@ -410,12 +410,16 @@ func (r *Repository) RequeueTokenFallback(requestID, jobID string, nowNS int64, 
 		}
 		return Result{}, ErrNotFound
 	}
-	if job.Stage != "needs_review" || (job.ReviewKind != "token" && job.ReviewKind != "candidate") || job.CancelRequested || job.Paused ||
-		task.State != "blocked" || task.CancelRequested || task.Command != cmdProcess {
+	if job.Stage != "needs_review" || !fallbackReviewKind(job.ReviewKind) || job.CancelRequested || job.Paused ||
+		(task.State != "blocked" && task.State != "recovery_required") || task.CancelRequested || task.Command != cmdProcess {
 		return Result{}, fmt.Errorf("fallback checkpoint changed: %w", ErrStale)
 	}
+	action := "retry"
+	if task.State == "recovery_required" {
+		action = "recover"
+	}
 	extra, _ := json.Marshal(struct{ JobID, Action string }{job.ID, "token_fallback"})
-	result, err := r.tasks.ControlOwned(requestID, task.ID, "retry", nowNS, extra, func(v *dataengine.View, _, after *taskrepo.Task, _ []taskrepo.Task) ([]dataengine.Condition, []dataengine.Mutation, json.RawMessage, error) {
+	result, err := r.tasks.ControlOwned(requestID, task.ID, action, nowNS, extra, func(v *dataengine.View, _, after *taskrepo.Task, _ []taskrepo.Task) ([]dataengine.Condition, []dataengine.Mutation, json.RawMessage, error) {
 		live, raw, err := readJob(v, job.ID)
 		if err != nil || live == nil {
 			if err != nil {
@@ -423,7 +427,7 @@ func (r *Repository) RequeueTokenFallback(requestID, jobID string, nowNS int64, 
 			}
 			return nil, nil, nil, ErrNotFound
 		}
-		if live.Revision != job.Revision || live.Stage != "needs_review" || (live.ReviewKind != "token" && live.ReviewKind != "candidate") || live.ActiveTaskID != task.ID {
+		if live.Revision != job.Revision || live.Stage != "needs_review" || !fallbackReviewKind(live.ReviewKind) || live.ActiveTaskID != task.ID {
 			return nil, nil, nil, fmt.Errorf("fallback job changed: %w", ErrStale)
 		}
 		if after == nil {
@@ -441,6 +445,64 @@ func (r *Repository) RequeueTokenFallback(requestID, jobID string, nowNS int64, 
 			next.SearchRetryCount++
 		}
 		next.Message = messageOr(reason, "令牌结果无法安全确认，已自动改用网易云回退；未重复使用令牌")
+		updated, err := bump(next, nowNS, true)
+		if err != nil {
+			return nil, nil, nil, err
+		}
+		condition, writes, err := putJob(raw, updated)
+		if err != nil {
+			return nil, nil, nil, err
+		}
+		attached, err := json.Marshal(Result{Job: &updated})
+		return []dataengine.Condition{condition}, writes, attached, err
+	})
+	return decode(result, err)
+}
+
+func fallbackReviewKind(kind string) bool {
+	return kind == "token" || kind == "candidate" || kind == "interrupted"
+}
+
+// AbandonInterrupted cancels an interrupted process whose external effects
+// cannot be replayed and for which no streaming fallback is configured. The
+// task is cancelled without re-running it, then the job receives an explicit
+// skipped terminal state instead of remaining in review forever.
+func (r *Repository) AbandonInterrupted(requestID, jobID string, nowNS int64, reason string) (Result, error) {
+	if !validID(jobID) || requestID == "" || len(requestID) > 128 || nowNS <= 0 || len(reason) > 4000 {
+		return Result{}, dataengine.ErrInvalidRequest
+	}
+	job, task, err := r.reviewTarget(jobID)
+	if err != nil || job == nil || task == nil {
+		if err != nil {
+			return Result{}, err
+		}
+		return Result{}, ErrNotFound
+	}
+	if job.Stage != "needs_review" || job.ReviewKind != "interrupted" || job.CancelRequested || job.Paused ||
+		task.State != "recovery_required" || task.CancelRequested || task.Command != cmdProcess {
+		return Result{}, fmt.Errorf("interrupted checkpoint changed: %w", ErrStale)
+	}
+	extra, _ := json.Marshal(struct{ JobID, Action string }{job.ID, "abandon_interrupted"})
+	result, err := r.tasks.ControlOwned(requestID, task.ID, "cancel", nowNS, extra, func(v *dataengine.View, _, after *taskrepo.Task, _ []taskrepo.Task) ([]dataengine.Condition, []dataengine.Mutation, json.RawMessage, error) {
+		live, raw, err := readJob(v, job.ID)
+		if err != nil || live == nil {
+			if err != nil {
+				return nil, nil, nil, err
+			}
+			return nil, nil, nil, ErrNotFound
+		}
+		if live.Revision != job.Revision || live.Stage != "needs_review" || live.ReviewKind != "interrupted" || live.ActiveTaskID != task.ID {
+			return nil, nil, nil, fmt.Errorf("interrupted job changed: %w", ErrStale)
+		}
+		if after == nil || after.State != "cancelled" {
+			return nil, nil, nil, fmt.Errorf("interrupted task was not cancelled: %w", ErrStale)
+		}
+		next := *live
+		next.Stage = "skipped"
+		next.ReviewKind = ""
+		next.ErrorClass = ""
+		next.SearchAction = searchdecision.ActionSkip
+		next.Message = messageOr(reason, "中断任务无法安全重放，已自动结束")
 		updated, err := bump(next, nowNS, true)
 		if err != nil {
 			return nil, nil, nil, err

@@ -492,18 +492,18 @@ func (a *App) acquireNeteaseAlbum(ctx context.Context, execution *scheduler.Exec
 }
 
 func verifiedNeteaseTrackPresent(local map[string][]string, song *neteaseSong) bool {
-	if song.DurationMS <= 0 {
+	if song == nil || song.DurationMS <= 0 {
 		return false
 	}
 	tolerance := int64(1500)
-	if song != nil && song.CatalogVerified {
+	if song.CatalogVerified {
 		// Match padding differences only for an identified catalogue track.
 		// The folder, title and credited artists must still match.
 		tolerance = 3000
 	}
 	for _, file := range local[normalizeKey(song.Name)] {
 		tags, err := readFLACTagsPrefix(file)
-		if err != nil || tags.StreamInfo.SampleRate == 0 || !playlistArtistsMatch(song.Artists, tags.Artists) {
+		if err != nil || tags.StreamInfo.SampleRate == 0 || normalizeKey(tags.Title) != normalizeKey(song.Name) || !playlistArtistsMatch(song.Artists, tags.Artists) {
 			continue
 		}
 		duration := int64(tags.StreamInfo.TotalSamples) * 1000 / int64(tags.StreamInfo.SampleRate)

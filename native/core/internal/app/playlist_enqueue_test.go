@@ -408,3 +408,38 @@ func TestPlaylistPresenceMatchesFeaturedCreditButKeepsVersionsDistinct(t *testin
 		}
 	}
 }
+
+func TestNeteasePlaylistPresenceUsesManagedFolderAndMeasuredDuration(t *testing.T) {
+	a := newApp(t)
+	library := t.TempDir()
+	post(t, a, "/v1/settings/library", map[string]any{"library_dir": library})
+	album := strings.Repeat("長いアルバム", 9)
+	title := strings.Repeat("長い曲名", 12)
+	folder := filepath.Join(library, "Artist", publishComponent(album))
+	if err := os.MkdirAll(folder, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(folder, publishComponent(title)+".flac")
+	if err := os.WriteFile(path, oneSecondFLAC(t, "Artist", title), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := flactags.Write(path, flactags.Tags{Title: title, Artist: "Artist", Album: "Localized Album"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.indexReleasedPath(path); err != nil {
+		t.Fatal(err)
+	}
+	index := a.playlistLibrary()
+	row := playlistTrack{Artist: "Artist", Title: title, Album: album, Duration: "1", NeteaseSongID: 123}
+	if !index.hasPlaylistRow(row) {
+		t.Fatal("unchanged recording in the managed album folder was missed")
+	}
+	row.Duration = "30"
+	if index.hasPlaylistRow(row) {
+		t.Fatal("accepted a different duration")
+	}
+	row.Duration, row.Title = "1", title+" (Remix)"
+	if index.hasPlaylistRow(row) {
+		t.Fatal("accepted a different title")
+	}
+}

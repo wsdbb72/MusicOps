@@ -251,6 +251,43 @@ func indexPlaylistLibrary(engine *dataengine.Engine, entries []audiorelease.Entr
 	return index
 }
 
+func (index playlistLibraryIndex) hasPlaylistRow(row playlistTrack) bool {
+	if index.hasTrack(row.Artist, row.Album, row.Title) {
+		return true
+	}
+	seconds, err := strconv.ParseFloat(row.Duration, 64)
+	if row.NeteaseSongID <= 0 || err != nil || !(seconds > 0 && seconds <= 24*3600) ||
+		strings.TrimSpace(row.Album) == "" || isHotSlowCompilationAlbum(row.Album) {
+		return false
+	}
+	// Use the same managed album folder and recording checks as NetEase
+	// acquisition. The folder names may be truncated and album tags localized.
+	artistName, albumName := publishComponent(row.Artist), publishComponent(row.Album)
+	albumKey := [2]string{libraryPathKey(artistName), libraryPathKey(albumName)}
+	key := normalizeKey(row.Title)
+	candidates := map[string][]string{}
+	for _, id := range index.albums[albumKey] {
+		if !index.isUnchanged(id) {
+			continue
+		}
+		path, found, err := audiorelease.PathFor(index.engine, id)
+		if err != nil || !found || !strings.EqualFold(filepath.Ext(path), ".flac") {
+			continue
+		}
+		// Raw folder bytes still have to match after sanitizing. The index
+		// key intentionally folds punctuation for fast candidate lookup.
+		artistFolder, albumFolder, _ := trackPathOf(path)
+		if !strings.EqualFold(artistFolder, artistName) ||
+			!strings.EqualFold(albumFolder, albumName) {
+			continue
+		}
+		candidates[key] = append(candidates[key], path)
+	}
+	return verifiedNeteaseTrackPresent(candidates, &neteaseSong{
+		Name: row.Title, Artists: splitPlaylistArtists(row.Artist), DurationMS: int(seconds * 1000), CatalogVerified: true,
+	})
+}
+
 func (index playlistLibraryIndex) hasTrack(artist, album, title string) bool {
 	// A source row without an album is published under its own title.
 	// Use that same folder when checking whether it has already been filed.
@@ -547,7 +584,7 @@ func (a *App) enqueuePlaylistTracks(ctx context.Context, playlistJobID string, r
 		report.Tracks++
 		album := normalizePlaylistAlbumTitle(row.Album)
 		albumCompletion := opts.AlbumCompletion && album != "" && !isHotSlowCompilationAlbum(album)
-		if library.hasTrack(artist, row.Album, title) && (!albumCompletion || !library.hasAlbumGap(artist, album)) {
+		if library.hasPlaylistRow(row) && (!albumCompletion || !library.hasAlbumGap(artist, album)) {
 			report.Skipped = append(report.Skipped, artist+" - "+title)
 			continue
 		}
@@ -809,7 +846,7 @@ func (a *App) playlistTracksView(w http.ResponseWriter, r *http.Request) {
 	}
 	out := make([]rowView, 0, len(rows))
 	for i, row := range rows {
-		out = append(out, rowView{Index: i, Artist: row.Artist, Title: row.Title, Album: row.Album, Present: library.hasTrack(row.Artist, row.Album, row.Title)})
+		out = append(out, rowView{Index: i, Artist: row.Artist, Title: row.Title, Album: row.Album, Present: library.hasPlaylistRow(row)})
 	}
 	library.commitPresenceSnapshots()
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "name": name, "tracks": out, "total": len(out)})

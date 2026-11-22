@@ -328,8 +328,18 @@ func (f *fakeQBT) setLocation(w http.ResponseWriter, r *http.Request) {
 			os.Remove(location)
 		}
 	}
-	if err := os.Rename(f.row.savePath, location); err != nil {
-		f.t.Logf("setLocation rename failed: %v (from %q to %q)", err, f.row.savePath, location)
+	var renameErr error
+	for attempt := 0; attempt < atomicRenameAttempts; attempt++ {
+		if renameErr = os.Rename(f.row.savePath, location); renameErr == nil {
+			break
+		}
+		if !retryableAtomicRename(renameErr) || attempt+1 == atomicRenameAttempts {
+			break
+		}
+		time.Sleep(time.Duration(attempt+1) * 20 * time.Millisecond)
+	}
+	if renameErr != nil {
+		f.t.Logf("setLocation rename failed: %v (from %q to %q)", renameErr, f.row.savePath, location)
 		http.Error(w, "cannot move", http.StatusInternalServerError)
 		return
 	}

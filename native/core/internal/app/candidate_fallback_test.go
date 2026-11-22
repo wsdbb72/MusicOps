@@ -278,11 +278,13 @@ func TestReleasedCandidateReviewRetryActuallyDownloadsSameCandidate(t *testing.T
 	}
 	candidate := AcquireCandidate{Site: "dicmusic", CandidateID: "dicmusic:11"}
 	releasedKey := acquireTokenRequestID(*job, []AcquireCandidate{candidate}, candidate)
-	if _, err := application.ledger.Reserve(application.now(), candidateTokenQuote(*job, releasedKey, "11", application.now())); err != nil {
-		t.Fatal(err)
+	reservedAt := application.now()
+	reservation, err := application.ledger.Reserve(reservedAt, candidateTokenQuote(*job, releasedKey, "11", reservedAt))
+	if err != nil || reservation.State != tokenledger.StateReserved {
+		t.Fatalf("reserve released review token: result=%+v err=%v key=%q job=%+v", reservation, err, releasedKey, job)
 	}
-	if _, err := application.ledger.Advance(application.now(), "dicmusic", releasedKey, tokenledger.StateReleased, "read-hold-without-request"); err != nil {
-		t.Fatal(err)
+	if _, err := application.ledger.Advance(reservedAt.Add(time.Millisecond), "dicmusic", releasedKey, tokenledger.StateReleased, "read-hold-without-request"); err != nil {
+		t.Fatalf("release reserved review token: key=%q reservation=%+v err=%v", releasedKey, reservation, err)
 	}
 
 	recorder := postCode(t, application, "/v1/jobs/"+processID+"/review", map[string]any{"action": "ai"})

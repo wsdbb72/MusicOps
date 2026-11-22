@@ -258,8 +258,35 @@ func neteaseFallbackRouting(batchID string, plan SearchPlan) (albumPath, exclusi
 	return albumPath, albumPath
 }
 
+// Single local tracks often belong to partial albums. The ordinary streaming
+// fallback searches only plan.PlaylistTrack, so it can only retry that already
+// present track; it cannot discover the album's missing tracks. Let the next
+// tracker pass expand the release instead of replacing the local file in a
+// guaranteed library_conflict loop. NetEase playlist albums keep their
+// dedicated album-level path and are excluded here.
+func singleTrackAlbumStreamingCannotComplete(plan SearchPlan, neteaseAlbum bool) bool {
+	return !neteaseAlbum && plan.Scene == "expand" && len(plan.LibraryTracks) > 0
+}
 func (a *App) acquireFallback(ctx context.Context, execution *scheduler.Execution, held taskrepo.Token, job workflow.Job, plan SearchPlan) (scheduler.Outcome, error) {
 	neteaseAlbum, exclusiveNetease := neteaseFallbackRouting(job.BatchID, plan)
+	if singleTrackAlbumStreamingCannotComplete(plan, neteaseAlbum) {
+		message := "四站没有取得可发布的完整发行；单曲流媒体回退不能补全专辑，未替换本地曲目。已自动结束，下一轮库维护会重新尝试整专检索。"
+		payload, err := json.Marshal(map[string]any{
+			"source": "streaming", "class": "album_completion_requires_tracks",
+			"library_tracks": len(plan.LibraryTracks), "message": message,
+		})
+		if err != nil {
+			return scheduler.Outcome{}, err
+		}
+		complete := workflow.Complete{
+			Edge: workflow.EdgeTerminal, NextStage: "skipped", TaskState: "completed", Message: message, NowNS: a.now().UnixNano(),
+			Evidence: []workflow.EvidenceInput{{ID: evidenceID(held.ID, held.Fence, "streaming"), Kind: "api", Source: "streaming", SubjectID: job.RootID, Payload: payload}},
+		}
+		if _, err := a.flows.Complete(intentID("streaming", held.ID, held.Fence), held, complete); err != nil {
+			return scheduler.Outcome{}, err
+		}
+		return scheduler.Outcome{State: "completed", Message: message}, nil
+	}
 	steps, err := playlistFallbackSteps(a.streamingOrder(), exclusiveNetease)
 	if err != nil {
 		return scheduler.Outcome{}, err

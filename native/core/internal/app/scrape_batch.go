@@ -253,7 +253,8 @@ func (a *App) scrapeLibrary(w http.ResponseWriter, r *http.Request) {
 					fetchedLyrics, fetchedCover, artErr := a.fetchArtworkContext(ctx, "", "", entry.artist, entry.album, entry.title)
 					cancel()
 					if artErr != nil {
-						result.Status, result.Code, result.Note = "failed", "ARTWORK_UNAVAILABLE", "歌词或封面没有读到，文件没有改"
+						result.Status, result.Code = "failed", "ARTWORK_UNAVAILABLE"
+						result.Note = "歌词或封面没有读到，文件没有改：" + scrub(artErr.Error())
 						continue
 					}
 					cover = fetchedCover

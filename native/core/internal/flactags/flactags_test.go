@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -612,4 +613,32 @@ func mustRead(t *testing.T, path string) []byte {
 		t.Fatal(err)
 	}
 	return data
+}
+
+func TestWriteFileAtomicRetriesTransientRenameFailure(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "source.flac")
+	if err := os.WriteFile(target, []byte("old"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	original := renameFile
+	defer func() { renameFile = original }()
+	calls := 0
+	renameFile = func(oldPath, newPath string) error {
+		calls++
+		if calls < 3 {
+			return errors.New("temporarily denied")
+		}
+		return os.Rename(oldPath, newPath)
+	}
+	if err := writeFileAtomic(target, []byte("new"), target); err != nil {
+		t.Fatal(err)
+	}
+	if calls != 3 {
+		t.Fatalf("rename calls=%d, want 3", calls)
+	}
+	data, err := os.ReadFile(target)
+	if err != nil || string(data) != "new" {
+		t.Fatalf("data=%q err=%v", data, err)
+	}
 }

@@ -93,7 +93,7 @@ func TestScrapeBatchArtworkFailureLeavesTheFile(t *testing.T) {
 	}
 	files, _ := decoded["files"].([]any)
 	row, _ := files[0].(map[string]any)
-	if row["code"] != "ARTWORK_UNAVAILABLE" {
+	if row["code"] != "ARTWORK_UNAVAILABLE" || !strings.Contains(row["note"].(string), "500") {
 		t.Fatal(row)
 	}
 	after, err := os.ReadFile(full)

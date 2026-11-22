@@ -21,6 +21,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 	"unicode/utf8"
 )
 
@@ -719,6 +720,21 @@ func writeU32LE(buf *bytes.Buffer, v uint32) {
 // writeFileAtomic writes data to dst via a temporary file in the same
 // directory plus rename. When src is non-empty the destination inherits
 // src's permission bits; otherwise 0644 is used.
+var renameFile = os.Rename
+
+func renameFileWithRetry(oldPath, newPath string) error {
+	var err error
+	for attempt := 0; attempt < 5; attempt++ {
+		if err = renameFile(oldPath, newPath); err == nil {
+			return nil
+		}
+		if attempt < 4 {
+			time.Sleep(time.Duration(attempt+1) * 20 * time.Millisecond)
+		}
+	}
+	return err
+}
+
 func writeFileAtomic(dst string, data []byte, src string) error {
 	dir := filepath.Dir(dst)
 	perm := os.FileMode(0644)
@@ -748,7 +764,7 @@ func writeFileAtomic(dst string, data []byte, src string) error {
 	if err := tmp.Close(); err != nil {
 		return fmt.Errorf("flactags: close temp file: %w", err)
 	}
-	if err := os.Rename(tmpName, dst); err != nil {
+	if err := renameFileWithRetry(tmpName, dst); err != nil {
 		return fmt.Errorf("flactags: rename temp file to %s: %w", dst, err)
 	}
 	return nil

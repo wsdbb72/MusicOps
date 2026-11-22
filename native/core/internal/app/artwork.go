@@ -20,6 +20,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/url"
@@ -186,7 +187,7 @@ func artworkGET(ctx context.Context, target artworkTarget, query url.Values) ([]
 		return nil, false, errors.New("歌词/封面服务要求跳转到其他主机，带凭据时不跟随")
 	}
 	if response.StatusCode != http.StatusOK {
-		return nil, false, errors.New("歌词/封面服务返回失败")
+		return nil, false, fmt.Errorf("歌词/封面服务返回 HTTP %d", response.StatusCode)
 	}
 	body, err := io.ReadAll(io.LimitReader(response.Body, 2<<20))
 	if err != nil {

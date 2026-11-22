@@ -476,3 +476,18 @@ func TestNeteasePlaylistPresenceAccountsForWholeSecondDuration(t *testing.T) {
 		t.Fatal("a precise duration should retain the original tolerance")
 	}
 }
+
+func TestPlaylistPresenceMatchesSanitizedTitleOnlyWithMatchingTags(t *testing.T) {
+	a := newApp(t)
+	library := t.TempDir()
+	indexPlaylistTestFile(t, a, library, "Artist/Album/Artist - STARTDASH!!.flac",
+		"Artist", "Album", "START:DASH!!")
+	index := a.playlistLibrary()
+	if !index.hasTrack("Artist", "Album", "START:DASH!!") {
+		t.Fatal("file with punctuation removed from its name should match its tags")
+	}
+	if index.hasTrack("Artist", "Album", "STARTDASH!!") {
+		// The historical path match does not include the artist-prefixed name.
+		t.Fatal("compact candidate lookup must not replace the original tag check")
+	}
+}

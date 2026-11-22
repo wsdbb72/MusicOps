@@ -181,9 +181,11 @@ func playlistTitleCandidateKeys(raw string) []string {
 	out := make([]string, 0, 3)
 	add := func(value string) {
 		key := libraryPathKey(value)
-		if key != "" && !seen[key] {
-			seen[key] = true
-			out = append(out, key)
+		for _, key := range []string{key, playlistCompactTitleKey(key)} {
+			if key != "" && !seen[key] {
+				seen[key] = true
+				out = append(out, key)
+			}
 		}
 	}
 	add(raw)
@@ -192,6 +194,13 @@ func playlistTitleCandidateKeys(raw string) []string {
 		add(strings.Join(parts[i:], " - "))
 	}
 	return out
+}
+
+func playlistCompactTitleKey(key string) string {
+	if strings.HasPrefix(key, "\x00") {
+		return ""
+	}
+	return "\x00compact:" + strings.ReplaceAll(key, " ", "")
 }
 
 const playlistLibraryCacheTTL = 2 * time.Minute
@@ -257,31 +266,44 @@ func (index playlistLibraryIndex) hasPlaylistRow(row playlistTrack) bool {
 	}
 	seconds, err := strconv.ParseFloat(row.Duration, 64)
 	if row.NeteaseSongID <= 0 || err != nil || !(seconds > 0 && seconds <= 24*3600) ||
-		strings.TrimSpace(row.Album) == "" || isHotSlowCompilationAlbum(row.Album) {
+		isHotSlowCompilationAlbum(row.Album) {
 		return false
 	}
-	// Use the same managed album folder and recording checks as NetEase
-	// acquisition. The folder names may be truncated and album tags localized.
-	artistName, albumName := publishComponent(row.Artist), publishComponent(row.Album)
-	albumKey := [2]string{libraryPathKey(artistName), libraryPathKey(albumName)}
 	key := normalizeKey(row.Title)
 	candidates := map[string][]string{}
-	for _, id := range index.albums[albumKey] {
-		if !index.isUnchanged(id) {
-			continue
+	if strings.TrimSpace(row.Album) == "" {
+		// There is no source edition to require. Verify title, credits and
+		// duration against the indexed audio instead of guessing an album.
+		for _, id := range index.titleCandidates[libraryPathKey(row.Title)] {
+			if !index.isUnchanged(id) {
+				continue
+			}
+			if path, found, err := audiorelease.PathFor(index.engine, id); err == nil && found && strings.EqualFold(filepath.Ext(path), ".flac") {
+				candidates[key] = append(candidates[key], path)
+			}
 		}
-		path, found, err := audiorelease.PathFor(index.engine, id)
-		if err != nil || !found || !strings.EqualFold(filepath.Ext(path), ".flac") {
-			continue
+	} else {
+		// Use the same managed album folder and recording checks as NetEase
+		// acquisition. The folder names may be truncated and album tags localized.
+		artistName, albumName := publishComponent(row.Artist), publishComponent(row.Album)
+		albumKey := [2]string{libraryPathKey(artistName), libraryPathKey(albumName)}
+		for _, id := range index.albums[albumKey] {
+			if !index.isUnchanged(id) {
+				continue
+			}
+			path, found, err := audiorelease.PathFor(index.engine, id)
+			if err != nil || !found || !strings.EqualFold(filepath.Ext(path), ".flac") {
+				continue
+			}
+			// Raw folder bytes still have to match after sanitizing. The index
+			// key intentionally folds punctuation for fast candidate lookup.
+			artistFolder, albumFolder, _ := trackPathOf(path)
+			if !strings.EqualFold(artistFolder, artistName) ||
+				!strings.EqualFold(albumFolder, albumName) {
+				continue
+			}
+			candidates[key] = append(candidates[key], path)
 		}
-		// Raw folder bytes still have to match after sanitizing. The index
-		// key intentionally folds punctuation for fast candidate lookup.
-		artistFolder, albumFolder, _ := trackPathOf(path)
-		if !strings.EqualFold(artistFolder, artistName) ||
-			!strings.EqualFold(albumFolder, albumName) {
-			continue
-		}
-		candidates[key] = append(candidates[key], path)
 	}
 	// Existing NetEase M3U entries store floor(duration_ms / 1000).
 	// Only whole seconds need that extra precision margin.
@@ -342,7 +364,9 @@ func (index playlistLibraryIndex) hasTrack(artist, album, title string) bool {
 		titleKeys = append(titleKeys, featuredTitle)
 	}
 	for _, titleKey := range titleKeys {
-		for _, id := range index.titleCandidates[titleKey] {
+		ids := append([]string(nil), index.titleCandidates[titleKey]...)
+		ids = append(ids, index.titleCandidates[playlistCompactTitleKey(titleKey)]...)
+		for _, id := range ids {
 			if !index.isUnchanged(id) {
 				continue
 			}

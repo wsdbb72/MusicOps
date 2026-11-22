@@ -72,7 +72,7 @@ func (a *App) reconcileTokens(ctx context.Context, now time.Time) int {
 	retrySites := map[string]bool{}
 	for _, row := range expired {
 		retrySites[row.Site] = true
-		a.requeueReconciledTokenJob(row.RequestID, tokenledger.StateExpired,
+		a.requeueReconciledTokenJob(row.JobID, tokenledger.StateExpired,
 			"令牌请求超过对账时限且无法证明是否扣费；已自动改用网易云回退，未再次发送令牌")
 	}
 	pending, err := a.ledger.Pending()
@@ -109,11 +109,11 @@ func (a *App) reconcileTokens(ctx context.Context, now time.Time) int {
 				moved++
 				retrySites[site] = true
 				if state == tokenledger.StateConfirmed {
-					if job, err := a.flows.Job(row.RequestID); err == nil && job != nil && strings.HasPrefix(job.BatchID, "pl-") && job.Stage != "needs_review" {
-						a.tryAutoDownload(row.RequestID)
+					if job, err := a.flows.Job(row.JobID); err == nil && job != nil && strings.HasPrefix(job.BatchID, "pl-") && job.Stage != "needs_review" {
+						a.tryAutoDownload(row.JobID)
 					}
 				}
-				a.requeueReconciledTokenJob(row.RequestID, state, note)
+				a.requeueReconciledTokenJob(row.JobID, state, note)
 			}
 		}
 	}
@@ -121,30 +121,65 @@ func (a *App) reconcileTokens(ctx context.Context, now time.Time) int {
 	return moved
 }
 
-// requeueReconciledTokenJob closes a still-blocked FL acquisition after the
-// ledger has a terminal verdict. It deliberately sends the task to NetEase's
-// source fallback instead of retrying the token site: a CONFIRMED charge may
-// already have succeeded remotely, while RELEASED/EXPIRED cannot prove that a
-// repeated request is safe. This avoids both a double spend and a permanent
-// needs_review/token row.
+// requeueReconciledTokenJob closes a still-blocked acquisition after the
+// ledger has a terminal verdict. A NetEase playlist always uses its native
+// source fallback. A library maintenance job with streaming enabled does the
+// same; without a usable fallback it may retry only after a proven zero-spend
+// verdict and otherwise settles instead of leaving a permanent review row.
 func (a *App) requeueReconciledTokenJob(requestID, state, note string) bool {
 	job, err := a.flows.Job(requestID)
 	if err != nil || job == nil || job.Stage != "needs_review" || job.ReviewKind != "token" ||
-		job.Paused || job.CancelRequested || !strings.HasPrefix(job.BatchID, "pl-netease-") {
+		job.Paused || job.CancelRequested {
 		return false
 	}
-	reason := strings.TrimSpace(note)
-	switch state {
-	case tokenledger.StateConfirmed:
-		reason = "令牌扣费已从余额变化确认，但本次没有取得种子；已自动改用网易云回退，未重复请求令牌"
-	case tokenledger.StateReleased:
-		reason = "余额对账确认上次请求未扣费；为避免结果不明时重复请求，已自动改用网易云回退"
-	case tokenledger.StateExpired:
-		reason = "令牌请求超过对账时限且无法证明是否扣费；已自动改用网易云回退，未再次发送令牌"
+	plan := a.tokenReviewPlan(*job)
+	playlistFallback := isNeteasePlaylistFallback(job.BatchID, plan)
+	fallbackUsable := tokenReviewFallbackUsable(*job, plan)
+
+	// RELEASED is positive evidence that no token was charged. Library work
+	// gets one bounded retry, while a NetEase playlist still prefers its
+	// source fallback so it cannot loop on the same tracker indefinitely.
+	if state == tokenledger.StateReleased && !playlistFallback && job.TokenRetryCount < tokenReviewRetryLimit {
+		request := "token-released-retry-" + requestID + "-" + strconv.FormatUint(job.Revision, 10)
+		result, retryErr := a.flows.Review(request, requestID, workflow.ReviewDecision{Action: "retry"}, a.now().UnixNano())
+		if retryErr == nil && result.Job != nil {
+			a.clearAutoReviewCooldown(requestID)
+			return true
+		}
 	}
-	request := "token-fallback-" + requestID + "-" + strconv.FormatUint(job.Revision, 10)
-	_, err = a.flows.RequeueTokenFallback(request, requestID, a.now().UnixNano(), reason)
-	return err == nil
+
+	if fallbackUsable {
+		reason := strings.TrimSpace(note)
+		switch state {
+		case tokenledger.StateConfirmed:
+			reason = "余额变化确认令牌已消耗，但本次没有取得种子；已自动改用流媒体回退，未重复请求令牌"
+		case tokenledger.StateReleased:
+			reason = "余额对账确认上次请求未扣费；为避免结果不明时重复请求，已自动改用流媒体回退"
+		case tokenledger.StateExpired:
+			reason = "令牌请求超过对账时限且无法证明是否扣费；已自动改用流媒体回退，未再次发送令牌"
+		}
+		request := "token-fallback-" + requestID + "-" + strconv.FormatUint(job.Revision, 10)
+		_, err = a.flows.RequeueTokenFallback(request, requestID, a.now().UnixNano(), reason)
+		if err == nil {
+			a.clearAutoReviewCooldown(requestID)
+			return true
+		}
+	}
+
+	// No streaming route is usable. A released request can still be retried
+	// safely; a confirmed or expired request cannot. Settle the latter as
+	// skipped so a possibly charged token never stays in the review queue.
+	action := "retry"
+	if state != tokenledger.StateReleased {
+		action = "skip"
+	}
+	request := "token-reconcile-" + action + "-" + requestID + "-" + strconv.FormatUint(job.Revision, 10)
+	result, resolveErr := a.flows.Review(request, requestID, workflow.ReviewDecision{Action: action}, a.now().UnixNano())
+	if resolveErr == nil && result.Job != nil {
+		a.clearAutoReviewCooldown(requestID)
+		return true
+	}
+	return false
 }
 
 // tokenReadAllowed keeps the background reads to one per site per
@@ -208,6 +243,13 @@ func (a *App) retryHeldPlaylistTokens(now time.Time, sites map[string]bool) {
 			raw, found, err := a.tasks.Data(job.ActiveTaskID, "arguments", 0)
 			var plan SearchPlan
 			if err != nil || !found || json.Unmarshal(raw, &plan) != nil || plan.PlaylistTrack == "" || !sites[plan.SelectedSite] {
+				continue
+			}
+			if job.TokenRetryCount >= tokenReviewRetryLimit {
+				request := "FL-fallback-" + job.ID + "-" + strconv.FormatUint(job.Revision, 10)
+				if _, err := a.flows.RequeueTokenFallback(request, job.ID, now.UnixNano(), "令牌核对重试已达上限；已自动改用网易云回退，未重复使用令牌"); err == nil {
+					delete(sites, plan.SelectedSite)
+				}
 				continue
 			}
 			request := "FL-retry-" + job.ID + "-" + strconv.FormatUint(job.Revision, 10)

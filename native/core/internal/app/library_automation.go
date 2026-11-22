@@ -1209,7 +1209,7 @@ func writeAutomationSidecar(path string, body []byte) error {
 	if err = temp.Close(); err != nil {
 		return err
 	}
-	return os.Rename(name, path)
+	return renameFileWithRetry(name, path)
 }
 
 func (a *App) runAutomatedDeduplication(ctx context.Context) bool {

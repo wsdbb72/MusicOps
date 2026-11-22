@@ -21,6 +21,7 @@ type Pending struct {
 	Site       string
 	AccountID  string
 	RequestID  string
+	JobID      string
 	ResourceID string
 	State      string
 	Cost       int
@@ -74,8 +75,12 @@ func (l *Ledger) Pending() ([]Pending, error) {
 			if current.State != item.State || current.UpdatedNS != item.UpdatedNS {
 				continue
 			}
+			jobID := current.JobID
+			if jobID == "" {
+				jobID = item.RequestID
+			}
 			out = append(out, Pending{
-				Site: site, AccountID: current.AccountID, RequestID: item.RequestID, ResourceID: item.ResourceID,
+				Site: site, AccountID: current.AccountID, RequestID: item.RequestID, JobID: jobID, ResourceID: item.ResourceID,
 				State: item.State, Cost: item.Cost, UpdatedNS: item.UpdatedNS,
 				Balance: current.Balance, BalanceKnown: current.BalanceKnown, ObservedAtNS: current.ObservedAtNS,
 			})

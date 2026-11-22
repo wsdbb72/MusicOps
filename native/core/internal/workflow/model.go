@@ -108,6 +108,8 @@ type Job struct {
 	ErrorClass          string `json:"error_class,omitempty"`
 	SearchAction        string `json:"search_action,omitempty"`
 	SearchRetryCount    uint8  `json:"search_retry_count,omitempty"`
+	TokenRetryCount     uint8  `json:"token_retry_count,omitempty"`
+	ProcessRetryCount   uint8  `json:"process_retry_count,omitempty"`
 	RecoveryRetryCount  uint8  `json:"recovery_retry_count,omitempty"`
 	AIResearchCount     uint8  `json:"ai_research_count,omitempty"`
 	SearchRetryAfterSec int    `json:"search_retry_after_sec,omitempty"`

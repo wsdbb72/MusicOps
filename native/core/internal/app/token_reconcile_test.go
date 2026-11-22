@@ -149,3 +149,31 @@ func TestReconcileTokensSkipsSitesWithoutASavedCookie(t *testing.T) {
 		t.Fatal("the site was read without a cookie")
 	}
 }
+
+func TestExpiredCandidateKeySettlesTheWorkflowJobFromItsSeparateJobID(t *testing.T) {
+	application, _, processID := seedTokenReviewJob(t, false, "REQUEST_UNKNOWN")
+	application.mu.Lock()
+	application.paused = false
+	application.mu.Unlock()
+
+	old := application.now().Add(-tokenledger.UnknownExpire - time.Minute)
+	quote := tokenledger.Quote{
+		Site: "dicmusic", AccountID: "7", CookieID: "candidate-cookie", ResourceID: "22",
+		RequestID: "candidate-ledger-key", JobID: processID, Cost: 1,
+		BalanceKnown: true, Balance: 2, Budget: 2, ObservedAt: old, BudgetRef: "candidate-batch",
+		Scene: "expand", IdentityConfirmed: true, StreamingEnabled: false,
+	}
+	if _, err := application.ledger.Reserve(old, quote); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := application.ledger.Advance(old.Add(time.Second), "dicmusic", quote.RequestID, tokenledger.StateRequestUnknown, "answer-lost"); err != nil {
+		t.Fatal(err)
+	}
+	if moved := application.reconcileTokens(context.Background(), application.now()); moved != 1 {
+		t.Fatalf("expired rows moved=%d", moved)
+	}
+	inspection := inspect(t, application, processID)
+	if inspection.Job.Stage != "skipped" || inspection.Job.ErrorClass != "" {
+		t.Fatalf("workflow identity was not used for reconciliation: %+v", inspection.Job)
+	}
+}

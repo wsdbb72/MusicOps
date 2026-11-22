@@ -61,12 +61,7 @@ func (a *App) storeSubscriptions(rows []playlistSubscription) error {
 		return err
 	}
 	encoded = append(encoded, '\n')
-	path := a.subscriptionPath()
-	temporary := path + ".tmp"
-	if err := os.WriteFile(temporary, encoded, 0o644); err != nil {
-		return err
-	}
-	return os.Rename(temporary, path)
+	return replaceFileAtomically(a.subscriptionPath(), encoded, 0o644)
 }
 
 func (a *App) listSubscriptions(w http.ResponseWriter, r *http.Request) {

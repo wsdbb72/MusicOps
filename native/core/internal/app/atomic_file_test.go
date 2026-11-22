@@ -17,10 +17,17 @@ func TestReplaceFileAtomicallyKeepsOriginalWhenRenameFails(t *testing.T) {
 		t.Fatal(err)
 	}
 	previous := atomicReplaceRename
-	atomicReplaceRename = func(_, _ string) error { return errors.New("rename blocked") }
+	calls := 0
+	atomicReplaceRename = func(_, _ string) error {
+		calls++
+		return errors.New("rename blocked")
+	}
 	t.Cleanup(func() { atomicReplaceRename = previous })
 	if err := replaceFileAtomically(path, replacement, 0); err == nil {
 		t.Fatal("atomic replace unexpectedly succeeded")
+	}
+	if calls != 1 {
+		t.Fatalf("non-retryable rename attempts=%d, want 1", calls)
 	}
 	got, err := os.ReadFile(path)
 	if err != nil || !bytes.Equal(got, original) {
@@ -32,6 +39,56 @@ func TestReplaceFileAtomicallyKeepsOriginalWhenRenameFails(t *testing.T) {
 	}
 }
 
+func TestReplaceFileAtomicallyRetriesTransientRenameFailure(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "track.flac")
+	if err := os.WriteFile(path, []byte("old"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	previous := atomicReplaceRename
+	calls := 0
+	atomicReplaceRename = func(oldPath, newPath string) error {
+		calls++
+		if calls < 3 {
+			return os.ErrPermission
+		}
+		return os.Rename(oldPath, newPath)
+	}
+	t.Cleanup(func() { atomicReplaceRename = previous })
+	if err := replaceFileAtomically(path, []byte("new"), 0); err != nil {
+		t.Fatal(err)
+	}
+	if calls != 3 {
+		t.Fatalf("rename attempts=%d, want 3", calls)
+	}
+	if got, err := os.ReadFile(path); err != nil || string(got) != "new" {
+		t.Fatalf("replacement=%q err=%v", got, err)
+	}
+}
+
+func TestStoreSubscriptionsRetriesTransientRenameFailure(t *testing.T) {
+	application := newApp(t)
+	previous := atomicReplaceRename
+	calls := 0
+	atomicReplaceRename = func(oldPath, newPath string) error {
+		calls++
+		if calls < 3 {
+			return os.ErrPermission
+		}
+		return os.Rename(oldPath, newPath)
+	}
+	t.Cleanup(func() { atomicReplaceRename = previous })
+	rows := []playlistSubscription{{PlaylistID: "pl-retry", Name: "Retry", IntervalHours: 6}}
+	if err := application.storeSubscriptions(rows); err != nil {
+		t.Fatal(err)
+	}
+	if calls != 3 {
+		t.Fatalf("rename attempts=%d, want 3", calls)
+	}
+	loaded, err := application.loadSubscriptions()
+	if err != nil || len(loaded) != 1 || loaded[0].PlaylistID != "pl-retry" || loaded[0].IntervalHours != 6 {
+		t.Fatalf("stored subscriptions=%+v err=%v", loaded, err)
+	}
+}
 func TestRestoreBackupKeepsBackupUntilRenameCommits(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "track.flac")

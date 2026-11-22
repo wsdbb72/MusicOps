@@ -156,7 +156,7 @@ func (a *App) recoverNeteasePlaylistIDs(ctx context.Context, batchID string, pla
 			_ = os.Remove(tempName)
 			return false
 		}
-		if renameErr := os.Rename(tempName, path); renameErr != nil {
+		if renameErr := renameFileWithRetry(tempName, path); renameErr != nil {
 			_ = os.Remove(tempName)
 			return false
 		}

@@ -37,7 +37,7 @@ func (c *Client) ReadDetail(ctx context.Context, q Query, path string, values ur
 	if retry, err := c.waitRead(ctx, q); err != nil {
 		return nil, err
 	} else if retry > 0 {
-		return nil, fmt.Errorf("detail is rate limited for %d seconds", retry)
+		return nil, fmt.Errorf("detail response HTTP 429 is rate limited for %d seconds", retry)
 	}
 	response, err := c.doer(q.Timeout).Do(req)
 	if err != nil {
@@ -47,14 +47,14 @@ func (c *Client) ReadDetail(ctx context.Context, q Query, path string, values ur
 	if response.StatusCode == http.StatusTooManyRequests {
 		delay := retryAfter(response.Header.Get("Retry-After"))
 		c.block(q.Site, delay)
-		return nil, fmt.Errorf("detail is rate limited for %d seconds", delay)
+		return nil, fmt.Errorf("detail response HTTP 429 is rate limited for %d seconds", delay)
 	}
 	body, err := io.ReadAll(io.LimitReader(response.Body, maxBody+1))
 	if err != nil {
 		return nil, err
 	}
 	if len(body) > maxBody {
-		return nil, fmt.Errorf("detail response was not usable")
+		return nil, fmt.Errorf("detail response exceeded %d bytes", maxBody)
 	}
 	// A detail page is a read-only GET, so a browser challenge can be retried
 	// once through the solver. An expired session answers 403 without the
@@ -64,10 +64,10 @@ func (c *Client) ReadDetail(ctx context.Context, q Query, path string, values ur
 		if solved, ok := c.solverGet(ctx, q, endpoint.String()); ok {
 			return solved, nil
 		}
-		return nil, fmt.Errorf("detail page required a browser challenge that was not solved")
+		return nil, fmt.Errorf("detail response HTTP %d required a browser challenge that was not solved", response.StatusCode)
 	}
 	if response.StatusCode != http.StatusOK || len(body) == 0 {
-		return nil, fmt.Errorf("detail response was not usable")
+		return nil, fmt.Errorf("detail response HTTP %d was not usable (%d bytes)", response.StatusCode, len(body))
 	}
 	return body, nil
 }

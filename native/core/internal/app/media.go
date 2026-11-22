@@ -144,7 +144,7 @@ func (a *App) decryptNCM(w http.ResponseWriter, r *http.Request) {
 		}
 		decodeState = "decoded"
 	}
-	if err := os.Rename(tempName, output); err != nil {
+	if err := renameFileWithRetry(tempName, output); err != nil {
 		if errors.Is(err, os.ErrExist) {
 			writeJSON(w, http.StatusConflict, map[string]any{"ok": false, "code": "NCM_CONFLICT"})
 			return
@@ -684,7 +684,7 @@ func writeSidecarOverwrite(audioPath, text string) error {
 	if err := tmp.Close(); err != nil {
 		return fmt.Errorf("lrc: close temp sidecar: %w", err)
 	}
-	if err := os.Rename(tmpName, sidecar); err != nil {
+	if err := renameFileWithRetry(tmpName, sidecar); err != nil {
 		return fmt.Errorf("lrc: rename temp sidecar to %s: %w", sidecar, err)
 	}
 	return nil

@@ -7,11 +7,20 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"syscall"
+	"time"
 )
 
 // atomicReplaceRename is a test seam so failure paths can prove that an
 // existing file and its backup survive when the final rename cannot happen.
 var atomicReplaceRename = os.Rename
+
+const (
+	windowsErrorAccessDenied     = syscall.Errno(5)
+	windowsErrorSharingViolation = syscall.Errno(32)
+	windowsErrorLockViolation    = syscall.Errno(33)
+	atomicRenameAttempts         = 5
+)
 
 // replaceFileAtomically writes data to a same-directory temporary file and
 // renames it over path. A failed write, Sync, Close or rename leaves the old
@@ -54,7 +63,7 @@ func replaceFileAtomically(path string, data []byte, mode os.FileMode) error {
 	if err := temp.Close(); err != nil {
 		return fmt.Errorf("atomic replace: close temp for %s: %w", path, err)
 	}
-	if err := atomicReplaceRename(tempPath, path); err != nil {
+	if err := renameFileWithRetry(tempPath, path); err != nil {
 		return fmt.Errorf("atomic replace: rename temp to %s: %w", path, err)
 	}
 	// Persist the directory entry where the platform supports syncing a
@@ -65,6 +74,42 @@ func replaceFileAtomically(path string, data []byte, mode os.FileMode) error {
 		_ = dir.Close()
 	}
 	return nil
+}
+
+// renameFileWithRetry performs a same-directory atomic rename and retries only
+// the transient permission/sharing failures Windows produces when scanners or
+// indexers briefly hold either path. It must not be used for cross-directory
+// moves or rollback transactions where a late retry could change semantics.
+func renameFileWithRetry(oldPath, newPath string) error {
+	var err error
+	for attempt := 0; attempt < atomicRenameAttempts; attempt++ {
+		if err = atomicReplaceRename(oldPath, newPath); err == nil {
+			return nil
+		}
+		if !retryableAtomicRename(err) {
+			return err
+		}
+		if attempt+1 < atomicRenameAttempts {
+			time.Sleep(time.Duration(attempt+1) * 20 * time.Millisecond)
+		}
+	}
+	return err
+}
+
+// retryableAtomicRename limits retries to Windows scanners and other programs
+// briefly holding a target open. A deterministic test failure or an unrelated
+// filesystem error still fails immediately.
+func retryableAtomicRename(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, os.ErrPermission) {
+		return true
+	}
+	if runtime.GOOS != "windows" {
+		return false
+	}
+	return errors.Is(err, windowsErrorAccessDenied) || errors.Is(err, windowsErrorSharingViolation) || errors.Is(err, windowsErrorLockViolation)
 }
 
 // fileSnapshot preserves one existing sidecar, or remembers that the sidecar

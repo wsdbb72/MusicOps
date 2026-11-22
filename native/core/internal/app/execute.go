@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -50,7 +51,23 @@ type SearchPlan struct {
 	SelectedSite        string               `json:"selected_site,omitempty"`
 	SelectedCandidateID string               `json:"selected_candidate_id,omitempty"`
 	LibraryTracks       []localWorkflowTrack `json:"library_tracks,omitempty"`
-	Identity            Identity             `json:"identity"`
+	// AcquireCandidates is the durable, ranked fallback order for the
+	// selected release. The first entry is always the selected candidate; if
+	// its detail is unavailable before any token request, acquire can move to
+	// the next eligible torrent without re-running the search.
+	AcquireCandidates []AcquireCandidate `json:"acquire_candidates,omitempty"`
+	Identity          Identity           `json:"identity"`
+}
+
+// AcquireCandidate is a secret-free tracker candidate retained beside the
+// search plan. CandidateID is the site-qualified id already used by the
+// tracker observations; the slice order is the persisted ranking.
+type AcquireCandidate struct {
+	Site        string   `json:"site"`
+	CandidateID string   `json:"candidate_id"`
+	Title       string   `json:"title,omitempty"`
+	Artists     []string `json:"artists,omitempty"`
+	Quality     string   `json:"quality,omitempty"`
 }
 
 // Identity is caller-supplied catalogue evidence. AI cannot confirm it.
@@ -202,7 +219,7 @@ func (a *App) searchOnce(ctx context.Context, execution *scheduler.Execution, pa
 	if err = a.waitIfPaused(ctx); err != nil {
 		return scheduler.Outcome{}, err
 	}
-	report, evidence, adviseClass, err := a.observe(ctx, execution, *job, plan, token)
+	report, evidence, adviseClass, err := a.observe(ctx, execution, *job, &plan, token)
 	if errors.Is(err, scheduler.ErrCancelled) {
 		return scheduler.Outcome{}, a.stop(execution)
 	}
@@ -296,10 +313,13 @@ func markNeteaseSourceFallback(report *searchdecision.Report) {
 	report.IdentityConfirmed = true
 }
 
-func (a *App) observe(ctx context.Context, execution *scheduler.Execution, job workflow.Job, plan SearchPlan, token taskrepo.Token) (searchdecision.Report, []workflow.EvidenceInput, string, error) {
+func (a *App) observe(ctx context.Context, execution *scheduler.Execution, job workflow.Job, plan *SearchPlan, token taskrepo.Token) (searchdecision.Report, []workflow.EvidenceInput, string, error) {
+	// A re-search must never inherit a prior attempt's fallback order when
+	// this attempt produces no confirmed candidate.
+	plan.AcquireCandidates = nil
 	enabled := map[string]bool{}
-	if !plan.NeteaseOnly || !isNeteasePlaylistFallback(job.BatchID, plan) {
-		for _, site := range a.effectiveEnabledSites(plan) {
+	if !plan.NeteaseOnly || !isNeteasePlaylistFallback(job.BatchID, *plan) {
+		for _, site := range a.effectiveEnabledSites(*plan) {
 			enabled[site] = true
 		}
 	}
@@ -310,6 +330,7 @@ func (a *App) observe(ctx context.Context, execution *scheduler.Execution, job w
 	solverURL, solverToken := a.solverTarget()
 	evidence := []workflow.EvidenceInput{}
 	var picks []identityPick
+	var allPicks []identityPick
 	var pool []reviewai.Candidate
 	seededSites := map[string]string{}
 	for _, site := range searchdecision.TrackerSites {
@@ -337,8 +358,14 @@ func (a *App) observe(ctx context.Context, execution *scheduler.Execution, job w
 				observation.Candidates = append(observation.Candidates, next.Candidates...)
 			}
 		}
-		row, seeded, sitePool := summarizeSite(plan, site, observation)
+		row, sitePicks, sitePool := summarizeSiteCandidates(*plan, site, observation)
 		pool = append(pool, sitePool...)
+		allPicks = append(allPicks, sitePicks...)
+		var seeded *identityPick
+		if len(sitePicks) > 0 {
+			copy := sitePicks[0]
+			seeded = &copy
+		}
 		if observation.Status == "OK" {
 			for _, hit := range observation.Candidates {
 				if (site == "open.cd" || hit.Seeders != nil && *hit.Seeders > 0) && hit.CandidateID != "" {
@@ -382,9 +409,10 @@ func (a *App) observe(ctx context.Context, execution *scheduler.Execution, job w
 	if chosen != "" {
 		report.SelectedSite = chosen
 		report.SelectedCandidateID = chosenID
+		plan.AcquireCandidates = acquireCandidatesForSelection(*plan, allPicks, chosen, chosenID)
 		if plan.Scene == "upgrade" {
 			for _, p := range picks {
-				if p.id == chosenID && localUpgradeAdmits(plan, p.hit) {
+				if p.id == chosenID && localUpgradeAdmits(*plan, p.hit) {
 					report.QualityImproved = true
 					break
 				}
@@ -399,13 +427,26 @@ func (a *App) observe(ctx context.Context, execution *scheduler.Execution, job w
 // from stored observations classifies the same as the report the executor
 // built from the same observations.
 func summarizeSite(plan SearchPlan, site string, observation trackersearch.Observation) (searchdecision.SiteReport, *identityPick, []reviewai.Candidate) {
+	row, picks, pool := summarizeSiteCandidates(plan, site, observation)
+	if len(picks) == 0 {
+		return row, nil, pool
+	}
+	best := picks[0]
+	return row, &best, pool
+}
+
+// summarizeSiteCandidates keeps every eligible torrent for the site while
+// reporting only its highest-ranked candidate in the site summary. The full
+// list is persisted later so an unavailable detail does not force an
+// immediate source-platform fallback.
+func summarizeSiteCandidates(plan SearchPlan, site string, observation trackersearch.Observation) (searchdecision.SiteReport, []identityPick, []reviewai.Candidate) {
 	row := searchdecision.SiteReport{Site: site, ExpectedTitle: plan.ExpectedTitle}
 	row.Status = observation.Status
 	row.Attempted = true
 	row.CandidateCount = len(observation.Candidates)
 	row.Limited = observation.Status == "OK" && !observation.SearchComplete
-	var seeded *identityPick
-	var pool []reviewai.Candidate
+	picks := make([]identityPick, 0, len(observation.Candidates))
+	pool := make([]reviewai.Candidate, 0, len(observation.Candidates))
 	for _, candidate := range observation.Candidates {
 		hit := releaseHit(candidate)
 		pool = append(pool, reviewai.Candidate{ID: hit.ID, Title: hit.Title, Artists: hit.Artists, Aliases: hit.Aliases, Edition: hit.Edition, GroupID: hit.GroupID, Format: hit.Format, Year: hit.Year})
@@ -417,25 +458,100 @@ func summarizeSite(plan SearchPlan, site string, observation trackersearch.Obser
 		if !available || candidate.CandidateID == "" {
 			continue
 		}
-		pick := identityPick{site: site, id: candidate.CandidateID, hit: hit, quality: quality}
-		if seeded == nil || compareCandidateQuality(quality, seeded.quality) > 0 {
-			copy := pick
-			seeded = &copy
-			row.ObservedTitle = candidate.Title
-			if candidate.Seeders != nil {
-				row.Seeders = *candidate.Seeders
-				row.SeedersKnown = true
-			}
+		picks = append(picks, identityPick{site: site, id: candidate.CandidateID, hit: hit, quality: quality, qualityLabel: candidateQualityLabel(quality, candidate), seedersKnown: candidate.Seeders != nil})
+	}
+	sort.SliceStable(picks, func(i, j int) bool {
+		return compareCandidateQuality(picks[i].quality, picks[j].quality) > 0
+	})
+	if len(picks) > 0 {
+		row.ObservedTitle = picks[0].hit.Title
+		if picks[0].seedersKnown {
+			row.Seeders = picks[0].quality.Seeders
+			row.SeedersKnown = true
 		}
 	}
-	return row, seeded, pool
+	return row, picks, pool
+}
+
+func acquireCandidatesForSelection(plan SearchPlan, picks []identityPick, selectedSite, selectedID string) []AcquireCandidate {
+	if selectedSite == "" || selectedID == "" {
+		return nil
+	}
+	selected := -1
+	for i := range picks {
+		if picks[i].site == selectedSite && picks[i].id == selectedID {
+			selected = i
+			break
+		}
+	}
+	if selected < 0 {
+		return []AcquireCandidate{{Site: selectedSite, CandidateID: selectedID}}
+	}
+	chosen := picks[selected]
+	candidates := make([]identityPick, 0, len(picks))
+	for _, pick := range picks {
+		if sameReleaseForPlan(plan, chosen.hit, pick.hit) {
+			candidates = append(candidates, pick)
+		}
+	}
+	sort.SliceStable(candidates, func(i, j int) bool {
+		if candidates[i].site == selectedSite && candidates[i].id == selectedID {
+			return true
+		}
+		if candidates[j].site == selectedSite && candidates[j].id == selectedID {
+			return false
+		}
+		return compareCandidateQuality(candidates[i].quality, candidates[j].quality) > 0
+	})
+	out := make([]AcquireCandidate, 0, len(candidates))
+	seen := map[string]bool{}
+	for _, pick := range candidates {
+		key := pick.site + "\x00" + pick.id
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		out = append(out, AcquireCandidate{
+			Site: pick.site, CandidateID: pick.id, Title: pick.hit.Title,
+			Artists: append([]string(nil), pick.hit.Artists...), Quality: pick.qualityLabel,
+		})
+		if len(out) == 32 {
+			break
+		}
+	}
+	if len(out) == 0 {
+		out = append(out, AcquireCandidate{Site: selectedSite, CandidateID: selectedID, Title: chosen.hit.Title, Artists: append([]string(nil), chosen.hit.Artists...), Quality: chosen.qualityLabel})
+	}
+	return out
+}
+
+func sameReleaseForPlan(plan SearchPlan, left, right reviewmatch.Hit) bool {
+	if reviewmatch.Same(left, right) {
+		return true
+	}
+	// open.cd names releases "Artist - Album" while the Gazelle sites use the
+	// album title. Both rows already passed CompareSource, so compare the
+	// edition, artist and year evidence against the same expected title.
+	left.Title, right.Title = plan.ExpectedTitle, plan.ExpectedTitle
+	return reviewmatch.Same(left, right)
+}
+
+func acquireCandidatesFromObservations(plan SearchPlan, observations map[string]trackersearch.Observation, selectedSite, selectedID string) []AcquireCandidate {
+	picks := []identityPick{}
+	for _, site := range searchdecision.TrackerSites {
+		_, sitePicks, _ := summarizeSiteCandidates(plan, site, observations[site])
+		picks = append(picks, sitePicks...)
+	}
+	return acquireCandidatesForSelection(plan, picks, selectedSite, selectedID)
 }
 
 type identityPick struct {
-	site    string
-	id      string
-	hit     reviewmatch.Hit
-	quality candidateQualityRank
+	site         string
+	id           string
+	hit          reviewmatch.Hit
+	quality      candidateQualityRank
+	qualityLabel string
+	seedersKnown bool
 }
 
 func selectIdentity(picks []identityPick) (string, string) {

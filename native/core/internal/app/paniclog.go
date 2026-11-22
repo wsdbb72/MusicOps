@@ -35,7 +35,7 @@ func (a *App) recordPanic(value, stack string) {
 	if info, err := os.Stat(path); err == nil && info.Size() > panicLogMaxBytes {
 		previous := path + ".previous"
 		_ = os.Remove(previous)
-		_ = os.Rename(path, previous)
+		_ = renameFileWithRetry(path, previous)
 	}
 	record := map[string]any{
 		"at":    a.now().UTC().Format(time.RFC3339Nano),

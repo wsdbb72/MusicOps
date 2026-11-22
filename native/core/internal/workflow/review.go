@@ -393,11 +393,11 @@ func (r *Repository) ReplayStaleSearch(requestID string, token taskrepo.Token, n
 	return decode(result, err)
 }
 
-// RequeueTokenFallback sends an unresolved NetEase playlist token acquisition
-// to the source-platform fallback. It never replays usetoken and never uses a
+// RequeueTokenFallback sends an unresolved acquisition to the configured
+// streaming fallback. It never replays usetoken and never uses a
 // normal tracker download. This is the terminal reconciliation path for a
 // request whose external token effect cannot be proved: falling back avoids a
-// second charge while still allowing the playlist row to finish.
+// second charge while still allowing the acquisition row to finish.
 
 func (r *Repository) RequeueTokenFallback(requestID, jobID string, nowNS int64, reason string) (Result, error) {
 	if !validID(jobID) || requestID == "" || len(requestID) > 128 || nowNS <= 0 || len(reason) > 4000 {
@@ -410,9 +410,9 @@ func (r *Repository) RequeueTokenFallback(requestID, jobID string, nowNS int64, 
 		}
 		return Result{}, ErrNotFound
 	}
-	if job.Stage != "needs_review" || job.ReviewKind != "token" || job.CancelRequested || job.Paused ||
-		task.State != "blocked" || task.CancelRequested || task.Command != cmdProcess || !strings.HasPrefix(job.BatchID, "pl-netease-") {
-		return Result{}, ErrStale
+	if job.Stage != "needs_review" || (job.ReviewKind != "token" && job.ReviewKind != "candidate") || job.CancelRequested || job.Paused ||
+		task.State != "blocked" || task.CancelRequested || task.Command != cmdProcess {
+		return Result{}, fmt.Errorf("fallback checkpoint changed: %w", ErrStale)
 	}
 	extra, _ := json.Marshal(struct{ JobID, Action string }{job.ID, "token_fallback"})
 	result, err := r.tasks.ControlOwned(requestID, task.ID, "retry", nowNS, extra, func(v *dataengine.View, _, after *taskrepo.Task, _ []taskrepo.Task) ([]dataengine.Condition, []dataengine.Mutation, json.RawMessage, error) {
@@ -423,17 +423,23 @@ func (r *Repository) RequeueTokenFallback(requestID, jobID string, nowNS int64, 
 			}
 			return nil, nil, nil, ErrNotFound
 		}
-		if live.Revision != job.Revision || live.Stage != "needs_review" || live.ReviewKind != "token" || live.ActiveTaskID != task.ID {
-			return nil, nil, nil, ErrStale
+		if live.Revision != job.Revision || live.Stage != "needs_review" || (live.ReviewKind != "token" && live.ReviewKind != "candidate") || live.ActiveTaskID != task.ID {
+			return nil, nil, nil, fmt.Errorf("fallback job changed: %w", ErrStale)
 		}
-		if after == nil || after.State != "queued" || after.Owner != "" || after.Execution != "" {
-			return nil, nil, nil, ErrStale
+		if after == nil {
+			return nil, nil, nil, fmt.Errorf("fallback task missing: %w", ErrStale)
+		}
+		if after.State != "queued" || after.Owner != "" || after.Execution != "" {
+			return nil, nil, nil, fmt.Errorf("fallback task state=%s owner=%q execution=%q: %w", after.State, after.Owner, after.Execution, ErrStale)
 		}
 		next := *live
 		next.Stage = "fallback"
 		next.ReviewKind = ""
 		next.ErrorClass = ""
 		next.SearchAction = searchdecision.ActionFallback
+		if next.SearchRetryCount < 3 {
+			next.SearchRetryCount++
+		}
 		next.Message = messageOr(reason, "令牌结果无法安全确认，已自动改用网易云回退；未重复使用令牌")
 		updated, err := bump(next, nowNS, true)
 		if err != nil {
@@ -638,6 +644,12 @@ func (r *Repository) reviewRetry(requestID string, job Job, task *taskrepo.Task,
 		next.ErrorClass = ""
 		next.SearchAction = ""
 		next.SearchRetryAfterSec = 0
+		if live.ReviewKind == "token" && live.TokenRetryCount < 255 {
+			next.TokenRetryCount = live.TokenRetryCount + 1
+		}
+		if task.Command == cmdProcess && live.ReviewKind == "candidate" && stage == "requesting" && live.ProcessRetryCount < 255 {
+			next.ProcessRetryCount = live.ProcessRetryCount + 1
+		}
 		if task.Command == cmdSearch {
 			next.RecoveryRetryCount = 0
 			// Three scheduler retries form one bounded cycle. A reviewed retry

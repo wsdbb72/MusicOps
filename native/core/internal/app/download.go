@@ -214,18 +214,20 @@ func downloadError(class, message string) *downloadFailure {
 	return &downloadFailure{Class: class, Message: message}
 }
 
-// torrentReceipt reads the stored torrent receipt for one job. When site or
-// resource is set it must match; otherwise the first stored receipt wins.
-// The receipt is the acquire executor's evidence, so a job that never saved
-// a torrent (for example a streaming-fallback job) has none.
+// torrentReceipt reads the newest stored torrent receipt for one job. When
+// site or resource is set it must match. Receipts written before FetchedAtNS
+// was introduced keep their legacy zero timestamp; among equally timed rows
+// the later evidence entry wins deterministically.
 func (a *App) torrentReceipt(jobID, site, resource string) (torrentfetch.Receipt, error) {
 	inspection, err := a.flows.Inspect(jobID)
 	if err != nil {
 		return torrentfetch.Receipt{}, err
 	}
+	var best torrentfetch.Receipt
+	found := false
 	for _, item := range inspection.Evidence {
-		payload, found, err := a.flows.EvidenceData(item.ID)
-		if err != nil || !found {
+		payload, payloadFound, err := a.flows.EvidenceData(item.ID)
+		if err != nil || !payloadFound {
 			continue
 		}
 		var receipt torrentfetch.Receipt
@@ -238,7 +240,14 @@ func (a *App) torrentReceipt(jobID, site, resource string) (torrentfetch.Receipt
 		if resource != "" && receipt.ResourceID != resource {
 			continue
 		}
-		return receipt, nil
+		if !found || receipt.FetchedAtNS > best.FetchedAtNS ||
+			receipt.FetchedAtNS == best.FetchedAtNS && receipt.MetaSHA256 > best.MetaSHA256 {
+			best = receipt
+			found = true
+		}
+	}
+	if found {
+		return best, nil
 	}
 	return torrentfetch.Receipt{}, errors.New("no saved torrent receipt for this job")
 }
@@ -632,16 +641,13 @@ func (a *App) buildDownloadPlan(job workflow.Job, savePath, category, tags strin
 			_ = json.Unmarshal(raw, &plan)
 		}
 	}
-	site, resource := plan.SelectedSite, ""
-	if _, res, ok := strings.Cut(plan.SelectedCandidateID, ":"); ok {
-		resource = res
-	}
-	receipt, err := a.torrentReceipt(job.ID, site, resource)
+	receipt, err := a.torrentReceipt(job.ID, "", "")
 	if err != nil {
 		return downloadPlan{}, err
 	}
 	strictFL := strings.HasPrefix(job.BatchID, "pl-") && (receipt.Site == "dicmusic" || receipt.Site == "orpheus")
-	if strictFL && !receipt.UseToken {
+	tokenEvidence := receipt.UseToken || receipt.FreeMethod == "token"
+	if strictFL && !tokenEvidence && !receiptSiteFree(receipt) {
 		return downloadPlan{}, errTokenNotSettled
 	}
 	if _, err := a.readTorrentBytes(receipt); err != nil {
@@ -650,9 +656,16 @@ func (a *App) buildDownloadPlan(job workflow.Job, savePath, category, tags strin
 	// Two honest refusals: there is no torrent to add, or the token state
 	// says this download is not allowed yet. They stay distinct so the HTTP
 	// layer can say which one happened.
-	freeMethod := "site-free"
-	if receipt.UseToken {
-		result, found, err := a.ledger.Get(receipt.Site, job.ID)
+	freeMethod := receipt.FreeMethod
+	if freeMethod == "" {
+		freeMethod = "site-free"
+	}
+	if tokenEvidence {
+		tokenRequestID := receipt.TokenRequestID
+		if tokenRequestID == "" {
+			tokenRequestID = job.ID
+		}
+		result, found, err := a.ledger.Get(receipt.Site, tokenRequestID)
 		if err != nil {
 			return downloadPlan{}, err
 		}
@@ -691,6 +704,21 @@ func (a *App) buildDownloadPlan(job workflow.Job, savePath, category, tags strin
 		FreeConfirmed: true, FreeMethod: freeMethod, PlaylistBatch: strings.HasPrefix(job.BatchID, "pl-") || len(plan.LibraryTracks) > 0,
 		SavePath: savePath, Category: category, Tags: tags,
 	}, nil
+}
+
+// receiptSiteFree accepts explicit personal/global evidence and legacy
+// no-token receipts from strict-FL sites. Legacy receipts could only be
+// written after sitefree proved the exact torrent was free: every ordinary
+// download path is rejected before a strict dicmusic/orpheus fetch.
+func receiptSiteFree(receipt torrentfetch.Receipt) bool {
+	switch receipt.FreeMethod {
+	case "personal", "global", "site-free":
+		return true
+	case "":
+		return !receipt.UseToken && receipt.TokenRequestID == ""
+	default:
+		return false
+	}
 }
 
 // failDownload fails the download task and moves the job to "failed" in one
@@ -1727,7 +1755,7 @@ func copyIncoming(source, dest string) error {
 	if err := os.WriteFile(temp, body, 0o600); err != nil {
 		return err
 	}
-	if err := os.Rename(temp, dest); err != nil {
+	if err := renameFileWithRetry(temp, dest); err != nil {
 		os.Remove(temp)
 		return err
 	}

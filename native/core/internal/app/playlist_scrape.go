@@ -126,7 +126,7 @@ func (a *App) scrapePlaylistIncoming(ctx context.Context, incoming, name, artist
 			if closeErr != nil {
 				return "", "", nil, closeErr
 			}
-			if err := os.Rename(temp.Name(), dest); err != nil {
+			if err := renameFileWithRetry(temp.Name(), dest); err != nil {
 				return "", "", nil, err
 			}
 		}

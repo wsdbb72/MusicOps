@@ -252,3 +252,28 @@ func TestRateLimitHoldExpiresWithoutBlockingAnotherSite(t *testing.T) {
 		t.Fatal(allowed, class)
 	}
 }
+
+func TestPendingKeepsCandidateRequestAndWorkflowJobIdentitySeparate(t *testing.T) {
+	ledger := openLedger(t)
+	now := time.Unix(1_700_000_100, 0)
+	observation := Observation{Site: "dicmusic", AccountID: "7", Balance: 3, Known: true, Source: "userstats.tokens", ObservedAtNS: now.UnixNano(), Generation: 1}
+	if _, err := ledger.CommitObservation(observation); err != nil {
+		t.Fatal(err)
+	}
+	item := quote("dicmusic", "22", "candidate-token-key", 1, 3, 3, 0)
+	item.AccountID = "7"
+	item.JobID = "process:search:workflow-job"
+	if _, err := ledger.ReserveObserved(now, item, "7"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ledger.Advance(now.Add(time.Second), "dicmusic", item.RequestID, StateRequestUnknown, "answer-lost"); err != nil {
+		t.Fatal(err)
+	}
+	pending, err := ledger.Pending()
+	if err != nil || len(pending) != 1 {
+		t.Fatalf("pending=%+v err=%v", pending, err)
+	}
+	if pending[0].RequestID != "candidate-token-key" || pending[0].JobID != "process:search:workflow-job" {
+		t.Fatalf("ledger identities collapsed: %+v", pending[0])
+	}
+}

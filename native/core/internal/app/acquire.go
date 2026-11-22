@@ -2,7 +2,10 @@ package app
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"net/http"
 	"net/url"
 	"path/filepath"
@@ -18,6 +21,75 @@ import (
 	"github.com/wsdbb72/MusicOps/native/core/internal/trackersearch"
 	"github.com/wsdbb72/MusicOps/native/core/internal/workflow"
 )
+
+type candidateUnavailable struct {
+	message string
+	class   string
+	token   bool
+}
+
+func (e *candidateUnavailable) Error() string { return e.message }
+
+func unavailableCandidate(message, class string) error {
+	return &candidateUnavailable{message: message, class: class}
+}
+
+func unavailableTokenCandidate(message, class string) error {
+	return &candidateUnavailable{message: message, class: class, token: true}
+}
+
+func acquireCandidateOrder(plan SearchPlan) []AcquireCandidate {
+	selected := AcquireCandidate{Site: plan.SelectedSite, CandidateID: plan.SelectedCandidateID}
+	all := plan.AcquireCandidates
+	if len(all) == 0 {
+		all = []AcquireCandidate{selected}
+	}
+	out := make([]AcquireCandidate, 0, len(all)+1)
+	seen := map[string]bool{}
+	add := func(candidate AcquireCandidate) {
+		if candidate.Site == "" || candidate.CandidateID == "" {
+			return
+		}
+		site, _, ok := strings.Cut(candidate.CandidateID, ":")
+		if !ok || site != candidate.Site {
+			return
+		}
+		key := candidate.Site + "\x00" + candidate.CandidateID
+		if seen[key] {
+			return
+		}
+		seen[key] = true
+		out = append(out, candidate)
+	}
+	// The selected candidate is always first, even for an older plan whose
+	// stored ranking has not yet been rewritten by a manual selection.
+	add(selected)
+	for _, candidate := range all {
+		add(candidate)
+	}
+	return out
+}
+
+// acquireTokenRequestID gives every candidate attempt its own ledger key. The
+// first candidate of the original attempt keeps the historical job id so
+// existing receipts and proof files remain compatible. Every later candidate
+// and every reviewed retry uses a deterministic candidate key. The revision
+// and bounded retry counters let a candidate recover after positive evidence
+// that the earlier attempt was RELEASED without spending a token. The token
+// ledger's global resource index still blocks a second charge for REQUESTING,
+// REQUEST_UNKNOWN or CONSUMED rows even when this request key changes.
+func acquireTokenRequestID(job workflow.Job, candidates []AcquireCandidate, candidate AcquireCandidate) string {
+	if job.TokenRetryCount == 0 && job.ProcessRetryCount == 0 && len(candidates) > 0 &&
+		candidates[0].Site == candidate.Site && candidates[0].CandidateID == candidate.CandidateID {
+		return job.ID
+	}
+	attempt := job.ID + "\x00" + strconv.FormatUint(job.Revision, 10) +
+		"\x00" + strconv.Itoa(int(job.TokenRetryCount)) +
+		"\x00" + strconv.Itoa(int(job.ProcessRetryCount)) +
+		"\x00" + candidate.Site + "\x00" + candidate.CandidateID
+	sum := sha256.Sum256([]byte(attempt))
+	return fmt.Sprintf("candidate-%x", sum[:16])
+}
 
 func (a *App) acquire(ctx context.Context, execution *scheduler.Execution, payload []byte) (scheduler.Outcome, error) {
 	if err := a.cancelled(ctx, execution); err != nil {
@@ -56,56 +128,136 @@ func (a *App) acquire(ctx context.Context, execution *scheduler.Execution, paylo
 	if job.Stage != "requesting" {
 		return a.finishAcquire(held, *job, "candidate", "当前阶段不能获取；尚未下载、尚未入库", "", nil)
 	}
-	site, resource, ok := strings.Cut(plan.SelectedCandidateID, ":")
-	if !ok || site == "" || site != plan.SelectedSite || resource == "" {
+	if len(plan.AcquireCandidates) == 0 && plan.SelectedSite != "" && plan.SelectedCandidateID != "" {
+		// Tasks created before ranked candidates were persisted still have the
+		// per-site observations. Rebuild the safe order from that durable
+		// evidence instead of stranding the old task or skipping straight to
+		// streaming.
+		if inspection, inspectErr := a.flows.Inspect(job.ID); inspectErr == nil {
+			if observations, _, _, observationErr := a.reviewObservations(inspection, plan); observationErr == nil {
+				plan.AcquireCandidates = acquireCandidatesFromObservations(plan, observations, plan.SelectedSite, plan.SelectedCandidateID)
+			}
+		}
+	}
+	candidates := acquireCandidateOrder(plan)
+	if len(candidates) == 0 {
 		return a.finishAcquire(held, *job, "candidate", "没有唯一候选，不能获取；尚未下载、尚未入库", "", nil)
 	}
+	failures := make([]candidateUnavailable, 0, len(candidates))
+	for _, candidate := range candidates {
+		if err := a.cancelled(ctx, execution); err != nil {
+			return scheduler.Outcome{}, err
+		}
+		attemptPlan := plan
+		attemptPlan.SelectedSite = candidate.Site
+		attemptPlan.SelectedCandidateID = candidate.CandidateID
+		tokenRequestID := acquireTokenRequestID(*job, candidates, candidate)
+		outcome, err := a.acquireCandidate(ctx, execution, held, *job, attemptPlan, tokenRequestID)
+		if err == nil {
+			return outcome, nil
+		}
+		var unavailable *candidateUnavailable
+		if !errors.As(err, &unavailable) {
+			return scheduler.Outcome{}, err
+		}
+		failure := *unavailable
+		failure.message = candidate.Site + " / " + candidate.CandidateID + "：" + failure.message
+		failures = append(failures, failure)
+	}
+	return a.finishCandidateExhaustion(ctx, execution, held, *job, plan, failures)
+}
+
+// acquireCandidate attempts one persisted candidate. A candidateUnavailable
+// result proves that no token request or ordinary tracker download was sent,
+// so the caller may safely try the next ranked candidate.
+func (a *App) acquireCandidate(ctx context.Context, execution *scheduler.Execution, held taskrepo.Token, job workflow.Job, plan SearchPlan, tokenRequestID string) (scheduler.Outcome, error) {
+	site, resource, ok := strings.Cut(plan.SelectedCandidateID, ":")
+	if !ok || site == "" || site != plan.SelectedSite || resource == "" {
+		return scheduler.Outcome{}, unavailableCandidate("候选标识无效，未向站点请求", "")
+	}
 	if a.cookieFor(plan.RootJobID, site) == "" {
-		return a.finishAcquire(held, *job, "candidate", "没有可用的登录状态，不能获取；尚未下载、尚未入库", "", nil)
+		if tokenledger.IsTokenSite(site) {
+			return scheduler.Outcome{}, unavailableTokenCandidate("没有可用的登录状态，未向站点请求", "auth")
+		}
+		return scheduler.Outcome{}, unavailableCandidate("没有可用的登录状态，未向站点请求", "auth")
 	}
 	decision, err := a.readEvidence(ctx, plan, site, resource)
 	if err != nil {
-		return a.finishAcquire(held, *job, "candidate", "站点详情读取失败，未发下载或令牌请求；尚未下载、尚未入库", "detail", nil)
+		message := candidateFailureMessage("站点详情读取失败，未发下载或令牌请求", err)
+		if tokenledger.IsTokenSite(site) {
+			return scheduler.Outcome{}, unavailableTokenCandidate(message, "detail")
+		}
+		return scheduler.Outcome{}, unavailableCandidate(message, "detail")
 	}
 	// Personal free is free everywhere. Global free (a site-wide freeleech
 	// event, proven for this exact torrent row) costs no token on any of the
-	// three token sites either: charging a token for a global-free torrent is
-	// a real loss with no benefit. sitefree only reports Global when the
-	// response was about this resource id, so a stray flag cannot route an
-	// unrelated torrent here.
+	// three token sites either. sitefree only reports Global when the response
+	// was about this resource id, so a stray flag cannot route an unrelated
+	// torrent here.
 	strictFL := site == "dicmusic" || site == "orpheus"
 	if decision.Personal || decision.Global {
 		receipt, err := a.fetchTorrent(ctx, execution, plan, site, resource, false)
 		if err != nil {
-			return a.finishAcquire(held, *job, "candidate", "种子响应不是有效元信息；尚未下载、尚未入库", "PARSE_ERROR", nil)
+			return scheduler.Outcome{}, unavailableCandidate(candidateFailureMessage("种子响应不是有效元信息，未使用令牌", err), "PARSE_ERROR")
 		}
-		return a.finishAcquire(held, *job, "candidate", "种子字节已保存，专辑尚未下载、尚未入库", "", &receipt)
+		if decision.Personal {
+			receipt.FreeMethod = "personal"
+		} else {
+			receipt.FreeMethod = "global"
+		}
+		return a.finishAcquire(held, job, "candidate", "种子字节已保存，专辑尚未下载、尚未入库", "", &receipt)
 	}
 	if tokenledger.IsTokenSite(site) && decision.TokenCost > 0 {
 		// dicmusic and orpheus have almost no freeleech: the FL button is the
 		// normal way to download, and it spends a token. A batch with no
-		// budget must not quietly download without one — that changes what
-		// the account is charged for, so it stops here for a human to decide.
+		// budget must not quietly download without one; try the next ranked
+		// candidate before using the source-platform fallback.
 		if plan.Budget <= 0 {
-			if isNeteasePlaylistFallback(job.BatchID, plan) {
-				return a.acquireFallback(ctx, execution, held, *job, plan)
-			}
-			// A normal download would add real download volume to the account.
-			// That is never done silently: without a token budget this torrent
-			// is skipped instead.
-			return a.finishSkipAcquire(held, *job, "没有配置令牌预算：为避免产生普通下载量，已跳过；尚未下载、尚未入库")
+			return scheduler.Outcome{}, unavailableTokenCandidate("没有配置令牌预算；为避免产生普通下载量，未向站点请求", tokenledger.ClassTokenBudget)
 		}
-		return a.acquireWithToken(ctx, execution, held, *job, plan, site, resource, decision)
+		return a.acquireWithToken(ctx, execution, held, job, plan, site, resource, decision, tokenRequestID)
 	}
 	if strictFL {
-		if isNeteasePlaylistFallback(job.BatchID, plan) || (plan.PlaylistTrack != "" && plan.StreamingEnabled && normalizeKey(plan.PlaylistTrack) == normalizeKey(plan.ExpectedTitle)) {
-			return a.acquireFallback(ctx, execution, held, *job, plan)
-		}
-		return a.finishSkipAcquire(held, *job, "本批次要求 FL 令牌，详情没有可核实的令牌按钮；未发下载请求")
+		return scheduler.Outcome{}, unavailableTokenCandidate("本批次要求 FL 令牌；详情没有可核实的 FL 免费或令牌按钮，未向站点请求", "")
 	}
 	// No personal free and no token button: the only way left would be a
-	// normal download, which spends ratio. Skipping is the honest outcome.
-	return a.finishSkipAcquire(held, *job, "该种子没有 FL 免费标记，也没有令牌按钮：为避免产生普通下载量，已跳过；尚未下载、尚未入库")
+	// normal download, which spends ratio. Try the next persisted candidate.
+	return scheduler.Outcome{}, unavailableCandidate("该种子没有 FL 免费标记，也没有令牌按钮；为避免产生普通下载量，未向站点请求", "")
+}
+
+func (a *App) finishCandidateExhaustion(ctx context.Context, execution *scheduler.Execution, held taskrepo.Token, job workflow.Job, plan SearchPlan, failures []candidateUnavailable) (scheduler.Outcome, error) {
+	if isNeteasePlaylistFallback(job.BatchID, plan) {
+		return a.acquireFallback(ctx, execution, held, job, plan)
+	}
+	class := ""
+	review := "candidate"
+	tokenFailure := false
+	parts := make([]string, 0, len(failures))
+	for _, failure := range failures {
+		if len(parts) < 6 {
+			parts = append(parts, failure.message)
+		}
+		if failure.class != "" && (class == "" || failure.token && !tokenFailure) {
+			class = failure.class
+		}
+		if failure.token && failure.class != "" {
+			tokenFailure = true
+			review = "token"
+		}
+	}
+	if len(failures) > len(parts) {
+		parts = append(parts, fmt.Sprintf("另有 %d 个候选未获取", len(failures)-len(parts)))
+	}
+	message := strings.Join(parts, "；")
+	if message == "" {
+		message = "所有候选均不可获取；未向站点使用令牌、尚未下载、尚未入库"
+	} else {
+		message += "；所有候选均已尝试，尚未下载、尚未入库"
+	}
+	if class == "" {
+		return a.finishSkipAcquire(held, job, message)
+	}
+	return a.finishAcquire(held, job, review, message, class, nil)
 }
 
 func (a *App) readEvidence(ctx context.Context, plan SearchPlan, site, resource string) (sitefree.Decision, error) {
@@ -135,110 +287,91 @@ func (a *App) readEvidence(ctx context.Context, plan SearchPlan, site, resource 
 	return sitefree.Read(site, resource, bodies, a.now())
 }
 
-func (a *App) acquireWithToken(ctx context.Context, execution *scheduler.Execution, held taskrepo.Token, job workflow.Job, plan SearchPlan, site, resource string, decision sitefree.Decision) (scheduler.Outcome, error) {
+func (a *App) acquireWithToken(ctx context.Context, execution *scheduler.Execution, held taskrepo.Token, job workflow.Job, plan SearchPlan, site, resource string, decision sitefree.Decision, tokenRequestID string) (scheduler.Outcome, error) {
 	if !tokenledger.IsTokenSite(site) {
-		return a.finishAcquire(held, job, "token", "该站不使用这条令牌账本；尚未下载、尚未入库", "", nil)
+		return scheduler.Outcome{}, unavailableTokenCandidate("该站不使用这条令牌账本",
+			"")
 	}
 	// Enforce the same deadline as the background reconciler, including
 	// when it has not yet had a chance to run after startup.
 	if _, err := a.ledger.SweepExpired(a.now(), tokenledger.UnknownExpire); err != nil {
-		if plan.StreamingEnabled && isNeteasePlaylistFallback(job.BatchID, plan) {
-			return a.acquireFallback(ctx, execution, held, job, plan)
-		}
-		return a.finishAcquire(held, job, "token", "令牌账本暂时无法读取，未向站点请求；尚未下载、尚未入库", "ledger_rejected", nil)
+		return scheduler.Outcome{}, unavailableTokenCandidate("令牌账本暂时无法读取，未向站点请求",
+			"ledger_rejected")
 	}
 	observation, _, err := a.observeBalance(ctx, site, a.cookieFor(plan.RootJobID, site), plan.Synthetic, plan.BaseURL)
 	if err != nil {
-		if plan.StreamingEnabled && isNeteasePlaylistFallback(job.BatchID, plan) {
-			return a.acquireFallback(ctx, execution, held, job, plan)
-		}
-		return a.finishAcquire(held, job, "token", "余额读取失败，未发令牌请求；尚未下载、尚未入库", observation.ErrorClass, nil)
+		return scheduler.Outcome{}, unavailableTokenCandidate("余额读取失败，未发令牌请求",
+			observation.ErrorClass)
 	}
 	if bound, bindErr := a.bindPageBalance(observation, decision); bindErr != nil {
-		if plan.StreamingEnabled && isNeteasePlaylistFallback(job.BatchID, plan) {
-			return a.acquireFallback(ctx, execution, held, job, plan)
-		}
-		return a.finishAcquire(held, job, "token", "余额读取失败，未发令牌请求；尚未下载、尚未入库", "read_error", nil)
+		return scheduler.Outcome{}, unavailableTokenCandidate("余额读取失败，未发令牌请求",
+			"read_error")
 	} else {
 		observation = bound
 	}
 	if !observation.Known || observation.ErrorClass != "" {
-		message := "站点余额未知或无法绑定账号，未发令牌请求；尚未下载、尚未入库"
+		message := "站点余额未知或无法绑定账号，未发令牌请求"
 		class := observation.ErrorClass
 		if class == "" {
 			class = tokenledger.ClassBalanceUnknown
 		}
 		switch class {
 		case "rate_limited", "auth", "network", "parse", "read_error":
-			message = "站点限制或读取失败只暂停这次账号读取，未发令牌请求；尚未下载、尚未入库"
+			message = "站点限制或读取失败只暂停这次账号读取，未发令牌请求"
 		}
-		if plan.StreamingEnabled && isNeteasePlaylistFallback(job.BatchID, plan) {
-			return a.acquireFallback(ctx, execution, held, job, plan)
-		}
-		return a.finishAcquire(held, job, "token", message, class, nil)
+		return scheduler.Outcome{}, unavailableTokenCandidate(message, class)
 	}
 	if decision.Balance != nil && *decision.Balance != observation.Balance {
-		if plan.StreamingEnabled && isNeteasePlaylistFallback(job.BatchID, plan) {
-			return a.acquireFallback(ctx, execution, held, job, plan)
-		}
-		return a.finishAcquire(held, job, "token", "页面令牌数与账号余额不一致，未发令牌请求；尚未下载、尚未入库", "balance_conflict", nil)
+		return scheduler.Outcome{}, unavailableTokenCandidate("页面令牌数与账号余额不一致，未发令牌请求",
+			"balance_conflict")
 	}
 	quote := tokenledger.Quote{
 		Site: site, AccountID: observation.AccountID, CookieID: tokenledger.Fingerprint(a.cookieFor(plan.RootJobID, site)),
-		ResourceID: resource, RequestID: job.ID, Cost: decision.TokenCost,
+		ResourceID: resource, RequestID: tokenRequestID, JobID: job.ID, Cost: decision.TokenCost,
 		Budget: plan.Budget, SafetyMargin: plan.SafetyMargin, BudgetRef: job.BatchID, Scene: job.Scene,
 		IdentityConfirmed: plan.Identity.IdentityConfirmed, StreamingEnabled: plan.StreamingEnabled,
 	}
 	reserved, err := a.ledger.ReserveObserved(a.now(), quote, observation.AccountID)
 	if err != nil {
-		// The site has not been asked yet. A NetEase playlist may continue
-		// through its native streaming route when the FL-only tracker account
-		// is on hold; other scenes still wait for a human to resolve the ledger.
-		if plan.StreamingEnabled && isNeteasePlaylistFallback(job.BatchID, plan) {
-			return a.acquireFallback(ctx, execution, held, job, plan)
-		}
-		return a.finishAcquire(held, job, "token", "令牌预留没有成立，未向站点请求；尚未下载、尚未入库", "ledger_rejected", nil)
+		// The site has not been asked yet, so trying another persisted
+		// candidate cannot spend a second token.
+		return scheduler.Outcome{}, unavailableTokenCandidate("令牌预留没有成立，未向站点请求",
+			"ledger_rejected")
 	}
 	switch reserved.State {
 	case tokenledger.StateRequesting, tokenledger.StateRequestUnknown, tokenledger.StateUnknown:
 		// The token request was already sent or may have been sent. Read the
 		// site again and do not add usetoken a second time.
-		return a.reconcileInFlightToken(ctx, execution, held, job, plan, site, resource)
+		return a.reconcileInFlightToken(ctx, execution, held, job, plan, site, resource, tokenRequestID)
 	case tokenledger.StateReserved:
 	default:
-		if reserved.State == tokenledger.StateRejected && plan.StreamingEnabled && isNeteasePlaylistFallback(job.BatchID, plan) {
-			switch reserved.Class {
-			case tokenledger.ClassTokenBudget, tokenledger.ClassSpent, tokenledger.ClassAccountHold:
-				return a.acquireFallback(ctx, execution, held, job, plan)
-			}
-		}
-		return a.finishAcquire(held, job, "token", "令牌预留没有成立，未向站点请求；尚未下载、尚未入库", reserved.Class, nil)
+		return scheduler.Outcome{}, unavailableTokenCandidate("令牌预留没有成立，未向站点请求",
+			reserved.Class)
 	}
 	if allowed, class, _ := a.ledger.ReadAllowed(site, a.now()); !allowed {
-		if _, err = a.ledger.Advance(a.now(), site, job.ID, tokenledger.StateReleased, "read-hold"); err != nil {
+		if _, err = a.ledger.Advance(a.now(), site, tokenRequestID, tokenledger.StateReleased, "read-hold"); err != nil {
 			return scheduler.Outcome{}, err
 		}
-		if plan.StreamingEnabled && isNeteasePlaylistFallback(job.BatchID, plan) {
-			return a.acquireFallback(ctx, execution, held, job, plan)
-		}
-		return a.finishAcquire(held, job, "token", "站点限制了账号读取，未发令牌请求；尚未下载、尚未入库", class, nil)
+		return scheduler.Outcome{}, unavailableTokenCandidate("站点限制了账号读取，未发令牌请求", class)
 	}
-	if _, err = a.ledger.Advance(a.now(), site, job.ID, tokenledger.StateRequesting, ""); err != nil {
+	if _, err = a.ledger.Advance(a.now(), site, tokenRequestID, tokenledger.StateRequesting, ""); err != nil {
 		return scheduler.Outcome{}, err
 	}
 	receipt, fetchErr := a.fetchTorrent(ctx, execution, plan, site, resource, true)
 	var receiptPtr *torrentfetch.Receipt
 	if fetchErr == nil {
+		receipt.TokenRequestID = tokenRequestID
+		receipt.FreeMethod = "token"
 		receiptPtr = &receipt
 	}
-	// A fixture proof is an explicit charge record. It settles the reservation
+	// A receipt is an explicit charge record. It settles the reservation
 	// before the site is read again. Torrent bytes alone are not a proof.
-	if proof, found := a.confirmSpend(ctx, site, job.ID); found {
+	if proof, found := a.confirmSpend(ctx, site, tokenRequestID); found {
 		if reconciled, err := a.ledger.Reconcile(a.now(), site, proof); err == nil && reconciled.Class != tokenledger.ClassUncertain {
 			switch proof.State {
 			case "CONSUMED":
 				if fetchErr != nil {
-					if plan.StreamingEnabled && isNeteasePlaylistFallback(job.BatchID, plan) {
+					if tokenReviewFallbackUsable(job, plan) {
 						return a.acquireFallback(ctx, execution, held, job, plan)
 					}
 					return a.finishAcquire(held, job, "token", "令牌已确认消耗，但获取未完成；尚未下载、尚未入库", "SPEND_CONFIRMED", nil)
@@ -246,26 +379,26 @@ func (a *App) acquireWithToken(ctx context.Context, execution *scheduler.Executi
 				return a.finishConfirmedToken(held, job, "令牌已确认消耗，种子已保存；尚未下载、尚未入库", "SPEND_CONFIRMED", receiptPtr)
 			case "NOT_CONSUMED":
 				if fetchErr != nil {
-					if plan.StreamingEnabled && isNeteasePlaylistFallback(job.BatchID, plan) {
-						return a.acquireFallback(ctx, execution, held, job, plan)
-					}
-					return a.finishAcquire(held, job, "token", "令牌未消耗，但获取未完成；尚未下载、尚未入库", "SPEND_NOT_CONSUMED", nil)
+					return scheduler.Outcome{}, unavailableTokenCandidate("令牌已确认未消耗，但获取未完成", "SPEND_NOT_CONSUMED")
 				}
-				return a.finishAcquire(held, job, "token", "令牌未消耗，种子已保存；尚未下载、尚未入库", "SPEND_NOT_CONSUMED", receiptPtr)
+				return scheduler.Outcome{}, unavailableTokenCandidate("令牌未消耗，种子不具备下载授权", "SPEND_NOT_CONSUMED")
 			}
 		}
 	}
-	if outcome, settled, err := a.confirmTokenFromSite(ctx, execution, held, job, plan, site, resource, receiptPtr); err != nil || settled {
+	if outcome, settled, err := a.confirmTokenFromSite(ctx, execution, held, job, plan, site, resource, receiptPtr, tokenRequestID); err != nil || settled {
 		return outcome, err
 	}
 	note := "种子已保存，免费对账未完成"
 	if fetchErr != nil {
 		note = "获取未完成，需要核对是否已消耗"
 	}
-	if _, err = a.ledger.Advance(a.now(), site, job.ID, tokenledger.StateRequestUnknown, note); err != nil {
+	if _, err = a.ledger.Advance(a.now(), site, tokenRequestID, tokenledger.StateRequestUnknown, note); err != nil {
 		return scheduler.Outcome{}, err
 	}
 	if fetchErr != nil {
+		if tokenReviewFallbackUsable(job, plan) {
+			return a.acquireFallback(ctx, execution, held, job, plan)
+		}
 		return a.finishAcquire(held, job, "token", "获取未完成，令牌状态待对账；尚未下载、尚未入库", "REQUEST_UNKNOWN", nil)
 	}
 	// The torrent bytes are here: the FL download itself succeeded. Whether
@@ -314,12 +447,12 @@ func tokenEffectConfirmed(decision sitefree.Decision) bool {
 // torrent already in hand can be downloaded. A read failure or a page that
 // still is not free leaves the reservation for the caller to mark uncertain.
 // This read never sends usetoken.
-func (a *App) confirmTokenFromSite(ctx context.Context, execution *scheduler.Execution, held taskrepo.Token, job workflow.Job, plan SearchPlan, site, resource string, receipt *torrentfetch.Receipt) (scheduler.Outcome, bool, error) {
+func (a *App) confirmTokenFromSite(ctx context.Context, execution *scheduler.Execution, held taskrepo.Token, job workflow.Job, plan SearchPlan, site, resource string, receipt *torrentfetch.Receipt, tokenRequestID string) (scheduler.Outcome, bool, error) {
 	after, err := a.readEvidence(ctx, plan, site, resource)
 	if err != nil || !tokenEffectConfirmed(after) {
 		return scheduler.Outcome{}, false, nil
 	}
-	if _, err = a.ledger.Advance(a.now(), site, job.ID, tokenledger.StateConfirmed, "site-personal-free"); err != nil {
+	if _, err = a.ledger.Advance(a.now(), site, tokenRequestID, tokenledger.StateConfirmed, "site-personal-free"); err != nil {
 		return scheduler.Outcome{}, false, err
 	}
 	if receipt != nil {
@@ -327,30 +460,30 @@ func (a *App) confirmTokenFromSite(ctx context.Context, execution *scheduler.Exe
 		return outcome, true, err
 	}
 	if strings.HasPrefix(job.BatchID, "pl-") && (site == "dicmusic" || site == "orpheus") {
-		if plan.StreamingEnabled && isNeteasePlaylistFallback(job.BatchID, plan) {
+		if tokenReviewFallbackUsable(job, plan) {
 			outcome, err := a.acquireFallback(ctx, execution, held, job, plan)
 			return outcome, true, err
 		}
 		outcome, err := a.finishAcquire(held, job, "token", "站点已确认免费，但没有收到令牌种子；未改用普通下载链接", "SPEND_CONFIRMED", nil)
 		return outcome, true, err
 	}
-	return a.saveFreeTorrent(ctx, execution, held, job, plan, site, resource)
+	return a.saveFreeTorrent(ctx, execution, held, job, plan, site, resource, tokenRequestID)
 }
 
 // reconcileInFlightToken runs when this request is already in flight. It
 // never sends usetoken again. A site free label confirms the reservation
 // and then downloads the torrent without a token; otherwise the request
 // stays uncertain.
-func (a *App) reconcileInFlightToken(ctx context.Context, execution *scheduler.Execution, held taskrepo.Token, job workflow.Job, plan SearchPlan, site, resource string) (scheduler.Outcome, error) {
-	if outcome, settled, err := a.confirmTokenFromSite(ctx, execution, held, job, plan, site, resource, nil); err != nil || settled {
+func (a *App) reconcileInFlightToken(ctx context.Context, execution *scheduler.Execution, held taskrepo.Token, job workflow.Job, plan SearchPlan, site, resource, tokenRequestID string) (scheduler.Outcome, error) {
+	if outcome, settled, err := a.confirmTokenFromSite(ctx, execution, held, job, plan, site, resource, nil, tokenRequestID); err != nil || settled {
 		return outcome, err
 	}
-	current, found, err := a.ledger.Get(site, job.ID)
+	current, found, err := a.ledger.Get(site, tokenRequestID)
 	if err != nil {
 		return scheduler.Outcome{}, err
 	}
 	if found && current.State == tokenledger.StateRequesting {
-		if _, err = a.ledger.Advance(a.now(), site, job.ID, tokenledger.StateRequestUnknown, "对账后仍未确认免费"); err != nil {
+		if _, err = a.ledger.Advance(a.now(), site, tokenRequestID, tokenledger.StateRequestUnknown, "对账后仍未确认免费"); err != nil {
 			return scheduler.Outcome{}, err
 		}
 	}
@@ -359,8 +492,12 @@ func (a *App) reconcileInFlightToken(ctx context.Context, execution *scheduler.E
 
 // saveFreeTorrent stores the torrent with the ordinary download link after
 // the site has already shown that this user does not need another token.
-func (a *App) saveFreeTorrent(ctx context.Context, execution *scheduler.Execution, held taskrepo.Token, job workflow.Job, plan SearchPlan, site, resource string) (scheduler.Outcome, bool, error) {
+func (a *App) saveFreeTorrent(ctx context.Context, execution *scheduler.Execution, held taskrepo.Token, job workflow.Job, plan SearchPlan, site, resource, tokenRequestID string) (scheduler.Outcome, bool, error) {
 	receipt, err := a.fetchTorrent(ctx, execution, plan, site, resource, false)
+	if err == nil {
+		receipt.TokenRequestID = tokenRequestID
+		receipt.FreeMethod = "token"
+	}
 	if err != nil {
 		outcome, finishErr := a.finishAcquire(held, job, "token", "免费已确认，但种子没有保存；未再次使用令牌；尚未下载、尚未入库", "SPEND_CONFIRMED", nil)
 		return outcome, true, finishErr
@@ -573,6 +710,9 @@ func (a *App) finishAcquire(held taskrepo.Token, job workflow.Job, review, messa
 		ErrorClass: class, Message: message, NowNS: a.now().UnixNano(),
 	}
 	if receipt != nil {
+		if receipt.FetchedAtNS == 0 {
+			receipt.FetchedAtNS = complete.NowNS
+		}
 		body, err := json.Marshal(receipt)
 		if err != nil {
 			return scheduler.Outcome{}, err

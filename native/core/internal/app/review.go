@@ -282,19 +282,16 @@ func (a *App) reviewWithAI(w http.ResponseWriter, r *http.Request, id, requestID
 		return
 	}
 	if inspection.Job.ReviewKind == "token" {
-		// aiReviewEligible admits only token checkpoints proven to have made no token download request.
-		// Replay that hold through the ordinary bounded review path so acquire
-		// re-checks the balance and enters the NetEase fallback when the account
-		// still cannot fund an FL request. Unknown or consumed token requests
-		// never reach this branch.
-		result, retryErr := a.flows.Review(requestID, id, workflow.ReviewDecision{Action: "retry"}, nowNS)
-		a.writeReviewResult(w, result, retryErr, "ai")
+		a.reviewTokenCheckpoint(w, requestID, id, nowNS, inspection.Job)
 		return
 	}
 	if inspection.Job.TaskType != "search" {
-		// Album expansion, metadata and interrupted jobs do not have a tracker
-		// candidate to compare. Use the original identity and current source
-		// policy to replay the job automatically.
+		if inspection.Task != nil && inspection.Task.Command == workflow.CommandProcess && inspection.Job.ReviewKind == "candidate" {
+			a.reviewProcessCandidateCheckpoint(w, requestID, id, nowNS, inspection.Job)
+			return
+		}
+		// Metadata and identification jobs do not have a tracker candidate to
+		// compare. Use the original identity and source policy to replay them.
 		result, retryErr := a.flows.Review(requestID, id, workflow.ReviewDecision{Action: "retry"}, nowNS)
 		a.writeReviewResult(w, result, retryErr, "ai")
 		return
@@ -447,6 +444,7 @@ func (a *App) reviewSearchFromEvidence(w http.ResponseWriter, requestID, id stri
 		return false
 	}
 	plan.SelectedSite, plan.SelectedCandidateID = "", ""
+	plan.AcquireCandidates = nil
 	encoded, err := json.Marshal(plan)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "code": "REVIEW_UNAVAILABLE"})
@@ -477,6 +475,7 @@ func (a *App) acceptNeteasePlaylistFallback(w http.ResponseWriter, id, requestID
 		return
 	}
 	plan.SelectedSite, plan.SelectedCandidateID = "", ""
+	plan.AcquireCandidates = nil
 	encoded, err := json.Marshal(plan)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "code": "REVIEW_UNAVAILABLE"})
@@ -493,20 +492,15 @@ func (a *App) acceptNeteasePlaylistFallback(w http.ResponseWriter, id, requestID
 // flow through the background token reconciler. Every other review can be
 // replayed from its durable evidence without inventing a release.
 func (a *App) aiReviewEligible(job workflow.Job) bool {
-	if a == nil || job.Stage != "needs_review" {
+	if a == nil || job.Stage != "needs_review" || job.Paused || job.CancelRequested {
 		return false
 	}
 	if job.ReviewKind == "token" {
-		// These classes are emitted before a token download request exists:
-		// the account read was held or rate-limited, or the reservation never
-		// formed. Replaying them only re-checks the ledger and current balance;
-		// consumed, released and uncertain requests remain explicit/reconciled.
-		switch job.ErrorClass {
-		case "account_token_hold", "rate_limited", "token_pending":
-			return true
-		default:
-			return false
-		}
+		// Token review is deterministic infrastructure reconciliation, not a
+		// model decision. The handler proves that no token download request is
+		// replayed; uncertain effects are reconciled, bounded, and then fall
+		// back or settle without another spend.
+		return true
 	}
 	if job.ReviewKind == "interrupted" {
 		task, err := a.tasks.Get(job.ActiveTaskID)
@@ -580,6 +574,7 @@ func (a *App) reviewAccept(w http.ResponseWriter, id, requestID, site, candidate
 	report := a.rebuildReviewReport(inspection.Job, plan, observations, site, candidateID)
 	plan.SelectedSite = site
 	plan.SelectedCandidateID = candidateID
+	plan.AcquireCandidates = acquireCandidatesFromObservations(plan, observations, site, candidateID)
 	enriched, err := json.Marshal(plan)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "code": "REVIEW_UNAVAILABLE"})

@@ -95,7 +95,7 @@ const appJS = `(function () {
   async function reviewAllAI() {
     if (loading) return;
     setBusy(true);
-    var ids = new Set(), checked = 0, accepted = 0, failed = 0, already = 0, failures = {};
+    var ids = new Set(), checked = 0, accepted = 0, held = 0, failed = 0, already = 0, failures = {};
     try {
       var cursor = "";
       setStatus("info", "正在读取全部待核对任务");
@@ -117,9 +117,12 @@ const appJS = `(function () {
           var reason = result.code || ("HTTP " + response.status);
           failures[reason] = (failures[reason] || 0) + 1;
         } else checked++;
-        if (response.ok && result.ok) accepted++;
+        if (response.ok && result.ok) {
+          if (result.held || result.stage === "needs_review") held++;
+          else accepted++;
+        }
       }
-      await reloadThen("ok", "AI 已核对 " + checked + " 项，确认推进 " + accepted + " 项，仍待核对 " + (checked - accepted) + " 项，调用或提交失败 " + failed + " 项，已处理 " + already + " 项。" + Object.keys(failures).map(function(code) { return code + " " + failures[code] + " 项"; }).join(" · "));
+      await reloadThen("ok", "AI 已核对 " + checked + " 项，自动推进 " + accepted + " 项，余额对账中 " + held + " 项，调用或提交失败 " + failed + " 项，已处理 " + already + " 项。" + Object.keys(failures).map(function(code) { return code + " " + failures[code] + " 项"; }).join(" · "));
     } catch(err) {
       setStatus("fail", err.message + "。已核对 " + checked + " 项，确认推进 " + accepted + " 项。");
     } finally { setBusy(false); }
@@ -2316,7 +2319,15 @@ const appJS = `(function () {
         setStatus("fail", (body && body.message) || ("核对操作失败。" + (body && body.code ? "（" + body.code + "）" : "")));
         return;
       }
-      setStatus(action === "skip" ? "review" : "ok", (action === "accept" || action === "ai") ? "已接受候选，继续处理。" : (action === "retry" ? "已重试。" : "已跳过。"));
+      if (body.held || body.stage === "needs_review") {
+        setStatus("review", body.message || "已提交余额对账，稍后自动收敛。");
+      } else if (body.stage === "fallback") {
+        setStatus("ok", "已自动切换流媒体回退，未重复使用令牌。");
+      } else if (body.stage === "skipped") {
+        setStatus("review", "没有可安全执行的后续路径，已自动结束。");
+      } else {
+        setStatus(action === "skip" ? "review" : "ok", action === "accept" ? "已接受候选，继续处理。" : (action === "retry" ? "已自动重试。" : "已自动处理。"));
+      }
     } catch (err) {
       setStatus("fail", "核对操作中断。");
     } finally {

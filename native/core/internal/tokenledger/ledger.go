@@ -77,6 +77,7 @@ type Quote struct {
 	CookieID          string
 	ResourceID        string
 	RequestID         string
+	JobID             string
 	Cost              int
 	BalanceKnown      bool
 	Balance           int
@@ -114,6 +115,7 @@ type row struct {
 	AccountID         string `json:"account_id,omitempty"`
 	ResourceID        string `json:"resource_id"`
 	RequestID         string `json:"request_id"`
+	JobID             string `json:"job_id,omitempty"`
 	Cost              int    `json:"cost"`
 	RequestedCost     int    `json:"requested_cost"`
 	State             string `json:"state"`
@@ -157,6 +159,9 @@ func (l *Ledger) Reserve(now time.Time, quote Quote) (Result, error) {
 	}
 	if quote.Budget < 0 {
 		quote.Budget = 0
+	}
+	if quote.JobID == "" {
+		quote.JobID = quote.RequestID
 	}
 	if err := validateQuote(quote); err != nil {
 		return Result{}, err
@@ -361,7 +366,8 @@ func readReplay(v *dataengine.View, quote Quote) (row, []byte, error) {
 	}
 	if !ok || json.Unmarshal(raw, &current) != nil || current.ID != id ||
 		current.RequestID != quote.RequestID || current.Site != quote.Site ||
-		current.ResourceID != quote.ResourceID || current.BudgetRef != quote.BudgetRef || current.RequestedCost != quote.Cost {
+		currentJobID(current) != quote.JobID || current.ResourceID != quote.ResourceID ||
+		current.BudgetRef != quote.BudgetRef || current.RequestedCost != quote.Cost {
 		return row{}, nil, dataengine.ErrInvalidRequest
 	}
 	return current, raw, nil
@@ -425,7 +431,7 @@ func decide(now time.Time, quote Quote, snap indexDoc) (row, indexItem, Result) 
 		return row{}, indexItem{}, Result{Class: ClassTokenBudget}
 	}
 	next := row{
-		ID: quote.RequestID, Site: quote.Site, AccountID: quote.AccountID, ResourceID: quote.ResourceID, RequestID: quote.RequestID,
+		ID: quote.RequestID, Site: quote.Site, AccountID: quote.AccountID, ResourceID: quote.ResourceID, RequestID: quote.RequestID, JobID: quote.JobID,
 		Cost: quote.Cost, RequestedCost: quote.Cost, State: StateReserved, Class: ClassReserved, BudgetRef: quote.BudgetRef,
 		Balance: quote.Balance, BalanceKnown: true, Budget: quote.Budget, SafetyMargin: quote.SafetyMargin,
 		ObservedAtNS: quote.ObservedAt.UnixNano(), UpdatedNS: now.UnixNano(),
@@ -440,7 +446,7 @@ func rejection(now time.Time, quote Quote, class string) row {
 		balance = quote.Balance
 	}
 	return row{
-		ID: quote.RequestID, Site: quote.Site, ResourceID: quote.ResourceID, RequestID: quote.RequestID,
+		ID: quote.RequestID, Site: quote.Site, AccountID: quote.AccountID, ResourceID: quote.ResourceID, RequestID: quote.RequestID, JobID: quote.JobID,
 		Cost: 0, RequestedCost: quote.Cost, State: StateRejected, Class: class, BudgetRef: quote.BudgetRef,
 		Balance: balance, BalanceKnown: quote.BalanceKnown && class != ClassBalanceUnknown,
 		Budget: quote.Budget, SafetyMargin: quote.SafetyMargin, ObservedAtNS: observed(quote), UpdatedNS: now.UnixNano(),
@@ -481,7 +487,8 @@ func resultFrom(current row) Result {
 }
 
 func validateQuote(quote Quote) error {
-	if !tokenSite(quote.Site) || !validID(quote.ResourceID) || !validID(quote.RequestID) || !validID(quote.BudgetRef) {
+	if !tokenSite(quote.Site) || !validID(quote.ResourceID) || !validID(quote.RequestID) ||
+		!validID(quote.JobID) || !validID(quote.BudgetRef) {
 		return dataengine.ErrInvalidRequest
 	}
 	if quote.Cost < 1 || quote.Cost > maxQuoteBudget || quote.Budget < 0 || quote.Budget > maxQuoteBudget || quote.SafetyMargin < 0 || quote.SafetyMargin > maxQuoteBudget {
@@ -604,6 +611,13 @@ func oneOf(value string, choices ...string) bool {
 		}
 	}
 	return false
+}
+
+func currentJobID(current row) string {
+	if current.JobID != "" {
+		return current.JobID
+	}
+	return current.RequestID
 }
 
 func indexKey(site string) []byte { return []byte("fl/idx/" + site) }

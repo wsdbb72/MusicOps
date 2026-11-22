@@ -197,7 +197,7 @@ func writeGenericTags(ctx context.Context, path string, updates map[string][]str
 	if err != nil {
 		return nil, err
 	}
-	if err := os.Rename(tempPath, path); err != nil {
+	if err := renameFileWithRetry(tempPath, path); err != nil {
 		if restoreErr := restoreBackup(path, backup); restoreErr != nil {
 			return nil, errors.Join(err, restoreErr)
 		}

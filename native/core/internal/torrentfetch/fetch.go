@@ -8,6 +8,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/url"
@@ -51,6 +52,9 @@ type Receipt struct {
 	Size               int    `json:"size"`
 	Path               string `json:"path"`
 	UseToken           bool   `json:"use_token"`
+	TokenRequestID     string `json:"token_request_id,omitempty"`
+	FetchedAtNS        int64  `json:"fetched_at_ns,omitempty"`
+	FreeMethod         string `json:"free_method,omitempty"`
 	Downloaded         bool   `json:"downloaded"`
 	LibraryPublished   bool   `json:"library_published"`
 	ProductionVerified bool   `json:"production_verified"`
@@ -105,8 +109,17 @@ func Fetch(ctx context.Context, req Request) (Receipt, error) {
 	if err != nil {
 		return Receipt{}, err
 	}
-	if response.StatusCode != http.StatusOK || len(body) == 0 || len(body) > 8<<20 || looksLikeHTML(body) {
-		return Receipt{}, errors.New("torrent response was not a metainfo file")
+	if response.StatusCode != http.StatusOK {
+		return Receipt{}, fmt.Errorf("torrent response HTTP %d was not a metainfo file", response.StatusCode)
+	}
+	if len(body) == 0 {
+		return Receipt{}, errors.New("torrent response HTTP 200 was empty")
+	}
+	if len(body) > 8<<20 {
+		return Receipt{}, errors.New("torrent response HTTP 200 exceeded 8 MiB")
+	}
+	if looksLikeHTML(body) {
+		return Receipt{}, errors.New("torrent response HTTP 200 was HTML, not a metainfo file")
 	}
 	infoHash, err := infoHashV1(body)
 	if err != nil {

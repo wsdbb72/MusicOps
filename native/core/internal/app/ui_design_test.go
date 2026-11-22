@@ -116,3 +116,19 @@ func TestTorrentControlsFollowTheJobStage(t *testing.T) {
 		t.Fatal("the page must never ask for the files to be deleted")
 	}
 }
+
+// Token reconciliation is a successful hold, not an AI submission failure.
+// The batch and single-item views must distinguish automatic progress from
+// balance reconciliation and streaming fallback.
+func TestTokenReviewUIReportsHeldAndAutomaticOutcomes(t *testing.T) {
+	for _, want := range []string{
+		`result.held || result.stage === "needs_review"`,
+		`余额对账中`,
+		`已自动切换流媒体回退，未重复使用令牌。`,
+		`没有可安全执行的后续路径，已自动结束。`,
+	} {
+		if !strings.Contains(appJS, want) {
+			t.Fatal("missing token review feedback:", want)
+		}
+	}
+}

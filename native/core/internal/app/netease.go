@@ -299,6 +299,8 @@ func (a *App) neteaseSearchSong(ctx context.Context, plan SearchPlan) (*neteaseS
 	}
 	wantParts := splitPlaylistArtists(plan.ExpectedArtist)
 	best := (*neteaseSong)(nil)
+	var durable *neteaseSong
+	ambiguous := false
 	for _, item := range songs {
 		if item.ID <= 0 || strings.TrimSpace(item.Name) == "" {
 			continue
@@ -313,22 +315,37 @@ func (a *App) neteaseSearchSong(ctx context.Context, plan SearchPlan) (*neteaseS
 			}
 		}
 		artistMatch := len(wantParts) == 0 || playlistArtistsMatch(wantParts, artists)
-		if plan.PlaylistTrack != "" {
+		if plan.PlaylistTrack != "" && !(plan.NeteaseSongID > 0 && item.ID == plan.NeteaseSongID) {
 			artistMatch = artistMatch && normalizeKey(item.Album.Name) == normalizeKey(plan.ExpectedTitle)
 		}
 		if !artistMatch || len(artists) == 0 {
 			continue
 		}
 		candidate := &neteaseSong{ID: item.ID, Name: item.Name, Artists: artists, Album: item.Album.Name, DurationMS: item.Duration, AlbumID: item.Album.ID, CoverURL: item.Album.PicURL, CatalogVerified: true}
+		if plan.NeteaseSongID > 0 && item.ID == plan.NeteaseSongID {
+			durable = candidate
+			continue
+		}
 		// Prefer the first exact match: the catalogue ranks by relevance and
 		// the title/artist check above already rejected the rest.
 		if plan.PlaylistTrack != "" && best != nil && (best.AlbumID != candidate.AlbumID || best.ID != candidate.ID) {
-			return nil, errors.New("网易云返回多个同名录音，无法唯一确认发行版")
+			ambiguous = true
+			continue
 		}
-		best = candidate
+		if best == nil {
+			best = candidate
+		}
 		if plan.PlaylistTrack == "" {
 			break
 		}
+	}
+	if durable != nil {
+		// A durable id from the playlist is stronger evidence than duplicate
+		// album labels, which NetEase often shares across reissues.
+		return durable, nil
+	}
+	if ambiguous {
+		return nil, errors.New("网易云返回多个同名录音，无法唯一确认发行版")
 	}
 	return best, nil
 }
@@ -757,6 +774,7 @@ func (a *App) stageNeteaseSongWithEngine(ctx context.Context, plan SearchPlan, s
 	if path != "" || !handled {
 		return path, note, class, handled
 	}
+	primaryNote, primaryClass := note, class
 	if song.CatalogVerified && song.ID > 0 && song.ID == plan.NeteaseSongID {
 		// The playlist already supplied the identity. Text search can omit the
 		// exact ID even when the engine's download endpoint can serve it.
@@ -764,9 +782,57 @@ func (a *App) stageNeteaseSongWithEngine(ctx context.Context, plan SearchPlan, s
 			ID: strconv.FormatInt(song.ID, 10), Source: "netease", Name: song.Name,
 			Artist: strings.Join(song.Artists, " / "), Album: song.Album, Duration: (song.DurationMS + 500) / 1000,
 		}
-		return a.finishNeteaseEngineFallback(ctx, plan, note, class, exact)
+		if enginePath, engineNote, engineClass := a.tryConfiguredStreamSong(ctx, "netease", plan, exact); enginePath != "" {
+			return enginePath, primaryNote + "；网易云内置下载引擎：" + engineNote, downloadpolicy.ClassDownload, true
+		} else {
+			primaryNote += "；网易云内置下载引擎：" + engineNote
+			primaryClass = preferStreamFailure(primaryClass, engineClass)
+		}
+	} else if enginePath, engineNote, engineClass := a.tryConfiguredStreamSong(ctx, "netease", plan, nil); enginePath != "" {
+		return enginePath, primaryNote + "；网易云内置下载引擎：" + engineNote, downloadpolicy.ClassDownload, true
+	} else {
+		primaryNote += "；网易云内置下载引擎：" + engineNote
+		primaryClass = preferStreamFailure(primaryClass, engineClass)
 	}
-	return a.stageNeteaseEngineFallback(ctx, plan, note, class)
+
+	if strings.TrimSpace(plan.PlaylistTrack) == "" {
+		return "", primaryNote, primaryClass, true
+	}
+	alternates, alternateErr := a.neteaseAlternateSongs(ctx, plan, song)
+	if alternateErr != nil {
+		return "", primaryNote + "；网易云替代录音检索失败：" + alternateErr.Error(), primaryClass, true
+	}
+	if len(alternates) == 0 {
+		return "", primaryNote + "；没有找到曲名、歌手和时长都匹配的安全替代录音", primaryClass, true
+	}
+	notes := make([]string, 0, len(alternates))
+	for _, alternate := range alternates {
+		if recovered, recoveredNote, _, _ := a.stageNeteaseSong(ctx, plan, &alternate); recovered != "" {
+			if err := a.finalizeNeteaseAlternate(ctx, recovered, plan, &alternate, song, song.DurationMS); err != nil {
+				_ = os.Remove(recovered)
+				notes = append(notes, "ID "+strconv.FormatInt(alternate.ID, 10)+"："+err.Error())
+				continue
+			}
+			return recovered, primaryNote + "；网易云精确录音没有可用音源，已自动选用同曲同艺人的替代发行版 ID " + strconv.FormatInt(alternate.ID, 10) + "（" + alternate.Album + "）；" + recoveredNote, downloadpolicy.ClassDownload, true
+		} else {
+			notes = append(notes, "ID "+strconv.FormatInt(alternate.ID, 10)+"："+recoveredNote)
+		}
+		exact := &streamSong{
+			ID: strconv.FormatInt(alternate.ID, 10), Source: "netease", Name: alternate.Name,
+			Artist: strings.Join(alternate.Artists, " / "), Album: alternate.Album, Duration: (alternate.DurationMS + 500) / 1000,
+		}
+		if enginePath, engineNote, _ := a.tryConfiguredStreamSong(ctx, "netease", plan, exact); enginePath != "" {
+			if err := a.finalizeNeteaseAlternate(ctx, enginePath, plan, &alternate, song, song.DurationMS); err != nil {
+				_ = os.Remove(enginePath)
+				notes = append(notes, "ID "+strconv.FormatInt(alternate.ID, 10)+" 引擎："+err.Error())
+				continue
+			}
+			return enginePath, primaryNote + "；网易云精确录音没有可用音源，已自动选用同曲同艺人的替代发行版 ID " + strconv.FormatInt(alternate.ID, 10) + "（" + alternate.Album + "）；" + engineNote, downloadpolicy.ClassDownload, true
+		} else {
+			notes = append(notes, "ID "+strconv.FormatInt(alternate.ID, 10)+" 引擎："+engineNote)
+		}
+	}
+	return "", primaryNote + "；安全替代录音均未取得可用音频：" + strings.Join(notes, "；"), primaryClass, true
 }
 
 func (a *App) stageNeteaseEngineFallback(ctx context.Context, plan SearchPlan, primaryNote, primaryClass string) (string, string, string, bool) {

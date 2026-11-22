@@ -104,7 +104,7 @@ func (a *App) backfillLyricsSidecars(root string, dryRun bool) {
 			if data, readErr := os.ReadFile(legacy); readErr == nil && len(strings.TrimSpace(string(data))) > 0 {
 				if dryRun {
 					renamed = true
-				} else if renameErr := os.Rename(legacy, standard); renameErr != nil {
+				} else if renameErr := renameFileWithRetry(legacy, standard); renameErr != nil {
 					skipped = true
 					lyricsBackfill.mu.Lock()
 					lyricsBackfill.report.Failed = append(lyricsBackfill.report.Failed, legacy+": "+renameErr.Error())

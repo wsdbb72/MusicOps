@@ -48,9 +48,13 @@ func TestAIReviewEligibilityCoversSafeNonSearchAndTokenHoldPaths(t *testing.T) {
 	}
 	for _, class := range []string{"token_spent", "REQUEST_UNKNOWN", "SPEND_CONFIRMED"} {
 		token.ErrorClass = class
-		if application.aiReviewEligible(token) {
-			t.Fatalf("%s must remain explicit or be handled by the token reconciler", class)
+		if !application.aiReviewEligible(token) {
+			t.Fatalf("%s needs a deterministic reconciliation action, not a hidden disabled button", class)
 		}
+	}
+	token.Paused = true
+	if application.aiReviewEligible(token) {
+		t.Fatal("a paused token review must not be auto-processed")
 	}
 	complete := base
 	complete.Stage = "completed"

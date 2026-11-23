@@ -19,20 +19,30 @@ func TestNeteasePlaylistFallbackKeepsOriginalPlatform(t *testing.T) {
 		t.Fatal(got)
 	}
 	order := downloadpolicy.CanonicalOrder()
-	steps, err := playlistFallbackSteps(order, true)
-	if err != nil || len(steps) != 1 || steps[0].Name != "netease" {
-		t.Fatal(steps, err)
+	steps, err := playlistFallbackSteps(order, true, false)
+	if err != nil || len(steps) < 2 || steps[0].Name != "netease" {
+		t.Fatal("NetEase must be first, but remaining providers must stay available", steps, err)
 	}
-	normal, err := playlistFallbackSteps(order, false)
+	exclusive, err := playlistFallbackSteps(order, true, true)
+	if err != nil || len(exclusive) != 1 || exclusive[0].Name != "netease" {
+		t.Fatal(exclusive, err)
+	}
+	normal, err := playlistFallbackSteps(order, false, false)
 	if err != nil || len(normal) < 2 || normal[0].Name == "netease" {
 		t.Fatal(normal, err)
 	}
-	album, exclusive := neteaseFallbackRouting("pl-netease-590536461-batch", plan)
-	if !album || !exclusive {
-		t.Fatal("a NetEase-origin playlist must fall back to NetEase, not another provider")
+	album, exclusiveMode := neteaseFallbackRouting("pl-netease-590536461-batch", plan)
+	if !album || exclusiveMode {
+		t.Fatal("a NetEase-origin playlist must try NetEase first without disabling safe fallbacks")
 	}
-	album, exclusive = neteaseFallbackRouting("pl-qqmusic-123-batch", plan)
-	if album || exclusive {
+	explicit := plan
+	explicit.NeteaseOnly = true
+	album, exclusiveMode = neteaseFallbackRouting("pl-netease-590536461-batch", explicit)
+	if !album || !exclusiveMode {
+		t.Fatal("an explicit NetEase-only plan must stay exclusive")
+	}
+	album, exclusiveMode = neteaseFallbackRouting("pl-qqmusic-123-batch", plan)
+	if album || exclusiveMode {
 		t.Fatal("non-Netease playlist was routed through the NetEase album path")
 	}
 }

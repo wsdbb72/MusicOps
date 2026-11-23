@@ -244,22 +244,34 @@ func neteasePlaylistTitle(plan SearchPlan) string {
 	return ""
 }
 
-func playlistFallbackSteps(order []string, exclusiveNetease bool) ([]downloadpolicy.Step, error) {
+func playlistFallbackSteps(order []string, neteaseFirst, exclusiveNetease bool) ([]downloadpolicy.Step, error) {
 	steps, err := downloadpolicy.PlanOrdered(downloadpolicy.DefaultSources(), order, downloadpolicy.Track{SourceKnown: exclusiveNetease})
-	if err != nil || !exclusiveNetease {
-		return steps, err
+	if err != nil {
+		return nil, err
 	}
-	for _, step := range steps {
+	neteaseIndex := -1
+	for i, step := range steps {
 		if step.Name == "netease" {
-			return []downloadpolicy.Step{step}, nil
+			neteaseIndex = i
+			break
 		}
 	}
-	return nil, errors.New("网易云回退源未启用")
+	if neteaseIndex < 0 {
+		return nil, errors.New("网易云回退源未启用")
+	}
+	neteaseStep := steps[neteaseIndex]
+	if exclusiveNetease {
+		return []downloadpolicy.Step{neteaseStep}, nil
+	}
+	if neteaseFirst && neteaseIndex > 0 {
+		steps = append([]downloadpolicy.Step{neteaseStep}, append(steps[:neteaseIndex], steps[neteaseIndex+1:]...)...)
+	}
+	return steps, nil
 }
 
 func neteaseFallbackRouting(batchID string, plan SearchPlan) (albumPath, exclusive bool) {
 	albumPath = isNeteasePlaylistFallback(batchID, plan)
-	return albumPath, albumPath
+	return albumPath, albumPath && plan.NeteaseOnly
 }
 
 // Single local tracks often belong to partial albums. The ordinary streaming
@@ -291,7 +303,7 @@ func (a *App) acquireFallback(ctx context.Context, execution *scheduler.Executio
 		}
 		return scheduler.Outcome{State: "completed", Message: message}, nil
 	}
-	steps, err := playlistFallbackSteps(a.streamingOrder(), exclusiveNetease)
+	steps, err := playlistFallbackSteps(a.streamingOrder(), neteaseAlbum, exclusiveNetease)
 	if err != nil {
 		return scheduler.Outcome{}, err
 	}

@@ -17,10 +17,12 @@ func TestTokenReviewDecisionNeverReplaysAnUncertainSpend(t *testing.T) {
 		class       string
 		retries     uint8
 		fallback    bool
+		message     string
 		disposition tokenReviewDisposition
 	}{
 		{name: "account hold retries", class: "account_token_hold", disposition: tokenReviewRetry},
 		{name: "transient read retries", class: "network", disposition: tokenReviewRetry},
+		{name: "detail rate limit retries", class: "detail", message: "detail response HTTP 429 is rate limited for 22 seconds", disposition: tokenReviewRetry},
 		{name: "retry limit falls back", class: "account_token_hold", retries: tokenReviewRetryLimit, fallback: true, disposition: tokenReviewFallback},
 		{name: "retry limit settles", class: "account_token_hold", retries: tokenReviewRetryLimit, disposition: tokenReviewSkip},
 		{name: "unknown waits for balance proof", class: "REQUEST_UNKNOWN", disposition: tokenReviewWait},
@@ -31,7 +33,7 @@ func TestTokenReviewDecisionNeverReplaysAnUncertainSpend(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got := tokenReviewDecisionFor(workflow.Job{ErrorClass: tc.class, TokenRetryCount: tc.retries}, tc.fallback)
+			got := tokenReviewDecisionFor(workflow.Job{ErrorClass: tc.class, Message: tc.message, TokenRetryCount: tc.retries}, tc.fallback)
 			if got != tc.disposition {
 				t.Fatalf("decision=%s want=%s", got, tc.disposition)
 			}

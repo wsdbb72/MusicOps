@@ -184,10 +184,11 @@ func (a *App) acquireCandidate(ctx context.Context, execution *scheduler.Executi
 	decision, err := a.readEvidence(ctx, plan, site, resource)
 	if err != nil {
 		message := candidateFailureMessage("站点详情读取失败，未发下载或令牌请求", err)
+		class := candidateReadFailureClass(err)
 		if tokenledger.IsTokenSite(site) {
-			return scheduler.Outcome{}, unavailableTokenCandidate(message, "detail")
+			return scheduler.Outcome{}, unavailableTokenCandidate(message, class)
 		}
-		return scheduler.Outcome{}, unavailableCandidate(message, "detail")
+		return scheduler.Outcome{}, unavailableCandidate(message, class)
 	}
 	// Personal free is free everywhere. Global free (a site-wide freeleech
 	// event, proven for this exact torrent row) costs no token on any of the

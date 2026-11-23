@@ -26,6 +26,12 @@ const (
 // moved to the configured streaming fallback or settled as skipped.
 func tokenReviewDecisionFor(job workflow.Job, fallbackUsable bool) tokenReviewDisposition {
 	class := strings.TrimSpace(job.ErrorClass)
+	if class == "" || class == "detail" {
+		normalized := candidateReadFailureClassText(job.Message, nil)
+		if normalized != "detail" {
+			class = normalized
+		}
+	}
 	if tokenReviewRetrySafe(class) && job.TokenRetryCount < tokenReviewRetryLimit {
 		return tokenReviewRetry
 	}
@@ -99,6 +105,12 @@ func tokenReviewFallbackReason(class string) string {
 // the language model.
 func (a *App) reviewTokenCheckpoint(w http.ResponseWriter, requestID, id string, nowNS int64, job workflow.Job) {
 	plan := a.tokenReviewPlan(job)
+	class := strings.TrimSpace(job.ErrorClass)
+	if class == "" || class == "detail" {
+		if normalized := candidateReadFailureClassText(job.Message, nil); normalized != "detail" {
+			job.ErrorClass = normalized
+		}
+	}
 	decision := tokenReviewDecisionFor(job, tokenReviewFallbackUsable(job, plan))
 	switch decision {
 	case tokenReviewRetry:

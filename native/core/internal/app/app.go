@@ -66,6 +66,8 @@ type App struct {
 	playlistEntriesCache  []audiorelease.Entry
 	playlistEntriesCached bool
 	playlistEntriesAt     time.Time
+	playlistIndexCache    playlistLibraryIndex
+	playlistIndexCached   bool
 	// neteaseBases replaces the NetEase API origin in tests, the same seam as
 	// playlistBases. Production leaves it nil.
 	neteaseBases map[string]string

@@ -25,3 +25,18 @@ func TestCandidateFailureMessageIsBounded(t *testing.T) {
 		t.Fatalf("diagnostic was not bounded: %d runes", len([]rune(got)))
 	}
 }
+
+func TestCandidateReadFailureClassKeepsTransientReadFailuresAutomatic(t *testing.T) {
+	cases := map[string]string{
+		"detail response HTTP 429 is rate limited for 22 seconds": "rate_limited",
+		"detail response HTTP 503 was not usable":                 "read_error",
+		"connection refused":                                      "network",
+		"detail response HTTP 403 was not usable":                 "auth",
+		"detail response HTTP 404 was not usable":                 "detail",
+	}
+	for message, want := range cases {
+		if got := candidateReadFailureClass(errors.New(message)); got != want {
+			t.Errorf("message %q class=%q want=%q", message, got, want)
+		}
+	}
+}

@@ -631,3 +631,17 @@ func TestPlaylistPresenceHotSlowCompilationKeepsUnicodeTrackIdentity(t *testing.
 		t.Fatal("hot-slow compilation ignored the per-track artist")
 	}
 }
+
+func TestPlaylistLibraryReusesPreparedIndexUntilExplicitInvalidation(t *testing.T) {
+	application := newApp(t)
+	first := application.playlistLibrary()
+	second := application.playlistLibrary()
+	if first.presence == nil || first.presence != second.presence || first.metadata == nil || first.metadata != second.metadata {
+		t.Fatal("repeated playlist previews did not reuse the prepared index")
+	}
+	application.invalidatePlaylistLibraryCache()
+	third := application.playlistLibrary()
+	if third.presence == first.presence || third.metadata == first.metadata {
+		t.Fatal("library mutation invalidation left stale playlist caches in use")
+	}
+}

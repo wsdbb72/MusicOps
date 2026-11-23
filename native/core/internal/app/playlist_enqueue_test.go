@@ -48,8 +48,12 @@ func TestPlaylistPresenceRequiresMatchingUnchangedAudio(t *testing.T) {
 		t.Fatal(err)
 	}
 	index := application.playlistLibrary()
-	if !index.hasTrack("Artist A", "Album X", "Song One") || index.hasTrack("Artist A", "Album Y", "Song One") || index.hasTrack("Artist A", "", "Song One") {
-		t.Fatal("presence must match the album")
+
+	presentAlbum := index.hasTrack("Artist A", "Album X", "Song One")
+	presentWrongAlbum := index.hasTrack("Artist A", "Album Y", "Song One")
+	presentNoAlbum := index.hasTrack("Artist A", "", "Song One")
+	if !presentAlbum || presentWrongAlbum || presentNoAlbum {
+		t.Fatalf("presence album=%v wrongAlbum=%v noAlbum=%v", presentAlbum, presentWrongAlbum, presentNoAlbum)
 	}
 	if _, err := audiorelease.Release(context.Background(), application.engine, audiorelease.Request{
 		RequestID: "playlist-single-presence", RootID: "playlist-single", Artist: "Artist A", Album: "Song One",
@@ -548,5 +552,66 @@ func TestPlaylistPresenceMatchesSameRecordingAcrossAlbums(t *testing.T) {
 	row.Duration = "45"
 	if index.hasPlaylistRow(row) {
 		t.Fatal("a duration mismatch was accepted as the same recording")
+	}
+}
+
+func TestPlaylistMatchKeyFoldsBoundedOrthographicVariants(t *testing.T) {
+	tests := []struct {
+		left, right string
+	}{
+		{"人間失格～メインテーマ～", "人间失格~メインテーマ~"},
+		{"i BELIEVE～星に願いを", "i BELIEVE ~星に愿いを"},
+		{"5年後･･･", "5年后…"},
+	}
+	for _, test := range tests {
+		if got, want := playlistMatchKey(test.left), playlistMatchKey(test.right); got != want {
+			t.Fatalf("playlistMatchKey(%q)=%q, %q)=%q", test.left, got, test.right, want)
+		}
+	}
+	if !playlistArtistFallbackMatches("KEMU VOXX / GUMI", "KEMU VOXX,GUMI") {
+		t.Fatal("comma-separated multi-artist path did not match slash-separated playlist credits")
+	}
+	if playlistArtistFallbackMatches("Artist", "Artist Tribute") {
+		t.Fatal("single-artist fallback accepted a different path credit")
+	}
+}
+
+func TestPlaylistPresenceMatchesCJKVariantTags(t *testing.T) {
+	ffmpeg, err := exec.LookPath("ffmpeg")
+	if err != nil {
+		t.Skip("ffmpeg unavailable")
+	}
+	application := newApp(t)
+	library := t.TempDir()
+	path := filepath.Join(library, "中島ノブユキ", "人間失格", "中島ノブユキ - 人间失格~メインテーマ~.mp3")
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	command := exec.Command(ffmpeg, "-nostdin", "-v", "error", "-y", "-f", "lavfi", "-i", "sine=frequency=440:duration=30",
+		"-metadata", "artist=中島ノブユキ", "-metadata", "album=人间失格", "-metadata", "title=人间失格~メインテーマ~", path)
+	if output, err := command.CombinedOutput(); err != nil {
+		t.Fatalf("generate mp3: %v %s", err, output)
+	}
+	if added, err := audiorelease.IndexExisting(application.engine, audiorelease.Existing{
+		RequestID: "playlist-cjk-variant", RootID: "playlist-cjk-variant-root", Track: 1,
+		Path: path, Library: library, Format: "mp3", SourceName: "reindex", MetadataOnly: true,
+	}); err != nil || !added {
+		t.Fatalf("index CJK variant: added=%v err=%v", added, err)
+	}
+	application.invalidatePlaylistLibraryCache()
+	index := application.playlistLibrary()
+	row := playlistTrack{Artist: "中島ノブユキ", Album: "人間失格", Title: "人間失格～メインテーマ～", Duration: "30", NeteaseSongID: 42}
+	if !index.hasPlaylistRow(row) {
+		t.Fatal("equivalent CJK and punctuation variants were reported missing")
+	}
+	if !index.hasRecordingIdentity("中島ノブユキ", "人間失格～メインテーマ～") {
+		t.Fatal("stale failure recovery did not find the exact credited recording")
+	}
+	if index.hasRecordingIdentity("別の歌手", "人間失格～メインテーマ～") {
+		t.Fatal("stale failure recovery ignored the credited artist")
+	}
+	row.Title = "人間失格～ライブテーマ～"
+	if index.hasPlaylistRow(row) {
+		t.Fatal("different CJK title was accepted")
 	}
 }

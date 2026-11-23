@@ -295,7 +295,12 @@ func neteaseAlternateMissingArtistsNamedInTitle(title string, want, got []string
 }
 
 func neteaseAlternateTitleMatches(want, got string) bool {
-	if foldTagText(want) == foldTagText(got) {
+	// Catalogue and embedded tags commonly disagree on Traditional Chinese,
+	// Japanese ellipses and wave-dash glyphs. Fold only the bounded equivalent
+	// forms; qualitative words such as "TV Ver." remain significant below.
+	want = foldPlaylistMatchText(want)
+	got = foldPlaylistMatchText(got)
+	if want == got {
 		return true
 	}
 	if foldTagText(stripNeteaseTitleQualifiers(want)) != foldTagText(stripNeteaseTitleQualifiers(got)) {

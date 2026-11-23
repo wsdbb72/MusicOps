@@ -144,6 +144,10 @@ func TestNeteaseAlternateTitleKeepsContextButRejectsVersionDrift(t *testing.T) {
 		{name: "unexpected remix", want: "Monsters", got: "Monsters (Remix)"},
 		{name: "instrumental is a different recording", want: "Shed a Light (Like Instrumental Mix)", got: "Shed a Light"},
 		{name: "live version is different", want: "Song", got: "Song (Live)"},
+		{name: "traditional and simplified CJK", want: "人間失格～メインテーマ～", got: "人间失格~メインテーマ~", ok: true},
+		{name: "traditional CJK with wave punctuation", want: "i BELIEVE～星に願いを", got: "i BELIEVE ~星に愿いを", ok: true},
+		{name: "Japanese dots and ellipsis", want: "5年後･･･", got: "5年后…", ok: true},
+		{name: "TV version remains distinct", want: "adrenaline!!!", got: "adrenaline!!! -TV Ver.-"},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {

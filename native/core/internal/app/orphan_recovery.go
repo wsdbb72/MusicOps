@@ -3,6 +3,7 @@ package app
 import (
 	"fmt"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/wsdbb72/MusicOps/native/core/internal/audiorelease"
@@ -208,6 +209,86 @@ func (a *App) reconcilePublishedRoots(stop <-chan struct{}, now time.Time, log S
 	}
 }
 
+func libraryReconcileFailureSafe(class string) bool {
+	switch class {
+	case "AUDIO_REJECTED", "AUDIO_MISSING", "LIBRARY_CONFLICT", "NO_AUDIO", "ALREADY_IN_LIBRARY", "INGEST_FAILED":
+		return true
+	default:
+		return false
+	}
+}
+
+func (a *App) failedRootRecordingIdentity(job workflow.Job) (string, string, bool) {
+	if job.ActiveTaskID != "" {
+		if raw, found, err := a.tasks.Data(job.ActiveTaskID, "arguments", 0); err == nil && found {
+			if plan, decodeErr := decodePlan(raw); decodeErr == nil {
+				artist := strings.TrimSpace(plan.ExpectedArtist)
+				title := strings.TrimSpace(firstNonEmpty(plan.PlaylistTrack, plan.ExpectedTitle))
+				if artist != "" && title != "" {
+					return artist, title, true
+				}
+			}
+		}
+	}
+	label := strings.TrimSpace(job.Label)
+	for _, separator := range []string{" - ", " — ", " – "} {
+		if at := strings.Index(label, separator); at > 0 {
+			artist := strings.TrimSpace(label[:at])
+			title := strings.TrimSpace(label[at+len(separator):])
+			if artist != "" && title != "" {
+				return artist, title, true
+			}
+			break
+		}
+	}
+	return "", "", false
+}
+
+// reconcileLibrarySatisfiedRoots closes acquisition failures when an explicit
+// library reindex proves the exact title and credited artist are already on
+// disk. It never closes quality upgrades, ambiguous identity failures, token
+// debt or review states, and it never invents a download receipt.
+func (a *App) reconcileLibrarySatisfiedRoots(now time.Time, log StartupLogger) int {
+	cutoff := now.Add(-10 * time.Minute).UnixNano()
+	index := a.playlistLibrary()
+	var after []byte
+	reconciled := 0
+	for {
+		page, err := a.flows.List(after, 200)
+		if err != nil {
+			if log != nil {
+				log("workflow_reconcile", "library-satisfied scan failed: "+scrub(err.Error()))
+			}
+			break
+		}
+		for _, job := range page.Jobs {
+			if job.ParentJobID != "" || job.RootID != job.ID || job.Stage != "failed" ||
+				job.UpdatedNS > cutoff || !libraryReconcileFailureSafe(job.ErrorClass) {
+				continue
+			}
+			artist, title, ok := a.failedRootRecordingIdentity(job)
+			if !ok || !index.hasRecordingIdentity(artist, title) {
+				continue
+			}
+			if _, changed, err := a.flows.ReconcileLibrarySatisfiedRoot(job.ID, cutoff, now.UnixNano()); err != nil {
+				if log != nil {
+					log("workflow_reconcile", "library-satisfied root "+job.ID+" failed: "+scrub(err.Error()))
+				}
+			} else if changed {
+				reconciled++
+			}
+		}
+		if len(page.Next) == 0 {
+			break
+		}
+		after = page.Next
+	}
+	index.commitPresenceSnapshots()
+	if reconciled > 0 && log != nil {
+		log("workflow_reconcile", "closed "+strconv.Itoa(reconciled)+" library-satisfied root(s)")
+	}
+	return reconciled
+}
 func stopped(stop <-chan struct{}) bool {
 	if stop == nil {
 		return false

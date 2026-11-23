@@ -38,7 +38,8 @@ func (a *App) reindexLibrary(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "code": "LIBRARY_UNAVAILABLE", "error": "没有可索引的音乐库目录"})
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "added": added, "kept": kept, "deleted_files": pruned, "note": "已完成增量索引；只清理磁盘上已不存在的旧元数据映射，不删除音乐文件，也不把缺少的文件说成已下载。"})
+	reconciled := a.reconcileLibrarySatisfiedRoots(a.now(), nil)
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "added": added, "kept": kept, "deleted_files": pruned, "reconciled_failures": reconciled, "note": "已完成增量索引；只清理磁盘上已不存在的旧元数据映射，不删除音乐文件，也不把缺少的文件说成已下载。"})
 }
 
 func (a *App) indexLibraryTree(ctx context.Context, root string) (added, kept, pruned int, err error) {

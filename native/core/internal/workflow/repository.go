@@ -883,6 +883,62 @@ func (r *Repository) ReconcilePublishedRoot(rootID string, beforeNS, nowNS int64
 	}
 	return nil, false, ErrStale
 }
+
+// ReconcileLibrarySatisfiedRoot closes a failed acquisition only after the
+// caller has independently found the same credited recording in the verified
+// local library. The allowed classes are failures where the tracker candidate
+// could not be published, not quality upgrades whose original lossy file must
+// remain visibly pending.
+func (r *Repository) ReconcileLibrarySatisfiedRoot(rootID string, beforeNS, nowNS int64) (*Job, bool, error) {
+	if !validID(rootID) || beforeNS <= 0 || nowNS < beforeNS {
+		return nil, false, dataengine.ErrInvalidRequest
+	}
+	for attempt := 0; attempt < 8; attempt++ {
+		var current *Job
+		var raw []byte
+		err := r.engine.View(func(v *dataengine.View) error {
+			var readErr error
+			current, raw, readErr = readJob(v, rootID)
+			return readErr
+		})
+		if err != nil {
+			return nil, false, err
+		}
+		if current == nil {
+			return nil, false, ErrNotFound
+		}
+		if current.RootID != current.ID || current.Stage != "failed" || current.UpdatedNS > beforeNS {
+			return current, false, nil
+		}
+		switch current.ErrorClass {
+		case "AUDIO_REJECTED", "AUDIO_MISSING", "LIBRARY_CONFLICT", "NO_AUDIO", "ALREADY_IN_LIBRARY", "INGEST_FAILED":
+		default:
+			return current, false, nil
+		}
+		next := *current
+		next.Stage = "completed"
+		next.ActiveTaskID = ""
+		next.Message = "已在实际音库中核对到同一歌手与曲名，保留现有文件并结束旧失败任务"
+		next.ReviewKind = ""
+		next.ErrorClass = ""
+		updated, err := bump(next, nowNS, true)
+		if err != nil {
+			return nil, false, err
+		}
+		condition, writes, err := putJob(raw, updated)
+		if err != nil {
+			return nil, false, err
+		}
+		ok, err := r.engine.CompareAndSwap([]dataengine.Condition{condition}, writes)
+		if err != nil {
+			return nil, false, err
+		}
+		if ok {
+			return &updated, true, nil
+		}
+	}
+	return nil, false, ErrStale
+}
 func (r *Repository) Control(requestID, jobID, action string, nowNS int64) (Result, error) {
 	if !validID(jobID) || nowNS <= 0 {
 		return Result{}, dataengine.ErrInvalidRequest

@@ -799,7 +799,12 @@ func TestDownloadInfrastructureClassesAreFallbackSafe(t *testing.T) {
 			t.Fatalf("%s should hand off to streaming", class)
 		}
 	}
-	for _, class := range []string{"AUDIO_REJECTED", "LIBRARY_CONFLICT", "NO_AUDIO", "INVALID_PLAN"} {
+	for _, class := range []string{"AUDIO_REJECTED", "AUDIO_MISSING", "LIBRARY_CONFLICT", "NO_AUDIO", "QUALITY_NOT_PROVEN", "UPGRADE_IDENTITY_AMBIGUOUS", "UPGRADE_IDENTITY_UNPROVEN", "INGEST_FAILED"} {
+		if !downloadFailureCanFallback(class) {
+			t.Fatalf("%s should hand off to streaming after the acquired torrent cannot publish audio", class)
+		}
+	}
+	for _, class := range []string{"INVALID_PLAN", "SCRAPE_FAILED", "CACHE_LIMIT"} {
 		if downloadFailureCanFallback(class) {
 			t.Fatalf("%s must remain an explicit non-fallback failure", class)
 		}

@@ -165,9 +165,118 @@ func libraryPathKey(value string) string {
 	return key
 }
 
+// foldPlaylistMatchText normalizes bounded orthographic variants that commonly
+// split the same recording between Chinese catalogue metadata and Japanese or
+// Traditional tags. It deliberately does not strip title qualifiers or words.
+func foldPlaylistMatchText(value string) string {
+	var b strings.Builder
+	for _, r := range foldTagText(value) {
+		switch r {
+		case '願':
+			r = '愿'
+		case '後':
+			r = '后'
+		case '間':
+			r = '间'
+		case '樂':
+			r = '乐'
+		case '愛':
+			r = '爱'
+		case '時':
+			r = '时'
+		case '說':
+			r = '说'
+		case '會':
+			r = '会'
+		case '來':
+			r = '来'
+		case '為':
+			r = '为'
+		case '無':
+			r = '无'
+		case '與':
+			r = '与'
+		case '這':
+			r = '这'
+		case '過':
+			r = '过'
+		case '還':
+			r = '还'
+		case '將':
+			r = '将'
+		case '對':
+			r = '对'
+		case '萬':
+			r = '万'
+		case '歲':
+			r = '岁'
+		case '長':
+			r = '长'
+		case '場':
+			r = '场'
+		case '飛':
+			r = '飞'
+		case '車':
+			r = '车'
+		case '門':
+			r = '门'
+		case '風':
+			r = '风'
+		case '雲':
+			r = '云'
+		case '見':
+			r = '见'
+		case '實':
+			r = '实'
+		case '現':
+			r = '现'
+		case '開':
+			r = '开'
+		case '關':
+			r = '关'
+		case '發':
+			r = '发'
+		case '頭':
+			r = '头'
+		case '體':
+			r = '体'
+		case '聽':
+			r = '听'
+		case '讀':
+			r = '读'
+		case '書':
+			r = '书'
+		case '畫':
+			r = '画'
+		case '數':
+			r = '数'
+		case '當':
+			r = '当'
+		case '麼':
+			r = '么'
+		case '樣':
+			r = '样'
+		case '讓':
+			r = '让'
+		case '從':
+			r = '从'
+		case '～', '〜', '~', '…', '･', '・', '•':
+			r = ' '
+		case '—', '–', '−', '－':
+			r = '-'
+		}
+		b.WriteRune(r)
+	}
+	return strings.Join(strings.Fields(b.String()), " ")
+}
+
+func playlistMatchKey(value string) string {
+	return libraryPathKey(foldPlaylistMatchText(value))
+}
+
 func trackPathKeyOfPath(file string) (artist, album, title string) {
 	artist, album, title = trackPathOf(file)
-	return libraryPathKey(artist), libraryPathKey(album), libraryPathKey(title)
+	return playlistMatchKey(artist), playlistMatchKey(album), playlistMatchKey(title)
 }
 
 // playlistTitleCandidateKeys indexes both the complete stem and the possible
@@ -182,11 +291,13 @@ func playlistTitleCandidateKeys(raw string) []string {
 	seen := map[string]bool{}
 	out := make([]string, 0, 3)
 	add := func(value string) {
-		key := libraryPathKey(value)
-		for _, key := range []string{key, playlistCompactTitleKey(key)} {
-			if key != "" && !seen[key] {
-				seen[key] = true
-				out = append(out, key)
+		for _, value := range []string{value, foldPlaylistMatchText(value)} {
+			key := libraryPathKey(value)
+			for _, key := range []string{key, playlistCompactTitleKey(key)} {
+				if key != "" && !seen[key] {
+					seen[key] = true
+					out = append(out, key)
+				}
 			}
 		}
 	}
@@ -246,7 +357,13 @@ func (index playlistLibraryIndex) presenceWorker() playlistLibraryIndex {
 // iteration made a 4,000-track list block for minutes even though catalogue
 // matching itself was in memory.
 func (a *App) playlistPresence(rows []playlistTrack) []bool {
-	return playlistPresenceForIndex(a.playlistLibrary(), rows)
+	present := playlistPresenceForIndex(a.playlistLibrary(), rows)
+	// Presence verification may upgrade legacy records with size/time
+	// snapshots. The two-minute listing cache predates those durable updates;
+	// drop it so the next enqueue uses the O(1) metadata checks instead of
+	// hashing the same audio again.
+	a.invalidatePlaylistLibraryCache()
+	return present
 }
 
 func playlistPresenceForIndex(index playlistLibraryIndex, rows []playlistTrack) []bool {
@@ -328,7 +445,7 @@ func indexPlaylistLibrary(engine *dataengine.Engine, entries []audiorelease.Entr
 		}
 		index.records[entry.RequestID] = entry
 		rawArtist, rawAlbum, rawTitle := trackPathOf(entry.File)
-		artist, album, title := libraryPathKey(rawArtist), libraryPathKey(rawAlbum), libraryPathKey(rawTitle)
+		artist, album, title := playlistMatchKey(rawArtist), playlistMatchKey(rawAlbum), playlistMatchKey(rawTitle)
 		if artist != "" && artist != "." && album != "" && album != "." && title != "" {
 			key := [3]string{artist, album, title}
 			index.tracks[key] = append(index.tracks[key], entry.RequestID)
@@ -357,7 +474,7 @@ func (index playlistLibraryIndex) hasPlaylistRow(row playlistTrack) bool {
 	if _, err := strconv.Atoi(row.Duration); err == nil {
 		truncatedMS = 999
 	}
-	titleKeys := []string{libraryPathKey(row.Title)}
+	titleKeys := []string{playlistMatchKey(row.Title)}
 	if featured := playlistFeaturedTitleKey(row.Title, row.Artist); featured != "" && featured != titleKeys[0] {
 		titleKeys = append(titleKeys, featured)
 	}
@@ -376,7 +493,7 @@ func (index playlistLibraryIndex) hasPlaylistRow(row playlistTrack) bool {
 		add(index.titleCandidates[playlistCompactTitleKey(key)])
 	}
 	if strings.TrimSpace(row.Album) != "" {
-		albumKey := [2]string{libraryPathKey(publishComponent(row.Artist)), libraryPathKey(publishComponent(row.Album))}
+		albumKey := [2]string{playlistMatchKey(publishComponent(row.Artist)), playlistMatchKey(publishComponent(row.Album))}
 		add(index.albums[albumKey])
 	}
 	// Playlist membership is recording-level. A single release may be filed
@@ -402,7 +519,7 @@ func (index playlistLibraryIndex) hasPlaylistRow(row playlistTrack) bool {
 		}
 		artistMatches := playlistArtistTagMatches(row.Artist, artists)
 		if !artistMatches {
-			artistMatches = playlistArtistsMatch(splitPlaylistArtists(row.Artist), []string{pathArtist})
+			artistMatches = playlistArtistFallbackMatches(row.Artist, pathArtist)
 		}
 		if !artistMatches {
 			continue
@@ -411,7 +528,7 @@ func (index playlistLibraryIndex) hasPlaylistRow(row playlistTrack) bool {
 			continue
 		}
 		albumMatches := strings.TrimSpace(row.Album) == "" || playlistAlbumTagMatches(row.Album, albumTag) ||
-			libraryPathKey(row.Album) == libraryPathKey(pathAlbum)
+			playlistMatchKey(row.Album) == playlistMatchKey(pathAlbum)
 		tolerance := int64(1500)
 		if albumMatches {
 			tolerance = 3000
@@ -427,11 +544,49 @@ func (index playlistLibraryIndex) hasPlaylistRow(row playlistTrack) bool {
 	return false
 }
 
+// hasRecordingIdentity answers the narrow recovery question used for stale
+// tracker failures: is there a verified local file with this exact title and
+// credited artist? Duration is intentionally unavailable on old failure
+// records, so callers must only use this after an explicit library reindex and
+// only for acquisition failures that can never hide a quality-upgrade debt.
+func (index playlistLibraryIndex) hasRecordingIdentity(artist, title string) bool {
+	artist = strings.TrimSpace(artist)
+	title = strings.TrimSpace(title)
+	if artist == "" || title == "" {
+		return false
+	}
+	seen := map[string]bool{}
+	for _, key := range playlistTitleCandidateKeys(title) {
+		for _, id := range index.titleCandidates[key] {
+			if seen[id] || !index.isUnchanged(id) {
+				continue
+			}
+			seen[id] = true
+			path, found, err := audiorelease.PathFor(index.engine, id)
+			if err != nil || !found {
+				continue
+			}
+			artists, _, titleTag, _ := playlistRecordingEvidence(path)
+			pathArtist, _, pathTitle := trackPathOf(path)
+			if titleTag == "" {
+				titleTag = pathTitle
+			}
+			if !neteaseAlternateTitleMatches(title, titleTag) {
+				continue
+			}
+			if playlistArtistTagMatches(artist, artists) ||
+				playlistArtistFallbackMatches(artist, pathArtist) {
+				return true
+			}
+		}
+	}
+	return false
+}
 func (index playlistLibraryIndex) hasTrack(artist, album, title string) bool {
 	// A source row without an album is published under its own title.
 	// Use that same folder when checking whether it has already been filed.
-	key := [2]string{libraryPathKey(artist), libraryPathKey(firstNonEmpty(album, title))}
-	want := libraryPathKey(title)
+	key := [2]string{playlistMatchKey(artist), playlistMatchKey(firstNonEmpty(album, title))}
+	want := playlistMatchKey(title)
 	if key[0] == "" || key[1] == "" || want == "" {
 		return false
 	}
@@ -455,8 +610,8 @@ func (index playlistLibraryIndex) hasTrack(artist, album, title string) bool {
 				continue
 			}
 			tags, err := readFLACTagsPrefix(path)
-			if err == nil && libraryPathKey(tags.Album) == key[1] && libraryPathKey(tags.Title) != "" {
-				titles[libraryPathKey(tags.Title)] = true
+			if err == nil && playlistMatchKey(tags.Album) == key[1] && playlistMatchKey(tags.Title) != "" {
+				titles[playlistMatchKey(tags.Title)] = true
 			}
 		}
 		index.tagTitles[key] = titles
@@ -486,7 +641,7 @@ func (index playlistLibraryIndex) hasTrack(artist, album, title string) bool {
 				continue
 			}
 			artists, albumTag, titleTag := playlistTrackTags(path)
-			if libraryPathKey(titleTag) != titleKey || !playlistAlbumTagMatches(expectedAlbum, albumTag) {
+			if playlistMatchKey(titleTag) != titleKey || !playlistAlbumTagMatches(expectedAlbum, albumTag) {
 				continue
 			}
 			if playlistArtistTagMatches(artist, artists) {
@@ -511,7 +666,7 @@ func playlistFeaturedTitleKey(title, artist string) string {
 	}
 	for _, credit := range credits {
 		if libraryPathKey(credit) == guest {
-			return libraryPathKey(strings.TrimSpace(strings.TrimSuffix(strings.TrimSpace(title[:marker[0]]), "(")))
+			return playlistMatchKey(strings.TrimSpace(strings.TrimSuffix(strings.TrimSpace(title[:marker[0]]), "(")))
 		}
 	}
 	return ""
@@ -542,8 +697,8 @@ func playlistTrackTags(path string) (artists []string, album, title string) {
 }
 
 func playlistAlbumTagMatches(expected, actual string) bool {
-	want := libraryPathKey(expected)
-	got := libraryPathKey(actual)
+	want := playlistMatchKey(expected)
+	got := playlistMatchKey(actual)
 	if want == "" || got == "" {
 		return false
 	}
@@ -556,6 +711,23 @@ func playlistAlbumTagMatches(expected, actual string) bool {
 	return strings.HasSuffix(got, " "+want)
 }
 
+func playlistArtistFallbackMatches(expected, pathArtist string) bool {
+	want := splitPlaylistArtists(expected)
+	if playlistArtistsMatch(want, []string{pathArtist}) {
+		return true
+	}
+	// Publish paths use an underscore where the source catalogue used a slash,
+	// while imported folders often use a comma or ampersand between credits.
+	// Split those separators only when the playlist itself names multiple
+	// artists, so a legitimate comma inside one stage name cannot regress.
+	if len(flattenPlaylistArtists(want)) < 2 {
+		return false
+	}
+	normalized := strings.NewReplacer(
+		",", "/", "，", "/", "&", "/", "＆", "/", "+", "/", "＋", "/", " and ", "/", " & ", "/",
+	).Replace(pathArtist)
+	return playlistArtistsMatch(want, splitPlaylistArtists(normalized))
+}
 func playlistArtistTagMatches(expected string, actual []string) bool {
 	if len(actual) == 0 {
 		return false

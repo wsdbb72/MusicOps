@@ -721,16 +721,19 @@ func receiptSiteFree(receipt torrentfetch.Receipt) bool {
 	}
 }
 
-// downloadFailureCanFallback lists failures where the torrent client, its
-// credentials or the network failed before an audio file could be published.
-// The persisted album/search plan is still valid, so an enabled streaming
-// fallback can finish the row without replaying a tracker token or starting a
-// second ordinary tracker download.
+// downloadFailureCanFallback lists failures where the acquired torrent cannot
+// produce a publishable recording. The persisted album/search plan is still
+// valid, so an enabled streaming fallback can finish the row without replaying
+// a tracker token or starting a second ordinary tracker download. Invalid or
+// unsafe plans remain terminal until the caller supplies new evidence.
 func downloadFailureCanFallback(class string) bool {
 	switch strings.ToUpper(strings.TrimSpace(class)) {
 	case "QBITTORENT_UNAVAILABLE", "MISSING_CREDENTIALS", "INVALID_QBITTORRENT", "AUTH_FAILED",
 		"ADD_UNKNOWN", "OWNERSHIP_FAILED", "DOWNLOAD_TIMEOUT", "DOWNLOAD_STOPPED",
-		"DOWNLOAD_BLOCKED", "DOWNLOAD_STALLED", "START_FAILED":
+		"DOWNLOAD_BLOCKED", "DOWNLOAD_STALLED", "START_FAILED",
+		"AUDIO_REJECTED", "AUDIO_MISSING", "NO_AUDIO", "LIBRARY_CONFLICT",
+		"QUALITY_NOT_PROVEN", "UPGRADE_IDENTITY_AMBIGUOUS", "UPGRADE_IDENTITY_UNPROVEN",
+		"INGEST_FAILED":
 		return true
 	default:
 		return false

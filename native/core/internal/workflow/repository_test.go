@@ -767,3 +767,44 @@ func TestReconcilePublishedRootClosesVerifiedLegacyFailure(t *testing.T) {
 		t.Fatal("an unrelated failure was reconciled", changed, err)
 	}
 }
+
+func TestReconcileLibrarySatisfiedRootClosesOnlySafeAcquisitionFailures(t *testing.T) {
+	repo, _ := fixture(t)
+	job := Job{
+		ID: "library-satisfied-root", Kind: "album", Scene: "expand", Stage: "failed",
+		TaskType: "identification", TaskGroup: "identify", BatchID: "playlist-batch",
+		RootID: "library-satisfied-root", ActiveTaskID: "failed-download-task", Label: "Artist - Song",
+		Message: "tracker candidate failed", ErrorClass: "LIBRARY_CONFLICT",
+		Revision: 1, CreatedNS: 1000, UpdatedNS: 2000, StageStartedNS: 2000,
+	}
+	condition, writes, err := putJob(nil, job)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ok, err := repo.engine.CompareAndSwap([]dataengine.Condition{condition}, writes); err != nil || !ok {
+		t.Fatal(ok, err)
+	}
+	if _, changed, err := repo.ReconcileLibrarySatisfiedRoot(job.ID, 1500, 3000); err != nil || changed {
+		t.Fatal("recent failure was reconciled", changed, err)
+	}
+	updated, changed, err := repo.ReconcileLibrarySatisfiedRoot(job.ID, 2500, 3000)
+	if err != nil || !changed || updated == nil || updated.Stage != "completed" || updated.ActiveTaskID != "" || updated.ErrorClass != "" {
+		t.Fatal(updated, changed, err)
+	}
+
+	unsafe := job
+	unsafe.ID = "quality-pending-root"
+	unsafe.RootID = unsafe.ID
+	unsafe.ActiveTaskID = unsafe.ID
+	unsafe.ErrorClass = "QUALITY_NOT_PROVEN"
+	condition, writes, err = putJob(nil, unsafe)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ok, err := repo.engine.CompareAndSwap([]dataengine.Condition{condition}, writes); err != nil || !ok {
+		t.Fatal(ok, err)
+	}
+	if _, changed, err := repo.ReconcileLibrarySatisfiedRoot(unsafe.ID, 2500, 3000); err != nil || changed {
+		t.Fatal("quality upgrade was falsely closed", changed, err)
+	}
+}

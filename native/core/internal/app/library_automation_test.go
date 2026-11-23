@@ -1,12 +1,14 @@
 package app
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -151,6 +153,35 @@ func TestLibraryAutomationQueuesCorruptFLACReplacement(t *testing.T) {
 	defer cancelStop()
 	if err := application.runner.Stop(stopCtx); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestLibraryAutomationFetchesArtworkWithoutCatalogIdentity(t *testing.T) {
+	application := newApp(t)
+	service, _ := lrcAPIFake(t, "[00:01.00]direct artwork", jpegBody(), "Authorization", "")
+	saveLyricsService(t, application, service.URL, "Authorization", "")
+	_, full := writeScrapeFLAC(t, application, "direct-artwork.flac", 1, flactags.Tags{
+		Title: "Song", Artists: []string{"Artist"}, AlbumArtist: "Artist", Album: "Album",
+		TrackNumber: 1, Date: "2026", Genre: "Pop",
+	})
+	before, err := os.ReadFile(full)
+	if err != nil {
+		t.Fatal(err)
+	}
+	application.runAutomatedScrape(context.Background(), application.Dir, []string{full}, false)
+	_, report := application.libraryAutomation.snapshot()
+	if report.ArtworkProcessed != 1 || report.ArtworkWritten != 1 || report.ArtworkFailed != 0 || report.ArtworkSkipped != 0 {
+		t.Fatalf("unexpected artwork report: %+v", report)
+	}
+	after, err := os.ReadFile(full)
+	if err != nil || !bytes.Equal(before, after) {
+		t.Fatal("automation artwork changed the audio stream", err)
+	}
+	if _, err := os.Stat(strings.TrimSuffix(full, filepath.Ext(full)) + ".lrc"); err != nil {
+		t.Fatal("lyrics sidecar missing", err)
+	}
+	if _, err := os.Stat(strings.TrimSuffix(full, filepath.Ext(full)) + ".jpg"); err != nil {
+		t.Fatal("cover sidecar missing", err)
 	}
 }
 

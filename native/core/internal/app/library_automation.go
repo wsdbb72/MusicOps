@@ -693,8 +693,7 @@ func (a *App) runAutomatedScrape(ctx context.Context, root string, paths []strin
 
 	catalogByDir := map[string][]string{}
 	genericByDir := map[string][]string{}
-	artworkFLACByDir := map[string][]string{}
-	artworkOther := []string{}
+	artworkDirect := []string{}
 	candidateCount := 0
 	artworkCount := 0
 	for _, input := range inputs {
@@ -711,11 +710,7 @@ func (a *App) runAutomatedScrape(ctx context.Context, root string, paths []strin
 			candidateCount++
 		}
 		if entry.NeedsArtwork {
-			if strings.EqualFold(filepath.Ext(input.path), ".flac") {
-				artworkFLACByDir[filepath.Dir(input.path)] = append(artworkFLACByDir[filepath.Dir(input.path)], input.path)
-			} else {
-				artworkOther = append(artworkOther, input.path)
-			}
+			artworkDirect = append(artworkDirect, input.path)
 			artworkCount++
 		}
 	}
@@ -853,57 +848,6 @@ func (a *App) runAutomatedScrape(ctx context.Context, root string, paths []strin
 	state.update(func(report *libraryAutomationReport) { report.ScrapeSkipped = skipped })
 
 	artworkProcessed, artworkSkipped, artworkFailed, artworkWritten := 0, 0, 0, 0
-	flacDirs := make([]string, 0, len(artworkFLACByDir))
-	for dir := range artworkFLACByDir {
-		flacDirs = append(flacDirs, dir)
-	}
-	sort.Strings(flacDirs)
-	for _, dir := range flacDirs {
-		if ctx.Err() != nil || catalogPaused || sliceExpired() {
-			break
-		}
-		for start := 0; start < len(artworkFLACByDir[dir]); start += scrapeArtworkMaxFiles {
-			if ctx.Err() != nil || sliceExpired() {
-				break
-			}
-			end := start + scrapeArtworkMaxFiles
-			if end > len(artworkFLACByDir[dir]) {
-				end = len(artworkFLACByDir[dir])
-			}
-			claimed := make([]string, 0, end-start)
-			for _, path := range artworkFLACByDir[dir][start:end] {
-				if state.claimAttempt("artwork-flac|"+path, time.Now()) {
-					claimed = append(claimed, path)
-					invalidated[automationCacheKey(root, path)] = true
-				} else {
-					artworkSkipped++
-				}
-			}
-			if len(claimed) == 0 {
-				continue
-			}
-			counts, err := a.runAutomatedScrapeChunk(ctx, claimed, true)
-			artworkProcessed += len(claimed)
-			if err != nil {
-				artworkFailed += len(claimed)
-				state.addError(fmt.Errorf("%s: 歌词封面刮削失败: %w", filepath.Base(dir), err))
-				catalogPaused = recordCatalogPause(err)
-				if catalogPaused {
-					break
-				}
-			}
-			state.update(func(report *libraryAutomationReport) {
-				report.ArtworkProcessed = artworkProcessed
-				report.ArtworkSkipped = artworkSkipped
-				report.ArtworkFailed = artworkFailed
-				report.ScrapeWritten += counts.Written
-				artworkWritten += counts.CoverWritten + counts.LyricsWritten
-				report.ArtworkWritten = artworkWritten
-				report.ScrapeFailed += counts.Failed
-			})
-			state.touch("scrape", dir)
-		}
-	}
 	if ctx.Err() == nil && !sliceExpired() {
 		jobs := make(chan string)
 		var workers sync.WaitGroup
@@ -938,7 +882,7 @@ func (a *App) runAutomatedScrape(ctx context.Context, root string, paths []strin
 			}()
 		}
 	feedArtwork:
-		for _, path := range artworkOther {
+		for _, path := range artworkDirect {
 			if ctx.Err() != nil || sliceExpired() {
 				break
 			}
@@ -967,6 +911,7 @@ func (a *App) runAutomatedScrape(ctx context.Context, root string, paths []strin
 		report.ArtworkProcessed = artworkProcessed
 		report.ArtworkSkipped = artworkSkipped
 		report.ArtworkFailed = artworkFailed
+		report.ArtworkWritten = artworkWritten
 	})
 	for key := range invalidated {
 		delete(nextCache.Files, key)

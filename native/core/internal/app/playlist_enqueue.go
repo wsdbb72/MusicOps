@@ -178,6 +178,12 @@ func foldPlaylistMatchText(value string) string {
 			r = '后'
 		case '間':
 			r = '间'
+		case '觸':
+			r = '触'
+		case '電':
+			r = '电'
+		case '搖':
+			r = '摇'
 		case '樂':
 			r = '乐'
 		case '愛':
@@ -1036,10 +1042,14 @@ func (a *App) startPlaylistAlbumJob(ctx context.Context, client *musicbrainz.Cli
 	if err := ctx.Err(); err != nil {
 		return "", err
 	}
+	expectedDuration := 0
+	if seconds, parseErr := strconv.ParseFloat(strings.TrimSpace(row.Duration), 64); parseErr == nil && seconds > 0 && seconds <= 24*3600 {
+		expectedDuration = int(seconds + 0.5)
+	}
 	plan := SearchPlan{
 		RootJobID: jobID, Scene: "expand",
 		Query: strings.TrimSpace(artist + " " + firstNonEmpty(title, expected)), ExpectedTitle: expected, ExpectedArtist: artist,
-		EnabledSites: sites, StreamingEnabled: true, Identity: identity, Budget: budget, PlaylistTrack: title,
+		EnabledSites: sites, StreamingEnabled: true, Identity: identity, Budget: budget, PlaylistTrack: title, ExpectedDuration: expectedDuration,
 		NeteaseOnly: neteaseOnly, NeteaseTrackOnly: album == "" || isHotSlowCompilationAlbum(album) || neteaseOnly && !albumCompletion, NeteaseSongID: row.NeteaseSongID, NeteaseAlbumID: row.NeteaseAlbumID,
 		AlbumArtist: func() string {
 			if isHotSlowCompilationAlbum(album) {

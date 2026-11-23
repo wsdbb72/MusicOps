@@ -208,7 +208,7 @@ func TestQBittorrentSettingsAndTest(t *testing.T) {
 
 func TestStreamingOrderEditableAndFollowed(t *testing.T) {
 	application := newApp(t)
-	reversed := []string{"playlist", "netease", "qqmusic", "deezer", "qobuz", "applemusic", "tidal"}
+	reversed := []string{"playlist", "joox", "qianqian", "migu", "netease", "qqmusic", "deezer", "qobuz", "applemusic", "tidal"}
 	post(t, application, "/v1/settings/download", map[string]any{"streaming_order": reversed})
 	got := getAuth(t, application, "/v1/settings/download")
 	settings := decodeBody(t, got)
@@ -224,7 +224,7 @@ func TestStreamingOrderEditableAndFollowed(t *testing.T) {
 	// Steps only include enabled sources (qobuz and deezer are off by
 	// default), but they must follow the saved order.
 	steps, _ := settings["streaming_sources"].([]any)
-	wantSteps := []string{"playlist", "netease", "qqmusic", "applemusic", "tidal"}
+	wantSteps := []string{"playlist", "joox", "qianqian", "migu", "netease", "qqmusic", "applemusic", "tidal"}
 	if len(steps) != len(wantSteps) {
 		t.Fatal(steps)
 	}

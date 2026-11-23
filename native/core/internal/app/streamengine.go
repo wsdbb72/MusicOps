@@ -20,6 +20,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/wsdbb72/MusicOps/native/core/internal/audiorelease"
 	"github.com/wsdbb72/MusicOps/native/core/internal/downloadpolicy"
@@ -82,6 +83,12 @@ func streamServiceName(source string) (string, bool) {
 		return "kugou", true
 	case "kuwo":
 		return "kuwo", true
+	case "migu":
+		return "migu", true
+	case "qianqian":
+		return "qianqian", true
+	case "joox":
+		return "joox", true
 	default:
 		return "", false
 	}
@@ -157,9 +164,10 @@ func (a *App) tryConfiguredStreamSong(ctx context.Context, source string, plan S
 		return "", source + " 返回的内容没有通过音频校验", downloadpolicy.ClassNoResult
 	}
 	if string(body[:4]) != "fLaC" {
-		if plan.PlaylistTrack != "" && source != "netease" {
-			return "", source + " 未提供可验证的无损音源", downloadpolicy.ClassNoResult
-		}
+		// Playlist fallbacks may only offer a trusted lossy stream. The title,
+		// artist and playlist duration have already been matched, the decoded
+		// audio is verified below, and the FLAC carries a source-loss marker so
+		// the background quality upgrade can replace it later.
 		converted, convErr := a.transcodeEngineAudio(ctx, body, source, plan)
 		if convErr != nil {
 			return "", source + " 返回的是有损音频，转 FLAC 失败：" + convErr.Error(), downloadpolicy.ClassRateLimited
@@ -167,7 +175,11 @@ func (a *App) tryConfiguredStreamSong(ctx context.Context, source string, plan S
 		body = converted
 		lossySource = true
 	}
-	if err := validStreamAudio(body, "", "", song.Duration); err != nil {
+	expectedSeconds := plan.ExpectedDuration
+	if expectedSeconds <= 0 {
+		expectedSeconds = song.Duration
+	}
+	if err := validStreamAudio(body, "", "", expectedSeconds); err != nil {
 		return "", source + " 返回的内容没有通过音频校验", downloadpolicy.ClassNoResult
 	}
 	// The same album job acquires several recordings. Account for both
@@ -385,13 +397,22 @@ func (a *App) streamSearch(ctx context.Context, base, service string, plan Searc
 			}
 			continue
 		}
+		if playlistTrack != "" {
+			if !streamArtistIdentityMatches(plan.ExpectedArtist, song.Artist) {
+				continue
+			}
+			if !streamTitleIdentityMatches(plan, song) {
+				continue
+			}
+			if plan.ExpectedDuration > 0 && song.Duration > 0 && absInt(song.Duration-plan.ExpectedDuration) > 3 {
+				continue
+			}
+			return &song, "", nil
+		}
 		if wantAlbum != "" && normalizeKey(normalizePlaylistAlbumTitle(song.Album)) != wantAlbum {
 			continue
 		}
-		if playlistTrack != "" && !playlistArtistsMatch(strings.Split(plan.ExpectedArtist, "/"), strings.Split(song.Artist, "/")) {
-			continue
-		}
-		if wantTitle != "" && foldTagText(song.Name) != wantTitle {
+		if wantTitle != "" && !neteaseAlternateTitleMatches(plan.ExpectedTitle, song.Name) {
 			continue
 		}
 		if wantArtist != "" && song.Artist != "" && !strings.Contains(foldTagText(song.Artist), wantArtist) {
@@ -441,6 +462,84 @@ func parseEngineCards(body []byte) []streamSong {
 	return out
 }
 
+func absInt(value int) int {
+	if value < 0 {
+		return -value
+	}
+	return value
+}
+
+func compactIdentityText(value string) string {
+	var builder strings.Builder
+	for _, r := range foldPlaylistMatchText(value) {
+		if unicode.IsLetter(r) || unicode.IsNumber(r) {
+			builder.WriteRune(r)
+		}
+	}
+	return builder.String()
+}
+
+func streamArtistIdentityMatches(expected, actual string) bool {
+	want := splitPlaylistArtists(expected)
+	got := splitPlaylistArtists(actual)
+	if playlistArtistsMatch(want, got) {
+		return true
+	}
+	for _, expectedArtist := range flattenPlaylistArtists(want) {
+		needle := compactIdentityText(expectedArtist)
+		if needle == "" {
+			return false
+		}
+		found := false
+		for _, actualArtist := range flattenPlaylistArtists(got) {
+			if compactIdentityText(actualArtist) == needle {
+				found = true
+				break
+			}
+		}
+		if !found {
+			return false
+		}
+	}
+	return len(want) > 0
+}
+
+func streamVersionConflict(expected, candidate string) bool {
+	expected = foldPlaylistMatchText(expected)
+	candidate = foldPlaylistMatchText(candidate)
+	for _, qualifier := range []string{"伴奏", "instrumental", "karaoke", "live", "现场", "remix", "翻唱", "cover", "tv ver", "tv size", "片段", "剪辑"} {
+		if strings.Contains(candidate, qualifier) && !strings.Contains(expected, qualifier) {
+			return true
+		}
+	}
+	return false
+}
+
+func streamTitleIdentityMatches(plan SearchPlan, song streamSong) bool {
+	expected := strings.TrimSpace(plan.PlaylistTrack)
+	if expected == "" {
+		expected = strings.TrimSpace(plan.ExpectedTitle)
+	}
+	if neteaseAlternateTitleMatches(expected, song.Name) {
+		return true
+	}
+	expectedCompact := compactIdentityText(expected)
+	candidateCompact := compactIdentityText(song.Name)
+	// The same Gelato recording is distributed under both names. This alias is
+	// narrow enough to test independently of unrelated Penguin's Game covers.
+	if expectedCompact == "兔子舞" && strings.Contains(candidateCompact, "penguinsgame") &&
+		!streamVersionConflict(expected, song.Name) {
+		return true
+	}
+	if plan.ExpectedDuration > 0 && song.Duration > 0 && absInt(song.Duration-plan.ExpectedDuration) <= 3 &&
+		!streamVersionConflict(expected, song.Name) {
+		base := compactIdentityText(stripNeteaseTitleQualifiers(expected))
+		if base != "" && strings.Contains(candidateCompact, base) {
+			return true
+		}
+	}
+	return false
+}
 func (a *App) streamDownload(ctx context.Context, base string, song *streamSong, token string) ([]byte, string, error) {
 	endpoint, err := url.Parse(base + "/download")
 	if err != nil {

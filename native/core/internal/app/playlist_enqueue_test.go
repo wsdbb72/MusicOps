@@ -326,8 +326,8 @@ func TestEnqueueNormalizesHotSlowCompilationAlbumPlan(t *testing.T) {
 func TestHotSlowCompilationNeverExpandsAWholeSourceVolume(t *testing.T) {
 	application := newApp(t)
 	rows := []playlistTrack{
-		{Artist: "Artist One", Title: "Song One", Album: "最新热歌慢摇90", NeteaseSongID: 11, NeteaseAlbumID: 90},
-		{Artist: "Artist Two", Title: "Song Two", Album: "最新热歌慢摇91", NeteaseSongID: 22, NeteaseAlbumID: 91},
+		{Artist: "Artist One", Title: "Song One", Album: "最新热歌慢摇90", Duration: "197", NeteaseSongID: 11, NeteaseAlbumID: 90},
+		{Artist: "Artist Two", Title: "Song Two", Album: "最新热歌慢摇91", Duration: "202", NeteaseSongID: 22, NeteaseAlbumID: 91},
 	}
 	report, err := application.enqueuePlaylistTracks(context.Background(), "pl-hot-slow-separate", rows, []int{0, 1}, playlistEnqueueOptions{AlbumCompletion: true})
 	if err != nil || len(report.Created) != 2 || report.Albums != 0 {
@@ -340,7 +340,8 @@ func TestHotSlowCompilationNeverExpandsAWholeSourceVolume(t *testing.T) {
 		}
 		raw, found, err := application.tasks.Data(job.ActiveTaskID, "arguments", 0)
 		plan, decodeErr := decodePlan(raw)
-		if err != nil || !found || decodeErr != nil || !plan.NeteaseTrackOnly || plan.ExpectedTitle != hotSlowCompilationAlbum || plan.AlbumArtist != hotSlowCompilationArtist {
+		wantDuration := map[string]int{"Song One": 197, "Song Two": 202}[plan.PlaylistTrack]
+		if err != nil || !found || decodeErr != nil || !plan.NeteaseTrackOnly || plan.ExpectedTitle != hotSlowCompilationAlbum || plan.AlbumArtist != hotSlowCompilationArtist || plan.ExpectedDuration != wantDuration || wantDuration == 0 {
 			t.Fatalf("plan=%+v found=%v err=%v decode=%v", plan, found, err, decodeErr)
 		}
 	}

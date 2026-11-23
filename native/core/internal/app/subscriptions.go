@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -444,6 +445,9 @@ func (a *App) queueSubscriptionAlbum(jobID, playlistID, album string, tracks []p
 		plan.NeteaseTrackOnly = len(tracks) == 1
 		if len(tracks) == 1 {
 			plan.PlaylistTrack = tracks[0].Title
+			if seconds, parseErr := strconv.ParseFloat(strings.TrimSpace(tracks[0].Duration), 64); parseErr == nil && seconds > 0 {
+				plan.ExpectedDuration = int(seconds + 0.5)
+			}
 			plan.NeteaseSongID = tracks[0].NeteaseSongID
 			plan.NeteaseAlbumID = tracks[0].NeteaseAlbumID
 		} else if allSameAlbum {

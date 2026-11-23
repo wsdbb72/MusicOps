@@ -175,3 +175,81 @@ func TestStreamEngineScrapesEachTrackInAnAlbumIndependently(t *testing.T) {
 		}
 	}
 }
+
+func TestStreamSearchMatchesVerifiedFallbackVariantsAndDuration(t *testing.T) {
+	tests := []struct {
+		name     string
+		service  string
+		response string
+		plan     SearchPlan
+		wantID   string
+	}{
+		{
+			name: "joox exact studio recording in another album", service: "joox",
+			response: `{"songs":[{"id":"joox-trysail","source":"joox","name":"Adrenaline!!!","artist":"TrySail","album":"Adrenaline!!!","duration":274}]}`,
+			plan:     SearchPlan{ExpectedTitle: "adrenaline!!!", ExpectedArtist: "TrySail", PlaylistTrack: "adrenaline!!!", ExpectedDuration: 274},
+			wantID:   "joox-trysail",
+		},
+		{
+			name: "joox traditional title and two-second container drift", service: "joox",
+			response: `{"songs":[{"id":"joox-barbie","source":"joox","name":"觸電","artist":"芭比","album":"搖頭舞曲3","duration":195}]}`,
+			plan:     SearchPlan{ExpectedTitle: "摇头舞曲 3", ExpectedArtist: "芭比", PlaylistTrack: "触电 (完整版)", ExpectedDuration: 197},
+			wantID:   "joox-barbie",
+		},
+		{
+			name: "gelato bilingual extended title", service: "joox",
+			response: `{"songs":[{"id":"joox-rabbit","source":"joox","name":"Penguin's Game (Extended Version)","artist":"Gelato","album":"Penguin's Game (Extended Version)","duration":239}]}`,
+			plan:     SearchPlan{ExpectedTitle: "野狼王的士高", ExpectedArtist: "Gelato", PlaylistTrack: "兔子舞", ExpectedDuration: 241},
+			wantID:   "joox-rabbit",
+		},
+		{
+			name: "migu compact artist spacing", service: "migu",
+			response: `{"songs":[{"id":"migu-home","source":"migu","name":"Home(Blaze U Remix Edit)","artist":"Thimlife / BibianeZ","album":"Home (Remixes)","duration":183}]}`,
+			plan:     SearchPlan{ExpectedTitle: "Futuresque - The Future House Collection", ExpectedArtist: "ThimLife / Bibiane Z", PlaylistTrack: "Home (Blaze U Remix Edit)", ExpectedDuration: 183},
+			wantID:   "migu-home",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(test.response))
+			}))
+			defer server.Close()
+			song, _, err := (&App{}).streamSearch(t.Context(), server.URL, test.service, test.plan, "")
+			if err != nil || song == nil || song.ID != test.wantID {
+				t.Fatalf("song=%+v err=%v", song, err)
+			}
+		})
+	}
+}
+
+func TestStreamSearchRejectsVersionOrDurationDrift(t *testing.T) {
+	tests := []struct {
+		name     string
+		response string
+		plan     SearchPlan
+	}{
+		{
+			name: "live version", response: `{"songs":[{"id":"live","source":"joox","name":"adrenaline!!! (Live)","artist":"TrySail","album":"Live","duration":274}]}`,
+			plan: SearchPlan{ExpectedTitle: "adrenaline!!!", ExpectedArtist: "TrySail", PlaylistTrack: "adrenaline!!!", ExpectedDuration: 274},
+		},
+		{
+			name: "wrong duration", response: `{"songs":[{"id":"long","source":"bilibili","name":"爱河","artist":"DJ奶小深","album":"Remix","duration":340}]}`,
+			plan: SearchPlan{ExpectedTitle: "Remix", ExpectedArtist: "DJ奶小深", PlaylistTrack: "爱河", ExpectedDuration: 326},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(test.response))
+			}))
+			defer server.Close()
+			song, _, err := (&App{}).streamSearch(t.Context(), server.URL, "joox", test.plan, "")
+			if err != nil || song != nil {
+				t.Fatalf("unexpected match: song=%+v err=%v", song, err)
+			}
+		})
+	}
+}

@@ -175,10 +175,10 @@ type downloadSettings struct {
 	// token sites have almost no freeleech: the FL button is the normal way
 	// to download, so the budget is what authorises it. 0 means "never spend
 	// a token" and the job downloads normally instead.
-	TokenBudget int `json:"token_budget"`
-	StreamingOrder   []string `json:"streaming_order,omitempty"`
-	EngineURL        string   `json:"engine_url,omitempty"`
-	UpdatedNS        int64    `json:"updated_ns"`
+	TokenBudget    int      `json:"token_budget"`
+	StreamingOrder []string `json:"streaming_order,omitempty"`
+	EngineURL      string   `json:"engine_url,omitempty"`
+	UpdatedNS      int64    `json:"updated_ns"`
 }
 
 func (a *App) loadDownloadSettings() (downloadSettings, error) {
@@ -195,6 +195,8 @@ func (a *App) loadDownloadSettings() (downloadSettings, error) {
 	}
 	if len(out.StreamingOrder) == 0 {
 		out.StreamingOrder = downloadpolicy.CanonicalOrder()
+	} else {
+		out.StreamingOrder = downloadpolicy.NormalizeOrder(out.StreamingOrder)
 	}
 	return out, nil
 }

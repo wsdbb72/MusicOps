@@ -160,7 +160,7 @@ func (a *App) streamingSourceStatus() []streamSourceStatus {
 			} else {
 				status.Reason = "内置网易云需要账号 Cookie（尚未保存）"
 			}
-		case "tidal", "applemusic", "qqmusic":
+		case "tidal", "applemusic", "qqmusic", "migu", "qianqian", "joox":
 			if settings, err := a.loadDownloadSettings(); err == nil {
 				if _, ok := allowedEngineURL(settings.EngineURL); ok {
 					status.Configured = true

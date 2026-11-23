@@ -29,26 +29,26 @@ func equal(got, want []string) bool {
 
 func TestDefaultOrderPrefersLosslessSubscriptions(t *testing.T) {
 	bare, err := Plan(DefaultSources(), Track{})
-	if err != nil || !equal(names(bare), []string{"tidal", "applemusic", "qqmusic", "netease", "playlist"}) {
+	if err != nil || !equal(names(bare), []string{"tidal", "applemusic", "qqmusic", "netease", "migu", "qianqian", "joox", "playlist"}) {
 		t.Fatal(names(bare), err)
 	}
 	known, err := Plan(DefaultSources(), Track{SourceKnown: true})
-	if err != nil || !equal(names(known), []string{"tidal", "applemusic", "qqmusic", "netease"}) {
+	if err != nil || !equal(names(known), []string{"tidal", "applemusic", "qqmusic", "netease", "migu", "qianqian", "joox"}) {
 		t.Fatal(names(known), err)
 	}
 	info, err := Plan(DefaultSources(), Track{InfoKnown: true, PlaylistPlatform: "qqmusic"})
-	if err != nil || !equal(names(info), []string{"tidal", "applemusic", "qqmusic", "netease"}) {
+	if err != nil || !equal(names(info), []string{"tidal", "applemusic", "qqmusic", "netease", "migu", "qianqian", "joox"}) {
 		t.Fatal(names(info), err)
 	}
 	labeled, err := Plan(DefaultSources(), Track{PlaylistPlatform: "qqmusic"})
-	if err != nil || !equal(names(labeled), []string{"tidal", "applemusic", "qqmusic", "netease", "playlist:qqmusic"}) {
+	if err != nil || !equal(names(labeled), []string{"tidal", "applemusic", "qqmusic", "netease", "migu", "qianqian", "joox", "playlist:qqmusic"}) {
 		t.Fatal(names(labeled), err)
 	}
 	shuffled := DefaultSources()
 	shuffled[0], shuffled[5] = shuffled[5], shuffled[0]
 	shuffled[2].Enabled = true
 	ordered, err := Plan(shuffled, Track{})
-	if err != nil || !equal(names(ordered), []string{"tidal", "applemusic", "qobuz", "qqmusic", "netease", "playlist"}) {
+	if err != nil || !equal(names(ordered), []string{"tidal", "applemusic", "qobuz", "qqmusic", "netease", "migu", "qianqian", "joox", "playlist"}) {
 		t.Fatal(names(ordered), err)
 	}
 	lossy := DefaultSources()
@@ -152,7 +152,7 @@ func TestTransientStreamingRetriesThenAsksForReview(t *testing.T) {
 
 func TestValidateOrderAndPlanOrdered(t *testing.T) {
 	canonical := CanonicalOrder()
-	if len(canonical) != 7 {
+	if len(canonical) != 10 {
 		t.Fatal(canonical)
 	}
 	if err := ValidateOrder(canonical); err != nil {
@@ -171,7 +171,7 @@ func TestValidateOrderAndPlanOrdered(t *testing.T) {
 	}
 	// Only enabled sources produce steps (qobuz and deezer are off by
 	// default), but the enabled steps follow the given order.
-	if !equal(names(steps), []string{"playlist", "netease", "qqmusic", "applemusic", "tidal"}) {
+	if !equal(names(steps), []string{"playlist", "joox", "qianqian", "migu", "netease", "qqmusic", "applemusic", "tidal"}) {
 		t.Fatal(names(steps), reversed)
 	}
 	// Plan with the canonical order is unchanged from before: only the
@@ -180,18 +180,30 @@ func TestValidateOrderAndPlanOrdered(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !equal(names(steps), []string{"tidal", "applemusic", "qqmusic", "netease", "playlist"}) {
+	if !equal(names(steps), []string{"tidal", "applemusic", "qqmusic", "netease", "migu", "qianqian", "joox", "playlist"}) {
 		t.Fatal(names(steps), canonical)
 	}
-	for _, bad := range [][]string{
-		{"tidal"},
-		{"tidal", "tidal", "applemusic", "qobuz", "deezer", "qqmusic", "netease"},
-		{"tidal", "applemusic", "qobuz", "deezer", "qqmusic", "netease", "unknown"},
-		{"tidal", "applemusic", "qobuz", "deezer", "qqmusic", "netease", "playlist", "tidal"},
-		nil,
-	} {
+	short := canonical[:len(canonical)-1]
+	duplicate := append([]string(nil), canonical...)
+	duplicate[1] = duplicate[0]
+	unknown := append([]string(nil), canonical...)
+	unknown[len(unknown)-1] = "unknown"
+	extra := append(append([]string(nil), canonical...), "tidal")
+	for _, bad := range [][]string{short, duplicate, unknown, extra, nil} {
 		if err := ValidateOrder(bad); err == nil {
 			t.Fatalf("order %v must be rejected", bad)
 		}
+	}
+}
+
+func TestNormalizeOrderUpgradesLegacyOrderWithoutLosingPreference(t *testing.T) {
+	legacy := []string{"netease", "qqmusic", "applemusic", "tidal", "qobuz", "deezer", "playlist"}
+	got := NormalizeOrder(legacy)
+	want := []string{"netease", "qqmusic", "applemusic", "tidal", "qobuz", "deezer", "migu", "qianqian", "joox", "playlist"}
+	if !equal(got, want) {
+		t.Fatalf("NormalizeOrder=%v want %v", got, want)
+	}
+	if err := ValidateOrder(got); err != nil {
+		t.Fatal(err)
 	}
 }

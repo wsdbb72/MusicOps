@@ -37,6 +37,7 @@ type SearchPlan struct {
 	NeteaseSongID       int64                `json:"netease_song_id,omitempty"`
 	NeteaseAlbumID      int64                `json:"netease_album_id,omitempty"`
 	PlaylistTrack       string               `json:"playlist_track,omitempty"`
+	ExpectedDuration    int                  `json:"expected_duration,omitempty"`
 	PlaylistMode        string               `json:"playlist_mode,omitempty"`
 	AlbumArtist         string               `json:"album_artist,omitempty"`
 	Query               string               `json:"query"`

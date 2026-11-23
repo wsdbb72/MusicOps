@@ -167,7 +167,7 @@ func TestStreamingSourceStatusRecognizesBundledEngine(t *testing.T) {
 	application := newApp(t)
 	status := application.streamingSourceStatus()
 	for _, entry := range status {
-		if entry.Name == "tidal" || entry.Name == "applemusic" || entry.Name == "qqmusic" {
+		if entry.Name == "tidal" || entry.Name == "applemusic" || entry.Name == "qqmusic" || entry.Name == "migu" || entry.Name == "qianqian" || entry.Name == "joox" {
 			if !entry.Configured {
 				t.Fatalf("bundled go-music-dl was not reported for %s: %+v", entry.Name, entry)
 			}

@@ -306,7 +306,7 @@ func (a *App) libraryWorkflow(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	settings, _ := a.loadDownloadSettings()
-	plan := SearchPlan{RootJobID: id, Scene: body.Scene, Query: first.Artist + " " + first.Album, ExpectedTitle: first.Album, ExpectedArtist: first.Artist, PlaylistTrack: first.Title, Budget: settings.TokenBudget, StreamingEnabled: true, LibraryTracks: tracks}
+	plan := SearchPlan{RootJobID: id, Scene: body.Scene, Query: first.Artist + " " + first.Album, ExpectedTitle: first.Album, ExpectedArtist: first.Artist, PlaylistTrack: first.Title, ExpectedDuration: int(first.Duration + 0.5), Budget: settings.TokenBudget, StreamingEnabled: true, LibraryTracks: tracks}
 	raw, err := json.Marshal(plan)
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "code": "INVALID_REQUEST"})

@@ -84,9 +84,9 @@ type Walk struct {
 	ProductionVerified bool     `json:"production_verified"`
 }
 
-// DefaultSources is the readable switch list. Qobuz and Deezer stay off until
-// a caller enables them, so the default path is Tidal, Apple Music, then QQ
-// and NetEase.
+// DefaultSources is the readable switch list. Enabled domestic backends are
+// tried only after the original lossless subscription services. Qobuz and
+// Deezer stay off until a caller enables them.
 func DefaultSources() []Source {
 	return []Source{
 		{Name: "tidal", Tier: 1, Quality: "lossless", Enabled: true},
@@ -95,11 +95,14 @@ func DefaultSources() []Source {
 		{Name: "deezer", Tier: 1, Quality: "lossless", Enabled: false},
 		{Name: "qqmusic", Tier: 2, Quality: "lossless", Enabled: true},
 		{Name: "netease", Tier: 2, Quality: "lossless", Enabled: true},
+		{Name: "migu", Tier: 2, Quality: "lossless", Enabled: true},
+		{Name: "qianqian", Tier: 2, Quality: "lossless", Enabled: true},
+		{Name: "joox", Tier: 2, Quality: "lossless", Enabled: true},
 		{Name: "playlist", Tier: 3, Quality: "source-file", Enabled: true},
 	}
 }
 
-var canonical = []string{"tidal", "applemusic", "qobuz", "deezer", "qqmusic", "netease", "playlist"}
+var canonical = []string{"tidal", "applemusic", "qobuz", "deezer", "qqmusic", "netease", "migu", "qianqian", "joox", "playlist"}
 
 // CanonicalOrder is the default fallback order: the lossless-first policy
 // for this core. A saved order replaces it; see PlanOrdered.
@@ -125,6 +128,33 @@ func ValidateOrder(order []string) error {
 		seen[name] = true
 	}
 	return nil
+}
+
+// NormalizeOrder preserves a valid saved order while appending newly added
+// sources. Older cores stored seven names; an upgrade must not turn that
+// setting into a 500 or discard the operator's relative order.
+func NormalizeOrder(order []string) []string {
+	if ValidateOrder(order) == nil {
+		return append([]string(nil), order...)
+	}
+	seen := map[string]bool{}
+	out := make([]string, 0, len(canonical))
+	for _, name := range order {
+		if name == "playlist" || !knownSource(name) || seen[name] {
+			continue
+		}
+		seen[name] = true
+		out = append(out, name)
+	}
+	for _, name := range canonical {
+		if name == "playlist" || seen[name] {
+			continue
+		}
+		seen[name] = true
+		out = append(out, name)
+	}
+	out = append(out, "playlist")
+	return out
 }
 
 // OrderedSources returns the default sources in the given order, for
@@ -290,7 +320,7 @@ func classify(outcome Outcome) (string, error) {
 
 func knownSource(name string) bool {
 	switch name {
-	case "tidal", "applemusic", "qobuz", "deezer", "qqmusic", "netease", "playlist":
+	case "tidal", "applemusic", "qobuz", "deezer", "qqmusic", "netease", "migu", "qianqian", "joox", "playlist":
 		return true
 	default:
 		return false
@@ -301,7 +331,7 @@ func tierOf(name string) int {
 	switch name {
 	case "tidal", "applemusic", "qobuz", "deezer":
 		return 1
-	case "qqmusic", "netease":
+	case "qqmusic", "netease", "migu", "qianqian", "joox":
 		return 2
 	default:
 		return 0

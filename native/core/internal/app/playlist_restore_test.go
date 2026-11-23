@@ -118,3 +118,34 @@ func TestSubscriptionRecordsExistingTracksThenQueuesOnlyNewOnes(t *testing.T) {
 		t.Fatal(third)
 	}
 }
+
+func TestSubscriptionRetriesSeenTrackThatIsStillMissing(t *testing.T) {
+	application := newApp(t)
+	content := "#PLAYLIST:Retry\n#MUSICOPS-ALBUM:Album\n#EXTINF:1,Artist A - Missing Song\n.\n"
+	if saved := post(t, application, "/v1/playlists", map[string]any{"name": "Retry", "content": content}); saved["ok"] != true {
+		t.Fatal(saved)
+	}
+	if subscribed := post(t, application, "/v1/subscriptions", map[string]any{"playlist_id": "retry", "interval_hours": 24}); subscribed["ok"] != true {
+		t.Fatal(subscribed)
+	}
+	first := post(t, application, "/v1/subscriptions/check", map[string]any{"playlist_id": "retry"})
+	if first["queued"] != float64(0) {
+		t.Fatal(first)
+	}
+	rows, err := application.loadSubscriptions()
+	if err != nil || len(rows) != 1 {
+		t.Fatal(rows, err)
+	}
+	rows[0].RetryMissing = map[string]string{}
+	if err := application.storeSubscriptions(rows); err != nil {
+		t.Fatal(err)
+	}
+	second := post(t, application, "/v1/subscriptions/check", map[string]any{"playlist_id": "retry"})
+	if second["queued"] != float64(1) || !strings.Contains(second["message"].(string), "仍未入库") {
+		t.Fatal(second)
+	}
+	third := post(t, application, "/v1/subscriptions/check", map[string]any{"playlist_id": "retry"})
+	if third["queued"] != float64(0) {
+		t.Fatal(third)
+	}
+}

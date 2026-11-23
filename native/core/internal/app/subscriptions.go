@@ -14,23 +14,31 @@ import (
 	"github.com/wsdbb72/MusicOps/native/core/internal/workflow"
 )
 
-// Playlist subscriptions re-read a saved local playlist. A row that records
-// a public QQ Music or Kuwo id refreshes that playlist first. New tracks are
-// queued as playlist-scene jobs; the first check can record the current
-// tracks without queueing them. Nothing here downloads audio.
+const (
+	playlistSubscriptionMissingCooldown = 7 * 24 * time.Hour
+	playlistSubscriptionAlbumBatch      = 100
+)
+
+// Playlist subscriptions re-read a saved local playlist. A row that records a
+// public streaming-platform id refreshes that playlist first. New tracks and
+// previously seen tracks that are still absent from the verified library are
+// queued as playlist-scene jobs; a cooldown prevents an immediate duplicate
+// batch. The first check can record current tracks without queueing them.
+// Nothing here downloads audio.
 
 type playlistSubscription struct {
-	PlaylistID      string   `json:"playlist_id"`
-	Name            string   `json:"name"`
-	IntervalHours   int      `json:"interval_hours"`
-	IncludeExisting bool     `json:"include_existing"`
-	Paused          bool     `json:"paused"`
-	Seen            []string `json:"seen"`
-	Platform        string   `json:"platform,omitempty"`
-	RemoteID        string   `json:"remote_id,omitempty"`
-	LastChecked     string   `json:"last_checked,omitempty"`
-	NextCheck       string   `json:"next_check,omitempty"`
-	LastResult      string   `json:"last_result,omitempty"`
+	PlaylistID      string            `json:"playlist_id"`
+	Name            string            `json:"name"`
+	IntervalHours   int               `json:"interval_hours"`
+	IncludeExisting bool              `json:"include_existing"`
+	Paused          bool              `json:"paused"`
+	Seen            []string          `json:"seen"`
+	RetryMissing    map[string]string `json:"retry_missing,omitempty"`
+	Platform        string            `json:"platform,omitempty"`
+	RemoteID        string            `json:"remote_id,omitempty"`
+	LastChecked     string            `json:"last_checked,omitempty"`
+	NextCheck       string            `json:"next_check,omitempty"`
+	LastResult      string            `json:"last_result,omitempty"`
 }
 
 func (a *App) subscriptionPath() string {
@@ -287,37 +295,75 @@ func (a *App) runSubscriptionCheck(playlistID string, manual bool) (map[string]a
 	for _, key := range row.Seen {
 		seen[key] = true
 	}
+	now := a.now()
 	fresh := len(row.Seen) == 0 && row.LastChecked == ""
 	if fresh && !row.IncludeExisting {
 		keys := trackKeys(tracks)
 		row.Seen = keys
-		row.LastChecked = a.now().UTC().Format(time.RFC3339)
-		row.NextCheck = a.now().Add(time.Duration(row.IntervalHours) * time.Hour).UTC().Format(time.RFC3339)
+		row.RetryMissing = make(map[string]string, len(keys))
+		retryAt := now.Add(playlistSubscriptionMissingCooldown).UTC().Format(time.RFC3339)
+		for _, key := range keys {
+			row.RetryMissing[key] = retryAt
+		}
+		row.LastChecked = now.UTC().Format(time.RFC3339)
+		row.NextCheck = now.Add(time.Duration(row.IntervalHours) * time.Hour).UTC().Format(time.RFC3339)
 		row.LastResult = fmt.Sprintf("已记录现有 %d 首，未创建任务", len(keys))
 		if err := a.updateStoredSubscription(row); err != nil {
 			return nil, err
 		}
 		return map[string]any{"ok": true, "subscription": row, "queued": 0, "job_ids": []string{}, "downloaded": false, "message": row.LastResult}, nil
 	}
+	retrySeenMissing := manual
+	if !manual {
+		if last, err := time.Parse(time.RFC3339, row.LastChecked); err == nil {
+			retrySeenMissing = !now.Before(last.Add(time.Duration(row.IntervalHours) * time.Hour))
+		}
+	}
+	if row.RetryMissing == nil {
+		row.RetryMissing = map[string]string{}
+	}
+	library := a.playlistLibrary()
 	groups := map[string][]playlistTrack{}
 	order := []string{}
+	queuedKeys := map[string]bool{}
+	newTracks, missingTracks := 0, 0
 	for _, track := range tracks {
 		key := trackKey(track)
-		if seen[key] {
+		if library.hasPlaylistRow(track) {
+			delete(row.RetryMissing, key)
 			continue
 		}
+		seenTrack := seen[key]
+		if seenTrack {
+			if !retrySeenMissing {
+				continue
+			}
+			if retryAt, err := time.Parse(time.RFC3339, row.RetryMissing[key]); err == nil && now.Before(retryAt) {
+				continue
+			}
+		}
+		if queuedKeys[key] {
+			continue
+		}
+		queuedKeys[key] = true
 		group := track.Album
 		if group == "" {
 			group = track.Artist + " - " + track.Title
 		}
 		if _, ok := groups[group]; !ok {
+			if len(order) >= playlistSubscriptionAlbumBatch {
+				continue
+			}
 			order = append(order, group)
+		}
+		if seenTrack {
+			missingTracks++
+		} else {
+			newTracks++
 		}
 		groups[group] = append(groups[group], track)
 	}
-	if len(order) > 20 {
-		order = order[:20]
-	}
+	library.commitPresenceSnapshots()
 	jobIDs := []string{}
 	queuedTracks := 0
 	for index, album := range order {
@@ -331,10 +377,15 @@ func (a *App) runSubscriptionCheck(playlistID string, manual bool) (map[string]a
 		jobIDs = append(jobIDs, jobID)
 		queuedTracks += len(members)
 		for _, track := range members {
-			row.Seen = append(row.Seen, trackKey(track))
+			key := trackKey(track)
+			if !seen[key] {
+				row.Seen = append(row.Seen, key)
+			}
+			seen[key] = true
+			row.RetryMissing[key] = now.Add(playlistSubscriptionMissingCooldown).UTC().Format(time.RFC3339)
 		}
 		sort.Strings(row.Seen)
-		row.LastResult = fmt.Sprintf("已为 %d 首新增曲目创建任务；尚未下载、尚未入库", queuedTracks)
+		row.LastResult = fmt.Sprintf("已为 %d 首新增曲目和 %d 首仍未入库的已见曲目创建任务；尚未下载、尚未入库", newTracks, missingTracks)
 		if err := a.updateStoredSubscription(row); err != nil {
 			return nil, err
 		}
@@ -342,7 +393,7 @@ func (a *App) runSubscriptionCheck(playlistID string, manual bool) (map[string]a
 	row.LastChecked = a.now().UTC().Format(time.RFC3339)
 	row.NextCheck = a.now().Add(time.Duration(row.IntervalHours) * time.Hour).UTC().Format(time.RFC3339)
 	if queuedTracks == 0 {
-		row.LastResult = "没有新增曲目"
+		row.LastResult = "没有需要重新排队的曲目"
 	}
 	if err := a.updateStoredSubscription(row); err != nil {
 		return nil, err

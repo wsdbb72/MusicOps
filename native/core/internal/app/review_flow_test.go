@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -128,15 +129,37 @@ func TestAIReviewRetriesAZeroSpendTokenHoldWithoutCallingTheModel(t *testing.T) 
 
 func claimAndBeginWorkflowTask(t *testing.T, application *App, id, lane string, now int64) taskrepo.Token {
 	t.Helper()
-	claim, err := application.tasks.Claim("claim-"+id, lane, "review-test-owner", now)
-	if err != nil || claim.Task == nil {
-		t.Fatalf("claim %s: %+v %v", id, claim, err)
+	// Open starts the workers before a test can set the pipeline pause flag.
+	// On a fast runner (notably macOS), a worker may therefore claim the task
+	// in that tiny window. Release an unstarted claim and retry so the test is
+	// deterministic instead of relying on scheduler timing.
+	deadline := time.Now().Add(3 * time.Second)
+	for attempt := int64(0); ; attempt++ {
+		requestID := "claim-" + id + "-" + time.Now().Format("150405.000000000")
+		claim, err := application.tasks.Claim(requestID, lane, "review-test-owner", now+attempt)
+		if err == nil && claim.Task != nil {
+			token := taskrepo.Token{ID: claim.Task.ID, Owner: claim.Task.Owner, Fence: claim.Task.Fence}
+			if _, err := application.tasks.Begin("begin-"+id, token, now+attempt+1); err != nil {
+				t.Fatal(err)
+			}
+			return token
+		}
+		current, inspectErr := application.tasks.Get(id)
+		if inspectErr != nil {
+			t.Fatalf("inspect claim %s: %v", id, inspectErr)
+		}
+		if current != nil && current.Execution == "claimed" && current.Owner != "" {
+			token := taskrepo.Token{ID: current.ID, Owner: current.Owner, Fence: current.Fence}
+			_, releaseErr := application.tasks.ReleaseClaim("release-claim-"+id+"-"+time.Now().Format("150405.000000000"), token, now+attempt+1)
+			if releaseErr != nil && !errors.Is(releaseErr, taskrepo.ErrStale) {
+				t.Fatalf("release competing claim %s: %v", id, releaseErr)
+			}
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("claim %s: %+v %v task=%+v", id, claim, err, current)
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
-	token := taskrepo.Token{ID: claim.Task.ID, Owner: claim.Task.Owner, Fence: claim.Task.Fence}
-	if _, err := application.tasks.Begin("begin-"+id, token, now+1); err != nil {
-		t.Fatal(err)
-	}
-	return token
 }
 
 func TestNormalizedAndSameReleaseCanQueueWithoutAModel(t *testing.T) {

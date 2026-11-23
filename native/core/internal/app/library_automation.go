@@ -29,9 +29,10 @@ type automationWorkflowPriorityKey struct{}
 const (
 	automationWorkflowPriority      = 50
 	libraryAutomationInitialDelay   = 5 * time.Minute
-	libraryAutomationMaxMerges      = 5
+	libraryAutomationMaxMerges      = 1000
 	libraryAutomationMaxJobs        = 200
 	libraryAutomationScanWorkers    = 8
+	duplicateFingerprintWorkers     = 4
 	libraryAutomationCheckpoint     = 20_000
 	libraryAutomationScanVersion    = 2
 	libraryAutomationStallTimeout   = 45 * time.Minute
@@ -107,15 +108,38 @@ func (a *App) saveLibraryAutomationSettings(in libraryAutomationSettings) (libra
 }
 
 type cachedLibraryScan struct {
-	Size         int64   `json:"size"`
-	ModNS        int64   `json:"mod_ns"`
-	NeedsCatalog bool    `json:"needs_catalog"`
-	NeedsArtwork bool    `json:"needs_artwork"`
-	Codec        string  `json:"codec,omitempty"`
-	Duration     float64 `json:"duration,omitempty"`
-	Artist       string  `json:"artist,omitempty"`
-	Album        string  `json:"album,omitempty"`
-	Title        string  `json:"title,omitempty"`
+	Size          int64                       `json:"size"`
+	ModNS         int64                       `json:"mod_ns"`
+	NeedsCatalog  bool                        `json:"needs_catalog"`
+	NeedsArtwork  bool                        `json:"needs_artwork"`
+	Codec         string                      `json:"codec,omitempty"`
+	Duration      float64                     `json:"duration,omitempty"`
+	Artist        string                      `json:"artist,omitempty"`
+	Album         string                      `json:"album,omitempty"`
+	Title         string                      `json:"title,omitempty"`
+	Duplicate     *cachedDuplicateFingerprint `json:"duplicate,omitempty"`
+	DuplicateOnly bool                        `json:"duplicate_only,omitempty"`
+}
+
+// cachedDuplicateFingerprint stores the expensive decode result for an
+// unchanged file. It is persisted in the existing maintenance scan document,
+// so repeated whole-library dedupe passes do not hash and decode the same
+// candidates again.
+type cachedDuplicateFingerprint struct {
+	FileSize         int64   `json:"file_size,omitempty"`
+	FileModNS        int64   `json:"file_mod_ns,omitempty"`
+	FileSHA256       string  `json:"file_sha256,omitempty"`
+	PCMSHA256        string  `json:"pcm_sha256,omitempty"`
+	Codec            string  `json:"codec,omitempty"`
+	SampleRate       uint32  `json:"sample_rate,omitempty"`
+	Channels         int     `json:"channels,omitempty"`
+	BitsPerSample    int     `json:"bits_per_sample,omitempty"`
+	BitRate          int64   `json:"bit_rate,omitempty"`
+	Duration         float64 `json:"duration,omitempty"`
+	Lossless         bool    `json:"lossless,omitempty"`
+	Valid            bool    `json:"valid,omitempty"`
+	DecoderAvailable bool    `json:"decoder_available"`
+	ProbeError       string  `json:"probe_error,omitempty"`
 }
 
 type libraryAutomationScanDocument struct {
@@ -530,13 +554,16 @@ func scanAutomationFile(ctx context.Context, input libraryAutomationScanInput) l
 		result.err = fmt.Errorf("%s: 文件状态读取失败: %w", filepath.Base(input.path), err)
 		return result
 	}
-	if input.hasCache && input.cached.Size == info.Size() && input.cached.ModNS == info.ModTime().UnixNano() {
+	if input.hasCache && !input.cached.DuplicateOnly && input.cached.Size == info.Size() && input.cached.ModNS == info.ModTime().UnixNano() {
 		result.entry = input.cached
 		result.ok = true
 		result.reused = true
 		return result
 	}
 	entry := cachedLibraryScan{Size: info.Size(), ModNS: info.ModTime().UnixNano()}
+	if input.hasCache && input.cached.Size == info.Size() && input.cached.ModNS == info.ModTime().UnixNano() && input.cached.Duplicate != nil {
+		entry.Duplicate = input.cached.Duplicate
+	}
 	if strings.EqualFold(filepath.Ext(input.path), ".flac") {
 		tags, readErr := readFLACTagsPrefix(input.path)
 		if readErr != nil {
@@ -1215,7 +1242,9 @@ func writeAutomationSidecar(path string, body []byte) error {
 func (a *App) runAutomatedDeduplication(ctx context.Context) bool {
 	state := a.libraryAutomation
 	state.touch("dedupe", "正在扫描重复项")
-	groups, _, _, err := a.scanDuplicatesWithProgress(ctx, func(checked, total int, current string) {
+	root := a.libraryDir()
+	cache := a.loadLibraryAutomationScanCache(root)
+	groups, _, truncated, updates, err := a.scanDuplicatesWithOptions(ctx, 0, root, cache.Files, func(checked, total int, current string) {
 		state.update(func(report *libraryAutomationReport) {
 			report.DuplicateCandidates = total
 			report.DuplicateChecked = checked
@@ -1226,6 +1255,22 @@ func (a *App) runAutomatedDeduplication(ctx context.Context) bool {
 		}
 		state.touch("dedupe", fmt.Sprintf("正在比对重复项 %d/%d · %s", checked, total, label))
 	})
+	for key, fingerprint := range updates {
+		if fingerprint.FileSize <= 0 {
+			continue
+		}
+		entry := cache.Files[key]
+		wasMetadataComplete := entry.Size != 0 && !entry.DuplicateOnly
+		entry.Size = fingerprint.FileSize
+		entry.ModNS = fingerprint.FileModNS
+		entry.DuplicateOnly = !wasMetadataComplete
+		copied := fingerprint
+		entry.Duplicate = &copied
+		cache.Files[key] = entry
+	}
+	if err := a.saveLibraryAutomationScanCache(cache); err != nil {
+		state.addError(fmt.Errorf("重复扫描缓存保存失败: %w", err))
+	}
 	if err != nil {
 		state.addError(fmt.Errorf("重复扫描失败: %w", err))
 		return true
@@ -1266,7 +1311,7 @@ func (a *App) runAutomatedDeduplication(ctx context.Context) bool {
 			return true
 		}
 	}
-	return ctx.Err() == nil && len(candidates) > merged
+	return ctx.Err() == nil && (truncated || len(candidates) > merged)
 }
 
 func (a *App) enqueueLibraryMaintenanceWorkflows(ctx context.Context, byDir map[string][]string, settings libraryAutomationSettings) {

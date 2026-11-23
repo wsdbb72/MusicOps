@@ -9,8 +9,6 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
-
-	"github.com/wsdbb72/MusicOps/native/core/internal/downloadpolicy"
 )
 
 func TestParseM3U(t *testing.T) {
@@ -62,6 +60,23 @@ func TestStreamingFallbackWithoutPlaylist(t *testing.T) {
 	}
 	if !found {
 		t.Fatal("streaming walk evidence missing", detail.Evidence)
+	}
+}
+
+func TestStreamingFallbackSettlesAfterExhaustedTransientSources(t *testing.T) {
+	engine := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, "temporary outage", http.StatusServiceUnavailable)
+	}))
+	defer engine.Close()
+	tracker := emptyResultsServer(t)
+	defer tracker.Close()
+	application := newApp(t)
+	t.Setenv("MUSICOPS_ENGINE_URL", engine.URL)
+	post(t, application, "/v1/settings/download", map[string]any{"streaming_enabled": true})
+	post(t, application, "/v1/search", searchBody("album-transient", tracker.URL, []string{"dicmusic", "orpheus"}, true))
+	job := waitJob(t, application, "process:search:album-transient", "skipped")
+	if job.ReviewKind != "" || !strings.Contains(job.Message, "已自动结束") || !strings.Contains(job.Message, "下一轮库维护会重新尝试") {
+		t.Fatal(job)
 	}
 }
 
@@ -157,21 +172,5 @@ func TestStreamingSourceStatusRecognizesBundledEngine(t *testing.T) {
 				t.Fatalf("bundled go-music-dl was not reported for %s: %+v", entry.Name, entry)
 			}
 		}
-	}
-}
-
-func TestStreamingOutcomesSettleOnlyWhenEverySourceIsDefinitivelyEmpty(t *testing.T) {
-	noResult := []downloadpolicy.Outcome{{Class: downloadpolicy.ClassNoResult}, {Class: downloadpolicy.ClassNoResult}}
-	if !streamingOutcomesAreDefinitive(noResult) {
-		t.Fatal("all no-result outcomes were not definitive")
-	}
-	for _, class := range []string{downloadpolicy.ClassAuth, downloadpolicy.ClassAuthorization, downloadpolicy.ClassNetwork, downloadpolicy.ClassRateLimited, downloadpolicy.ClassMatch, downloadpolicy.ClassImport} {
-		mixed := append([]downloadpolicy.Outcome{{Class: class}}, noResult...)
-		if streamingOutcomesAreDefinitive(mixed) {
-			t.Fatalf("%s failure was incorrectly treated as a definitive empty result", class)
-		}
-	}
-	if streamingOutcomesAreDefinitive(nil) {
-		t.Fatal("an empty walk was treated as definitive")
 	}
 }

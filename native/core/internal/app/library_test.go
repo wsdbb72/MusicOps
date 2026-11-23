@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/binary"
 	"encoding/json"
+	"fmt"
 	"io"
 	"math"
 	"net/http"
@@ -165,6 +166,27 @@ func TestDuplicateScanGroupsSameRecordingAndIgnoresDifferentTitle(t *testing.T) 
 	group := groups[0]
 	if group.State != "ready" || group.Keep == nil || len(group.Files) != 2 || group.Keep.Valid != true {
 		t.Fatal(group)
+	}
+}
+
+func TestDuplicateScanLimitStopsAndReportsTruncation(t *testing.T) {
+	application := newApp(t)
+	incoming := filepath.Join(application.Dir, "incoming")
+	for i := 0; i < 3; i++ {
+		wav := filepath.Join(incoming, fmt.Sprintf("limit-%d.wav", i))
+		flac := filepath.Join(incoming, fmt.Sprintf("limit-%d.flac", i))
+		writeToneWAV(t, wav, 440+float64(i))
+		writeFLACFromWAV(t, wav, flac)
+		title := fmt.Sprintf("Song %d", i)
+		releaseLibraryFile(t, application, filepath.Base(wav), fmt.Sprintf("limit-wav-%d", i), "Artist", "Limit Album", title, i+1)
+		releaseLibraryFile(t, application, filepath.Base(flac), fmt.Sprintf("limit-flac-%d", i), "Artist", "Limit Album", title, i+1)
+	}
+	groups, _, truncated, _, err := application.scanDuplicatesWithOptions(context.Background(), 2, "", nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(groups) != 2 || !truncated {
+		t.Fatalf("groups=%d truncated=%v", len(groups), truncated)
 	}
 }
 

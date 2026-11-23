@@ -391,11 +391,11 @@ func (a *App) acquireFallback(ctx context.Context, execution *scheduler.Executio
 	if err != nil {
 		return scheduler.Outcome{}, err
 	}
-	// There is no later source or candidate to inspect when the complete walk
-	// has no import and no retryable failure. Retrying that terminal no-result
-	// through auto review forever was the cause of the large maintenance review
-	// queue. Cache/network failures remain recoverable and are bounded below.
-	if validated == "" && len(imported) == 0 && !walk.Recoverable && streamingOutcomesAreDefinitive(outcomes) {
+	// With no validated audio, no imported tracklist and no retry left, every
+	// source has reached a terminal outcome for this pass. There is no human
+	// decision that can unlock a later source, so retain the evidence and let
+	// the next maintenance pass retry instead of leaving a permanent review.
+	if validated == "" && len(imported) == 0 && !walk.Recoverable {
 		message := streamWalkMessage(notes, "") + "；已自动结束，下一轮库维护会重新尝试"
 		complete := workflow.Complete{
 			Edge: workflow.EdgeTerminal, NextStage: "skipped", TaskState: "completed", Message: message, NowNS: a.now().UnixNano(),
@@ -452,15 +452,4 @@ func playlistSuffix(name string) string {
 		return ""
 	}
 	return "（" + name + "）"
-}
-func streamingOutcomesAreDefinitive(outcomes []downloadpolicy.Outcome) bool {
-	if len(outcomes) == 0 {
-		return false
-	}
-	for _, outcome := range outcomes {
-		if outcome.Class != downloadpolicy.ClassNoResult {
-			return false
-		}
-	}
-	return true
 }

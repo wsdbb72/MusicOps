@@ -2029,7 +2029,11 @@ const appJS = `(function () {
         return;
       }
       duplicateRows = body.groups || [];
-      setStatus("ok", "扫描完成，" + duplicateRows.length + " 组。同名未确认的不会合并。");
+      if (body.truncated) {
+        setStatus("info", "已显示前 " + duplicateRows.length + " 组，仍有候选未展开。自动维护会继续按最佳音质分批处理；同名未确认的不会合并。");
+      } else {
+        setStatus("ok", "扫描完成，" + duplicateRows.length + " 组。同名未确认的不会合并。");
+      }
       renderLibrary();
     } catch (err) {
       setStatus("fail", "扫描中断。");

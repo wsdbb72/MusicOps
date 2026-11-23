@@ -401,3 +401,41 @@ func TestLibraryAutomationMergesBestQualityDuplicate(t *testing.T) {
 		t.Fatalf("report=%+v", report)
 	}
 }
+
+func TestLibraryAutomationPersistsAndRestoresDuplicateFingerprintCache(t *testing.T) {
+	application := newApp(t)
+	incoming := filepath.Join(application.Dir, "incoming")
+	wave := filepath.Join(incoming, "cache-second.wav")
+	writeToneWAV(t, wave, 440)
+	writeFLACFromWAV(t, wave, filepath.Join(incoming, "cache-first.flac"))
+	releaseLibraryFile(t, application, "cache-first.flac", "cache-dup-1", "Artist", "Album", "Song", 1)
+	releaseLibraryFile(t, application, "cache-second.wav", "cache-dup-2", "Artist", "Album", "Song", 1)
+
+	settings := libraryAutomationSettings{Enabled: true, Dedupe: true, IntervalHours: 6}
+	if err := application.runLibraryAutomationPass(context.Background(), settings); err != nil {
+		t.Fatal(err)
+	}
+	root := application.libraryDir()
+	cache := application.loadLibraryAutomationScanCache(root)
+	if len(cache.Files) < 2 {
+		t.Fatalf("expected fingerprints for both duplicates: %+v", cache.Files)
+	}
+	restored := 0
+	for key, entry := range cache.Files {
+		if entry.Duplicate == nil || entry.Duplicate.FileSize <= 0 || !entry.DuplicateOnly {
+			t.Fatalf("duplicate fingerprint not persisted: %s %+v", key, entry)
+		}
+		path := filepath.Join(root, filepath.FromSlash(key))
+		if _, err := os.Stat(path); err != nil {
+			continue
+		}
+		result := scanAutomationFile(context.Background(), libraryAutomationScanInput{path: path, key: key, cached: entry, hasCache: true})
+		if !result.ok || result.reused || result.entry.DuplicateOnly || result.entry.Duplicate == nil {
+			t.Fatalf("metadata scan lost duplicate fingerprint: %+v", result)
+		}
+		restored++
+	}
+	if restored != 1 {
+		t.Fatalf("expected one surviving file, restored=%d", restored)
+	}
+}

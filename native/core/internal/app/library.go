@@ -24,9 +24,11 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/wsdbb72/MusicOps/native/core/internal/audiorelease"
@@ -115,9 +117,19 @@ func (a *App) scanDuplicates(ctx context.Context) ([]duplicateGroup, string, boo
 }
 
 func (a *App) scanDuplicatesWithProgress(ctx context.Context, progress func(checked, total int, current string)) ([]duplicateGroup, string, bool, error) {
+	groups, method, truncated, _, err := a.scanDuplicatesWithOptions(ctx, 1000, "", nil, progress)
+	return groups, method, truncated, err
+}
+
+// scanDuplicatesWithOptions fingerprints candidate recordings concurrently.
+// A positive limit keeps the interactive endpoint bounded; zero scans every
+// candidate for whole-library automation. cached is only read by workers and
+// is never mutated concurrently. The returned updates are safe to merge into
+// the persisted maintenance cache after every worker has stopped.
+func (a *App) scanDuplicatesWithOptions(ctx context.Context, limit int, root string, cached map[string]cachedLibraryScan, progress func(checked, total int, current string)) ([]duplicateGroup, string, bool, map[string]cachedDuplicateFingerprint, error) {
 	entries, err := audiorelease.List(a.engine)
 	if err != nil {
-		return nil, "", false, err
+		return nil, "", false, nil, err
 	}
 	decoder := audiorelease.SystemDecoder()
 	method := "pcm"
@@ -147,34 +159,101 @@ func (a *App) scanDuplicatesWithProgress(ctx context.Context, progress func(chec
 		}
 	}
 	sort.Strings(candidateKeys)
-	groups := []duplicateGroup{}
-	truncated := false
-	checkedCount := 0
-	for checked, key := range candidateKeys {
-		if progress != nil {
-			if err := ctx.Err(); err != nil {
-				return nil, "", false, err
+	type scanResult struct {
+		index   int
+		group   *duplicateGroup
+		updates map[string]cachedDuplicateFingerprint
+		err     error
+	}
+	judge, workers := ctx, duplicateFingerprintWorkers
+	if available := runtime.GOMAXPROCS(0); available < workers {
+		workers = available
+	}
+	if len(candidateKeys) < workers {
+		workers = len(candidateKeys)
+	}
+	if workers < 1 {
+		return []duplicateGroup{}, method, false, nil, nil
+	}
+	cacheSnapshot := make(map[string]cachedLibraryScan, len(cached))
+	for key, entry := range cached {
+		cacheSnapshot[key] = entry
+	}
+	jobs := make(chan int)
+	results := make(chan scanResult, workers*2)
+	stopFeeding := make(chan struct{})
+	var stopOnce sync.Once
+	stop := func() { stopOnce.Do(func() { close(stopFeeding) }) }
+	var workerWG sync.WaitGroup
+	for i := 0; i < workers; i++ {
+		workerWG.Add(1)
+		go func() {
+			defer workerWG.Done()
+			for index := range jobs {
+				group, updates, fingerprintErr := a.fingerprintGroupWithCache(judge, byRecording[candidateKeys[index]], decoder, root, cacheSnapshot)
+				select {
+				case results <- scanResult{index: index, group: group, updates: updates, err: fingerprintErr}:
+				case <-judge.Done():
+					return
+				}
 			}
-			progress(checked, len(candidateKeys), key)
+		}()
+	}
+	go func() {
+		defer close(jobs)
+		for index := range candidateKeys {
+			select {
+			case jobs <- index:
+			case <-stopFeeding:
+				return
+			case <-judge.Done():
+				return
+			}
 		}
-		if len(groups) >= 1000 {
-			truncated = true
-			break
+	}()
+	go func() {
+		workerWG.Wait()
+		close(results)
+	}()
+
+	groups := make([]duplicateGroup, 0, len(candidateKeys))
+	updates := make(map[string]cachedDuplicateFingerprint)
+	checkedCount, truncated, firstErr := 0, false, error(nil)
+	for result := range results {
+		checkedCount++
+		if result.err != nil && firstErr == nil {
+			firstErr = result.err
+			stop()
 		}
-		group, err := a.fingerprintGroup(ctx, byRecording[key], decoder)
-		if err != nil {
-			return nil, "", false, err
+		for key, entry := range result.updates {
+			updates[key] = entry
 		}
-		if group != nil {
-			groups = append(groups, *group)
+		if result.group != nil {
+			if limit > 0 && len(groups) >= limit {
+				truncated = true
+				stop()
+				continue
+			}
+			groups = append(groups, *result.group)
 		}
-		checkedCount = checked + 1
+		if progress != nil {
+			progress(checkedCount, len(candidateKeys), candidateKeys[result.index])
+		}
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, "", false, updates, err
+	}
+	if firstErr != nil {
+		return nil, "", false, updates, firstErr
+	}
+	if checkedCount < len(candidateKeys) {
+		truncated = true
 	}
 	if progress != nil {
 		progress(checkedCount, len(candidateKeys), "scan complete")
 	}
 	sort.Slice(groups, func(i, j int) bool { return groups[i].GroupID < groups[j].GroupID })
-	return groups, method, truncated, nil
+	return groups, method, truncated, updates, nil
 }
 
 type duplicateAudioInfo struct {
@@ -285,40 +364,27 @@ func losslessAudioCodec(codec string) bool {
 // group when they have one title, compatible duration and channel count, and
 // at least one independently decodable copy.
 func (a *App) fingerprintGroup(ctx context.Context, rows []audiorelease.Entry, decoder audiorelease.Decoder) (*duplicateGroup, error) {
+	group, _, err := a.fingerprintGroupWithCache(ctx, rows, decoder, "", nil)
+	return group, err
+}
+
+func (a *App) fingerprintGroupWithCache(ctx context.Context, rows []audiorelease.Entry, decoder audiorelease.Decoder, root string, cached map[string]cachedLibraryScan) (*duplicateGroup, map[string]cachedDuplicateFingerprint, error) {
 	artist, album := splitLibraryTail(rows[0].File)
 	files := make([]duplicateFile, 0, len(rows))
 	valid := make([]duplicateFile, 0, len(rows))
+	updates := make(map[string]cachedDuplicateFingerprint)
 	for _, entry := range rows {
 		full := a.entryFilePath(entry)
-		fileSHA, hashErr := hashFile(full)
-		info, probeErr := probeDuplicateAudio(ctx, full, entry.Format)
-		file := duplicateFile{
-			RequestID: entry.RequestID, File: entry.File, Format: strings.ToLower(entry.Format),
-			Codec: info.Codec, SHA256: fileSHA, SampleRate: info.SampleRate, Channels: info.Channels,
-			BitsPerSample: info.BitsPerSample, BitRate: info.BitRate, Duration: info.Duration,
-			Lossless: losslessAudioCodec(info.Codec), LibraryDir: entry.LibraryDir,
+		cacheKey := ""
+		var cachedEntry cachedLibraryScan
+		if root != "" && cached != nil {
+			cacheKey = automationCacheKey(root, full)
+			cachedEntry = cached[cacheKey]
 		}
-		if strings.EqualFold(file.Format, "flac") {
-			if tags, err := readFLACTagsPrefix(full); err == nil && isLossyFLACProvenance(firstTagValue(tags.Raw, "COMMENT")) {
-				file.Lossless = false
-				file.Codec = "flac-lossy"
-			}
+		file, fingerprint := a.fingerprintDuplicateFile(ctx, entry, full, decoder, cachedEntry, cacheKey != "")
+		if cacheKey != "" {
+			updates[cacheKey] = fingerprint
 		}
-		var pcmHash string
-		if decoder != nil && hashErr == nil && probeErr == nil {
-			pcmHash, hashErr = pcmHashWithFormat(ctx, full, []string{"-f", "s32le"})
-			if hashErr != nil {
-				probeErr = fmt.Errorf("音频解码校验失败: %w", hashErr)
-			}
-		}
-		file.PCMSHA256 = pcmHash
-		if hashErr != nil {
-			probeErr = fmt.Errorf("文件哈希读取失败: %w", hashErr)
-		}
-		if probeErr != nil {
-			file.ProbeError = scrub(probeErr.Error())
-		}
-		file.Valid = decoder != nil && probeErr == nil && file.SampleRate > 0 && file.Channels > 0 && file.Duration > 0
 		file.Rank = duplicateRank(file)
 		files = append(files, file)
 		if file.Valid {
@@ -342,19 +408,19 @@ func (a *App) fingerprintGroup(ctx context.Context, rows []audiorelease.Entry, d
 		} else {
 			group.Reason = "没有可完整解码的版本，原文件全部保留"
 		}
-		return group, nil
+		return group, updates, nil
 	case duplicateSameResolutionLosslessMismatch(valid):
 		group.State = "review"
 		group.Reason = "同为无损且位深与采样率相同的版本解码内容不同，可能是不同母带，原文件保留"
-		return group, nil
+		return group, updates, nil
 	case !duplicateDurationsCompatible(valid):
 		group.State = "review"
 		group.Reason = "同名曲目的时长差异超过容差，可能是不同版本，原文件保留"
-		return group, nil
+		return group, updates, nil
 	case !duplicateChannelsCompatible(valid):
 		group.State = "review"
 		group.Reason = "同名曲目的声道数不同，可能是不同母带，原文件保留"
-		return group, nil
+		return group, updates, nil
 	}
 	keep := valid[0]
 	for _, file := range valid[1:] {
@@ -366,7 +432,72 @@ func (a *App) fingerprintGroup(ctx context.Context, rows []audiorelease.Entry, d
 	group.Keep = &keepCopy
 	group.State = "ready"
 	group.Reason = "同一专辑、曲名、时长和声道；保留最高音质 " + duplicateQualityLabel(keep) + "，其余版本进入可恢复隔离区"
-	return group, nil
+	return group, updates, nil
+}
+
+func (a *App) fingerprintDuplicateFile(ctx context.Context, entry audiorelease.Entry, full string, decoder audiorelease.Decoder, cached cachedLibraryScan, cacheable bool) (duplicateFile, cachedDuplicateFingerprint) {
+	info, statErr := os.Stat(full)
+	if statErr == nil && cached.Duplicate != nil && cached.Duplicate.Valid && cached.Size == info.Size() && cached.ModNS == info.ModTime().UnixNano() && cached.Duplicate.DecoderAvailable == (decoder != nil) && (entry.SHA256 == "" || cached.Duplicate.FileSHA256 == entry.SHA256) {
+		fingerprint := *cached.Duplicate
+		return duplicateFileFromFingerprint(entry, fingerprint), fingerprint
+	}
+
+	fileSHA := strings.TrimSpace(entry.SHA256)
+	var hashErr error
+	if fileSHA == "" || !entry.PresenceUnchanged() {
+		fileSHA, hashErr = hashFile(full)
+	}
+	audioInfo, probeErr := probeDuplicateAudio(ctx, full, entry.Format)
+	file := duplicateFile{
+		RequestID: entry.RequestID, File: entry.File, Format: strings.ToLower(entry.Format),
+		Codec: audioInfo.Codec, SHA256: fileSHA, SampleRate: audioInfo.SampleRate, Channels: audioInfo.Channels,
+		BitsPerSample: audioInfo.BitsPerSample, BitRate: audioInfo.BitRate, Duration: audioInfo.Duration,
+		Lossless: losslessAudioCodec(audioInfo.Codec), LibraryDir: entry.LibraryDir,
+	}
+	if strings.EqualFold(file.Format, "flac") {
+		if tags, err := readFLACTagsPrefix(full); err == nil && isLossyFLACProvenance(firstTagValue(tags.Raw, "COMMENT")) {
+			file.Lossless = false
+			file.Codec = "flac-lossy"
+		}
+	}
+	if decoder != nil && hashErr == nil && probeErr == nil {
+		file.PCMSHA256, hashErr = pcmHashWithFormat(ctx, full, []string{"-f", "s32le"})
+		if hashErr != nil {
+			probeErr = fmt.Errorf("音频解码校验失败: %w", hashErr)
+		}
+	}
+	if hashErr != nil {
+		probeErr = fmt.Errorf("文件哈希读取失败: %w", hashErr)
+	}
+	if probeErr != nil {
+		file.ProbeError = scrub(probeErr.Error())
+	}
+	file.Valid = decoder != nil && probeErr == nil && file.SampleRate > 0 && file.Channels > 0 && file.Duration > 0
+	fingerprint := cachedDuplicateFingerprint{
+		FileSHA256: file.SHA256, PCMSHA256: file.PCMSHA256, Codec: file.Codec,
+		SampleRate: file.SampleRate, Channels: file.Channels, BitsPerSample: file.BitsPerSample,
+		BitRate: file.BitRate, Duration: file.Duration, Lossless: file.Lossless, Valid: file.Valid,
+		DecoderAvailable: decoder != nil, ProbeError: file.ProbeError,
+	}
+	if cacheable && statErr == nil && file.Valid {
+		fingerprint.FileSize = info.Size()
+		fingerprint.FileModNS = info.ModTime().UnixNano()
+		cached.Size = info.Size()
+		cached.ModNS = info.ModTime().UnixNano()
+		cached.Duplicate = &fingerprint
+	}
+	return file, fingerprint
+}
+
+func duplicateFileFromFingerprint(entry audiorelease.Entry, fingerprint cachedDuplicateFingerprint) duplicateFile {
+	return duplicateFile{
+		RequestID: entry.RequestID, File: entry.File, Format: strings.ToLower(entry.Format),
+		Codec: fingerprint.Codec, SHA256: fingerprint.FileSHA256, PCMSHA256: fingerprint.PCMSHA256,
+		SampleRate: fingerprint.SampleRate, Channels: fingerprint.Channels,
+		BitsPerSample: fingerprint.BitsPerSample, BitRate: fingerprint.BitRate,
+		Duration: fingerprint.Duration, Lossless: fingerprint.Lossless, Valid: fingerprint.Valid,
+		ProbeError: fingerprint.ProbeError, LibraryDir: entry.LibraryDir,
+	}
 }
 
 func duplicateRecordingTitle(tail, artist string) string {

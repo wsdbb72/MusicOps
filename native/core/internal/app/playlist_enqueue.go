@@ -210,7 +210,7 @@ const (
 	// Presence checks may need to inspect thousands of files on a slow library
 	// disk. The immutable catalogue maps are shared; only each worker's small
 	// verification/cache maps are independent.
-	playlistPresenceWorkers = 8
+	playlistPresenceWorkers = 2
 )
 
 func (a *App) playlistLibrary() playlistLibraryIndex {
@@ -352,51 +352,79 @@ func (index playlistLibraryIndex) hasPlaylistRow(row playlistTrack) bool {
 		isHotSlowCompilationAlbum(row.Album) {
 		return false
 	}
-	key := normalizeKey(row.Title)
-	candidates := map[string][]string{}
-	if strings.TrimSpace(row.Album) == "" {
-		// There is no source edition to require. Verify title, credits and
-		// duration against the indexed audio instead of guessing an album.
-		for _, id := range index.titleCandidates[libraryPathKey(row.Title)] {
-			if !index.isUnchanged(id) {
-				continue
-			}
-			if path, found, err := audiorelease.PathFor(index.engine, id); err == nil && found && strings.EqualFold(filepath.Ext(path), ".flac") {
-				candidates[key] = append(candidates[key], path)
-			}
-		}
-	} else {
-		// Use the same managed album folder and recording checks as NetEase
-		// acquisition. The folder names may be truncated and album tags localized.
-		artistName, albumName := publishComponent(row.Artist), publishComponent(row.Album)
-		albumKey := [2]string{libraryPathKey(artistName), libraryPathKey(albumName)}
-		for _, id := range index.albums[albumKey] {
-			if !index.isUnchanged(id) {
-				continue
-			}
-			path, found, err := audiorelease.PathFor(index.engine, id)
-			if err != nil || !found || !strings.EqualFold(filepath.Ext(path), ".flac") {
-				continue
-			}
-			// Raw folder bytes still have to match after sanitizing. The index
-			// key intentionally folds punctuation for fast candidate lookup.
-			artistFolder, albumFolder, _ := trackPathOf(path)
-			if !strings.EqualFold(artistFolder, artistName) ||
-				!strings.EqualFold(albumFolder, albumName) {
-				continue
-			}
-			candidates[key] = append(candidates[key], path)
-		}
-	}
-	// Existing NetEase M3U entries store floor(duration_ms / 1000).
-	// Only whole seconds need that extra precision margin.
-	var truncatedMS int64
+	durationMS := int64(seconds * 1000)
+	truncatedMS := int64(0)
 	if _, err := strconv.Atoi(row.Duration); err == nil {
 		truncatedMS = 999
 	}
-	return verifiedNeteaseTrackPresentWithPrecision(candidates, &neteaseSong{
-		Name: row.Title, Artists: splitPlaylistArtists(row.Artist), DurationMS: int(seconds * 1000), CatalogVerified: true,
-	}, truncatedMS)
+	titleKeys := []string{libraryPathKey(row.Title)}
+	if featured := playlistFeaturedTitleKey(row.Title, row.Artist); featured != "" && featured != titleKeys[0] {
+		titleKeys = append(titleKeys, featured)
+	}
+	ids := make([]string, 0, 32)
+	seen := map[string]bool{}
+	add := func(candidates []string) {
+		for _, id := range candidates {
+			if !seen[id] {
+				seen[id] = true
+				ids = append(ids, id)
+			}
+		}
+	}
+	for _, key := range titleKeys {
+		add(index.titleCandidates[key])
+		add(index.titleCandidates[playlistCompactTitleKey(key)])
+	}
+	if strings.TrimSpace(row.Album) != "" {
+		albumKey := [2]string{libraryPathKey(publishComponent(row.Artist)), libraryPathKey(publishComponent(row.Album))}
+		add(index.albums[albumKey])
+	}
+	// Playlist membership is recording-level. A single release may be filed
+	// under its parent album, while uploader tags can credit a compilation or a
+	// different romanization. Accept cross-album evidence only when title,
+	// credited artist and measured duration still agree; an exact album/path
+	// match can use the normal three-second padding tolerance.
+	for _, id := range ids {
+		if !index.isUnchanged(id) {
+			continue
+		}
+		path, found, err := audiorelease.PathFor(index.engine, id)
+		if err != nil || !found {
+			continue
+		}
+		artists, albumTag, titleTag, duration := playlistRecordingEvidence(path)
+		pathArtist, pathAlbum, pathTitle := trackPathOf(path)
+		if titleTag == "" {
+			titleTag = pathTitle
+		}
+		if !neteaseAlternateTitleMatches(row.Title, titleTag) {
+			continue
+		}
+		artistMatches := playlistArtistTagMatches(row.Artist, artists)
+		if !artistMatches {
+			artistMatches = playlistArtistsMatch(splitPlaylistArtists(row.Artist), []string{pathArtist})
+		}
+		if !artistMatches {
+			continue
+		}
+		if duration <= 0 {
+			continue
+		}
+		albumMatches := strings.TrimSpace(row.Album) == "" || playlistAlbumTagMatches(row.Album, albumTag) ||
+			libraryPathKey(row.Album) == libraryPathKey(pathAlbum)
+		tolerance := int64(1500)
+		if albumMatches {
+			tolerance = 3000
+		}
+		delta := int64(duration*1000) - durationMS
+		if delta < 0 {
+			delta = -delta
+		}
+		if delta <= tolerance+truncatedMS {
+			return true
+		}
+	}
+	return false
 }
 
 func (index playlistLibraryIndex) hasTrack(artist, album, title string) bool {
@@ -491,20 +519,26 @@ func playlistFeaturedTitleKey(title, artist string) string {
 
 var playlistFeaturing = regexp.MustCompile(`(?i) feat\. +`)
 
-func playlistTrackTags(path string) (artists []string, album, title string) {
+func playlistRecordingEvidence(path string) (artists []string, album, title string, duration float64) {
 	if strings.EqualFold(filepath.Ext(path), ".flac") {
 		if tags, err := readFLACTagsPrefix(path); err == nil {
-			return tags.Artists, tags.Album, tags.Title
+			duration, _ = flacDuration(tags.StreamInfo)
+			return tags.Artists, tags.Album, tags.Title, duration
 		}
-		return nil, "", ""
+		return nil, "", "", 0
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	if info, err := probeGenericAudio(ctx, path); err == nil {
 		artist := firstNonEmpty(info.Artist, info.AlbumArtist, info.Tags["artist"], info.Tags["artists"])
-		return splitPlaylistArtists(artist), firstNonEmpty(info.Album, info.Tags["album"]), firstNonEmpty(info.Title, info.Tags["title"])
+		return splitPlaylistArtists(artist), firstNonEmpty(info.Album, info.Tags["album"]), firstNonEmpty(info.Title, info.Tags["title"]), info.Duration
 	}
-	return nil, "", ""
+	return nil, "", "", 0
+}
+
+func playlistTrackTags(path string) (artists []string, album, title string) {
+	artists, album, title, _ = playlistRecordingEvidence(path)
+	return artists, album, title
 }
 
 func playlistAlbumTagMatches(expected, actual string) bool {

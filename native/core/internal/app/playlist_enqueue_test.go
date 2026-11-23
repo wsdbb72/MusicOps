@@ -516,3 +516,37 @@ func TestPlaylistPresenceParallelMatchesLibrary(t *testing.T) {
 		}
 	}
 }
+
+func TestPlaylistPresenceMatchesSameRecordingAcrossAlbums(t *testing.T) {
+	ffmpeg, err := exec.LookPath("ffmpeg")
+	if err != nil {
+		t.Skip("ffmpeg unavailable")
+	}
+	application := newApp(t)
+	library := t.TempDir()
+	path := filepath.Join(library, "Artist", "Other Album", "01 Song.mp3")
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	command := exec.Command(ffmpeg, "-nostdin", "-v", "error", "-y", "-f", "lavfi", "-i", "sine=frequency=440:duration=30",
+		"-metadata", "artist=Artist", "-metadata", "album=Other Album", "-metadata", "title=Song", path)
+	if output, err := command.CombinedOutput(); err != nil {
+		t.Fatalf("generate mp3: %v %s", err, output)
+	}
+	if added, err := audiorelease.IndexExisting(application.engine, audiorelease.Existing{
+		RequestID: "playlist-cross-album", RootID: "playlist-cross-album-root", Track: 1,
+		Path: path, Library: library, Format: "mp3", SourceName: "reindex", MetadataOnly: true,
+	}); err != nil || !added {
+		t.Fatalf("index cross-album recording: added=%v err=%v", added, err)
+	}
+	application.invalidatePlaylistLibraryCache()
+	index := application.playlistLibrary()
+	row := playlistTrack{Artist: "Artist", Album: "Single", Title: "Song", Duration: "30", NeteaseSongID: 42}
+	if !index.hasPlaylistRow(row) {
+		t.Fatal("same title, artist and duration in another album was reported missing")
+	}
+	row.Duration = "45"
+	if index.hasPlaylistRow(row) {
+		t.Fatal("a duration mismatch was accepted as the same recording")
+	}
+}

@@ -8,6 +8,7 @@ const appJS = `(function () {
   var activeCount = 0, pipelinePaused = false, globalJobCounts = null;
   var currentJob = null;
   var currentActionJobID = "";
+  var currentActionStage = "";
   var currentReviewJobID = "";
   var siteRows = [];
   var downloadSettings = null;
@@ -2198,7 +2199,7 @@ const appJS = `(function () {
       detail.hidden = false;
       document.getElementById("detail-title").textContent = job.label || "未命名";
       detailFields.replaceChildren();
-      field("整体状态", executionLabel(summary.execution_state, job.paused) || "未知");
+      field("整体状态", executionLabel(summary.execution_state, summary.paused) || "未知");
       if (actionID && actionID !== job.job_id) field("当前环节", actionID);
       field("进度", body.progress);
       field("说明", body.headline);
@@ -2213,6 +2214,7 @@ const appJS = `(function () {
       }
       currentJob = job;
       currentActionJobID = actionID || job.job_id;
+      currentActionStage = summary.stage || "";
       currentReviewJobID = reviewID;
       showActions(summary, job);
       if (summary.stage === "needs_review") openReview(currentReviewJobID);
@@ -2232,7 +2234,7 @@ const appJS = `(function () {
     // The aggregate state may come from a descendant task. It is the action
     // target, while the root remains the stable card and title.
     document.getElementById("pause-job").hidden = terminal || needsReview || !!state.paused;
-    document.getElementById("resume-job").hidden = terminal || needsReview || !root.paused;
+    document.getElementById("resume-job").hidden = terminal || needsReview || !state.paused;
     document.getElementById("cancel-job").hidden = terminal || needsReview || !!state.cancel_requested;
     document.getElementById("retry-job").hidden = state.stage !== "failed";
     document.getElementById("torrent-actions").hidden = !(state.stage === "downloading" || state.stage === "failed");
@@ -2377,7 +2379,7 @@ const appJS = `(function () {
       // A downloading job is controlled on both sides: the workflow task and
       // the qBittorrent torrent. Cancel means "remove the torrent, keep the
       // files" there; pausing the task alone would leave the torrent running.
-      var downloading = currentJob.stage === "downloading";
+      var downloading = currentActionStage === "downloading";
       var path = "/v1/jobs/" + encodeURIComponent(currentActionJobID) + (downloading ? "/download/control" : "/control");
       var payload = downloading ? {action: action === "cancel" ? "delete" : action} : {action: action};
       var response = await fetch(path, {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(payload)});
@@ -2401,7 +2403,7 @@ const appJS = `(function () {
     setBusy(true);
     setStatus("info", "正在重试");
     try {
-      var response = await fetch("/v1/jobs/" + encodeURIComponent(currentReviewJobID) + "/review", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({action: "retry"})});
+      var response = await fetch("/v1/jobs/" + encodeURIComponent(currentActionJobID) + "/review", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({action: "retry"})});
       var body = await response.json();
       if (!response.ok || !body || !body.ok) {
         setStatus("fail", "重试失败。" + (body && body.code ? "（" + body.code + "）" : ""));

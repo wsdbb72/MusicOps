@@ -105,6 +105,8 @@ func TestTorrentControlsFollowTheJobStage(t *testing.T) {
 	for _, want := range []string{
 		`document.getElementById("torrent-actions").hidden = !(state.stage === "downloading" || state.stage === "failed")`,
 		`/download/control`,
+		`var downloading = currentActionStage === "downloading"`,
+		`encodeURIComponent(currentActionJobID) + "/review"`,
 		`JSON.stringify({action: action})`,
 		`torrent-pause`, `torrent-resume`, `torrent-recheck`, `torrent-delete`,
 	} {

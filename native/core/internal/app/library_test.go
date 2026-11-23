@@ -181,7 +181,7 @@ func TestDuplicateScanLimitStopsAndReportsTruncation(t *testing.T) {
 		releaseLibraryFile(t, application, filepath.Base(wav), fmt.Sprintf("limit-wav-%d", i), "Artist", "Limit Album", title, i+1)
 		releaseLibraryFile(t, application, filepath.Base(flac), fmt.Sprintf("limit-flac-%d", i), "Artist", "Limit Album", title, i+1)
 	}
-	groups, _, truncated, _, err := application.scanDuplicatesWithOptions(context.Background(), 2, "", nil, nil)
+	groups, _, truncated, _, err := application.scanDuplicatesWithOptions(context.Background(), 2, "", nil, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

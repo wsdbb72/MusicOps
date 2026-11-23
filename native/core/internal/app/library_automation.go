@@ -1239,22 +1239,13 @@ func writeAutomationSidecar(path string, body []byte) error {
 	return renameFileWithRetry(name, path)
 }
 
-func (a *App) runAutomatedDeduplication(ctx context.Context) bool {
-	state := a.libraryAutomation
-	state.touch("dedupe", "正在扫描重复项")
-	root := a.libraryDir()
-	cache := a.loadLibraryAutomationScanCache(root)
-	groups, _, truncated, updates, err := a.scanDuplicatesWithOptions(ctx, 0, root, cache.Files, func(checked, total int, current string) {
-		state.update(func(report *libraryAutomationReport) {
-			report.DuplicateCandidates = total
-			report.DuplicateChecked = checked
-		})
-		label := current
-		if parts := strings.Split(current, "\x00"); len(parts) >= 2 {
-			label = parts[0] + " - " + parts[1]
-		}
-		state.touch("dedupe", fmt.Sprintf("正在比对重复项 %d/%d · %s", checked, total, label))
-	})
+func mergeDuplicateFingerprintCache(cache *libraryAutomationScanDocument, updates map[string]cachedDuplicateFingerprint) {
+	if cache == nil || len(updates) == 0 {
+		return
+	}
+	if cache.Files == nil {
+		cache.Files = make(map[string]cachedLibraryScan, len(updates))
+	}
 	for key, fingerprint := range updates {
 		if fingerprint.FileSize <= 0 {
 			continue
@@ -1268,6 +1259,30 @@ func (a *App) runAutomatedDeduplication(ctx context.Context) bool {
 		entry.Duplicate = &copied
 		cache.Files[key] = entry
 	}
+}
+func (a *App) runAutomatedDeduplication(ctx context.Context) bool {
+	state := a.libraryAutomation
+	state.touch("dedupe", "正在扫描重复项")
+	root := a.libraryDir()
+	cache := a.loadLibraryAutomationScanCache(root)
+	checkpoint := func(updates map[string]cachedDuplicateFingerprint) {
+		mergeDuplicateFingerprintCache(&cache, updates)
+		if err := a.saveLibraryAutomationScanCache(cache); err != nil {
+			state.addError(fmt.Errorf("重复扫描缓存检查点保存失败: %w", err))
+		}
+	}
+	groups, _, truncated, updates, err := a.scanDuplicatesWithOptions(ctx, 0, root, cache.Files, func(checked, total int, current string) {
+		state.update(func(report *libraryAutomationReport) {
+			report.DuplicateCandidates = total
+			report.DuplicateChecked = checked
+		})
+		label := current
+		if parts := strings.Split(current, "\x00"); len(parts) >= 2 {
+			label = parts[0] + " - " + parts[1]
+		}
+		state.touch("dedupe", fmt.Sprintf("正在比对重复项 %d/%d · %s", checked, total, label))
+	}, checkpoint)
+	mergeDuplicateFingerprintCache(&cache, updates)
 	if err := a.saveLibraryAutomationScanCache(cache); err != nil {
 		state.addError(fmt.Errorf("重复扫描缓存保存失败: %w", err))
 	}

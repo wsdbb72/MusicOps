@@ -117,7 +117,7 @@ func (a *App) scanDuplicates(ctx context.Context) ([]duplicateGroup, string, boo
 }
 
 func (a *App) scanDuplicatesWithProgress(ctx context.Context, progress func(checked, total int, current string)) ([]duplicateGroup, string, bool, error) {
-	groups, method, truncated, _, err := a.scanDuplicatesWithOptions(ctx, 1000, "", nil, progress)
+	groups, method, truncated, _, err := a.scanDuplicatesWithOptions(ctx, 1000, "", nil, progress, nil)
 	return groups, method, truncated, err
 }
 
@@ -126,7 +126,7 @@ func (a *App) scanDuplicatesWithProgress(ctx context.Context, progress func(chec
 // candidate for whole-library automation. cached is only read by workers and
 // is never mutated concurrently. The returned updates are safe to merge into
 // the persisted maintenance cache after every worker has stopped.
-func (a *App) scanDuplicatesWithOptions(ctx context.Context, limit int, root string, cached map[string]cachedLibraryScan, progress func(checked, total int, current string)) ([]duplicateGroup, string, bool, map[string]cachedDuplicateFingerprint, error) {
+func (a *App) scanDuplicatesWithOptions(ctx context.Context, limit int, root string, cached map[string]cachedLibraryScan, progress func(checked, total int, current string), checkpoint func(map[string]cachedDuplicateFingerprint)) ([]duplicateGroup, string, bool, map[string]cachedDuplicateFingerprint, error) {
 	entries, err := audiorelease.List(a.engine)
 	if err != nil {
 		return nil, "", false, nil, err
@@ -218,6 +218,19 @@ func (a *App) scanDuplicatesWithOptions(ctx context.Context, limit int, root str
 
 	groups := make([]duplicateGroup, 0, len(candidateKeys))
 	updates := make(map[string]cachedDuplicateFingerprint)
+	pending := make(map[string]cachedDuplicateFingerprint)
+	flush := func() {
+		if checkpoint == nil || len(pending) == 0 {
+			return
+		}
+		changes := make(map[string]cachedDuplicateFingerprint, len(pending))
+		for key, entry := range pending {
+			changes[key] = entry
+		}
+		checkpoint(changes)
+		pending = make(map[string]cachedDuplicateFingerprint)
+	}
+	defer flush()
 	checkedCount, truncated, firstErr := 0, false, error(nil)
 	for result := range results {
 		checkedCount++
@@ -227,6 +240,10 @@ func (a *App) scanDuplicatesWithOptions(ctx context.Context, limit int, root str
 		}
 		for key, entry := range result.updates {
 			updates[key] = entry
+			pending[key] = entry
+		}
+		if checkedCount%100 == 0 {
+			flush()
 		}
 		if result.group != nil {
 			if limit > 0 && len(groups) >= limit {

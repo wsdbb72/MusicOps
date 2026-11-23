@@ -726,3 +726,44 @@ func TestReconcilePublishedRootClosesOnlyStalePublicationBookkeeping(t *testing.
 		t.Fatal("a completed root was reconciled again", changed, err)
 	}
 }
+
+func TestReconcilePublishedRootClosesVerifiedLegacyFailure(t *testing.T) {
+	repo, _ := fixture(t)
+	job := Job{
+		ID: "verified-failed-root", Kind: "album", Scene: "expand", Stage: "failed",
+		TaskType: "identification", TaskGroup: "identify", BatchID: "batch-verified-failed",
+		RootID: "verified-failed-root", ActiveTaskID: "verified-failed-root", Label: "Published",
+		Message: "library record did not verify: library release conflict", ErrorClass: "VERIFY_FAILED",
+		Revision: 1, CreatedNS: 1000, UpdatedNS: 2000, StageStartedNS: 2000,
+	}
+	condition, writes, err := putJob(nil, job)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ok, err := repo.engine.CompareAndSwap([]dataengine.Condition{condition}, writes); err != nil || !ok {
+		t.Fatal(ok, err)
+	}
+	if _, changed, err := repo.ReconcilePublishedRoot(job.ID, 2500, 3000); err != nil || !changed {
+		t.Fatal(changed, err)
+	}
+	updated, err := repo.Job(job.ID)
+	if err != nil || updated == nil || updated.Stage != "completed" || updated.ErrorClass != "" || updated.Message != "已入库并完成发布校验" {
+		t.Fatal(updated, err)
+	}
+
+	other := job
+	other.ID = "unverified-failed-root"
+	other.RootID = other.ID
+	other.ActiveTaskID = other.ID
+	other.ErrorClass = "PUBLISH_FAILED"
+	condition, writes, err = putJob(nil, other)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ok, err := repo.engine.CompareAndSwap([]dataengine.Condition{condition}, writes); err != nil || !ok {
+		t.Fatal(ok, err)
+	}
+	if _, changed, err := repo.ReconcilePublishedRoot(other.ID, 2500, 3000); err != nil || changed {
+		t.Fatal("an unrelated failure was reconciled", changed, err)
+	}
+}

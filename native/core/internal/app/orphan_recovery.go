@@ -154,10 +154,11 @@ func (a *App) normalizeLegacyRetrySchedules(log StartupLogger) {
 	}
 }
 
-// reconcilePublishedRoots closes pre-0.4.71 roots that reached publishing
-// but never received a process follow-up. Only roots already present in the
-// verified audio catalogue are touched, and only after a ten-minute grace
-// period. This changes bookkeeping; it never copies, deletes or rewrites music.
+// reconcilePublishedRoots closes roots that reached publishing without a
+// process follow-up, or retained a stale VERIFY_FAILED after the verified
+// library record became visible. Only roots already present in the verified
+// audio catalogue are touched, and only after a ten-minute grace period. This
+// changes bookkeeping; it never copies, deletes or rewrites music.
 func (a *App) reconcilePublishedRoots(stop <-chan struct{}, now time.Time, log StartupLogger) {
 	if stopped(stop) {
 		return
@@ -181,7 +182,9 @@ func (a *App) reconcilePublishedRoots(stop <-chan struct{}, now time.Time, log S
 			return
 		}
 		for _, job := range page.Jobs {
-			if job.ParentJobID == "" && job.RootID == job.ID && (job.Stage == "publishing" || job.Stage == "notifying") && job.UpdatedNS <= cutoff && published[job.RootID] {
+			publicationBoundary := job.Stage == "publishing" || job.Stage == "notifying"
+			reconcilableVerifyFailure := job.Stage == "failed" && job.ErrorClass == "VERIFY_FAILED"
+			if job.ParentJobID == "" && job.RootID == job.ID && (publicationBoundary || reconcilableVerifyFailure) && job.UpdatedNS <= cutoff && published[job.RootID] {
 				candidates[job.ID] = job.UpdatedNS
 			}
 		}

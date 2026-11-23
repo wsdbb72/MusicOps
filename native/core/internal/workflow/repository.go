@@ -833,9 +833,10 @@ func messageOr(value, fallback string) string {
 }
 
 // ReconcilePublishedRoot closes a legacy root that crossed the durable
-// publication boundary but whose process follow-up was never created. The
-// caller must independently confirm that the root has a verified library
-// release and pass a cutoff old enough to rule out an in-flight follow-up.
+// publication boundary, or retained a stale VERIFY_FAILED after the verified
+// library record became visible. The caller must independently confirm the
+// root has a verified library release and pass a cutoff old enough to rule out
+// an in-flight follow-up.
 func (r *Repository) ReconcilePublishedRoot(rootID string, beforeNS, nowNS int64) (*Job, bool, error) {
 	if !validID(rootID) || beforeNS <= 0 || nowNS < beforeNS {
 		return nil, false, dataengine.ErrInvalidRequest
@@ -854,7 +855,9 @@ func (r *Repository) ReconcilePublishedRoot(rootID string, beforeNS, nowNS int64
 		if current == nil {
 			return nil, false, ErrNotFound
 		}
-		if current.RootID != current.ID || (current.Stage != "publishing" && current.Stage != "notifying") || current.UpdatedNS > beforeNS {
+		publicationBoundary := current.Stage == "publishing" || current.Stage == "notifying"
+		reconcilableVerifyFailure := current.Stage == "failed" && current.ErrorClass == "VERIFY_FAILED"
+		if current.RootID != current.ID || (!publicationBoundary && !reconcilableVerifyFailure) || current.UpdatedNS > beforeNS {
 			return current, false, nil
 		}
 		next := *current

@@ -615,3 +615,18 @@ func TestPlaylistPresenceMatchesCJKVariantTags(t *testing.T) {
 		t.Fatal("different CJK title was accepted")
 	}
 }
+
+func TestPlaylistPresenceHotSlowCompilationKeepsUnicodeTrackIdentity(t *testing.T) {
+	application := newApp(t)
+	library := t.TempDir()
+	indexPlaylistTestFile(t, application, library,
+		"初音ミク/最新热歌慢摇/初音ミク - 恋愛裁判.flac",
+		"初音ミク", "最新热歌慢摇", "恋愛裁判")
+	index := application.playlistLibrary()
+	if !index.hasTrack("初音ミク", "最新热歌慢摇66", "恋愛裁判") {
+		t.Fatal("Unicode track in the unified hot-slow compilation was reported missing")
+	}
+	if index.hasTrack("別の歌手", "最新热歌慢摇66", "恋愛裁判") {
+		t.Fatal("hot-slow compilation ignored the per-track artist")
+	}
+}

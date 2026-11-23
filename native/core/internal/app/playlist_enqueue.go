@@ -748,14 +748,14 @@ func playlistArtistTagMatches(expected string, actual []string) bool {
 // Compilation folders share an album artist, so only the embedded track
 // artist can distinguish recordings with the same title.
 func (index playlistLibraryIndex) hasCompilationTrack(artist, album, title string) bool {
-	pathArtist := libraryPathKey(artist)
-	for _, id := range index.tracks[[3]string{pathArtist, album, title}] {
-		if pathArtist != libraryPathKey(hotSlowCompilationArtist) && index.isUnchanged(id) {
+	pathArtist := playlistMatchKey(artist)
+	for _, id := range index.tracks[[3]string{pathArtist, album, playlistMatchKey(title)}] {
+		if pathArtist != playlistMatchKey(hotSlowCompilationArtist) && index.isUnchanged(id) {
 			return true
 		}
 	}
-	unified := libraryPathKey(hotSlowCompilationAlbum)
-	track := [2]string{compilationArtistKey([]string{artist}), title}
+	unified := playlistMatchKey(hotSlowCompilationAlbum)
+	track := [2]string{compilationArtistKey([]string{artist}), playlistMatchKey(title)}
 	return index.compilationMatches(unified)[track] || album != unified && index.compilationMatches(album)[track]
 }
 
@@ -774,7 +774,7 @@ func (index playlistLibraryIndex) compilationMatches(album string) map[[2]string
 			artists, albumTag, titleTag := compilationTrackTags(path)
 			artistKey := compilationArtistKey(artists)
 			if isHotSlowCompilationAlbum(albumTag) && artistKey != "" && titleTag != "" {
-				matches[[2]string{artistKey, libraryPathKey(titleTag)}] = true
+				matches[[2]string{artistKey, playlistMatchKey(titleTag)}] = true
 			}
 		}
 		index.compilationTags[album] = matches
@@ -786,7 +786,7 @@ func compilationArtistKey(values []string) string {
 	var artists []string
 	for _, value := range values {
 		for _, artist := range splitPlaylistArtists(value) {
-			if key := libraryPathKey(artist); key != "" {
+			if key := playlistMatchKey(artist); key != "" {
 				artists = append(artists, key)
 			}
 		}

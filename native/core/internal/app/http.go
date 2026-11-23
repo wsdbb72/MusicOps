@@ -554,6 +554,43 @@ func (a *App) jobs(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	jobs = markReleased(jobs, albums)
+	if rootsOnly {
+		for i := range jobs {
+			rootID := jobs[i].RootID
+			if rootID == "" {
+				rootID = jobs[i].ID
+			}
+			family, familyErr := a.flows.Family(rootID)
+			if familyErr != nil {
+				writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "code": "JOBS_UNAVAILABLE"})
+				return
+			}
+			familyViews := make([]jobView, 0, len(family))
+			for _, job := range family {
+				entry := a.publicJobWithResult(job)
+				entry.AIReviewEligible = a.aiReviewEligible(job)
+				if task, taskErr := a.tasks.Get(job.ActiveTaskID); taskErr == nil && task != nil {
+					entry.ExecutionState = task.State
+				}
+				familyViews = append(familyViews, entry)
+			}
+			familyViews = presentJobs(familyViews)
+			familyViews = markReleased(familyViews, map[string]bool{rootID: albums[rootID]})
+			summary := summarizeRootJobs(familyViews)
+			jobs[i].RootStatus = &summary
+			jobs[i].ExecutionState = summary.ExecutionState
+			jobs[i].Progress = summary.Progress
+			jobs[i].Headline = summary.Headline
+			jobs[i].Message = summary.Message
+			jobs[i].ErrorClass = summary.ErrorClass
+			jobs[i].ReviewKind = summary.ReviewKind
+			jobs[i].Downloaded = summary.Downloaded
+			jobs[i].LibraryPublished = summary.LibraryPublished
+			if summary.Result != nil {
+				jobs[i].Result = summary.Result
+			}
+		}
+	}
 	downloaded, published := false, false
 	for _, job := range jobs {
 		downloaded = downloaded || job.Downloaded
@@ -788,16 +825,14 @@ func (a *App) job(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	views = markReleased(views, albums)
-	progress, headline := "", ""
-	downloaded, published := false, false
-	for _, job := range views {
-		if job.ID == inspection.Job.ID {
-			progress, headline = job.Progress, job.Headline
-			downloaded, published = job.Downloaded, job.LibraryPublished
-		}
+	summary := summarizeRootJobs(views)
+	progress, headline := summary.Progress, summary.Headline
+	downloaded, published := summary.Downloaded, summary.LibraryPublished
+	if summary.JobID != inspection.Job.ID && summary.Result != nil {
+		selectedResult = summary.Result
 	}
 	response := map[string]any{
-		"ok": true, "inspection": scrubInspection(inspection), "progress": progress, "headline": headline,
+		"ok": true, "inspection": scrubInspection(inspection), "summary": summary, "progress": progress, "headline": headline,
 		"downloaded": downloaded, "library_published": published, "production_verified": false,
 	}
 	if selectedResult != nil {

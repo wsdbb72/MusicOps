@@ -846,6 +846,12 @@ func (a *App) stageNeteaseSongWithEngine(ctx context.Context, plan SearchPlan, s
 	if strings.TrimSpace(plan.PlaylistTrack) == "" {
 		return "", primaryNote, primaryClass, true
 	}
+	if recovered, recoveredNote, recoveredClass := a.recoverNeteaseFromSecondaryStreams(ctx, plan, song); recovered != "" {
+		return recovered, primaryNote + "；" + recoveredNote, downloadpolicy.ClassDownload, true
+	} else {
+		primaryNote += "；" + recoveredNote
+		primaryClass = preferStreamFailure(primaryClass, recoveredClass)
+	}
 	alternates, alternateErr := a.neteaseAlternateSongs(ctx, plan, song)
 	if alternateErr != nil {
 		return "", primaryNote + "；网易云替代录音检索失败：" + alternateErr.Error(), preferStreamFailure(primaryClass, classifyNeteaseFailure(alternateErr)), true
@@ -883,6 +889,62 @@ func (a *App) stageNeteaseSongWithEngine(ctx context.Context, plan SearchPlan, s
 	return "", primaryNote + "；安全替代录音均未取得可用音频：" + strings.Join(notes, "；"), primaryClass, true
 }
 
+// recoverNeteaseFromSecondaryStreams is the final source fallback after the
+// exact NetEase recording and its own download engine returned no playable
+// audio. Kugou and Kuwo are different licensed catalogues; a hit is accepted
+// only when title and an overlapping credited artist match, then the file is
+// duration-checked and rewritten with the NetEase row's album, artists and
+// artwork before it can enter the library.
+func (a *App) recoverNeteaseFromSecondaryStreams(ctx context.Context, plan SearchPlan, anchor *neteaseSong) (string, string, string) {
+	if anchor == nil || strings.TrimSpace(anchor.Name) == "" {
+		return "", "备用流媒体无法恢复：缺少网易云目标曲目", downloadpolicy.ClassNoResult
+	}
+	artists := append([]string(nil), splitPlaylistArtists(plan.ExpectedArtist)...)
+	for _, artist := range anchor.Artists {
+		if normalizeNeteaseArtist(artist) != "" {
+			artists = append(artists, artist)
+		}
+	}
+	seenArtists := map[string]bool{}
+	notes := []string{}
+	class := downloadpolicy.ClassNoResult
+	for _, source := range []string{"kugou", "kuwo"} {
+		for _, artist := range artists {
+			artist = strings.TrimSpace(artist)
+			key := normalizeNeteaseArtist(artist)
+			if artist == "" || key == "" || seenArtists[source+"\x00"+key] {
+				continue
+			}
+			seenArtists[source+"\x00"+key] = true
+			recoveryPlan := plan
+			recoveryPlan.ExpectedTitle = anchor.Name
+			recoveryPlan.ExpectedArtist = artist
+			recoveryPlan.PlaylistTrack = ""
+			recoveryPlan.Query = artist + " " + anchor.Name
+			path, note, stepClass := a.tryConfiguredStreamSong(ctx, source, recoveryPlan, nil)
+			if path == "" {
+				if len(notes) < 6 {
+					notes = append(notes, source+" / "+artist+"："+note)
+				}
+				class = preferStreamFailure(class, stepClass)
+				continue
+			}
+			if err := a.finalizeNeteaseAlternate(ctx, path, plan, nil, anchor, anchor.DurationMS); err != nil {
+				_ = os.Remove(path)
+				if len(notes) < 6 {
+					notes = append(notes, source+" / "+artist+"："+err.Error())
+				}
+				class = preferStreamFailure(class, downloadpolicy.ClassNoResult)
+				continue
+			}
+			return path, "网易云原曲无可用音频，已由 " + source + " 取得同曲同艺人录音，并恢复网易云专辑、歌手和封面；" + note, downloadpolicy.ClassDownload
+		}
+	}
+	if len(notes) == 0 {
+		notes = append(notes, "没有可用的备用流媒体检索词")
+	}
+	return "", "备用流媒体均未取得可安全发布的原曲：" + strings.Join(notes, "；"), class
+}
 func (a *App) stageNeteaseEngineFallback(ctx context.Context, plan SearchPlan, primaryNote, primaryClass string) (string, string, string, bool) {
 	return a.finishNeteaseEngineFallback(ctx, plan, primaryNote, primaryClass, nil)
 }

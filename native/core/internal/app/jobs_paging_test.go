@@ -112,3 +112,17 @@ func TestJobsCountsOnlyIncludesLiveRuntimeState(t *testing.T) {
 		t.Fatalf("counts-only response has no pipeline_paused: %s", recorder.Body.String())
 	}
 }
+
+func TestRootSummaryDoesNotHideFailedDescendant(t *testing.T) {
+	summary := summarizeRootJobs([]jobView{
+		{ID: "root", RootID: "root", Stage: "completed", ExecutionState: "completed", Message: "identity complete", UpdatedNS: 1},
+		{ID: "search:root", RootID: "root", ParentID: "root", Stage: "completed", ExecutionState: "completed", UpdatedNS: 2},
+		{ID: "process:search:root", RootID: "root", ParentID: "search:root", Stage: "failed", ExecutionState: "failed", Progress: "未能继续", Headline: "下载失败", ErrorClass: "QBITTORENT_UNAVAILABLE", Message: "qBittorrent 登录失败", UpdatedNS: 3, Result: &jobResultView{Stage: "failed", State: "failed", ErrorClass: "QBITTORENT_UNAVAILABLE"}},
+	})
+	if summary.JobID != "process:search:root" || summary.Stage != "failed" || summary.ExecutionState != "failed" || summary.Progress != "未能继续" || summary.ErrorClass != "QBITTORENT_UNAVAILABLE" {
+		t.Fatalf("root summary hid the failed child: %+v", summary)
+	}
+	if summary.Result == nil || summary.Result.ErrorClass != "QBITTORENT_UNAVAILABLE" {
+		t.Fatalf("root summary lost the actionable diagnostic: %+v", summary)
+	}
+}

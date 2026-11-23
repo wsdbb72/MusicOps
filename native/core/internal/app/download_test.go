@@ -792,3 +792,16 @@ func TestDownloadAcceptanceOverHTTP(t *testing.T) {
 		t.Fatal("qBittorrent password was written to disk")
 	}
 }
+
+func TestDownloadInfrastructureClassesAreFallbackSafe(t *testing.T) {
+	for _, class := range []string{"QBITTORENT_UNAVAILABLE", "MISSING_CREDENTIALS", "AUTH_FAILED", "DOWNLOAD_TIMEOUT", "ADD_UNKNOWN"} {
+		if !downloadFailureCanFallback(class) {
+			t.Fatalf("%s should hand off to streaming", class)
+		}
+	}
+	for _, class := range []string{"AUDIO_REJECTED", "LIBRARY_CONFLICT", "NO_AUDIO", "INVALID_PLAN"} {
+		if downloadFailureCanFallback(class) {
+			t.Fatalf("%s must remain an explicit non-fallback failure", class)
+		}
+	}
+}

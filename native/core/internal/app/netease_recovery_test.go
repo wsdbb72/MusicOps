@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"image/color"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -246,5 +247,73 @@ func TestNeteaseRecoveredTagsKeepFullLongMetadata(t *testing.T) {
 	}
 	if strings.Join(tags.Artists, " / ") != longArtist {
 		t.Fatalf("credited artists=%q want=%q", strings.Join(tags.Artists, " / "), longArtist)
+	}
+}
+
+func TestNeteaseSecondaryStreamRestoresOriginalReleaseIdentity(t *testing.T) {
+	vaultKey(t)
+	application := newApp(t)
+	saveNeteaseTestCookie(t, application)
+
+	cover := solidJPEG(color.RGBA{R: 24, G: 72, B: 128, A: 255})
+	audio := oneSecondFLAC(t, "Artist", "Song")
+	netease := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.HasPrefix(r.URL.Path, "/api/song/enhance/player/url"):
+			_, _ = w.Write([]byte(`{"code":200,"data":[{"id":42,"url":"","type":"flac","code":-110}]}`))
+		case strings.HasPrefix(r.URL.Path, "/song/media/outer/url"):
+			http.NotFound(w, r)
+		case r.URL.Path == "/cover.jpg":
+			w.Header().Set("Content-Type", "image/jpeg")
+			_, _ = w.Write(cover)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer netease.Close()
+	application.neteaseBases = map[string]string{"api": netease.URL}
+
+	engine := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/search":
+			if r.URL.Query().Get("sources") != "kugou" {
+				_, _ = io.WriteString(w, `<html></html>`)
+				return
+			}
+			_, _ = io.WriteString(w, `<html><li class="song-card" data-id="k1" data-source="kugou" data-name="Song" data-artist="Artist" data-album="Other Release" data-duration="1"></li></html>`)
+		case "/download":
+			if r.URL.Query().Get("source") == "netease" {
+				http.NotFound(w, r)
+				return
+			}
+			if r.URL.Query().Get("source") != "kugou" || r.URL.Query().Get("id") != "k1" {
+				http.NotFound(w, r)
+				return
+			}
+			_, _ = w.Write(audio)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer engine.Close()
+	t.Setenv("MUSICOPS_ENGINE_URL", engine.URL)
+
+	plan := SearchPlan{
+		RootJobID: "secondary-net", Scene: "expand", ExpectedTitle: "Album", ExpectedArtist: "Artist",
+		PlaylistTrack: "Song", StreamingEnabled: true, NeteaseOnly: true, NeteaseTrackOnly: true,
+		NeteaseSongID: 42, NeteaseAlbumID: 7,
+	}
+	anchor := &neteaseSong{ID: 42, Name: "Song", Artists: []string{"Artist"}, Album: "Album", AlbumID: 7, DurationMS: 1000, CoverURL: netease.URL + "/cover.jpg", CatalogVerified: true}
+	path, note, class, handled := application.stageNeteaseSongWithEngine(t.Context(), plan, anchor)
+	if !handled || path == "" || class != downloadpolicy.ClassDownload || !strings.Contains(note, "kugou") {
+		t.Fatalf("handled=%v path=%q class=%q note=%q", handled, path, class, note)
+	}
+	tags := readTags(t, path)
+	if tags.Title != "Song" || tags.Album != "Album" || strings.Join(tags.Artists, " / ") != "Artist" {
+		t.Fatalf("original NetEase identity was not restored: title=%q album=%q artists=%v", tags.Title, tags.Album, tags.Artists)
+	}
+	body, err := os.ReadFile(path)
+	if err != nil || !bytes.Equal(flactags.FrontCover(body), cover) {
+		t.Fatalf("original NetEase cover was not restored: %v", err)
 	}
 }

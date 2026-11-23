@@ -298,6 +298,7 @@ func open(dir, backup, password string, logger StartupLogger) (*App, error) {
 	app.stopAutoReview = make(chan struct{})
 	stopAutoReview := app.stopAutoReview
 	app.startBackground("auto-review", func() { app.runAutoReview(stopAutoReview) })
+	app.startBackground("download-failure-recovery", func() { app.runDownloadFailureRecovery(stopSubs) })
 	app.stopLibraryAuto = make(chan struct{})
 	stopLibraryAuto := app.stopLibraryAuto
 	app.startBackground("library-automation", func() { app.runLibraryAutomationScheduler(stopLibraryAuto) })

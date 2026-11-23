@@ -99,7 +99,7 @@ func TestVerifiedAudioIngestsLocallyAndTorrentDoesNot(t *testing.T) {
 	// asserting on a single racy read.
 	waitJob(t, application, "board-audio", "completed")
 	detail := getAuth(t, application, "/v1/jobs/board-audio")
-	if !strings.Contains(detail.Body.String(), `"progress":"已入库"`) || !strings.Contains(detail.Body.String(), "本地导入") || strings.Contains(detail.Body.String(), `"downloaded":true`) || strings.Contains(detail.Body.String(), `"production_verified":true`) {
+	if !strings.Contains(detail.Body.String(), `"progress":"部分入库"`) || !strings.Contains(detail.Body.String(), "仍有未完成项目") || strings.Contains(detail.Body.String(), `"downloaded":true`) || strings.Contains(detail.Body.String(), `"production_verified":true`) {
 		t.Fatal(detail.Body.String())
 	}
 	var shown struct {
@@ -140,7 +140,7 @@ func TestHandoffStaysUnfinishedUntilAudioIsReleased(t *testing.T) {
 	}
 	done := markReleased(presentJobs(jobs), map[string]bool{"board-1": true})
 	for _, item := range done {
-		if item.Progress != "已入库" || item.Headline != "音乐已校验并放入库中（本地导入，未经站点下载）。" || item.Downloaded || !item.LibraryPublished {
+		if item.Progress != "部分入库" || !strings.Contains(item.Headline, "仍有未完成项目") || item.Downloaded || !item.LibraryPublished {
 			t.Fatal(item)
 		}
 	}

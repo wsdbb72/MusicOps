@@ -721,13 +721,70 @@ func receiptSiteFree(receipt torrentfetch.Receipt) bool {
 	}
 }
 
+// downloadFailureCanFallback lists failures where the torrent client, its
+// credentials or the network failed before an audio file could be published.
+// The persisted album/search plan is still valid, so an enabled streaming
+// fallback can finish the row without replaying a tracker token or starting a
+// second ordinary tracker download.
+func downloadFailureCanFallback(class string) bool {
+	switch strings.ToUpper(strings.TrimSpace(class)) {
+	case "QBITTORENT_UNAVAILABLE", "MISSING_CREDENTIALS", "INVALID_QBITTORRENT", "AUTH_FAILED",
+		"ADD_UNKNOWN", "OWNERSHIP_FAILED", "DOWNLOAD_TIMEOUT", "DOWNLOAD_STOPPED",
+		"DOWNLOAD_BLOCKED", "DOWNLOAD_STALLED", "START_FAILED":
+		return true
+	default:
+		return false
+	}
+}
+
+// fallbackDownloadToStreaming advances a downloading task to the durable
+// fallback stage when the original plan permits streaming. It reuses the
+// process task's stored SearchPlan and never claims that a torrent downloaded.
+func (a *App) fallbackDownloadToStreaming(execution *scheduler.Execution, jobID, reason string) (scheduler.Outcome, bool, error) {
+	if a == nil || execution == nil || strings.TrimSpace(jobID) == "" {
+		return scheduler.Outcome{}, false, nil
+	}
+	job, err := a.flows.Job(jobID)
+	if err != nil || job == nil || job.Stage != "downloading" {
+		return scheduler.Outcome{}, false, err
+	}
+	raw, found, err := a.tasks.Data(jobID, "arguments", 0)
+	if err != nil || !found {
+		return scheduler.Outcome{}, false, err
+	}
+	plan, err := decodePlan(raw)
+	if err != nil {
+		return scheduler.Outcome{}, false, nil
+	}
+	if !tokenReviewFallbackUsable(*job, plan) {
+		return scheduler.Outcome{}, false, nil
+	}
+	message := strings.TrimSpace(reason)
+	if message == "" {
+		message = "下载客户端暂不可用"
+	}
+	message += "；已自动切换流媒体回退，未重复使用令牌或普通站内下载"
+	if _, err := a.flows.Complete(intentID("download-fallback", execution.Token().ID, execution.Token().Fence), execution.Token(), workflow.Complete{
+		Edge: workflow.EdgeAdvance, NextStage: "fallback", TaskState: "completed", Result: raw, Message: message, NowNS: a.now().UnixNano(),
+	}); err != nil {
+		return scheduler.Outcome{}, false, err
+	}
+	return scheduler.Outcome{State: "completed", Message: message}, true, nil
+}
+
 // failDownload fails the download task and moves the job to "failed" in one
-// atomic workflow step, like failPublish. The job stays visible as failed
-// and can be retried: from review (which needs fresh credentials through
-// POST /v1/jobs/{id}/download) or by re-posting the download with new
-// credentials.
+// atomic workflow step, like failPublish. Eligible infrastructure failures
+// hand off to streaming first; anything else stays visible as failed and can
+// be retried with fresh credentials through POST /v1/jobs/{id}/download.
 func (a *App) failDownload(execution *scheduler.Execution, class, message string) (scheduler.Outcome, error) {
 	token := execution.Token()
+	if downloadFailureCanFallback(class) {
+		if task, taskErr := a.tasks.Get(token.ID); taskErr == nil && task != nil {
+			if outcome, done, fallbackErr := a.fallbackDownloadToStreaming(execution, task.WorkflowJobID, message); done || fallbackErr != nil {
+				return outcome, fallbackErr
+			}
+		}
+	}
 	if _, err := a.flows.Complete(intentID("download", token.ID, token.Fence), token, workflow.Complete{
 		Edge: workflow.EdgeTerminal, NextStage: "failed", TaskState: "failed",
 		ErrorClass: class, Message: message, NowNS: a.now().UnixNano(),
@@ -1122,26 +1179,11 @@ func (a *App) pollDownload(ctx context.Context, execution *scheduler.Execution, 
 // process job; other tasks fail explicitly so an unseeded torrent cannot block
 // the lane for the full two-hour timeout.
 func (a *App) fallbackStalledDownload(execution *scheduler.Execution, jobID string) (scheduler.Outcome, bool, error) {
-	job, err := a.flows.Job(jobID)
-	if err != nil || job == nil {
-		return a.failDownloadStep(execution, "DOWNLOAD_STALLED", "下载长时间无进度；任务信息不可读")
+	const message = "qBittorrent 长时间无进度"
+	if outcome, done, err := a.fallbackDownloadToStreaming(execution, jobID, message); done || err != nil {
+		return outcome, done, err
 	}
-	raw, found, err := a.tasks.Data(jobID, "arguments", 0)
-	if err != nil || !found {
-		return a.failDownloadStep(execution, "DOWNLOAD_STALLED", "下载长时间无进度；原检索计划不可读")
-	}
-	searchPlan, err := decodePlan(raw)
-	if err != nil || !isNeteasePlaylistFallback(job.BatchID, searchPlan) {
-		return a.failDownloadStep(execution, "DOWNLOAD_STALLED", "qBittorrent 长时间无进度；未找到可用的网易云兜底计划")
-	}
-	token := execution.Token()
-	message := "qBittorrent 长时间无进度，已自动切换网易云原曲兜底"
-	if _, err := a.flows.Complete(intentID("download-fallback", token.ID, token.Fence), token, workflow.Complete{
-		Edge: workflow.EdgeAdvance, NextStage: "fallback", TaskState: "completed", Result: raw, Message: message, NowNS: a.now().UnixNano(),
-	}); err != nil {
-		return scheduler.Outcome{}, false, err
-	}
-	return scheduler.Outcome{State: "completed", Message: message}, true, nil
+	return a.failDownloadStep(execution, "DOWNLOAD_STALLED", message+"；计划没有启用可用的流媒体回退")
 }
 
 // finishDownload records the download: the download task completes with

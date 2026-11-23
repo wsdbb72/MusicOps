@@ -7,6 +7,8 @@ const appJS = `(function () {
   var jobs = [];
   var activeCount = 0, pipelinePaused = false, globalJobCounts = null;
   var currentJob = null;
+  var currentActionJobID = "";
+  var currentReviewJobID = "";
   var siteRows = [];
   var downloadSettings = null;
   var outboundProxy = null;
@@ -54,7 +56,7 @@ const appJS = `(function () {
 
   function pill(job) {
     var moving = job.progress === "检索中" || job.progress === "获取中" || job.progress === "识别中" || job.progress === "已排队流媒体" || job.progress === "正在入库";
-    var kind = job.progress === "待核对" ? "review" : (moving ? "queue" : "");
+    var kind = job.progress === "待核对" ? "review" : (job.progress === "未能继续" ? "fail" : (job.progress === "部分入库" ? "partial" : (moving ? "queue" : "")));
     return '<span class="pill ' + kind + '">' + escapeText(job.progress || "未下载") + "</span>";
   }
   function escapeText(value) {
@@ -2188,12 +2190,16 @@ const appJS = `(function () {
         setStatus("fail", "没有读到这条任务。");
         return;
       }
+      var summary = body.summary || job;
+      var actionID = summary.job_id || job.job_id;
+      var reviewID = summary.stage === "needs_review" ? actionID : job.job_id;
       list.hidden = true;
       note.hidden = true;
       detail.hidden = false;
       document.getElementById("detail-title").textContent = job.label || "未命名";
       detailFields.replaceChildren();
-      field("执行状态", executionLabel(body.inspection.task && body.inspection.task.state, job.paused) || "未知");
+      field("整体状态", executionLabel(summary.execution_state, job.paused) || "未知");
+      if (actionID && actionID !== job.job_id) field("当前环节", actionID);
       field("进度", body.progress);
       field("说明", body.headline);
       field("下载", body.downloaded ? "已下载" : "未下载");
@@ -2202,10 +2208,14 @@ const appJS = `(function () {
         var failure = body.result;
         var diagnostic = [failure.error_class, failure.phase, failure.message].filter(Boolean).join(" · ");
         field("失败诊断", diagnostic || failure.state || "未返回详细原因");
+      } else if (summary.error_class || summary.message) {
+        field("失败诊断", [summary.error_class, summary.message].filter(Boolean).join(" · "));
       }
       currentJob = job;
-      showActions(job);
-      if (job.stage === "needs_review") openReview(job.job_id);
+      currentActionJobID = actionID || job.job_id;
+      currentReviewJobID = reviewID;
+      showActions(summary, job);
+      if (summary.stage === "needs_review") openReview(currentReviewJobID);
       else document.getElementById("review-box").hidden = true;
       setStatus("", "");
     } catch (err) {
@@ -2214,19 +2224,18 @@ const appJS = `(function () {
       setBusy(false);
     }
   }
-  function showActions(job) {
-    var terminal = job.stage === "completed" || job.stage === "failed" || job.stage === "cancelled" || job.stage === "skipped";
-    var needsReview = job.stage === "needs_review";
-    // Pause/resume/cancel always refuse a blocked needs_review job, so hide
-    // them there; the review box carries the only way out.
-    document.getElementById("pause-job").hidden = terminal || needsReview || !!job.paused;
-    document.getElementById("resume-job").hidden = terminal || needsReview || !job.paused;
-    document.getElementById("cancel-job").hidden = terminal || needsReview || !!job.cancel_requested;
-    document.getElementById("retry-job").hidden = job.stage !== "failed";
-    // The torrent itself can only be controlled while the job owns one. A
-    // failed download keeps delete: the row is still in the client and the
-    // operator may want it gone.
-    document.getElementById("torrent-actions").hidden = !(job.stage === "downloading" || job.stage === "failed");
+  function showActions(state, root) {
+    state = state || root;
+    root = root || state;
+    var terminal = state.stage === "completed" || state.stage === "failed" || state.stage === "cancelled" || state.stage === "skipped";
+    var needsReview = state.stage === "needs_review";
+    // The aggregate state may come from a descendant task. It is the action
+    // target, while the root remains the stable card and title.
+    document.getElementById("pause-job").hidden = terminal || needsReview || !!state.paused;
+    document.getElementById("resume-job").hidden = terminal || needsReview || !root.paused;
+    document.getElementById("cancel-job").hidden = terminal || needsReview || !!state.cancel_requested;
+    document.getElementById("retry-job").hidden = state.stage !== "failed";
+    document.getElementById("torrent-actions").hidden = !(state.stage === "downloading" || state.stage === "failed");
   }
   // torrentControl talks to the client, not just to the workflow: pausing the
   // job alone leaves the torrent running, and deleting keeps the files.
@@ -2236,7 +2245,7 @@ const appJS = `(function () {
     setBusy(true);
     setStatus("info", "正在处理种子");
     try {
-      var response = await fetch("/v1/jobs/" + encodeURIComponent(currentJob.job_id) + "/download/control", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({action: action})});
+      var response = await fetch("/v1/jobs/" + encodeURIComponent(currentActionJobID) + "/download/control", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({action: action})});
       var body = await response.json();
       if (!response.ok || !body || !body.ok) {
         setStatus("fail", (body && (body.error || body.code)) || "没有执行。");
@@ -2318,7 +2327,7 @@ const appJS = `(function () {
     setBusy(true);
     setStatus("info", action === "ai" ? "AI 正在核对候选" : "正在处理核对");
     try {
-      var response = await fetch("/v1/jobs/" + encodeURIComponent(currentJob.job_id) + "/review", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({action: action, site: site, candidate_id: candidateID})});
+      var response = await fetch("/v1/jobs/" + encodeURIComponent(currentReviewJobID) + "/review", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({action: action, site: site, candidate_id: candidateID})});
       var body = await response.json();
       if (!response.ok || !body || !body.ok) {
         setStatus("fail", (body && body.message) || ("核对操作失败。" + (body && body.code ? "（" + body.code + "）" : "")));
@@ -2345,7 +2354,7 @@ const appJS = `(function () {
     setBusy(true);
     setStatus("info", "正在交给 qBittorrent");
     try {
-      var response = await fetch("/v1/jobs/" + encodeURIComponent(currentJob.job_id) + "/download", {method: "POST", headers: {"Content-Type": "application/json"}, body: "{}"});
+      var response = await fetch("/v1/jobs/" + encodeURIComponent(currentReviewJobID) + "/download", {method: "POST", headers: {"Content-Type": "application/json"}, body: "{}"});
       var body = await response.json();
       if (!response.ok || !body || !body.ok) {
         setStatus("fail", (body && body.error) || ("没有开始下载。" + (body && body.code ? "（" + body.code + "）" : "")));
@@ -2369,7 +2378,7 @@ const appJS = `(function () {
       // the qBittorrent torrent. Cancel means "remove the torrent, keep the
       // files" there; pausing the task alone would leave the torrent running.
       var downloading = currentJob.stage === "downloading";
-      var path = "/v1/jobs/" + encodeURIComponent(currentJob.job_id) + (downloading ? "/download/control" : "/control");
+      var path = "/v1/jobs/" + encodeURIComponent(currentActionJobID) + (downloading ? "/download/control" : "/control");
       var payload = downloading ? {action: action === "cancel" ? "delete" : action} : {action: action};
       var response = await fetch(path, {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(payload)});
       var body = await response.json();
@@ -2392,7 +2401,7 @@ const appJS = `(function () {
     setBusy(true);
     setStatus("info", "正在重试");
     try {
-      var response = await fetch("/v1/jobs/" + encodeURIComponent(currentJob.job_id) + "/review", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({action: "retry"})});
+      var response = await fetch("/v1/jobs/" + encodeURIComponent(currentReviewJobID) + "/review", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({action: "retry"})});
       var body = await response.json();
       if (!response.ok || !body || !body.ok) {
         setStatus("fail", "重试失败。" + (body && body.code ? "（" + body.code + "）" : ""));

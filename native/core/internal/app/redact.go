@@ -98,16 +98,38 @@ func redactJSON(value any) any {
 }
 
 type jobView struct {
-	ExecutionState   string         `json:"execution_state,omitempty"`
-	AIReviewEligible bool           `json:"ai_review_eligible,omitempty"`
-	ID               string         `json:"job_id"`
-	RootID           string         `json:"root_id,omitempty"`
-	ParentID         string         `json:"parent_job_id,omitempty"`
-	Scene            string         `json:"scene"`
+	ExecutionState   string          `json:"execution_state,omitempty"`
+	AIReviewEligible bool            `json:"ai_review_eligible,omitempty"`
+	ID               string          `json:"job_id"`
+	RootID           string          `json:"root_id,omitempty"`
+	ParentID         string          `json:"parent_job_id,omitempty"`
+	Scene            string          `json:"scene"`
+	Stage            string          `json:"stage"`
+	Progress         string          `json:"progress"`
+	Headline         string          `json:"headline"`
+	Label            string          `json:"label,omitempty"`
+	Message          string          `json:"message,omitempty"`
+	ReviewKind       string          `json:"review_kind,omitempty"`
+	ErrorClass       string          `json:"error_class,omitempty"`
+	Paused           bool            `json:"paused,omitempty"`
+	CancelRequested  bool            `json:"cancel_requested,omitempty"`
+	Downloaded       bool            `json:"downloaded,omitempty"`
+	LibraryPublished bool            `json:"library_published,omitempty"`
+	Result           *jobResultView  `json:"result,omitempty"`
+	UpdatedNS        int64           `json:"updated_ns"`
+	RootStatus       *rootStatusView `json:"root_status,omitempty"`
+}
+
+// rootStatusView is the aggregate state of a root and every durable child.
+// The root's own task often finishes after identification while a later
+// search or download descendant is still running, blocked or failed. Showing
+// only the root task state made those albums look completed and healthy.
+type rootStatusView struct {
+	JobID            string         `json:"job_id"`
 	Stage            string         `json:"stage"`
+	ExecutionState   string         `json:"execution_state"`
 	Progress         string         `json:"progress"`
 	Headline         string         `json:"headline"`
-	Label            string         `json:"label,omitempty"`
 	Message          string         `json:"message,omitempty"`
 	ReviewKind       string         `json:"review_kind,omitempty"`
 	ErrorClass       string         `json:"error_class,omitempty"`
@@ -194,9 +216,17 @@ func markReleased(jobs []jobView, albums map[string]bool) []jobView {
 			root = job.ID
 		}
 		if albums[root] {
-			job.Progress = "已入库"
-			job.Headline = "音乐已校验并放入库中（本地导入，未经站点下载）。"
 			job.LibraryPublished = true
+			switch job.Progress {
+			case "未下载":
+				job.Progress = "已入库"
+				job.Headline = "音乐已校验并放入库中（本地导入，未经站点下载）。"
+			case "待核对", "未能继续", "已取消", "已跳过":
+				job.Progress = "部分入库"
+				if !strings.Contains(job.Headline, "部分入库") && !strings.Contains(job.Headline, "仍缺") {
+					job.Headline = "已入库可用曲目，但仍有未完成项目：" + job.Headline
+				}
+			}
 		}
 		out[i] = job
 	}
@@ -260,6 +290,110 @@ func albumProgress(tree []jobView) (string, string) {
 	}
 }
 
+// summarizeRootJobs projects the state a person needs to see for an album.
+// The representative descendant is selected with the same precedence as the
+// progress label: live work first, then review, failure, cancellation and a
+// terminal skip. The root itself is retained as the stable click target.
+func summarizeRootJobs(tree []jobView) rootStatusView {
+	if len(tree) == 0 {
+		return rootStatusView{Progress: "未下载", Headline: "音乐还没有下载到库里。"}
+	}
+	var active, review, failed, cancelled, skipped *jobView
+	best := 0
+	for i := range tree {
+		job := &tree[i]
+		switch job.Stage {
+		case "needs_review":
+			if review == nil || job.UpdatedNS >= review.UpdatedNS {
+				review = job
+			}
+		case "failed":
+			if failed == nil || job.UpdatedNS >= failed.UpdatedNS {
+				failed = job
+			}
+		case "cancelled":
+			if cancelled == nil || job.UpdatedNS >= cancelled.UpdatedNS {
+				cancelled = job
+			}
+		case "skipped":
+			if skipped == nil || job.UpdatedNS >= skipped.UpdatedNS {
+				skipped = job
+			}
+		default:
+			rank := albumStageRank(job.Stage)
+			if rank > best || rank == best && rank > 0 && (active == nil || job.UpdatedNS >= active.UpdatedNS) {
+				if rank > 0 {
+					best = rank
+					active = job
+				}
+			}
+		}
+	}
+	rep := active
+	if rep == nil {
+		rep = review
+	}
+	if rep == nil {
+		rep = failed
+	}
+	if rep == nil {
+		rep = cancelled
+	}
+	if rep == nil {
+		rep = skipped
+	}
+	if rep == nil {
+		rep = &tree[0]
+	}
+	progress, headline := "", ""
+	if rep.Progress != "" {
+		progress, headline = rep.Progress, rep.Headline
+	} else {
+		progress, headline = albumProgress(tree)
+	}
+	state := rep.ExecutionState
+	if state == "" {
+		switch rep.Stage {
+		case "needs_review":
+			state = "blocked"
+		case "failed":
+			state = "failed"
+		case "cancelled":
+			state = "cancelled"
+		case "skipped", "completed":
+			state = "completed"
+		default:
+			state = "running"
+		}
+	}
+	out := rootStatusView{
+		JobID: rep.ID, Stage: rep.Stage, ExecutionState: state, Progress: progress, Headline: headline,
+		Message: rep.Message, ReviewKind: rep.ReviewKind, ErrorClass: rep.ErrorClass,
+		Paused: rep.Paused, CancelRequested: rep.CancelRequested, Downloaded: rep.Downloaded, LibraryPublished: rep.LibraryPublished, Result: rep.Result, UpdatedNS: rep.UpdatedNS,
+	}
+	for _, job := range tree {
+		out.Downloaded = out.Downloaded || job.Downloaded
+		out.LibraryPublished = out.LibraryPublished || job.LibraryPublished
+	}
+	return out
+}
+
+func albumStageRank(stage string) int {
+	switch stage {
+	case "preparing", "identifying", "snapshotting", "metadata":
+		return 1
+	case "searching":
+		return 2
+	case "fallback":
+		return 3
+	case "requesting", "validating":
+		return 4
+	case "downloading", "publishing", "notifying":
+		return 5
+	default:
+		return 0
+	}
+}
 func withUndownloaded(message, fallback string) string {
 	message = userFacing(strings.TrimSpace(message))
 	if message == "" {

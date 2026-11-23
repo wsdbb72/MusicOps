@@ -103,7 +103,7 @@ func TestLibrarySelectionSupportsPageAndWholeLibrary(t *testing.T) {
 // reveals them for the stages that own one.
 func TestTorrentControlsFollowTheJobStage(t *testing.T) {
 	for _, want := range []string{
-		`document.getElementById("torrent-actions").hidden = !(job.stage === "downloading" || job.stage === "failed")`,
+		`document.getElementById("torrent-actions").hidden = !(state.stage === "downloading" || state.stage === "failed")`,
 		`/download/control`,
 		`JSON.stringify({action: action})`,
 		`torrent-pause`, `torrent-resume`, `torrent-recheck`, `torrent-delete`,

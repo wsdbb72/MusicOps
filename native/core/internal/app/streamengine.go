@@ -78,6 +78,10 @@ func streamServiceName(source string) (string, bool) {
 		return "qq", true
 	case "netease":
 		return "netease", true
+	case "kugou":
+		return "kugou", true
+	case "kuwo":
+		return "kuwo", true
 	default:
 		return "", false
 	}

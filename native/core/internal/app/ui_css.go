@@ -168,8 +168,9 @@ article>h2:first-child{margin-top:0}
 .meta{display:flex;flex-wrap:wrap;align-items:center;gap:var(--s-1) var(--s-2);margin:var(--s-2) 0;color:var(--fg-muted);font-size:var(--t-sm)}
 .meta:empty{display:none}
 .pill{display:inline-flex;align-items:center;gap:4px;border-radius:var(--r-xs);padding:1px 7px;background:var(--sunken);color:var(--fg-muted);font-size:var(--t-xs);font-weight:500;white-space:nowrap}
-.pill.review{background:var(--warn-soft);color:var(--warn)}
+.pill.review,.pill.partial{background:var(--warn-soft);color:var(--warn)}
 .pill.queue{background:var(--info-soft);color:var(--info)}
+.pill.fail{background:var(--danger-soft);color:var(--danger)}
 .batch{display:flex;flex-wrap:wrap;align-items:center;gap:var(--s-2);margin:0 0 var(--s-3);padding:var(--s-2) var(--s-3);border:1px solid var(--line);border-radius:var(--r-sm);background:var(--surface-2)}
 .batch>span{color:var(--fg-muted);font-size:var(--t-sm);margin-right:var(--s-1)}
 

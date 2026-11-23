@@ -110,19 +110,21 @@ func (a *App) identify(ctx context.Context, execution *scheduler.Execution, payl
 	// stored at enqueue time. Recover their durable song/album ids from the
 	// ordered M3U (or one authenticated playlist refresh) and let the search
 	// proceed automatically; media identity is still checked again at acquire.
-	if !plan.Identity.IdentityConfirmed && plan.PlaylistTrack != "" {
+	if !plan.Identity.IdentityConfirmed {
 		if task, taskErr := a.tasks.Get(token.ID); taskErr == nil && task != nil {
 			if job, jobErr := a.flows.Job(task.WorkflowJobID); jobErr == nil && job != nil && a.recoverNeteasePlaylistIDs(ctx, job.BatchID, &plan) {
-				identityPayload, _ := json.Marshal(map[string]any{
-					"source": "netease", "title": plan.PlaylistTrack, "artist": plan.ExpectedArtist,
-					"album": plan.ExpectedTitle, "netease_song_id": plan.NeteaseSongID,
-					"netease_album_id": plan.NeteaseAlbumID,
-				})
-				plan.Identity = Identity{
-					ID: evidenceID(token.ID, token.Fence, "playlist-identity"), Kind: "api", Source: "netease",
-					SubjectID:         fmt.Sprintf("netease:%d:%d", plan.NeteaseSongID, plan.NeteaseAlbumID),
-					TracklistVerified: true, IdentityConfirmed: true,
-					Payload: string(identityPayload),
+				if !plan.Identity.IdentityConfirmed {
+					identityPayload, _ := json.Marshal(map[string]any{
+						"source": "netease", "title": plan.PlaylistTrack, "artist": plan.ExpectedArtist,
+						"album": plan.ExpectedTitle, "netease_song_id": plan.NeteaseSongID,
+						"netease_album_id": plan.NeteaseAlbumID,
+					})
+					plan.Identity = Identity{
+						ID: evidenceID(token.ID, token.Fence, "playlist-identity"), Kind: "api", Source: "netease",
+						SubjectID:         fmt.Sprintf("netease:%d:%d", plan.NeteaseSongID, plan.NeteaseAlbumID),
+						TracklistVerified: true, IdentityConfirmed: true,
+						Payload: string(identityPayload),
+					}
 				}
 				payload, err = json.Marshal(plan)
 				if err != nil {

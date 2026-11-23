@@ -507,3 +507,17 @@ func TestTemporaryStreamFailureClasses(t *testing.T) {
 		}
 	}
 }
+
+func TestNeteaseIngestFailureTerminalForConfirmedPlaylistRows(t *testing.T) {
+	confirmed := SearchPlan{NeteaseSongID: 26850810, NeteaseAlbumID: 42}
+	if !neteaseIngestFailureIsTerminal(workflow.Job{SearchRetryCount: 0}, confirmed) {
+		t.Fatal("a durable NetEase song and album identity must not re-enter the same library-conflict review forever")
+	}
+	retried := SearchPlan{}
+	if !neteaseIngestFailureIsTerminal(workflow.Job{SearchRetryCount: 3}, retried) {
+		t.Fatal("an older plan without recovered ids must still terminate after the bounded retries")
+	}
+	if neteaseIngestFailureIsTerminal(workflow.Job{SearchRetryCount: 0}, retried) {
+		t.Fatal("an unconfirmed plan with retries remaining must keep its normal review path")
+	}
+}

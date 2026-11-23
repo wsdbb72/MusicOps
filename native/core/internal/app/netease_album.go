@@ -483,6 +483,9 @@ func (a *App) acquireNeteaseAlbum(ctx context.Context, execution *scheduler.Exec
 	}
 	if len(receipts) == 0 {
 		if ingestFailure != nil {
+			if neteaseIngestFailureIsTerminal(job, plan) {
+				return finishSkip("网易云发行版没有可安全发布的新曲目；保留库内现有文件并自动结束：" + ingestFailure.Error())
+			}
 			return review(ingestFailure.Error(), "STREAM_INGEST_FAILED")
 		}
 		if len(missing) > 0 {
@@ -539,6 +542,14 @@ func isTemporaryStreamFailure(class string) bool {
 	}
 }
 
+// A confirmed NetEase playlist row carries durable song and album ids. A
+// library collision is then a terminal, non-destructive outcome for this
+// attempt: retrying the same exact recording cannot choose a different path.
+// After the bounded search retries, the same rule applies even when an older
+// plan has not recovered its ids yet.
+func neteaseIngestFailureIsTerminal(job workflow.Job, plan SearchPlan) bool {
+	return plan.NeteaseSongID > 0 && plan.NeteaseAlbumID > 0 || job.SearchRetryCount >= 3
+}
 func firstMissing(items []string) string {
 	if len(items) == 0 {
 		return ""

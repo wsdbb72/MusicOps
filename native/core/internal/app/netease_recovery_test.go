@@ -317,3 +317,81 @@ func TestNeteaseSecondaryStreamRestoresOriginalReleaseIdentity(t *testing.T) {
 		t.Fatalf("original NetEase cover was not restored: %v", err)
 	}
 }
+
+func TestNeteaseRecoveryArtistAliasesAreConservative(t *testing.T) {
+	got := neteaseRecoveryArtistAliases("DJ奶小深", "洛天依Official", "Alexandra Stan")
+	joined := strings.Join(got, "|")
+	for _, want := range []string{"DJ奶小深", "奶小深", "洛天依Official", "洛天依", "Alexandra Stan"} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("alias list %v is missing %q", got, want)
+		}
+	}
+	plain := neteaseRecoveryArtistAliases("DJ Snake")
+	if len(plain) != 1 || plain[0] != "DJ Snake" {
+		t.Fatalf("an English DJ name must not lose its stage prefix: %v", plain)
+	}
+}
+
+func TestNeteaseTitleDurationRecoveryUsesSoundtrackUploader(t *testing.T) {
+	vaultKey(t)
+	application := newApp(t)
+	saveNeteaseTestCookie(t, application)
+
+	cover := solidJPEG(color.RGBA{R: 92, G: 40, B: 18, A: 255})
+	audio := oneSecondFLAC(t, "Compilation Uploader", "The teletype")
+	netease := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.HasPrefix(r.URL.Path, "/api/song/enhance/player/url"):
+			_, _ = w.Write([]byte(`{"code":200,"data":[{"id":42,"url":"","type":"flac","code":-110}]}`))
+		case strings.HasPrefix(r.URL.Path, "/song/media/outer/url"):
+			http.NotFound(w, r)
+		case r.URL.Path == "/cover.jpg":
+			w.Header().Set("Content-Type", "image/jpeg")
+			_, _ = w.Write(cover)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer netease.Close()
+	application.neteaseBases = map[string]string{"api": netease.URL}
+
+	engine := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/search":
+			if r.URL.Query().Get("sources") != "qq" || r.URL.Query().Get("q") != "The teletype" {
+				_, _ = io.WriteString(w, `<html></html>`)
+				return
+			}
+			_, _ = io.WriteString(w, `<html><li class="song-card" data-id="q1" data-source="qq" data-name="The teletype" data-artist="Compilation Uploader" data-album="Soundtrack Collection" data-duration="0"></li></html>`)
+		case "/download":
+			if r.URL.Query().Get("source") != "qq" || r.URL.Query().Get("id") != "q1" {
+				http.NotFound(w, r)
+				return
+			}
+			_, _ = w.Write(audio)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer engine.Close()
+	t.Setenv("MUSICOPS_ENGINE_URL", engine.URL)
+
+	plan := SearchPlan{
+		RootJobID: "title-duration-net", Scene: "expand", ExpectedTitle: "Great War", ExpectedArtist: "Various Artists",
+		PlaylistTrack: "The teletype", StreamingEnabled: true, NeteaseOnly: true, NeteaseTrackOnly: true,
+		NeteaseSongID: 42, NeteaseAlbumID: 7,
+	}
+	anchor := &neteaseSong{ID: 42, Name: "The teletype", Artists: []string{"Star Media Team"}, Album: "Great War", AlbumID: 7, DurationMS: 1000, CoverURL: netease.URL + "/cover.jpg", CatalogVerified: true}
+	path, note, class, handled := application.stageNeteaseSongWithEngine(t.Context(), plan, anchor)
+	if !handled || path == "" || class != downloadpolicy.ClassDownload || !strings.Contains(note, "标题和时长") {
+		t.Fatalf("handled=%v path=%q class=%q note=%q", handled, path, class, note)
+	}
+	tags := readTags(t, path)
+	if tags.Title != "The teletype" || tags.Album != "Great War" || strings.Join(tags.Artists, " / ") != "Various Artists" {
+		t.Fatalf("playlist identity was not restored: title=%q album=%q artists=%v", tags.Title, tags.Album, tags.Artists)
+	}
+	body, err := os.ReadFile(path)
+	if err != nil || !bytes.Equal(flactags.FrontCover(body), cover) {
+		t.Fatalf("NetEase cover was not restored: %v", err)
+	}
+}

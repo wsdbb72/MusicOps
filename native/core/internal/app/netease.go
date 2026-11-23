@@ -26,6 +26,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/wsdbb72/MusicOps/native/core/internal/cookies"
 	"github.com/wsdbb72/MusicOps/native/core/internal/downloadpolicy"
@@ -846,11 +847,13 @@ func (a *App) stageNeteaseSongWithEngine(ctx context.Context, plan SearchPlan, s
 	if strings.TrimSpace(plan.PlaylistTrack) == "" {
 		return "", primaryNote, primaryClass, true
 	}
-	if recovered, recoveredNote, recoveredClass := a.recoverNeteaseFromSecondaryStreams(ctx, plan, song); recovered != "" {
-		return recovered, primaryNote + "；" + recoveredNote, downloadpolicy.ClassDownload, true
-	} else {
-		primaryNote += "；" + recoveredNote
-		primaryClass = preferStreamFailure(primaryClass, recoveredClass)
+	if plan.NeteaseSongID > 0 && plan.NeteaseAlbumID > 0 {
+		if recovered, recoveredNote, recoveredClass := a.recoverNeteaseFromSecondaryStreams(ctx, plan, song); recovered != "" {
+			return recovered, primaryNote + "；" + recoveredNote, downloadpolicy.ClassDownload, true
+		} else {
+			primaryNote += "；" + recoveredNote
+			primaryClass = preferStreamFailure(primaryClass, recoveredClass)
+		}
 	}
 	alternates, alternateErr := a.neteaseAlternateSongs(ctx, plan, song)
 	if alternateErr != nil {
@@ -900,11 +903,8 @@ func (a *App) recoverNeteaseFromSecondaryStreams(ctx context.Context, plan Searc
 		return "", "备用流媒体无法恢复：缺少网易云目标曲目", downloadpolicy.ClassNoResult
 	}
 	artists := append([]string(nil), splitPlaylistArtists(plan.ExpectedArtist)...)
-	for _, artist := range anchor.Artists {
-		if normalizeNeteaseArtist(artist) != "" {
-			artists = append(artists, artist)
-		}
-	}
+	artists = append(artists, anchor.Artists...)
+	artists = neteaseRecoveryArtistAliases(artists...)
 	seenArtists := map[string]bool{}
 	notes := []string{}
 	class := downloadpolicy.ClassNoResult
@@ -920,7 +920,7 @@ func (a *App) recoverNeteaseFromSecondaryStreams(ctx context.Context, plan Searc
 			recoveryPlan.ExpectedTitle = anchor.Name
 			recoveryPlan.ExpectedArtist = artist
 			recoveryPlan.PlaylistTrack = ""
-			recoveryPlan.Query = artist + " " + anchor.Name
+			recoveryPlan.Query = anchor.Name + " " + artist
 			path, note, stepClass := a.tryConfiguredStreamSong(ctx, source, recoveryPlan, nil)
 			if path == "" {
 				if len(notes) < 6 {
@@ -940,10 +940,57 @@ func (a *App) recoverNeteaseFromSecondaryStreams(ctx context.Context, plan Searc
 			return path, "网易云原曲无可用音频，已由 " + source + " 取得同曲同艺人录音，并恢复网易云专辑、歌手和封面；" + note, downloadpolicy.ClassDownload
 		}
 	}
+	if recovered, recoveredNote, recoveredClass := a.recoverNeteaseByTitleDuration(ctx, plan, anchor); recovered != "" {
+		return recovered, recoveredNote, downloadpolicy.ClassDownload
+	} else {
+		if len(notes) < 8 {
+			notes = append(notes, recoveredNote)
+		}
+		class = preferStreamFailure(class, recoveredClass)
+	}
+	if recovered, recoveredNote, recoveredClass := a.recoverNeteaseByTitleDuration(ctx, plan, anchor); recovered != "" {
+		return recovered, recoveredNote, downloadpolicy.ClassDownload
+	} else {
+		if len(notes) < 8 {
+			notes = append(notes, recoveredNote)
+		}
+		class = preferStreamFailure(class, recoveredClass)
+	}
 	if len(notes) == 0 {
 		notes = append(notes, "没有可用的备用流媒体检索词")
 	}
 	return "", "备用流媒体均未取得可安全发布的原曲：" + strings.Join(notes, "；"), class
+}
+
+// neteaseRecoveryArtistAliases adds only spelling variants that describe the
+// same credited act, such as a trailing "Official" account suffix or a DJ
+// prefix on a Chinese stage name. Each alias is still followed by the normal
+// title, artist and duration checks before bytes can enter the library.
+func neteaseRecoveryArtistAliases(values ...string) []string {
+	out := make([]string, 0, len(values)*2)
+	seen := map[string]bool{}
+	add := func(value string) {
+		value = strings.TrimSpace(value)
+		key := normalizeNeteaseArtist(value)
+		if value == "" || key == "" || seen[key] {
+			return
+		}
+		seen[key] = true
+		out = append(out, value)
+	}
+	for _, value := range values {
+		add(value)
+		trimmed := strings.TrimSpace(value)
+		lower := strings.ToLower(trimmed)
+		runes := []rune(trimmed)
+		if len(runes) > 2 && strings.HasPrefix(lower, "dj") && unicode.Is(unicode.Han, runes[2]) {
+			add(strings.TrimSpace(string(runes[2:])))
+		}
+		if strings.HasSuffix(lower, "official") {
+			add(strings.TrimSpace(trimmed[:len(trimmed)-len("official")]))
+		}
+	}
+	return out
 }
 func (a *App) stageNeteaseEngineFallback(ctx context.Context, plan SearchPlan, primaryNote, primaryClass string) (string, string, string, bool) {
 	return a.finishNeteaseEngineFallback(ctx, plan, primaryNote, primaryClass, nil)

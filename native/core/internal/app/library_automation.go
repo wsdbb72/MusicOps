@@ -713,7 +713,11 @@ func (a *App) runAutomatedScrape(ctx context.Context, root string, paths []strin
 		return
 	}
 	for _, track := range repairTracks {
-		if a.enqueueMaintenanceWorkflow(ctx, "upgrade", []localWorkflowTrack{track}, filepath.Dir(track.Path)) {
+		// Old policy versions may have left a skipped/no-result job under the
+		// same path. A versioned repair key creates exactly one new attempt for
+		// genuinely corrupt audio while normal no-source tracks keep their
+		// longer skipped-task cooldown.
+		if a.enqueueMaintenanceWorkflowKey(ctx, "upgrade", []localWorkflowTrack{track}, filepath.Dir(track.Path), "corrupt-repair-v2") {
 			state.update(func(report *libraryAutomationReport) { report.UpgradeJobs++ })
 		}
 	}
@@ -1500,6 +1504,10 @@ func (a *App) albumNeedsExpansion(ctx context.Context, client *musicbrainz.Clien
 }
 
 func (a *App) enqueueMaintenanceWorkflow(ctx context.Context, scene string, tracks []localWorkflowTrack, dir string) bool {
+	return a.enqueueMaintenanceWorkflowKey(ctx, scene, tracks, dir, "")
+}
+
+func (a *App) enqueueMaintenanceWorkflowKey(ctx context.Context, scene string, tracks []localWorkflowTrack, dir, keyPrefix string) bool {
 	if len(tracks) == 0 {
 		return false
 	}
@@ -1509,6 +1517,16 @@ func (a *App) enqueueMaintenanceWorkflow(ctx context.Context, scene string, trac
 	}
 	sort.Strings(paths)
 	key := scene + "|" + filepath.Clean(dir) + "|" + strings.Join(paths, "|")
+	if keyPrefix != "" {
+		key = keyPrefix + "|" + key
+	} else if scene == "upgrade" {
+		// The corrupt-file pass uses a separately versioned key. Do not create a
+		// second ordinary upgrade job for the same path in the same maintenance
+		// run; the versioned repair job owns future retry cooldown.
+		if _, existing, lookupErr := a.automationWorkflowID(scene, "corrupt-repair-v2|"+key); lookupErr == nil && existing != nil {
+			return false
+		}
+	}
 	status, raw, err := a.libraryMaintenancePost(ctx, "/v1/library/workflow", a.libraryWorkflow, map[string]any{
 		"scene": scene, "label": tracks[0].Artist + " — " + tracks[0].Album, "paths": paths, "confirmed": true, "key": key,
 	})

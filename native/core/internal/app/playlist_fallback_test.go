@@ -81,12 +81,33 @@ func TestGelatoSameAlbumRemixAliasRequiresIdentityAndDuration(t *testing.T) {
 		t.Fatal("same artist, album and duration did not admit the Gelato Remix label")
 	}
 	match.Duration = 340
-	if streamTitleIdentityMatches(plan, match) {
+	if streamPlaylistCardMatches(plan, match) {
 		t.Fatal("duration mismatch was admitted by the Gelato alias")
 	}
 	match.Duration = 241
 	plan.ExpectedArtist = "Another Artist"
-	if streamTitleIdentityMatches(plan, match) {
+	if streamPlaylistCardMatches(plan, match) {
 		t.Fatal("different artist was admitted by the Gelato alias")
+	}
+}
+
+func TestChineseDJArtistAliasStillRequiresTitleAndDuration(t *testing.T) {
+	if !streamChineseDJAliasMatches("DJ奶小深", "奶小深") {
+		t.Fatal("DJ prefix on a Chinese stage name was not recognized")
+	}
+	if streamChineseDJAliasMatches("DJ Snake", "Snake") {
+		t.Fatal("Latin DJ stage name was incorrectly stripped")
+	}
+	plan := SearchPlan{ExpectedArtist: "DJ奶小深", ExpectedTitle: "Remix", PlaylistTrack: "爱河", ExpectedDuration: 326}
+	match := streamSong{Name: "爱河", Artist: "奶小深", Album: "Remix", Duration: 326}
+	if !streamPlaylistCardMatches(plan, match) {
+		t.Fatal("exact DJ alias result failed title or duration identity checks")
+	}
+	match.Duration = 340
+	if !streamArtistIdentityMatches(plan.ExpectedArtist, match.Artist) {
+		t.Fatal("artist alias should be independent from duration")
+	}
+	if streamPlaylistCardMatches(plan, match) {
+		t.Fatal("DJ alias admitted a 340-second recording for a 326-second target")
 	}
 }

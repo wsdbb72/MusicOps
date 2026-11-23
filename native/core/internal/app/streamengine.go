@@ -398,13 +398,7 @@ func (a *App) streamSearch(ctx context.Context, base, service string, plan Searc
 			continue
 		}
 		if playlistTrack != "" {
-			if !streamArtistIdentityMatches(plan.ExpectedArtist, song.Artist) {
-				continue
-			}
-			if !streamTitleIdentityMatches(plan, song) {
-				continue
-			}
-			if plan.ExpectedDuration > 0 && song.Duration > 0 && absInt(song.Duration-plan.ExpectedDuration) > 3 {
+			if !streamPlaylistCardMatches(plan, song) {
 				continue
 			}
 			return &song, "", nil
@@ -482,7 +476,7 @@ func compactIdentityText(value string) string {
 func streamArtistIdentityMatches(expected, actual string) bool {
 	want := splitPlaylistArtists(expected)
 	got := splitPlaylistArtists(actual)
-	if playlistArtistsMatch(want, got) {
+	if playlistArtistsMatch(want, got) || streamChineseDJAliasMatches(expected, actual) {
 		return true
 	}
 	for _, expectedArtist := range flattenPlaylistArtists(want) {
@@ -504,6 +498,30 @@ func streamArtistIdentityMatches(expected, actual string) bool {
 	return len(want) > 0
 }
 
+func streamChineseDJAliasMatches(expected, actual string) bool {
+	want := splitPlaylistArtists(expected)
+	got := splitPlaylistArtists(actual)
+	strip := func(value string) string {
+		value = strings.TrimSpace(value)
+		runes := []rune(value)
+		if len(runes) > 2 && strings.EqualFold(string(runes[:2]), "dj") && unicode.Is(unicode.Han, runes[2]) {
+			return compactIdentityText(string(runes[2:]))
+		}
+		return ""
+	}
+	for _, expectedArtist := range flattenPlaylistArtists(want) {
+		expectedKey := compactIdentityText(expectedArtist)
+		expectedPlain := strip(expectedArtist)
+		for _, actualArtist := range flattenPlaylistArtists(got) {
+			actualKey := compactIdentityText(actualArtist)
+			actualPlain := strip(actualArtist)
+			if expectedPlain != "" && expectedPlain == actualKey || actualPlain != "" && actualPlain == expectedKey {
+				return true
+			}
+		}
+	}
+	return false
+}
 func streamVersionConflict(expected, candidate string) bool {
 	expected = foldPlaylistMatchText(expected)
 	candidate = foldPlaylistMatchText(candidate)
@@ -515,6 +533,12 @@ func streamVersionConflict(expected, candidate string) bool {
 	return false
 }
 
+func streamPlaylistCardMatches(plan SearchPlan, song streamSong) bool {
+	if !streamArtistIdentityMatches(plan.ExpectedArtist, song.Artist) || !streamTitleIdentityMatches(plan, song) {
+		return false
+	}
+	return plan.ExpectedDuration <= 0 || song.Duration <= 0 || absInt(song.Duration-plan.ExpectedDuration) <= 3
+}
 func streamTitleIdentityMatches(plan SearchPlan, song streamSong) bool {
 	expected := strings.TrimSpace(plan.PlaylistTrack)
 	if expected == "" {

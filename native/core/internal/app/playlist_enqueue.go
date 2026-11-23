@@ -663,6 +663,9 @@ func (a *App) enqueuePlaylistTracks(ctx context.Context, playlistJobID string, r
 	library := a.playlistLibrary()
 	selectedRows := make([]playlistTrack, len(indices))
 	for position, index := range indices {
+		if index < 0 || index >= len(rows) {
+			return report, fmt.Errorf("曲目序号超出范围：%d", index)
+		}
 		selectedRows[position] = rows[index]
 	}
 	selectedPresence := playlistPresenceForIndex(library, selectedRows)

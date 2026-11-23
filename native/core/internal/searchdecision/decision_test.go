@@ -268,6 +268,7 @@ func TestOfflineSamplesCoverSearchClassesWithoutClaimingDownloads(t *testing.T) 
 		}(), action: ActionReviewSearch, reason: "no_sites_enabled", deferStream: true},
 		{name: "clean-empty-playlist-may-stream", report: base(), action: ActionFallback, reason: "sites_exhausted"},
 		{name: "clean-empty-fill-may-stream", report: func() Report { r := base(); r.Scene = "fill"; return r }(), action: ActionFallback, reason: "sites_exhausted"},
+		{name: "clean-empty-upgrade-may-stream", report: func() Report { r := base(); r.Scene = "upgrade"; r.StreamingEnabled = true; return r }(), action: ActionFallback, reason: "sites_exhausted"},
 		{name: "clean-empty-album-stays", report: func() Report { r := base(); r.Scene = "complete"; return r }(), action: ActionSkip, reason: "no_match_kept"},
 		{name: "limited-page-blocks-streaming", report: func() Report {
 			r := base()

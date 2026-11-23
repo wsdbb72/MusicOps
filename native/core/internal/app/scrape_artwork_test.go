@@ -2,12 +2,14 @@ package app
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -170,6 +172,119 @@ func TestScrapeBatchArtworkCap(t *testing.T) {
 	code, decoded := scrapePost(t, application, map[string]any{"paths": paths, "with_artwork": true})
 	if code != http.StatusUnprocessableEntity || decoded["code"] != "ARTWORK_BATCH_TOO_LARGE" {
 		t.Fatal(code, decoded)
+	}
+}
+
+// A catalogue miss must not suppress independently available artwork. The
+// existing tags are enough to ask the lyrics service, and the audio stream stays
+// untouched while its .lrc and .jpg sidecars are filled.
+func TestScrapeBatchFetchesArtworkWhenCatalogIsUnconfirmed(t *testing.T) {
+	application := newApp(t)
+	catalog := newFakeMusicBrainz(t, `{"releases":[]}`, `{}`, http.StatusOK)
+	path, full := writeScrapeFLAC(t, application, "opening.flac", 240.25, flactags.Tags{
+		Title: "Opening", Artists: []string{"Some Artist"}, Album: "First Album", TrackNumber: 1,
+	})
+	before, err := os.ReadFile(full)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cover := jpegBody()
+	service, _ := lrcAPIFake(t, "[00:01.00]fallback lyrics", cover, "Authorization", "")
+	saveLyricsService(t, application, service.URL, "Authorization", "")
+
+	code, decoded := scrapePost(t, application, map[string]any{
+		"paths": []string{path}, "catalog_base_url": catalog.server.URL, "with_artwork": true,
+	})
+	if code != http.StatusOK || decoded["written"] != float64(1) || decoded["failed"] != float64(0) || decoded["lyrics_written"] != float64(1) || decoded["cover_written"] != float64(1) {
+		t.Fatal(code, decoded)
+	}
+	files, _ := decoded["files"].([]any)
+	row, _ := files[0].(map[string]any)
+	if row["code"] != "CATALOG_UNCONFIRMED" || row["status"] != "written" {
+		t.Fatal(row)
+	}
+	after, err := os.ReadFile(full)
+	if err != nil || !bytes.Equal(before, after) {
+		t.Fatal("catalogue fallback changed the audio stream", err)
+	}
+	lyricsPath := strings.TrimSuffix(full, filepath.Ext(full)) + ".lrc"
+	lyrics, err := os.ReadFile(lyricsPath)
+	if err != nil || !strings.Contains(string(lyrics), "fallback lyrics") {
+		t.Fatalf("lyrics=%q err=%v", lyrics, err)
+	}
+	sidecar, err := os.ReadFile(strings.TrimSuffix(full, filepath.Ext(full)) + ".jpg")
+	if err != nil || !bytes.Equal(sidecar, cover) {
+		t.Fatal("cover sidecar was not written", err)
+	}
+}
+
+// Two sidecars are one user-visible transaction. If the cover cannot be
+// committed after the lyrics write, the helper restores the prior state.
+func TestScrapeArtworkSidecarsRollBackTogether(t *testing.T) {
+	application := newApp(t)
+	path := filepath.Join(t.TempDir(), "song.flac")
+	cover := jpegBody()
+	previousRename := atomicReplaceRename
+	atomicReplaceRename = func(oldPath, newPath string) error {
+		if strings.EqualFold(filepath.Ext(newPath), ".jpg") {
+			return errors.New("injected jpg failure")
+		}
+		return os.Rename(oldPath, newPath)
+	}
+	t.Cleanup(func() { atomicReplaceRename = previousRename })
+	lyrics, wroteCover, err := application.writeScrapeArtworkSidecars(path, scrapeArtworkData{
+		Lyrics: "[00:01.00]lyrics", Cover: cover,
+	}, false)
+	if err == nil || lyrics || wroteCover {
+		t.Fatalf("lyrics=%v cover=%v err=%v", lyrics, wroteCover, err)
+	}
+	for _, candidate := range []string{lyricsSidecarPath(path), strings.TrimSuffix(path, filepath.Ext(path)) + ".jpg"} {
+		if _, statErr := os.Stat(candidate); !os.IsNotExist(statErr) {
+			t.Fatalf("partial sidecar survived after failure: %s stat=%v", candidate, statErr)
+		}
+	}
+}
+
+func TestScrapeGenericArtworkWhenCatalogIsUnconfirmed(t *testing.T) {
+	ffmpeg, err := exec.LookPath("ffmpeg")
+	if err != nil {
+		t.Skip("ffmpeg unavailable")
+	}
+	application := newApp(t)
+	folder := filepath.Join(application.Dir, "incoming")
+	if err := os.MkdirAll(folder, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	full := filepath.Join(folder, "opening.mp3")
+	command := exec.Command(ffmpeg, "-nostdin", "-v", "error", "-y", "-f", "lavfi", "-i", "sine=frequency=440:duration=1",
+		"-metadata", "artist=Some Artist", "-metadata", "album=First Album", "-metadata", "title=Opening", full)
+	if output, err := command.CombinedOutput(); err != nil {
+		t.Fatal(err, string(output))
+	}
+	before, err := genericAudioHash(context.Background(), full)
+	if err != nil {
+		t.Fatal(err)
+	}
+	catalog := newFakeMusicBrainz(t, `{"releases":[]}`, `{}`, http.StatusOK)
+	cover := jpegBody()
+	service, _ := lrcAPIFake(t, "[00:01.00]generic fallback", cover, "Authorization", "")
+	saveLyricsService(t, application, service.URL, "Authorization", "")
+
+	code, decoded := scrapePost(t, application, map[string]any{
+		"paths": []string{"incoming/opening.mp3"}, "catalog_base_url": catalog.server.URL, "with_artwork": true,
+	})
+	if code != http.StatusOK || decoded["written"] != float64(1) || decoded["failed"] != float64(0) {
+		t.Fatal(code, decoded)
+	}
+	after, err := genericAudioHash(context.Background(), full)
+	if err != nil || before != after {
+		t.Fatalf("generic artwork fallback changed the stream: %s %s %v", before, after, err)
+	}
+	if _, err := os.Stat(strings.TrimSuffix(full, filepath.Ext(full)) + ".lrc"); err != nil {
+		t.Fatal("lyrics sidecar missing", err)
+	}
+	if _, err := os.Stat(strings.TrimSuffix(full, filepath.Ext(full)) + ".jpg"); err != nil {
+		t.Fatal("cover sidecar missing", err)
 	}
 }
 

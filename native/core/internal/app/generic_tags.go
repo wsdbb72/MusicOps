@@ -11,7 +11,6 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
-	"time"
 
 	"github.com/wsdbb72/MusicOps/native/core/internal/musicbrainz"
 )
@@ -285,10 +284,29 @@ func (a *App) scrapeGenericFiles(ctx context.Context, paths []string, client *mu
 			tracks = append(tracks, catalogTrackRequest{Title: info.Title, Artists: []string{info.Artist}, Duration: &duration})
 		}
 		lookup, err := identifyCatalogLookup(ctx, client, a.engine, catalogIdentifyRequest{Artist: group.artist, Album: group.album, Tracks: tracks}, catalogBudget, catalogTTL)
+		var artworkByPath map[string]scrapeArtworkData
+		if withArtwork && !dryRun {
+			requests := make([]scrapeArtworkLookup, 0, len(group.files))
+			for _, info := range group.files {
+				requests = append(requests, scrapeArtworkLookup{Path: info.Path, Artist: info.Artist, Album: info.Album, Title: info.Title})
+			}
+			artworkByPath = a.fetchScrapeArtworkBatch(ctx, requests)
+		}
 		if err != nil || lookup.MusicBrainz == nil {
 			for _, info := range group.files {
-				results[info.Path].Status, results[info.Path].Code = "failed", "CATALOG_UNCONFIRMED"
-				results[info.Path].Note = "目录没有确认这张专辑，文件没有改"
+				result := results[info.Path]
+				result.Status, result.Code, result.Note = "failed", "CATALOG_UNCONFIRMED", "目录没有确认这张专辑"
+				if withArtwork && !dryRun {
+					lyrics, cover, artErr := a.writeScrapeArtworkSidecars(info.Path, artworkByPath[info.Path], false)
+					if artErr != nil {
+						result.Code = "ARTWORK_UNAVAILABLE"
+						result.Note += "；歌词或封面读取失败：" + scrub(artErr.Error())
+					} else if lyrics || cover {
+						result.Status = "written"
+						result.Lyrics, result.LyricsSidecar, result.Cover = lyrics, lyrics, cover
+						result.Note += "；已按现有标签补写可独立验证的歌词或封面"
+					}
+				}
 			}
 			continue
 		}
@@ -326,20 +344,15 @@ func (a *App) scrapeGenericFiles(ctx context.Context, paths []string, client *mu
 			}
 			result.WrittenFields = written
 			if withArtwork {
-				request, cancel := context.WithTimeout(ctx, 20*time.Second)
-				lyrics, cover, artErr := a.fetchArtworkContext(request, "", "", info.Artist, info.Album, info.Title)
-				cancel()
-				if artErr != nil {
-					result.Note = "标签已写入，但歌词封面服务不可用"
+				art := artworkByPath[info.Path]
+				if art.Err != nil {
+					result.Note = "标签已写入，但歌词封面服务不可用：" + scrub(art.Err.Error())
 				} else {
-					if lyrics != "" && !hasLyricsSidecar(info.Path) && writeLyricsSidecar(info.Path, lyrics) == nil {
-						result.Lyrics, result.LyricsSidecar = true, true
-					}
-					if len(cover) > 0 {
-						sidecar := strings.TrimSuffix(info.Path, filepath.Ext(info.Path)) + ".jpg"
-						if _, statErr := os.Stat(sidecar); os.IsNotExist(statErr) && writeAutomationSidecar(sidecar, cover) == nil {
-							result.Cover = true
-						}
+					lyrics, cover, artErr := a.writeScrapeArtworkSidecars(info.Path, art, overwrite)
+					if artErr != nil {
+						result.Note = "标签已写入，但歌词封面写入失败：" + scrub(artErr.Error())
+					} else {
+						result.Lyrics, result.LyricsSidecar, result.Cover = lyrics, lyrics, cover
 					}
 				}
 			}

@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/wsdbb72/MusicOps/native/core/internal/flactags"
@@ -31,7 +32,121 @@ const (
 	// scrapeArtworkMaxFiles bounds a batch that also fetches lyrics and
 	// covers: two extra reads per file, each with its own deadline.
 	scrapeArtworkMaxFiles = 30
+	// Artwork reads are independent per track. A small worker pool keeps a
+	// large library from spending hours waiting on two serial HTTP calls at a
+	// time while still avoiding an unbounded request burst.
+	scrapeArtworkWorkers = 6
 )
+
+type scrapeArtworkLookup struct {
+	Path, Artist, Album, Title string
+}
+
+type scrapeArtworkData struct {
+	Lyrics string
+	Cover  []byte
+	Err    error
+}
+
+// fetchScrapeArtworkBatch reads artwork independently of catalogue identity.
+// This matters when MusicBrainz cannot confirm a release: the existing tags can
+// still identify a usable LrcApi result, and dropping that result would make a
+// selective metadata outage look like missing artwork.
+func (a *App) fetchScrapeArtworkBatch(ctx context.Context, requests []scrapeArtworkLookup) map[string]scrapeArtworkData {
+	out := make(map[string]scrapeArtworkData, len(requests))
+	if len(requests) == 0 {
+		return out
+	}
+	jobs := make(chan scrapeArtworkLookup)
+	results := make(chan struct {
+		path string
+		data scrapeArtworkData
+	}, len(requests))
+	workers := scrapeArtworkWorkers
+	if len(requests) < workers {
+		workers = len(requests)
+	}
+	var group sync.WaitGroup
+	for i := 0; i < workers; i++ {
+		group.Add(1)
+		go func() {
+			defer group.Done()
+			for request := range jobs {
+				requestCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
+				lyrics, cover, err := a.fetchArtworkContext(requestCtx, "", "", request.Artist, request.Album, request.Title)
+				cancel()
+				results <- struct {
+					path string
+					data scrapeArtworkData
+				}{path: request.Path, data: scrapeArtworkData{Lyrics: lyrics, Cover: cover, Err: err}}
+			}
+		}()
+	}
+	go func() {
+		defer close(jobs)
+		for _, request := range requests {
+			select {
+			case <-ctx.Done():
+				return
+			case jobs <- request:
+			}
+		}
+	}()
+	go func() {
+		group.Wait()
+		close(results)
+	}()
+	for result := range results {
+		out[result.path] = result.data
+	}
+	for _, request := range requests {
+		if _, ok := out[request.Path]; !ok {
+			out[request.Path] = scrapeArtworkData{Err: ctx.Err()}
+		}
+	}
+	return out
+}
+
+// writeScrapeArtworkSidecars is the no-catalogue fallback used by the batch
+// scraper. It never changes the audio stream, so an unconfirmed release can
+// still receive its independently verified .lrc and .jpg sidecars.
+func (a *App) writeScrapeArtworkSidecars(path string, data scrapeArtworkData, overwrite bool) (bool, bool, error) {
+	if data.Err != nil {
+		return false, false, data.Err
+	}
+	coverPath := strings.TrimSuffix(path, filepath.Ext(path)) + ".jpg"
+	wantLyrics := strings.TrimSpace(data.Lyrics) != "" && (overwrite || !hasLyricsSidecar(path))
+	wantCover := len(data.Cover) > 0
+	if wantCover {
+		_, statErr := os.Stat(coverPath)
+		wantCover = overwrite || os.IsNotExist(statErr)
+	}
+	if !wantLyrics && !wantCover {
+		return false, false, nil
+	}
+	sidecars, snapshotErr := snapshotFiles(lyricsSidecarPath(path), path+".lrc", coverPath)
+	if snapshotErr != nil {
+		return false, false, snapshotErr
+	}
+	rollback := func(cause error) (bool, bool, error) {
+		return false, false, errors.Join(cause, restoreFileSnapshots(sidecars))
+	}
+	lyricsWritten, coverWritten := false, false
+	if wantLyrics {
+		if err := writeLyricsSidecar(path, data.Lyrics); err != nil {
+			return rollback(err)
+		}
+		lyricsWritten = true
+	}
+	if wantCover {
+		if err := writeAutomationSidecar(coverPath, data.Cover); err != nil {
+			return rollback(err)
+		}
+		coverWritten = true
+	}
+	_ = commitFileSnapshots(sidecars)
+	return lyricsWritten, coverWritten, nil
+}
 
 type scrapeBatchRequest struct {
 	Paths          []string `json:"paths"`
@@ -192,20 +307,49 @@ func (a *App) scrapeLibrary(w http.ResponseWriter, r *http.Request) {
 				})
 				return
 			}
+		}
+		view := lookup.MusicBrainz
+		var artworkByPath map[string]scrapeArtworkData
+		if body.WithArtwork && !body.DryRun {
+			requests := make([]scrapeArtworkLookup, 0, len(group.entries))
 			for _, entry := range group.entries {
-				results[entry.apiPath].Status, results[entry.apiPath].Code = "failed", "CATALOG_UNAVAILABLE"
-				results[entry.apiPath].Note = "目录查询失败，文件没有改"
+				requests = append(requests, scrapeArtworkLookup{Path: entry.apiPath, Artist: entry.artist, Album: entry.album, Title: entry.title})
 			}
+			artworkByPath = a.fetchScrapeArtworkBatch(r.Context(), requests)
+		}
+		applyArtworkOnly := func(code, note string) {
+			for _, entry := range group.entries {
+				result := results[entry.apiPath]
+				result.Status, result.Code, result.Note = "failed", code, note
+				if !body.WithArtwork || body.DryRun {
+					continue
+				}
+				lyrics, cover, artErr := a.writeScrapeArtworkSidecars(entry.full, artworkByPath[entry.apiPath], body.Overwrite)
+				if artErr != nil {
+					result.Code = "ARTWORK_UNAVAILABLE"
+					result.Note = note + "；歌词或封面读取失败：" + scrub(artErr.Error())
+					continue
+				}
+				if lyrics || cover {
+					result.Status = "written"
+					result.Lyrics, result.LyricsSidecar, result.Cover = lyrics, lyrics, cover
+					result.Note = note + "；已按现有标签补写可独立验证的歌词或封面"
+					if lyrics {
+						lyricsWritten++
+					}
+					if cover {
+						coverWritten++
+					}
+				}
+			}
+		}
+		if err != nil {
+			applyArtworkOnly("CATALOG_UNAVAILABLE", "目录查询失败")
 			summary = append(summary, map[string]any{"artist": group.artist, "album": group.album, "confirmed": false, "note": "目录查询失败"})
 			continue
 		}
-		view := lookup.MusicBrainz
-		confirmed := view != nil
-		if !confirmed {
-			for _, entry := range group.entries {
-				results[entry.apiPath].Status, results[entry.apiPath].Code = "failed", "CATALOG_UNCONFIRMED"
-				results[entry.apiPath].Note = "目录没有确认这张专辑，文件没有改"
-			}
+		if view == nil {
+			applyArtworkOnly("CATALOG_UNCONFIRMED", "目录没有确认这张专辑")
 			summary = append(summary, map[string]any{"artist": group.artist, "album": group.album, "confirmed": false, "note": "目录没有确认"})
 			continue
 		}
@@ -249,15 +393,14 @@ func (a *App) scrapeLibrary(w http.ResponseWriter, r *http.Request) {
 				if body.DryRun {
 					result.ArtworkPlanned = true
 				} else {
-					ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
-					fetchedLyrics, fetchedCover, artErr := a.fetchArtworkContext(ctx, "", "", entry.artist, entry.album, entry.title)
-					cancel()
-					if artErr != nil {
+					art := artworkByPath[entry.apiPath]
+					if art.Err != nil {
 						result.Status, result.Code = "failed", "ARTWORK_UNAVAILABLE"
-						result.Note = "歌词或封面没有读到，文件没有改：" + scrub(artErr.Error())
+						result.Note = "歌词或封面没有读到，文件没有改：" + scrub(art.Err.Error())
 						continue
 					}
-					cover = fetchedCover
+					cover = art.Cover
+					fetchedLyrics := art.Lyrics
 					if fetchedLyrics != "" && ((len(entry.tags.Raw["LYRICS"]) == 0 && !hasLyricsSidecar(entry.full)) || body.Overwrite) {
 						updates["LYRICS"] = []string{fetchedLyrics}
 						lyricsText = fetchedLyrics

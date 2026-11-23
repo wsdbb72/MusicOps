@@ -492,7 +492,7 @@ func knownScene(scene string) bool {
 }
 
 func fallbackScene(scene string) bool {
-	return scene == "playlist" || scene == "fill"
+	return scene == "playlist" || scene == "fill" || scene == "upgrade"
 }
 
 func fallbackAllowed(report Report) bool {

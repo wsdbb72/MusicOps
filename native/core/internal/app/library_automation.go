@@ -14,6 +14,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/wsdbb72/MusicOps/native/core/internal/flactags"
@@ -26,14 +27,18 @@ var libraryAutomationScanKey = []byte("app/library/automation-scan-cache")
 type automationWorkflowPriorityKey struct{}
 
 const (
-	automationWorkflowPriority    = 50
-	libraryAutomationInitialDelay = 5 * time.Minute
-	libraryAutomationMaxMerges    = 5
-	libraryAutomationMaxJobs      = 200
-	libraryAutomationScanWorkers  = 8
-	libraryAutomationCheckpoint   = 20_000
-	libraryAutomationScanVersion  = 2
-	libraryAutomationStallTimeout = 45 * time.Minute
+	automationWorkflowPriority      = 50
+	libraryAutomationInitialDelay   = 5 * time.Minute
+	libraryAutomationMaxMerges      = 5
+	libraryAutomationMaxJobs        = 200
+	libraryAutomationScanWorkers    = 8
+	libraryAutomationCheckpoint     = 20_000
+	libraryAutomationScanVersion    = 2
+	libraryAutomationStallTimeout   = 45 * time.Minute
+	libraryAutomationScrapeSlice    = 45 * time.Minute
+	libraryAutomationArtworkWorkers = 6
+	libraryAutomationPolicyVersion  = 2
+	libraryAutomationSkippedRetry   = 24 * time.Hour
 )
 
 type libraryAutomationSettings struct {
@@ -720,6 +725,20 @@ func (a *App) runAutomatedScrape(ctx context.Context, root string, paths []strin
 	})
 	state.touch("scrape", fmt.Sprintf("扫描完成：待补标签 %d，待补歌词封面 %d", candidateCount, artworkCount))
 
+	scrapeDeadline := time.Now().Add(libraryAutomationScrapeSlice)
+	scrapeSliceExpired := false
+	sliceExpired := func() bool {
+		if scrapeSliceExpired || time.Now().Before(scrapeDeadline) {
+			return scrapeSliceExpired
+		}
+		scrapeSliceExpired = true
+		state.update(func(report *libraryAutomationReport) {
+			report.Backlog = true
+			report.Note = "本轮刮削已达到安全时间片，下一轮自动继续；去重和音质升级不会被长期阻塞"
+		})
+		return true
+	}
+
 	invalidated := map[string]bool{}
 	processed, skipped := 0, 0
 	catalogPaused := false
@@ -742,7 +761,7 @@ func (a *App) runAutomatedScrape(ctx context.Context, root string, paths []strin
 	}
 	sort.Strings(dirs)
 	for _, dir := range dirs {
-		if ctx.Err() != nil || catalogPaused {
+		if ctx.Err() != nil || catalogPaused || sliceExpired() {
 			break
 		}
 		eligible := make([]string, 0, len(catalogByDir[dir]))
@@ -754,7 +773,7 @@ func (a *App) runAutomatedScrape(ctx context.Context, root string, paths []strin
 			}
 		}
 		for start := 0; start < len(eligible); start += scrapeBatchMaxFiles {
-			if ctx.Err() != nil {
+			if ctx.Err() != nil || sliceExpired() {
 				break
 			}
 			end := start + scrapeBatchMaxFiles
@@ -790,7 +809,7 @@ func (a *App) runAutomatedScrape(ctx context.Context, root string, paths []strin
 	}
 	sort.Strings(genericDirs)
 	for _, dir := range genericDirs {
-		if ctx.Err() != nil || catalogPaused {
+		if ctx.Err() != nil || catalogPaused || sliceExpired() {
 			break
 		}
 		eligible := make([]string, 0, len(genericByDir[dir]))
@@ -802,7 +821,7 @@ func (a *App) runAutomatedScrape(ctx context.Context, root string, paths []strin
 			}
 		}
 		for start := 0; start < len(eligible); start += scrapeBatchMaxFiles {
-			if ctx.Err() != nil {
+			if ctx.Err() != nil || sliceExpired() {
 				break
 			}
 			end := start + scrapeBatchMaxFiles
@@ -833,18 +852,18 @@ func (a *App) runAutomatedScrape(ctx context.Context, root string, paths []strin
 	}
 	state.update(func(report *libraryAutomationReport) { report.ScrapeSkipped = skipped })
 
-	artworkProcessed, artworkSkipped, artworkFailed := 0, 0, 0
+	artworkProcessed, artworkSkipped, artworkFailed, artworkWritten := 0, 0, 0, 0
 	flacDirs := make([]string, 0, len(artworkFLACByDir))
 	for dir := range artworkFLACByDir {
 		flacDirs = append(flacDirs, dir)
 	}
 	sort.Strings(flacDirs)
 	for _, dir := range flacDirs {
-		if ctx.Err() != nil || catalogPaused {
+		if ctx.Err() != nil || catalogPaused || sliceExpired() {
 			break
 		}
 		for start := 0; start < len(artworkFLACByDir[dir]); start += scrapeArtworkMaxFiles {
-			if ctx.Err() != nil {
+			if ctx.Err() != nil || sliceExpired() {
 				break
 			}
 			end := start + scrapeArtworkMaxFiles
@@ -878,34 +897,70 @@ func (a *App) runAutomatedScrape(ctx context.Context, root string, paths []strin
 				report.ArtworkSkipped = artworkSkipped
 				report.ArtworkFailed = artworkFailed
 				report.ScrapeWritten += counts.Written
-				report.ArtworkWritten += counts.CoverWritten + counts.LyricsWritten
+				artworkWritten += counts.CoverWritten + counts.LyricsWritten
+				report.ArtworkWritten = artworkWritten
 				report.ScrapeFailed += counts.Failed
 			})
 			state.touch("scrape", dir)
 		}
 	}
-	for index, path := range artworkOther {
-		if ctx.Err() != nil {
-			break
+	if ctx.Err() == nil && !sliceExpired() {
+		jobs := make(chan string)
+		var workers sync.WaitGroup
+		var otherProcessed, otherSkipped, otherFailed, otherWritten atomic.Int64
+		for worker := 0; worker < libraryAutomationArtworkWorkers; worker++ {
+			workers.Add(1)
+			go func() {
+				defer workers.Done()
+				for path := range jobs {
+					wrote, err := a.writeAutomationArtwork(ctx, path)
+					if wrote {
+						otherWritten.Add(1)
+					} else if err != nil {
+						otherFailed.Add(1)
+					} else {
+						otherSkipped.Add(1)
+					}
+					if err != nil {
+						state.addError(fmt.Errorf("%s: 歌词封面服务失败: %w", path, err))
+					}
+					processed := otherProcessed.Add(1)
+					if processed%20 == 0 {
+						state.update(func(report *libraryAutomationReport) {
+							report.ArtworkProcessed = artworkProcessed + int(otherProcessed.Load())
+							report.ArtworkSkipped = artworkSkipped + int(otherSkipped.Load())
+							report.ArtworkFailed = artworkFailed + int(otherFailed.Load())
+							report.ArtworkWritten = artworkWritten + int(otherWritten.Load())
+						})
+						state.touch("scrape", path)
+					}
+				}
+			}()
 		}
-		if !state.claimAttempt("artwork-other|"+path, time.Now()) {
-			artworkSkipped++
-			continue
+	feedArtwork:
+		for _, path := range artworkOther {
+			if ctx.Err() != nil || sliceExpired() {
+				break
+			}
+			if !state.claimAttempt("artwork-other|"+path, time.Now()) {
+				otherSkipped.Add(1)
+				continue
+			}
+			invalidated[automationCacheKey(root, path)] = true
+			select {
+			case jobs <- path:
+			case <-ctx.Done():
+				break feedArtwork
+			}
 		}
-		invalidated[automationCacheKey(root, path)] = true
-		if a.writeAutomationArtwork(ctx, path) {
-			state.update(func(report *libraryAutomationReport) { report.ArtworkWritten++ })
-		} else {
-			artworkFailed++
-		}
-		artworkProcessed++
-		if artworkProcessed%20 == 0 || index == len(artworkOther)-1 {
-			state.update(func(report *libraryAutomationReport) {
-				report.ArtworkProcessed = artworkProcessed
-				report.ArtworkSkipped = artworkSkipped
-				report.ArtworkFailed = artworkFailed
-			})
-			state.touch("scrape", path)
+		close(jobs)
+		workers.Wait()
+		artworkProcessed += int(otherProcessed.Load())
+		artworkSkipped += int(otherSkipped.Load())
+		artworkFailed += int(otherFailed.Load())
+		artworkWritten += int(otherWritten.Load())
+		if artworkFailed > 0 {
+			state.update(func(report *libraryAutomationReport) { report.Backlog = true })
 		}
 	}
 	state.update(func(report *libraryAutomationReport) {
@@ -1176,32 +1231,19 @@ func automationTrackIdentity(path string) (artist, album, title string, err erro
 	return artist, album, title, nil
 }
 
-func (a *App) writeAutomationArtwork(ctx context.Context, path string) bool {
+func (a *App) writeAutomationArtwork(ctx context.Context, path string) (bool, error) {
 	artist, album, title, err := automationTrackIdentity(path)
 	if err != nil {
-		return false
+		return false, err
 	}
 	request, cancel := context.WithTimeout(ctx, 20*time.Second)
 	lyrics, cover, fetchErr := a.fetchArtworkContext(request, "", "", artist, album, title)
 	cancel()
 	if fetchErr != nil {
-		return false
+		return false, fetchErr
 	}
-	wrote := false
-	if strings.TrimSpace(lyrics) != "" && !hasLyricsSidecar(path) {
-		if writeLyricsSidecar(path, lyrics) == nil {
-			wrote = true
-		}
-	}
-	if len(cover) > 0 {
-		sidecar := strings.TrimSuffix(path, filepath.Ext(path)) + ".jpg"
-		if _, err := os.Stat(sidecar); os.IsNotExist(err) {
-			if writeAutomationSidecar(sidecar, cover) == nil {
-				wrote = true
-			}
-		}
-	}
-	return wrote
+	wroteLyrics, wroteCover, writeErr := a.writeScrapeArtworkSidecars(path, scrapeArtworkData{Lyrics: lyrics, Cover: cover}, false)
+	return wroteLyrics || wroteCover, writeErr
 }
 
 func writeAutomationSidecar(path string, body []byte) error {
@@ -1296,6 +1338,7 @@ func (a *App) enqueueLibraryMaintenanceWorkflows(ctx context.Context, byDir map[
 		if ctx.Err() != nil || jobs >= libraryAutomationMaxJobs {
 			break
 		}
+		state.touch("library_workflows", dir)
 		files := byDir[dir]
 		tracks := make([]localWorkflowTrack, 0, len(files))
 		for _, path := range files {
@@ -1313,6 +1356,7 @@ func (a *App) enqueueLibraryMaintenanceWorkflows(ctx context.Context, byDir map[
 		if len(tracks) == 0 {
 			continue
 		}
+		queuedUpgrade := false
 		if settings.Upgrade {
 			lossy := make([]localWorkflowTrack, 0)
 			for _, track := range tracks {
@@ -1328,12 +1372,23 @@ func (a *App) enqueueLibraryMaintenanceWorkflows(ctx context.Context, byDir map[
 				// streaming plan cannot silently leave the other 31 tracks behind.
 				if a.enqueueMaintenanceWorkflow(ctx, "upgrade", []localWorkflowTrack{track}, dir) {
 					jobs++
+					queuedUpgrade = true
 					state.update(func(report *libraryAutomationReport) { report.UpgradeJobs++ })
 				}
 			}
 		}
-		if shouldExpandSingleAlbum(tracks, settings.Expand, jobs) {
-			if a.enqueueMaintenanceWorkflow(ctx, "expand", tracks, dir) {
+		if settings.Expand && !queuedUpgrade && jobs < libraryAutomationMaxJobs && len(tracks) == 1 {
+			expand, checkErr := a.albumNeedsExpansion(ctx, catalogClient, tracks[0])
+			if checkErr != nil {
+				state.addError(fmt.Errorf("%s: 整专补全核查失败: %w", filepath.Base(dir), checkErr))
+				state.update(func(report *libraryAutomationReport) {
+					report.Backlog = true
+					if delay, backoff := catalogBackoffDelay(checkErr); backoff {
+						report.RetryAfterSec = int(delay / time.Second)
+						report.Note = fmt.Sprintf("目录服务暂不可用，%d 分钟后继续核查整专", (int(delay/time.Second)+59)/60)
+					}
+				})
+			} else if expand && a.enqueueMaintenanceWorkflow(ctx, "expand", tracks, dir) {
 				jobs++
 				state.update(func(report *libraryAutomationReport) { report.ExpandJobs++ })
 			}
@@ -1344,8 +1399,29 @@ func (a *App) enqueueLibraryMaintenanceWorkflows(ctx context.Context, byDir map[
 	}
 }
 
-func shouldExpandSingleAlbum(tracks []localWorkflowTrack, enabled bool, jobs int) bool {
-	return enabled && len(tracks) == 1 && jobs < libraryAutomationMaxJobs
+// albumNeedsExpansion consults the catalogue before creating an expansion
+// workflow. A one-file directory is often a legitimate single, and an
+// unconfirmed release can still be a different edition; neither proves that
+// tracks are missing. Only a confirmed local track on a release with at least
+// two catalogue tracks is safe enough to expand automatically.
+func (a *App) albumNeedsExpansion(ctx context.Context, client *musicbrainz.Client, track localWorkflowTrack) (bool, error) {
+	duration := track.Duration
+	lookup, err := identifyCatalogLookup(ctx, client, a.engine, catalogIdentifyRequest{
+		Artist: track.Artist,
+		Album:  track.Album,
+		Tracks: []catalogTrackRequest{{Title: track.Title, Artists: []string{track.Artist}, Duration: &duration}},
+	}, catalogBudget, catalogTTL)
+	if err != nil {
+		return false, err
+	}
+	view := lookup.MusicBrainz
+	if view == nil || view.TrackCount <= 1 || len(view.Tracks) <= 1 {
+		return false, nil
+	}
+	if len(lookup.Results) == 0 || !lookup.Results[0].IdentityConfirmed {
+		return false, nil
+	}
+	return true, nil
 }
 
 func (a *App) enqueueMaintenanceWorkflow(ctx context.Context, scene string, tracks []localWorkflowTrack, dir string) bool {

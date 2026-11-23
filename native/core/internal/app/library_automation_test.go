@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/wsdbb72/MusicOps/native/core/internal/flactags"
 	"github.com/wsdbb72/MusicOps/native/core/internal/musicbrainz"
 	"github.com/wsdbb72/MusicOps/native/core/internal/workflow"
 )
@@ -153,14 +154,28 @@ func TestLibraryAutomationQueuesCorruptFLACReplacement(t *testing.T) {
 	}
 }
 
-func TestSingleLossyTrackStillGetsAlbumCompletion(t *testing.T) {
-	tracks := []localWorkflowTrack{{Codec: "mp3", Artist: "Artist", Album: "Album", Title: "Song", Duration: 180}}
-	if !shouldExpandSingleAlbum(tracks, true, 0) {
-		t.Fatal("a one-track lossy album must still be eligible for completion")
+func TestAlbumExpansionRequiresConfirmedMultiTrackRelease(t *testing.T) {
+	application := newApp(t)
+	catalog := newFakeMusicBrainz(t, catalogCompletionSearch, scrapeDetailJSON, http.StatusOK)
+	track := localWorkflowTrack{Codec: "mp3", Artist: "Some Artist", Album: "First Album", Title: "Opening", Duration: 240.25}
+	expand, err := application.albumNeedsExpansion(context.Background(), catalogClientForTest(catalog.server.URL), track)
+	if err != nil || !expand {
+		t.Fatalf("multi-track release was not expandable: expand=%v err=%v", expand, err)
 	}
-	if shouldExpandSingleAlbum(tracks, false, 0) || shouldExpandSingleAlbum(tracks, true, libraryAutomationMaxJobs) {
-		t.Fatal("disabled or exhausted automation expanded an album")
+
+	single := newApp(t)
+	singleDetail := `{"id":"cccccccc-dddd-eeee-ffff-111111111111","title":"Single","date":"2020-01-01","artist-credit":[{"artist":{"name":"Some Artist"},"name":"Some Artist"}],"release-group":{"id":"dddddddd-eeee-ffff-1111-222222222222"},"media":[{"position":1,"track-count":1,"tracks":[{"id":"t1","title":"Opening","position":1,"length":240250,"artist-credit":[{"artist":{"name":"Some Artist"},"name":"Some Artist"}]}]}]}`
+	catalogSingle := newFakeMusicBrainz(t, catalogCompletionSearch, singleDetail, http.StatusOK)
+	expand, err = single.albumNeedsExpansion(context.Background(), catalogClientForTest(catalogSingle.server.URL), track)
+	if err != nil || expand {
+		t.Fatalf("single release was marked for expansion: expand=%v err=%v", expand, err)
 	}
+}
+
+func catalogClientForTest(baseURL string) *musicbrainz.Client {
+	client := musicbrainz.NewClient()
+	client.BaseURL = baseURL
+	return client
 }
 
 func TestLibraryAutomationRunEndpointReturnsAcceptedOrRunning(t *testing.T) {
@@ -322,6 +337,19 @@ func TestUnconfirmedTrackMatchStillRequiresAnExactTitle(t *testing.T) {
 	view.Tracks = append(view.Tracks, catalogReleaseTrack{Title: "Wanted Song", Duration: 42})
 	if track, found := matchCatalogTrackForResult(view, "Wanted Song", 40, false); !found || track.Title != "Wanted Song" {
 		t.Fatalf("exact unconfirmed title not matched: %+v found=%v", track, found)
+	}
+}
+
+func TestAutomationArtworkNoMatchIsSkippedNotFailed(t *testing.T) {
+	application := newApp(t)
+	_, full := writeScrapeFLAC(t, application, "no-match.flac", 1, flactags.Tags{
+		Title: "No Match", Artists: []string{"Artist"}, Album: "Album", TrackNumber: 1,
+	})
+	service, _ := lrcAPIFake(t, "", nil, "Authorization", "")
+	saveLyricsService(t, application, service.URL, "Authorization", "")
+	wrote, err := application.writeAutomationArtwork(context.Background(), full)
+	if err != nil || wrote {
+		t.Fatalf("wrote=%v err=%v; a no-match must be a clean skip", wrote, err)
 	}
 }
 

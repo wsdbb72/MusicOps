@@ -961,7 +961,7 @@ func rollbackCompilationFiles(files []compilationMove) error {
 // own a failed search/process descendant, so the whole durable child chain is
 // inspected instead of trusting only the root's stage.
 func (a *App) automationWorkflowID(scene, key string) (string, *workflow.Job, error) {
-	seed := scene + "|automation|" + key
+	seed := scene + "|automation-policy-" + strconv.Itoa(libraryAutomationPolicyVersion) + "|" + key
 	candidate := libraryFileID(seed)
 	current, err := a.flows.Job(candidate)
 	if err != nil {
@@ -975,7 +975,7 @@ func (a *App) automationWorkflowID(scene, key string) (string, *workflow.Job, er
 		if err != nil {
 			return "", nil, err
 		}
-		if !retry {
+		if !retry || maintenanceSkippedCoolingDown(latest, a.now()) {
 			return candidate, current, nil
 		}
 		candidate = libraryFileID(seed + "|retry|" + latest.ID + "|" + strconv.FormatInt(latest.UpdatedNS, 10))
@@ -985,6 +985,13 @@ func (a *App) automationWorkflowID(scene, key string) (string, *workflow.Job, er
 		}
 	}
 	return "", nil, errors.New("自动维护任务重试链异常")
+}
+
+func maintenanceSkippedCoolingDown(job workflow.Job, now time.Time) bool {
+	if job.Stage != "skipped" || job.UpdatedNS <= 0 || now.IsZero() {
+		return false
+	}
+	return now.Before(time.Unix(0, job.UpdatedNS).Add(libraryAutomationSkippedRetry))
 }
 
 // maintenanceRetryPoint walks the durable search/processing links. Any live

@@ -2,6 +2,7 @@ package app
 
 import (
 	"testing"
+	"time"
 
 	"github.com/wsdbb72/MusicOps/native/core/internal/workflow"
 )
@@ -54,5 +55,19 @@ func TestMaintenanceRetryPointDoesNotReplayCompletedOrBrokenChains(t *testing.T)
 	missing := workflow.Job{ID: "root", Stage: "completed", ProcessingJobID: "missing"}
 	if _, retry, err := maintenanceRetryPoint(missing, func(string) (*workflow.Job, error) { return nil, nil }); err != nil || retry {
 		t.Fatalf("missing child retry=%v err=%v", retry, err)
+	}
+}
+
+func TestSkippedMaintenanceRetryUsesCooldown(t *testing.T) {
+	updated := time.Unix(1_000, 0)
+	skipped := workflow.Job{Stage: "skipped", UpdatedNS: updated.UnixNano()}
+	if !maintenanceSkippedCoolingDown(skipped, updated.Add(time.Hour)) {
+		t.Fatal("a skipped maintenance task was retried during its cooldown")
+	}
+	if maintenanceSkippedCoolingDown(skipped, updated.Add(libraryAutomationSkippedRetry)) {
+		t.Fatal("a skipped maintenance task stayed blocked after its cooldown")
+	}
+	if maintenanceSkippedCoolingDown(workflow.Job{Stage: "failed", UpdatedNS: skipped.UpdatedNS}, updated.Add(time.Minute)) {
+		t.Fatal("a failed task was treated as a cooling-down skip")
 	}
 }

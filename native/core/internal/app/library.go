@@ -86,10 +86,19 @@ type duplicateGroup struct {
 }
 
 func (a *App) duplicateScan(w http.ResponseWriter, r *http.Request) {
-	groups, method, truncated, err := a.scanDuplicates(r.Context())
+	a.duplicateScanMu.Lock()
+	defer a.duplicateScanMu.Unlock()
+	root := a.libraryDir()
+	cache := a.loadLibraryAutomationScanCache(root)
+	groups, method, truncated, updates, err := a.scanDuplicatesWithOptions(r.Context(), 1000, root, cache.Files, nil, nil)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "code": "LIBRARY_UNAVAILABLE"})
 		return
+	}
+	cacheWarning := ""
+	mergeDuplicateFingerprintCache(&cache, updates)
+	if saveErr := a.saveLibraryAutomationScanCache(cache); saveErr != nil {
+		cacheWarning = "重复项已扫描，但结果缓存保存失败：" + scrub(saveErr.Error())
 	}
 	// Suppressed albums are hidden from the scan but still reachable by id:
 	// a merge attempt answers MERGE_SUPPRESSED instead of a confusing 404.
@@ -102,11 +111,15 @@ func (a *App) duplicateScan(w http.ResponseWriter, r *http.Request) {
 		}
 		visible = append(visible, groups[i])
 	}
-	writeJSON(w, http.StatusOK, map[string]any{
+	response := map[string]any{
 		"ok": true, "method": method, "groups": visible, "count": len(visible),
 		"suppressed": suppressed, "truncated": truncated,
 		"policy": "同一专辑的同一录音只保留可完整解码的最高音质版本；现场、混音、伴奏、Demo、TV size、不同母带或声道保留。旧版本进入可恢复隔离区。",
-	})
+	}
+	if cacheWarning != "" {
+		response["cache_warning"] = cacheWarning
+	}
+	writeJSON(w, http.StatusOK, response)
 }
 
 // scanDuplicates groups the library and fingerprints each candidate.

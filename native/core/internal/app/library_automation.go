@@ -1335,6 +1335,8 @@ func mergeDuplicateFingerprintCache(cache *libraryAutomationScanDocument, update
 	}
 }
 func (a *App) runAutomatedDeduplication(ctx context.Context) bool {
+	a.duplicateScanMu.Lock()
+	defer a.duplicateScanMu.Unlock()
 	state := a.libraryAutomation
 	state.touch("dedupe", "正在扫描重复项")
 	root := a.libraryDir()

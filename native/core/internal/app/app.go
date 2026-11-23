@@ -82,6 +82,7 @@ type App struct {
 	backgroundMu      sync.Mutex
 	backgroundActive  map[string]int
 	duplicateMu       sync.Mutex
+	duplicateScanMu   sync.Mutex
 	neteaseRecoveryMu sync.Mutex
 	secrets           map[string]string
 	proxyConfigErr    string

@@ -454,20 +454,20 @@ func (a *App) rewriteNeteaseRecoveredPlaylistTags(path string, plan SearchPlan) 
 		raw = map[string][]string{}
 	}
 	if title != "" {
-		raw["TITLE"] = []string{truncateName(title)}
+		raw["TITLE"] = []string{title}
 	}
 	if len(artists) > 0 {
 		raw["ARTIST"] = append([]string(nil), artists...)
 	}
 	if album != "" {
-		raw["ALBUM"] = []string{truncateName(album)}
+		raw["ALBUM"] = []string{album}
 	}
 	albumArtist := strings.TrimSpace(plan.AlbumArtist)
 	if albumArtist == "" && len(artists) > 0 {
 		albumArtist = strings.Join(artists, " / ")
 	}
 	if albumArtist != "" {
-		raw["ALBUMARTIST"] = []string{truncateName(albumArtist)}
+		raw["ALBUMARTIST"] = []string{albumArtist}
 	}
 	return flactags.Write(path, flactags.Tags{Raw: raw})
 }

@@ -38,7 +38,8 @@ func (a *App) scrapePlaylistIncoming(ctx context.Context, incoming, name, artist
 		if err != nil {
 			return "", "", nil, err
 		}
-		title := truncateName(firstNonEmpty(tags.Title, fallbackTitle))
+		// Filenames are bounded later by publishComponent, but FLAC tags must keep the full catalogue title. Truncating here made a successfully downloaded long title fail every playlist presence check.
+		title := strings.TrimSpace(firstNonEmpty(tags.Title, fallbackTitle))
 		lyrics := firstValue(tags.Raw["LYRICS"])
 		cover := flactags.FrontCover(body)
 		if !imageBytes(cover) {

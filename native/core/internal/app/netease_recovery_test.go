@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
@@ -218,5 +219,32 @@ func TestNeteaseSearchPrefersDurablePlaylistIDOverDuplicateLabels(t *testing.T) 
 	})
 	if err != nil || song == nil || song.ID != 201 {
 		t.Fatalf("durable id did not win: song=%+v err=%v", song, err)
+	}
+}
+
+func TestNeteaseRecoveredTagsKeepFullLongMetadata(t *testing.T) {
+	a := newApp(t)
+	path := filepath.Join(t.TempDir(), "recovered.flac")
+	if err := os.WriteFile(path, syntheticFLAC(t, false), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	longTitle := `The Four Seasons, Violin Concerto in F Minor, Op. 8 No. 4, RV 297 "Winter": I. Allegro non molto`
+	longAlbum := "Vivaldi: The Four Seasons (Complete Recording and Deluxe Remastered Anniversary Edition Notes)"
+	longArtist := "Anne-Sophie Mutter / Herbert von Karajan / Peter Alward / Wiener Philharmoniker / Special Guest Orchestra"
+	if len(longTitle) <= 80 || len(longAlbum) <= 80 || len(longArtist) <= 80 {
+		t.Fatal("fixtures must exceed the old filename-length truncation")
+	}
+	if err := a.rewriteNeteaseRecoveredPlaylistTags(path, SearchPlan{ExpectedTitle: longAlbum, ExpectedArtist: longArtist, AlbumArtist: longArtist, PlaylistTrack: longTitle}); err != nil {
+		t.Fatal(err)
+	}
+	tags, err := flactags.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tags.Title != longTitle || tags.Album != longAlbum || tags.AlbumArtist != longArtist {
+		t.Fatalf("long metadata was truncated: title=%q album=%q album_artist=%q", tags.Title, tags.Album, tags.AlbumArtist)
+	}
+	if strings.Join(tags.Artists, " / ") != longArtist {
+		t.Fatalf("credited artists=%q want=%q", strings.Join(tags.Artists, " / "), longArtist)
 	}
 }

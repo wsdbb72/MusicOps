@@ -1494,7 +1494,7 @@ func (a *App) ingestDownload(ctx context.Context, plan downloadPlan, meta qbitto
 		if trackNumbers != nil {
 			position = trackNumbers[f.Path]
 		}
-		title := truncateName(strings.TrimSuffix(filepath.Base(f.Path), filepath.Ext(f.Path)))
+		title := strings.TrimSuffix(filepath.Base(f.Path), filepath.Ext(f.Path))
 		if title == "" {
 			title = fmt.Sprintf("Track %d", track)
 		}
@@ -1525,13 +1525,13 @@ func (a *App) ingestDownload(ctx context.Context, plan downloadPlan, meta qbitto
 			}
 			incomingName = compared.PublishedName
 			if planArtist == "" && compared.After.Artist != "" && compared.After.FromFile {
-				trackArtist = truncateName(compared.After.Artist)
+				trackArtist = compared.After.Artist
 			}
 			if planAlbum == "" && compared.After.Album != "" && compared.After.FromFile {
-				trackAlbum = truncateName(compared.After.Album)
+				trackAlbum = compared.After.Album
 			}
 			if compared.After.Title != "" && compared.After.FromFile {
-				title = truncateName(compared.After.Title)
+				title = compared.After.Title
 			}
 		}
 		publishedAlbum := normalizePlaylistAlbumTitle(trackAlbum)

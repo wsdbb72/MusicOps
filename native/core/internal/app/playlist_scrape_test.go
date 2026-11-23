@@ -188,3 +188,63 @@ func solidJPEG(c color.RGBA) []byte {
 	}
 	return out.Bytes()
 }
+
+func TestPlaylistScrapePreservesFullLongTitleInFLACTags(t *testing.T) {
+	a := newApp(t)
+	dir := t.TempDir()
+	name := "long-title.flac"
+	if err := os.WriteFile(filepath.Join(dir, name), syntheticFLAC(t, false), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	longTitle := `The Four Seasons, Violin Concerto in F Minor, Op. 8 No. 4, RV 297 "Winter": I. Allegro non molto`
+	if len(longTitle) <= 80 {
+		t.Fatal("fixture title is not longer than the filename boundary")
+	}
+	staged, title, _, err := a.scrapePlaylistIncoming(context.Background(), dir, name, "Anne-Sophie Mutter", "Herbert von Karajan", "Vivaldi: The Four Seasons", longTitle, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if title != longTitle {
+		t.Fatalf("returned title=%q want=%q", title, longTitle)
+	}
+	tags, err := flactags.ReadFile(filepath.Join(dir, staged))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tags.Title != longTitle {
+		t.Fatalf("stored title=%q want=%q", tags.Title, longTitle)
+	}
+	if tags.Artist != "Anne-Sophie Mutter" || tags.Album != "Vivaldi: The Four Seasons" {
+		t.Fatalf("stored identity=%+v", tags)
+	}
+	lib := t.TempDir()
+	post(t, a, "/v1/settings/library", map[string]any{"library_dir": lib})
+	folder := filepath.Join(lib, publishComponent("Anne-Sophie Mutter"), publishComponent("Vivaldi: The Four Seasons"))
+	if err := os.MkdirAll(folder, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	libraryPath := filepath.Join(folder, "10 long-title.flac")
+	body, err := os.ReadFile(filepath.Join(dir, staged))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(libraryPath, body, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.indexReleasedPath(libraryPath); err != nil {
+		t.Fatal(err)
+	}
+	probed, err := readFLACTagsPrefix(libraryPath)
+	if err != nil || probed.StreamInfo.SampleRate == 0 {
+		t.Fatal(probed, err)
+	}
+	durationMS := int64(probed.StreamInfo.TotalSamples) * 1000 / int64(probed.StreamInfo.SampleRate)
+	local := a.verifiedPlaylistAlbumTracks(lib, publishComponent("Anne-Sophie Mutter"), publishComponent("Vivaldi: The Four Seasons"), "Vivaldi: The Four Seasons")
+	song := neteaseSong{Name: longTitle, Artists: []string{"Anne-Sophie Mutter"}, DurationMS: int(durationMS)}
+	if !verifiedNeteaseTrackPresent(local, &song) {
+		t.Fatal("full long title was downloaded and indexed but did not satisfy playlist presence")
+	}
+	if fileName := publishComponent(title); len(fileName) > 80 {
+		t.Fatalf("publish filename exceeds the bounded component: %d", len(fileName))
+	}
+}

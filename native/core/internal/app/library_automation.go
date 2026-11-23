@@ -32,7 +32,7 @@ const (
 	libraryAutomationMaxMerges      = 1000
 	libraryAutomationMaxJobs        = 200
 	libraryAutomationScanWorkers    = 8
-	duplicateFingerprintWorkers     = 4
+	duplicateFingerprintWorkers     = 8
 	libraryAutomationCheckpoint     = 20_000
 	libraryAutomationScanVersion    = 2
 	libraryAutomationStallTimeout   = 45 * time.Minute

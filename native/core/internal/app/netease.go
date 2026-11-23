@@ -891,7 +891,7 @@ func (a *App) stageNeteaseSongWithEngine(ctx context.Context, plan SearchPlan, s
 
 // recoverNeteaseFromSecondaryStreams is the final source fallback after the
 // exact NetEase recording and its own download engine returned no playable
-// audio. Kugou and Kuwo are different licensed catalogues; a hit is accepted
+// audio. QQ Music, Kugou and Kuwo are different licensed catalogues; a hit is accepted
 // only when title and an overlapping credited artist match, then the file is
 // duration-checked and rewritten with the NetEase row's album, artists and
 // artwork before it can enter the library.
@@ -908,7 +908,7 @@ func (a *App) recoverNeteaseFromSecondaryStreams(ctx context.Context, plan Searc
 	seenArtists := map[string]bool{}
 	notes := []string{}
 	class := downloadpolicy.ClassNoResult
-	for _, source := range []string{"kugou", "kuwo"} {
+	for _, source := range []string{"qqmusic", "kugou", "kuwo"} {
 		for _, artist := range artists {
 			artist = strings.TrimSpace(artist)
 			key := normalizeNeteaseArtist(artist)

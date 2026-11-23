@@ -101,15 +101,22 @@ func coreHealth(t *testing.T, handle *CoreHandle) {
 func waitCoreStatus(t *testing.T, profile string, want bool, timeout time.Duration) CoreStatusInfo {
 	t.Helper()
 	deadline := time.Now().Add(timeout)
+	var lastErr error
 	for time.Now().Before(deadline) {
 		status, err := CoreStatus(profile)
 		if err != nil {
-			t.Fatal(err)
+			lastErr = err
+			status = CoreStatusInfo{}
+		} else {
+			lastErr = nil
 		}
 		if status.Running == want {
 			return status
 		}
 		time.Sleep(200 * time.Millisecond)
+	}
+	if lastErr != nil {
+		t.Fatalf("CoreStatus did not become Running=%v within %s; last transient error: %v", want, timeout, lastErr)
 	}
 	t.Fatalf("CoreStatus did not become Running=%v within %s", want, timeout)
 	return CoreStatusInfo{}

@@ -262,7 +262,7 @@ func probeHealth(url, password string) bool {
 // readRendezvous reads core.json and the vault-protected core-password.
 // It returns nil, nil when no rendezvous exists.
 func readRendezvous(profile string) (*rendezvous, string, error) {
-	raw, err := os.ReadFile(coreJSONPath(profile))
+	raw, err := readRendezvousFile(coreJSONPath(profile))
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil, "", nil
@@ -273,7 +273,7 @@ func readRendezvous(profile string) (*rendezvous, string, error) {
 	if err := json.Unmarshal(raw, &rec); err != nil {
 		return nil, "", fmt.Errorf("core.json is corrupt: %w", err)
 	}
-	blob, err := os.ReadFile(corePasswordPath(profile))
+	blob, err := readRendezvousFile(corePasswordPath(profile))
 	if err != nil {
 		return nil, "", fmt.Errorf("core password file is missing: %w", err)
 	}
@@ -282,6 +282,29 @@ func readRendezvous(profile string) (*rendezvous, string, error) {
 		return nil, "", fmt.Errorf("cannot decrypt the core password: %w", err)
 	}
 	return &rec, string(plain), nil
+}
+
+// readRendezvousFile tolerates the short Windows sharing window between an
+// atomic rename and the antivirus/indexer releasing the previous core.json.
+// Only I/O errors are retried; a complete but malformed file is returned to the
+// caller immediately for an honest corrupt-state error.
+func readRendezvousFile(path string) ([]byte, error) {
+	var raw []byte
+	var err error
+	for attempt := 0; attempt < 8; attempt++ {
+		raw, err = os.ReadFile(path)
+		if err == nil || errors.Is(err, os.ErrNotExist) {
+			return raw, err
+		}
+		if attempt < 7 {
+			delay := 25 * time.Millisecond << attempt
+			if delay > 250*time.Millisecond {
+				delay = 250 * time.Millisecond
+			}
+			time.Sleep(delay)
+		}
+	}
+	return nil, err
 }
 
 // writeRendezvous atomically writes core.json and the vault-protected
@@ -659,7 +682,7 @@ func EnsureCoreDetached(profile, coreBinary string) (*CoreHandle, error) {
 // CoreStatus reads core.json and probes liveness, returning the rendezvous
 // core's state. A missing or stale rendezvous reports Running=false.
 func CoreStatus(profile string) (CoreStatusInfo, error) {
-	raw, err := os.ReadFile(coreJSONPath(profile))
+	raw, err := readRendezvousFile(coreJSONPath(profile))
 	if err != nil {
 		if os.IsNotExist(err) {
 			return CoreStatusInfo{}, nil
@@ -691,7 +714,7 @@ func CoreStatus(profile string) (CoreStatusInfo, error) {
 // SIGKILL, then rendezvous cleanup. It is idempotent: a missing rendezvous
 // or an already-dead core returns nil.
 func StopCore(profile string) error {
-	raw, err := os.ReadFile(coreJSONPath(profile))
+	raw, err := readRendezvousFile(coreJSONPath(profile))
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil

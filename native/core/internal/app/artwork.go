@@ -36,6 +36,16 @@ type artworkTarget struct {
 	Value  string
 }
 
+// artworkHTTPError preserves the upstream status so automation can stop a
+// large batch after a service-level failure instead of retrying every file.
+type artworkHTTPError struct {
+	StatusCode int
+}
+
+func (e *artworkHTTPError) Error() string {
+	return fmt.Sprintf("歌词/封面服务返回 HTTP %d", e.StatusCode)
+}
+
 func (t artworkTarget) configured() bool { return t.URL != "" }
 
 // artworkTargets resolves the lyrics and cover endpoints for one call. Body
@@ -187,7 +197,7 @@ func artworkGET(ctx context.Context, target artworkTarget, query url.Values) ([]
 		return nil, false, errors.New("歌词/封面服务要求跳转到其他主机，带凭据时不跟随")
 	}
 	if response.StatusCode != http.StatusOK {
-		return nil, false, fmt.Errorf("歌词/封面服务返回 HTTP %d", response.StatusCode)
+		return nil, false, &artworkHTTPError{StatusCode: response.StatusCode}
 	}
 	body, err := io.ReadAll(io.LimitReader(response.Body, 2<<20))
 	if err != nil {

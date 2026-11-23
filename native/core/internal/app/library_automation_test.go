@@ -5,10 +5,12 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -437,5 +439,57 @@ func TestLibraryAutomationPersistsAndRestoresDuplicateFingerprintCache(t *testin
 	}
 	if restored != 1 {
 		t.Fatalf("expected one surviving file, restored=%d", restored)
+	}
+}
+
+func TestLibraryAutomationUsesPathIdentityForArtworkFallback(t *testing.T) {
+	application := newApp(t)
+	service, _ := lrcAPIFake(t, "[00:01.00]path artwork", jpegBody(), "", "")
+	saveLyricsService(t, application, service.URL, "", "")
+	folder := filepath.Join(application.Dir, "Artist", "Album")
+	if err := os.MkdirAll(folder, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	full := filepath.Join(folder, "01 Song.flac")
+	if err := os.WriteFile(full, flacWithDuration(t, 2), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	application.runAutomatedScrape(context.Background(), application.Dir, []string{full}, false)
+	_, report := application.libraryAutomation.snapshot()
+	if report.ArtworkWritten != 1 || report.ArtworkFailed != 0 {
+		t.Fatalf("path identity did not recover artwork: %+v", report)
+	}
+	if _, err := os.Stat(strings.TrimSuffix(full, filepath.Ext(full)) + ".lrc"); err != nil {
+		t.Fatal("lyrics sidecar missing")
+	}
+}
+
+func TestLibraryAutomationStopsArtworkBatchAfterServiceFailure(t *testing.T) {
+	application := newApp(t)
+	var hits atomic.Int64
+	service := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		hits.Add(1)
+		http.Error(w, "temporarily unavailable", http.StatusServiceUnavailable)
+	}))
+	t.Cleanup(service.Close)
+	saveLyricsService(t, application, service.URL, "", "")
+	paths := make([]string, 0, 30)
+	for i := 1; i <= 30; i++ {
+		_, full := writeScrapeFLAC(t, application, fmt.Sprintf("%02d.flac", i), 2, flactags.Tags{
+			Title: "Song", Artists: []string{"Artist"}, AlbumArtist: "Artist", Album: "Album", TrackNumber: i,
+			Date: "2026", Genre: "Pop",
+		})
+		paths = append(paths, full)
+	}
+	application.runAutomatedScrape(context.Background(), application.Dir, paths, false)
+	_, report := application.libraryAutomation.snapshot()
+	if !report.Backlog || report.RetryAfterSec < int((10*time.Minute)/time.Second) {
+		t.Fatalf("service failure did not schedule retry: %+v", report)
+	}
+	if report.ArtworkProcessed >= len(paths) {
+		t.Fatalf("artwork batch consumed the full backlog: %+v", report)
+	}
+	if hits.Load() > int64(libraryAutomationArtworkWorkers*2) {
+		t.Fatalf("service failure caused %d requests; circuit breaker did not stop the batch", hits.Load())
 	}
 }

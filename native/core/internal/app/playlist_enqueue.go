@@ -25,6 +25,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 	"unicode"
 
@@ -99,6 +100,7 @@ type playlistLibraryIndex struct {
 	verified         map[string]bool
 	tagTitles        map[[2]string]map[string]bool
 	compilationTags  map[string]map[[2]string]bool
+	albumGaps        map[[2]string]bool
 	records          map[string]audiorelease.Entry
 	pendingSnapshots map[string]audiorelease.VerifiedPresence
 }
@@ -203,7 +205,13 @@ func playlistCompactTitleKey(key string) string {
 	return "\x00compact:" + strings.ReplaceAll(key, " ", "")
 }
 
-const playlistLibraryCacheTTL = 2 * time.Minute
+const (
+	playlistLibraryCacheTTL = 2 * time.Minute
+	// Presence checks may need to inspect thousands of files on a slow library
+	// disk. The immutable catalogue maps are shared; only each worker's small
+	// verification/cache maps are independent.
+	playlistPresenceWorkers = 8
+)
 
 func (a *App) playlistLibrary() playlistLibraryIndex {
 	// One listing is reused by the preview and its immediate enqueue; the
@@ -223,6 +231,81 @@ func (a *App) playlistLibrary() playlistLibraryIndex {
 	return indexPlaylistLibrary(a.engine, entries)
 }
 
+func (index playlistLibraryIndex) presenceWorker() playlistLibraryIndex {
+	return playlistLibraryIndex{
+		engine: index.engine, tracks: index.tracks, albums: index.albums,
+		titleCandidates: index.titleCandidates, albumMembers: index.albumMembers,
+		verified: map[string]bool{}, tagTitles: map[[2]string]map[string]bool{},
+		compilationTags: map[string]map[[2]string]bool{}, albumGaps: map[[2]string]bool{},
+		records: index.records, pendingSnapshots: map[string]audiorelease.VerifiedPresence{},
+	}
+}
+
+// playlistPresence evaluates rows concurrently. The expensive step is the
+// per-file unchanged check on external/mechanical library disks, so serial
+// iteration made a 4,000-track list block for minutes even though catalogue
+// matching itself was in memory.
+func (a *App) playlistPresence(rows []playlistTrack) []bool {
+	return playlistPresenceForIndex(a.playlistLibrary(), rows)
+}
+
+func playlistPresenceForIndex(index playlistLibraryIndex, rows []playlistTrack) []bool {
+	present := make([]bool, len(rows))
+	workers := playlistPresenceWorkers
+	if len(rows) < workers {
+		workers = len(rows)
+	}
+	if workers <= 1 {
+		for i, row := range rows {
+			present[i] = index.hasPlaylistRow(row)
+		}
+		index.commitPresenceSnapshots()
+		return present
+	}
+	type result struct {
+		index     int
+		present   bool
+		snapshots map[string]audiorelease.VerifiedPresence
+	}
+	jobs := make(chan int)
+	results := make(chan result, workers*2)
+	var wg sync.WaitGroup
+	for worker := 0; worker < workers; worker++ {
+		local := index.presenceWorker()
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for i := range jobs {
+				ok := local.hasPlaylistRow(rows[i])
+				snapshot := make(map[string]audiorelease.VerifiedPresence, len(local.pendingSnapshots))
+				for id, item := range local.pendingSnapshots {
+					snapshot[id] = item
+				}
+				local.pendingSnapshots = map[string]audiorelease.VerifiedPresence{}
+				results <- result{index: i, present: ok, snapshots: snapshot}
+			}
+		}()
+	}
+	go func() {
+		defer close(jobs)
+		for i := range rows {
+			jobs <- i
+		}
+	}()
+	go func() {
+		wg.Wait()
+		close(results)
+	}()
+	for item := range results {
+		present[item.index] = item.present
+		for id, snapshot := range item.snapshots {
+			index.pendingSnapshots[id] = snapshot
+		}
+	}
+	index.commitPresenceSnapshots()
+	return present
+}
+
 // invalidatePlaylistLibraryCache makes the next presence check observe a
 // just-published, moved or removed file. The cache only serves the large
 // preview/enqueue pair; library mutations must not leave a two-minute blind
@@ -238,7 +321,7 @@ func (a *App) invalidatePlaylistLibraryCache() {
 	a.playlistEntriesMu.Unlock()
 }
 func indexPlaylistLibrary(engine *dataengine.Engine, entries []audiorelease.Entry) playlistLibraryIndex {
-	index := playlistLibraryIndex{engine: engine, tracks: map[[3]string][]string{}, albums: map[[2]string][]string{}, titleCandidates: map[string][]string{}, albumMembers: map[string][]string{}, verified: map[string]bool{}, tagTitles: map[[2]string]map[string]bool{}, compilationTags: map[string]map[[2]string]bool{}, records: map[string]audiorelease.Entry{}, pendingSnapshots: map[string]audiorelease.VerifiedPresence{}}
+	index := playlistLibraryIndex{engine: engine, tracks: map[[3]string][]string{}, albums: map[[2]string][]string{}, titleCandidates: map[string][]string{}, albumMembers: map[string][]string{}, verified: map[string]bool{}, tagTitles: map[[2]string]map[string]bool{}, compilationTags: map[string]map[[2]string]bool{}, albumGaps: map[[2]string]bool{}, records: map[string]audiorelease.Entry{}, pendingSnapshots: map[string]audiorelease.VerifiedPresence{}}
 	for _, entry := range entries {
 		if !entry.FilePresent {
 			continue
@@ -540,38 +623,53 @@ func (index *playlistLibraryIndex) commitPresenceSnapshots() {
 
 // Only an explicit total in a local file is evidence that a folder has gaps.
 func (index playlistLibraryIndex) hasAlbumGap(artist, album string) bool {
-	ids := index.albums[[2]string{libraryPathKey(artist), libraryPathKey(album)}]
-	if len(ids) == 0 {
-		return false
+	key := [2]string{libraryPathKey(artist), libraryPathKey(album)}
+	if gap, checked := index.albumGaps[key]; checked {
+		return gap
 	}
-	for _, id := range ids {
-		path, found, err := audiorelease.PathFor(index.engine, id)
-		if err != nil || !found || !strings.EqualFold(filepath.Ext(path), ".flac") {
-			continue
-		}
-		tags, err := readFLACTagsPrefix(path)
-		if err != nil {
-			continue
-		}
-		total := firstValue(tags.Raw["TRACKTOTAL"])
-		if total == "" {
-			total = firstValue(tags.Raw["TOTALTRACKS"])
-		}
-		if total == "" {
-			_, total, _ = strings.Cut(firstValue(tags.Raw["TRACKNUMBER"]), "/")
-		}
-		count, err := strconv.Atoi(total)
-		if err == nil && count > len(ids) {
-			return true
+	ids := index.albums[key]
+	gap := false
+	if len(ids) > 0 {
+		for _, id := range ids {
+			path, found, err := audiorelease.PathFor(index.engine, id)
+			if err != nil || !found || !strings.EqualFold(filepath.Ext(path), ".flac") {
+				continue
+			}
+			tags, err := readFLACTagsPrefix(path)
+			if err != nil {
+				continue
+			}
+			total := firstValue(tags.Raw["TRACKTOTAL"])
+			if total == "" {
+				total = firstValue(tags.Raw["TOTALTRACKS"])
+			}
+			if total == "" {
+				_, total, _ = strings.Cut(firstValue(tags.Raw["TRACKNUMBER"]), "/")
+			}
+			count, err := strconv.Atoi(total)
+			if err == nil && count > len(ids) {
+				gap = true
+				break
+			}
 		}
 	}
-	return false
+	index.albumGaps[key] = gap
+	return gap
 }
 
 // enqueuePlaylistTracks starts the work for the selected rows.
 func (a *App) enqueuePlaylistTracks(ctx context.Context, playlistJobID string, rows []playlistTrack, indices []int, opts playlistEnqueueOptions) (playlistEnqueueReport, error) {
 	report := playlistEnqueueReport{}
 	library := a.playlistLibrary()
+	selectedRows := make([]playlistTrack, len(indices))
+	for position, index := range indices {
+		selectedRows[position] = rows[index]
+	}
+	selectedPresence := playlistPresenceForIndex(library, selectedRows)
+	present := make(map[int]bool, len(indices))
+	for position, index := range indices {
+		present[index] = selectedPresence[position]
+	}
 	sites := []string{}
 	if settings, err := a.loadSiteSettings(); err == nil {
 		sites = settings.EnabledSites
@@ -614,7 +712,7 @@ func (a *App) enqueuePlaylistTracks(ctx context.Context, playlistJobID string, r
 		report.Tracks++
 		album := normalizePlaylistAlbumTitle(row.Album)
 		albumCompletion := opts.AlbumCompletion && album != "" && !isHotSlowCompilationAlbum(album)
-		if library.hasPlaylistRow(row) && (!albumCompletion || !library.hasAlbumGap(artist, album)) {
+		if present[index] && (!albumCompletion || !library.hasAlbumGap(artist, album)) {
 			report.Skipped = append(report.Skipped, artist+" - "+title)
 			continue
 		}
@@ -866,7 +964,6 @@ func (a *App) playlistTracksView(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusNotFound, map[string]any{"ok": false, "code": "PLAYLIST_NOT_FOUND", "error": err.Error()})
 		return
 	}
-	library := a.playlistLibrary()
 	type rowView struct {
 		Index   int    `json:"index"`
 		Artist  string `json:"artist"`
@@ -875,10 +972,10 @@ func (a *App) playlistTracksView(w http.ResponseWriter, r *http.Request) {
 		Present bool   `json:"present"`
 	}
 	out := make([]rowView, 0, len(rows))
+	present := a.playlistPresence(rows)
 	for i, row := range rows {
-		out = append(out, rowView{Index: i, Artist: row.Artist, Title: row.Title, Album: row.Album, Present: library.hasPlaylistRow(row)})
+		out = append(out, rowView{Index: i, Artist: row.Artist, Title: row.Title, Album: row.Album, Present: present[i]})
 	}
-	library.commitPresenceSnapshots()
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "name": name, "tracks": out, "total": len(out)})
 }
 

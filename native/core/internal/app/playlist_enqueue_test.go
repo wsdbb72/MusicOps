@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -489,5 +490,29 @@ func TestPlaylistPresenceMatchesSanitizedTitleOnlyWithMatchingTags(t *testing.T)
 	if index.hasTrack("Artist", "Album", "STARTDASH!!") {
 		// The historical path match does not include the artist-prefixed name.
 		t.Fatal("compact candidate lookup must not replace the original tag check")
+	}
+}
+
+func TestPlaylistPresenceParallelMatchesLibrary(t *testing.T) {
+	application := newApp(t)
+	library := t.TempDir()
+	indexPlaylistTestFile(t, application, library, "Artist One/Album One/01 Song One.flac", "Artist One", "Album One", "Song One")
+	indexPlaylistTestFile(t, application, library, "Artist Two/Album Two/01 Song Two.flac", "Artist Two", "Album Two", "Song Two")
+	application.invalidatePlaylistLibraryCache()
+	index := application.playlistLibrary()
+	rows := make([]playlistTrack, 40)
+	for i := range rows {
+		rows[i] = playlistTrack{Artist: "Missing Artist", Album: "Missing Album", Title: "Missing " + strconv.Itoa(i)}
+	}
+	rows[3] = playlistTrack{Artist: "Artist One", Album: "Album One", Title: "Song One"}
+	rows[27] = playlistTrack{Artist: "Artist Two", Album: "Album Two", Title: "Song Two"}
+	present := playlistPresenceForIndex(index, rows)
+	if len(present) != len(rows) || !present[3] || !present[27] {
+		t.Fatalf("parallel presence did not retain known rows: %v", present)
+	}
+	for i, ok := range present {
+		if ok && i != 3 && i != 27 {
+			t.Fatalf("parallel presence reported missing row %d as present", i)
+		}
 	}
 }

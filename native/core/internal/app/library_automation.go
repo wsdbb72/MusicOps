@@ -877,40 +877,74 @@ func (a *App) runAutomatedScrape(ctx context.Context, root string, paths []strin
 	artworkProcessed, artworkSkipped, artworkFailed, artworkWritten := 0, 0, 0, 0
 	if ctx.Err() == nil && !sliceExpired() {
 		jobs := make(chan string)
+		workCtx, stopArtwork := context.WithCancel(ctx)
+		defer stopArtwork()
 		var workers sync.WaitGroup
 		var otherProcessed, otherSkipped, otherFailed, otherWritten atomic.Int64
+		var stopOnce sync.Once
+		var retryAfterNS atomic.Int64
+		stopForService := func(err error) {
+			delay, transient := artworkRetryDelay(err)
+			if !transient {
+				return
+			}
+			stopOnce.Do(func() {
+				retryAfterNS.Store(int64(delay))
+				state.update(func(report *libraryAutomationReport) {
+					report.Backlog = true
+					report.RetryAfterSec = int(delay / time.Second)
+					report.Note = fmt.Sprintf("歌词封面服务暂不可用，已停止本轮后续请求，约 %d 分钟后自动继续", (int(delay/time.Second)+59)/60)
+				})
+				state.addError(fmt.Errorf("歌词封面服务暂不可用，已停止本轮后续请求: %w", err))
+				stopArtwork()
+			})
+		}
 		for worker := 0; worker < libraryAutomationArtworkWorkers; worker++ {
 			workers.Add(1)
 			go func() {
 				defer workers.Done()
-				for path := range jobs {
-					wrote, err := a.writeAutomationArtwork(ctx, path)
-					if wrote {
-						otherWritten.Add(1)
-					} else if err != nil {
-						otherFailed.Add(1)
-					} else {
-						otherSkipped.Add(1)
-					}
-					if err != nil {
-						state.addError(fmt.Errorf("%s: 歌词封面服务失败: %w", path, err))
-					}
-					processed := otherProcessed.Add(1)
-					if processed%20 == 0 {
-						state.update(func(report *libraryAutomationReport) {
-							report.ArtworkProcessed = artworkProcessed + int(otherProcessed.Load())
-							report.ArtworkSkipped = artworkSkipped + int(otherSkipped.Load())
-							report.ArtworkFailed = artworkFailed + int(otherFailed.Load())
-							report.ArtworkWritten = artworkWritten + int(otherWritten.Load())
-						})
-						state.touch("scrape", path)
+				for {
+					select {
+					case <-workCtx.Done():
+						return
+					case path, ok := <-jobs:
+						if !ok {
+							return
+						}
+						wrote, err := a.writeAutomationArtwork(workCtx, path)
+						if wrote {
+							otherWritten.Add(1)
+						} else if err != nil {
+							otherFailed.Add(1)
+						} else {
+							otherSkipped.Add(1)
+						}
+						if err != nil {
+							// A service-wide failure must not consume the whole
+							// artwork backlog. Record one diagnostic, cancel the
+							// feeder and retry after a durable backoff window.
+							stopForService(err)
+							if retryAfterNS.Load() == 0 {
+								state.addError(fmt.Errorf("%s: 歌词封面服务失败: %w", path, err))
+							}
+						}
+						processed := otherProcessed.Add(1)
+						if processed%20 == 0 {
+							state.update(func(report *libraryAutomationReport) {
+								report.ArtworkProcessed = artworkProcessed + int(otherProcessed.Load())
+								report.ArtworkSkipped = artworkSkipped + int(otherSkipped.Load())
+								report.ArtworkFailed = artworkFailed + int(otherFailed.Load())
+								report.ArtworkWritten = artworkWritten + int(otherWritten.Load())
+							})
+							state.touch("scrape", path)
+						}
 					}
 				}
 			}()
 		}
 	feedArtwork:
 		for _, path := range artworkDirect {
-			if ctx.Err() != nil || sliceExpired() {
+			if ctx.Err() != nil || sliceExpired() || retryAfterNS.Load() > 0 {
 				break
 			}
 			if !state.claimAttempt("artwork-other|"+path, time.Now()) {
@@ -920,7 +954,7 @@ func (a *App) runAutomatedScrape(ctx context.Context, root string, paths []strin
 			invalidated[automationCacheKey(root, path)] = true
 			select {
 			case jobs <- path:
-			case <-ctx.Done():
+			case <-workCtx.Done():
 				break feedArtwork
 			}
 		}
@@ -1194,7 +1228,24 @@ func automationTrackIdentity(path string) (artist, album, title string, err erro
 		}
 	}
 	if artist == "" || album == "" || title == "" {
-		track, probeErr := probeLocalWorkflowTrack(context.Background(), path)
+		// Artwork lookup is search evidence, not a tag write. Fill missing
+		// fields from the managed path before invoking ffprobe: this keeps
+		// untagged files recoverable even when ffprobe itself cannot parse a
+		// damaged stream.
+		if pathArtist, pathAlbum, pathTitle, ok := localWorkflowIdentityFromPath(path); ok {
+			if artist == "" {
+				artist = pathArtist
+			}
+			if album == "" {
+				album = pathAlbum
+			}
+			if title == "" {
+				title = pathTitle
+			}
+		}
+	}
+	if artist == "" || album == "" || title == "" {
+		track, probeErr := probeLocalWorkflowTrackForRepair(context.Background(), path)
 		if probeErr != nil {
 			return "", "", "", probeErr
 		}
@@ -1218,6 +1269,25 @@ func (a *App) writeAutomationArtwork(ctx context.Context, path string) (bool, er
 	return wroteLyrics || wroteCover, writeErr
 }
 
+func artworkRetryDelay(err error) (time.Duration, bool) {
+	var statusErr *artworkHTTPError
+	if errors.As(err, &statusErr) {
+		switch {
+		case statusErr.StatusCode == http.StatusTooManyRequests:
+			return 10 * time.Minute, true
+		case statusErr.StatusCode >= 500 && statusErr.StatusCode <= 599:
+			return 15 * time.Minute, true
+		}
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return 2 * time.Minute, true
+	}
+	var timeout interface{ Timeout() bool }
+	if errors.As(err, &timeout) && timeout.Timeout() {
+		return 2 * time.Minute, true
+	}
+	return 0, false
+}
 func writeAutomationSidecar(path string, body []byte) error {
 	temp, err := os.CreateTemp(filepath.Dir(path), ".musicops-artwork-*.tmp")
 	if err != nil {

@@ -533,7 +533,7 @@ func (a *App) aiReviewEligible(job workflow.Job) bool {
 	// retry an expired rate limit or choose the configured fallback without a
 	// model. Candidate comparisons still need the configured reviewer below.
 	// Metadata and album jobs use the durable retry path too.
-	if job.TaskType != "search" || job.ReviewKind == "search" || job.ReviewKind == "candidate" && strings.HasPrefix(job.BatchID, "pl-netease-") {
+	if job.TaskType != "search" || job.ReviewKind == "search" || job.ReviewKind == "candidate" && isNeteasePlaylistBatch(job.BatchID) {
 		return true
 	}
 	return a.reviewCompleter() != nil && a.reviews != nil
@@ -564,7 +564,7 @@ func interruptedReviewSafe(job workflow.Job, task *taskrepo.Task) bool {
 		// already have crossed the FL token boundary. RecoverInterrupted routes
 		// every such task through the source-platform fallback, which is
 		// idempotent and never sends a second token or ordinary tracker download.
-		return strings.HasPrefix(job.BatchID, "pl-netease-")
+		return isNeteasePlaylistBatch(job.BatchID)
 	default:
 		return false
 	}

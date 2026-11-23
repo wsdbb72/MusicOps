@@ -221,7 +221,11 @@ func (a *App) playlistFile(rootJobID string) (string, bool) {
 // and cover belong to that platform. Other providers are attempted only by
 // the four-site acquisition stage, before fallback.
 func isNeteasePlaylistFallback(batchID string, plan SearchPlan) bool {
-	return strings.HasPrefix(batchID, "pl-netease-")
+	return isNeteasePlaylistBatch(batchID)
+}
+
+func isNeteasePlaylistBatch(batchID string) bool {
+	return strings.HasPrefix(batchID, "pl-netease-") || strings.HasPrefix(batchID, "sub-netease-")
 }
 
 // neteasePlaylistTitle recovers the source row title for jobs created before

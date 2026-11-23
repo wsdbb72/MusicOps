@@ -1,6 +1,8 @@
 package app
 
 import (
+	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -147,5 +149,67 @@ func TestSubscriptionRetriesSeenTrackThatIsStillMissing(t *testing.T) {
 	third := post(t, application, "/v1/subscriptions/check", map[string]any{"playlist_id": "retry"})
 	if third["queued"] != float64(0) {
 		t.Fatal(third)
+	}
+}
+
+func TestSubscriptionNeteaseJobCarriesConfirmedSourceIdentity(t *testing.T) {
+	application := newApp(t)
+	jobID := "sub-netease-590536461-test"
+	tracks := []playlistTrack{{
+		Artist: "Artist", Title: "Song", Album: "Album", Duration: "180",
+		NeteaseSongID: 42, NeteaseAlbumID: 84,
+	}}
+	if err := application.queueSubscriptionAlbum(jobID, "netease-590536461", "Album", tracks); err != nil {
+		t.Fatal(err)
+	}
+	job, err := application.flows.Job(jobID)
+	if err != nil || job == nil || job.ActiveTaskID == "" {
+		t.Fatal(job, err)
+	}
+	task, err := application.tasks.Get(job.ActiveTaskID)
+	if err != nil || task == nil {
+		t.Fatal(task, err)
+	}
+	raw, found, err := application.tasks.Data(task.ID, "arguments", 0)
+	if err != nil || !found {
+		t.Fatal(found, err)
+	}
+	var plan SearchPlan
+	if err := json.Unmarshal(raw, &plan); err != nil {
+		t.Fatal(err)
+	}
+	if !plan.Identity.IdentityConfirmed || !plan.Identity.TracklistVerified || plan.Identity.Source != "netease" ||
+		!plan.NeteaseOnly || !plan.NeteaseTrackOnly || plan.PlaylistTrack != "Song" || plan.NeteaseSongID != 42 || plan.NeteaseAlbumID != 84 {
+		t.Fatal(plan)
+	}
+	if !isNeteasePlaylistBatch(jobID) {
+		t.Fatal("subscription NetEase job was not recognized as a NetEase playlist batch")
+	}
+}
+
+func TestNeteaseSubscriptionRecoveryReconstructsLegacyIdentity(t *testing.T) {
+	application := newApp(t)
+	jobID := "sub-netease-590536461-legacy"
+	incoming := application.workPath("incoming")
+	if err := os.MkdirAll(incoming, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	tracks := []playlistTrack{
+		{Artist: "Artist", Title: "One", Album: "Album", Duration: "180", NeteaseSongID: 1, NeteaseAlbumID: 9},
+		{Artist: "Artist", Title: "Two", Album: "Album", Duration: "181", NeteaseSongID: 2, NeteaseAlbumID: 9},
+	}
+	if err := os.WriteFile(filepath.Join(incoming, playlistFileName(jobID)), encodeM3U("Album", tracks), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	plan := SearchPlan{RootJobID: jobID, Scene: "playlist", Query: "Album", ExpectedTitle: "Album"}
+	if !application.recoverNeteasePlaylistIDs(context.Background(), jobID, &plan) {
+		t.Fatal("legacy subscription identity was not recovered")
+	}
+	if !plan.Identity.IdentityConfirmed || !plan.Identity.TracklistVerified || plan.Identity.Source != "netease" ||
+		!plan.NeteaseOnly || plan.NeteaseTrackOnly || plan.NeteaseAlbumID != 9 {
+		t.Fatal(plan)
+	}
+	if id := neteasePlaylistIDFromBatch(jobID); id != "590536461" {
+		t.Fatal(id)
 	}
 }

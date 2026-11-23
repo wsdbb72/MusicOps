@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/wsdbb72/MusicOps/native/core/internal/workflow"
@@ -423,8 +424,39 @@ func (a *App) queueSubscriptionAlbum(jobID, playlistID, album string, tracks []p
 		artist = tracks[0].Artist
 	}
 	plan := SearchPlan{
-		RootJobID: jobID, Query: album, ExpectedTitle: album, ExpectedArtist: artist,
+		RootJobID: jobID, Scene: "playlist", Query: album, ExpectedTitle: album, ExpectedArtist: artist,
 		EnabledSites: sites.EnabledSites, StreamingEnabled: streaming,
+	}
+	if strings.HasPrefix(playlistID, "netease-") {
+		albumID := int64(0)
+		allSameAlbum, allHaveSongIDs := len(tracks) > 0, len(tracks) > 0
+		for _, track := range tracks {
+			if track.NeteaseSongID <= 0 {
+				allHaveSongIDs = false
+			}
+			if albumID == 0 {
+				albumID = track.NeteaseAlbumID
+			} else if track.NeteaseAlbumID != albumID {
+				allSameAlbum = false
+			}
+		}
+		plan.NeteaseOnly = true
+		plan.NeteaseTrackOnly = len(tracks) == 1
+		if len(tracks) == 1 {
+			plan.PlaylistTrack = tracks[0].Title
+			plan.NeteaseSongID = tracks[0].NeteaseSongID
+			plan.NeteaseAlbumID = tracks[0].NeteaseAlbumID
+		} else if allSameAlbum {
+			plan.NeteaseAlbumID = albumID
+		}
+		if allHaveSongIDs && (len(tracks) == 1 || allSameAlbum && albumID > 0) {
+			identityPayload, _ := json.Marshal(tracks)
+			plan.Identity = Identity{
+				ID: evidenceID(jobID, 0, "playlist-identity"), Kind: "api", Source: "netease",
+				SubjectID: fmt.Sprintf("netease:album:%d:%d", albumID, len(tracks)), TracklistVerified: true,
+				IdentityConfirmed: true, Payload: string(identityPayload),
+			}
+		}
 	}
 	raw, err := json.Marshal(plan)
 	if err != nil {

@@ -102,18 +102,21 @@ func decodeNeteaseAlbum(raw []byte, anchor *neteaseSong) ([]neteaseSong, error) 
 // the user's saved NetEase credential and merges IDs by title, artist and
 // album without changing the selected track order.
 func (a *App) recoverNeteasePlaylistIDs(ctx context.Context, batchID string, plan *SearchPlan) bool {
-	if ctx == nil || ctx.Err() != nil || plan == nil || !strings.HasPrefix(batchID, "pl-netease-") {
+	if ctx == nil || ctx.Err() != nil || plan == nil || !isNeteasePlaylistBatch(batchID) {
 		return false
 	}
-	if plan.NeteaseSongID > 0 {
+	if plan.Identity.IdentityConfirmed && (plan.NeteaseSongID > 0 || plan.NeteaseAlbumID > 0) {
 		return true
 	}
 	a.neteaseRecoveryMu.Lock()
 	defer a.neteaseRecoveryMu.Unlock()
-	if ctx.Err() != nil || plan.NeteaseSongID > 0 {
+	if ctx.Err() != nil {
 		return true
 	}
 	rows, name, err := a.playlistTrackRows(batchID)
+	if err == nil && recoverNeteaseSubscriptionPlan(rows, plan) {
+		return true
+	}
 	if err == nil && recoverIDsFromPlaylistRows(rows, plan) {
 		return true
 	}
@@ -161,7 +164,51 @@ func (a *App) recoverNeteasePlaylistIDs(ctx context.Context, batchID string, pla
 			return false
 		}
 	}
-	return recoverIDsFromPlaylistRows(rows, plan)
+	return recoverNeteaseSubscriptionPlan(rows, plan) || recoverIDsFromPlaylistRows(rows, plan)
+}
+
+func recoverNeteaseSubscriptionPlan(rows []playlistTrack, plan *SearchPlan) bool {
+	if plan == nil || plan.Identity.IdentityConfirmed || strings.TrimSpace(plan.ExpectedTitle) == "" {
+		return false
+	}
+	wantAlbum := normalizePlaylistAlbumTitle(plan.ExpectedTitle)
+	selected := make([]playlistTrack, 0, 1)
+	for _, row := range rows {
+		if row.NeteaseSongID <= 0 || normalizePlaylistAlbumTitle(row.Album) != wantAlbum {
+			continue
+		}
+		if artist := strings.TrimSpace(plan.ExpectedArtist); artist != "" && !playlistArtistsMatch(splitPlaylistArtists(artist), splitPlaylistArtists(row.Artist)) {
+			continue
+		}
+		selected = append(selected, row)
+	}
+	if len(selected) == 0 {
+		return false
+	}
+	albumID := selected[0].NeteaseAlbumID
+	for _, row := range selected[1:] {
+		if albumID <= 0 || row.NeteaseAlbumID != albumID {
+			return false
+		}
+	}
+	plan.NeteaseOnly = true
+	plan.NeteaseTrackOnly = len(selected) == 1
+	if len(selected) == 1 {
+		plan.PlaylistTrack = selected[0].Title
+		plan.ExpectedArtist = firstNonEmpty(plan.ExpectedArtist, selected[0].Artist)
+		plan.NeteaseSongID = selected[0].NeteaseSongID
+	}
+	plan.NeteaseAlbumID = albumID
+	payload, err := json.Marshal(selected)
+	if err != nil {
+		return false
+	}
+	plan.Identity = Identity{
+		ID: evidenceID(plan.RootJobID, 0, "playlist-identity"), Kind: "api", Source: "netease",
+		SubjectID: fmt.Sprintf("netease:album:%d:%d", albumID, len(selected)), TracklistVerified: true,
+		IdentityConfirmed: true, Payload: string(payload),
+	}
+	return true
 }
 
 func recoverIDsFromPlaylistRows(rows []playlistTrack, plan *SearchPlan) bool {
@@ -253,6 +300,9 @@ func mergeNeteasePlaylistIDs(local, remote []playlistTrack) int {
 
 func neteasePlaylistIDFromBatch(batchID string) string {
 	slug := strings.TrimPrefix(batchID, "pl-netease-")
+	if slug == batchID {
+		slug = strings.TrimPrefix(batchID, "sub-netease-")
+	}
 	if end := strings.IndexByte(slug, '-'); end > 0 {
 		slug = slug[:end]
 	}

@@ -1445,7 +1445,8 @@ const appJS = `(function () {
     if (report.duplicate_candidates) text += " · 去重 " + (report.duplicate_checked || 0) + "/" + report.duplicate_candidates;
     text += " · 写入 " + (report.scrape_written || 0) + " · 跳过 " + ((report.scrape_skipped || 0) + (report.artwork_skipped || 0)) + " · 失败 " + ((report.scrape_failed || 0) + (report.artwork_failed || 0)) + " · 去重 " + (report.deduplicated || 0) + " · 升级 " + (report.upgrade_jobs || 0) + " · 补专 " + (report.expand_jobs || 0);
     if (report.note) text += " · " + report.note;
-    if (report.errors && report.errors.length) text += " · " + report.errors.slice(0, 2).join(" | ");
+    if (report.blocked_by) text += " · 已暂停：" + report.blocked_by + (report.blocked_reason ? "，" + report.blocked_reason : "");
+    if (report.errors && report.errors.length) text += " · " + report.errors.slice(-2).join(" | ");
     return text;
   }
   function scheduleLibraryRunRefresh(running) {

@@ -335,6 +335,16 @@ func flattenPlaylistArtists(values []string) []string {
 	return out
 }
 
+// neteaseAlbumContinue is not a failed acquisition. It proves that NetEase did
+// not publish usable audio, so the outer fallback walk may safely continue with
+// the next configured source without completing the job early.
+type neteaseAlbumContinue struct {
+	message string
+	class   string
+}
+
+func (e *neteaseAlbumContinue) Error() string { return e.message }
+
 func (a *App) acquireNeteaseAlbum(ctx context.Context, execution *scheduler.Execution, held taskrepo.Token, job workflow.Job, plan SearchPlan) (scheduler.Outcome, error) {
 	if err := ctx.Err(); err != nil {
 		return scheduler.Outcome{}, err
@@ -383,12 +393,14 @@ func (a *App) acquireNeteaseAlbum(ctx context.Context, execution *scheduler.Exec
 		}
 		if path == "" {
 			if class == downloadpolicy.ClassNoResult {
-				return finishSkip(note + "；网易云内置接口与下载引擎均确认无可用音源，下一轮库维护会重新尝试")
+				return scheduler.Outcome{}, &neteaseAlbumContinue{
+					message: note + "；网易云内置接口与下载引擎均确认无可用音源", class: class,
+				}
 			}
 			if isTemporaryStreamFailure(class) {
 				message := "网易云音频暂时不可取：" + note
 				if job.SearchRetryCount >= 3 {
-					return finishSkip(message + "；已有限重试三轮")
+					return scheduler.Outcome{}, &neteaseAlbumContinue{message: message + "；已有限重试三轮", class: class}
 				}
 				return review(message+"；将由自动核对重试", "STREAM_RETRY")
 			}

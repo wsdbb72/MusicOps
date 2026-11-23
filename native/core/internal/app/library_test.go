@@ -83,13 +83,22 @@ func writeHighResFLAC(t *testing.T, source, destination string) string {
 // audiorelease.Release and returns the stored entry.
 func releaseLibraryFile(t *testing.T, application *App, sourceName, rootID, artist, album, title string, track int) audiorelease.Entry {
 	t.Helper()
+	return releaseLibraryFileWithOptions(t, application, sourceName, rootID, artist, album, title, track, nil)
+}
+
+func releaseLibraryFileWithOptions(t *testing.T, application *App, sourceName, rootID, artist, album, title string, track int, mutate func(*audiorelease.Request)) audiorelease.Entry {
+	t.Helper()
 	incoming := filepath.Join(application.Dir, "incoming")
 	library := filepath.Join(application.Dir, "library-audio")
-	result, err := audiorelease.Release(context.Background(), application.engine, audiorelease.Request{
+	request := audiorelease.Request{
 		RequestID: "rel-" + rootID, RootID: rootID, Artist: artist, Album: album, Title: title,
 		Track: track, SourceName: sourceName, Incoming: incoming, Library: library,
 		Decoder: audiorelease.SystemDecoder(),
-	})
+	}
+	if mutate != nil {
+		mutate(&request)
+	}
+	result, err := audiorelease.Release(context.Background(), application.engine, request)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -783,8 +792,8 @@ func TestDuplicateMergeRefusesFilesStillInQBittorrent(t *testing.T) {
 	writeToneWAV(t, filepath.Join(incoming, "a-source.wav"), 440)
 	writeFLACFromWAV(t, filepath.Join(incoming, "a-source.wav"), filepath.Join(incoming, "a.flac"))
 	writeToneWAV(t, filepath.Join(incoming, "b.wav"), 440)
-	releaseLibraryFile(t, application, "a.flac", "seed-1", "Artist", "Album", "Song", 1)
-	loser := releaseLibraryFile(t, application, "b.wav", "seed-2", "Artist", "Album", "Song", 1)
+	releaseLibraryFileWithOptions(t, application, "a.flac", "seed-1", "Artist", "Album", "Song", 1, func(request *audiorelease.Request) { request.TorrentManaged = true })
+	loser := releaseLibraryFileWithOptions(t, application, "b.wav", "seed-2", "Artist", "Album", "Song", 1, func(request *audiorelease.Request) { request.TorrentManaged = true })
 	loserPath := filepath.Join(application.Dir, "library-audio", loser.File)
 
 	fake := newFakeQBT(t, map[string][]byte{}, 0)
@@ -900,5 +909,29 @@ func TestDuplicateAcrossTrackSlotsWithSameTitleAndPCM(t *testing.T) {
 	groups := duplicateGroups(t, application)
 	if len(groups) != 1 || groups[0].State != "ready" || len(groups[0].Files) != 2 {
 		t.Fatal(groups)
+	}
+}
+
+func TestDuplicateMergeDoesNotRequireQBittorrentForStreamingImports(t *testing.T) {
+	vaultKey(t)
+	application := newApp(t)
+	incoming := filepath.Join(application.Dir, "incoming")
+	writeToneWAV(t, filepath.Join(incoming, "local-a.wav"), 440)
+	writeFLACFromWAV(t, filepath.Join(incoming, "local-a.wav"), filepath.Join(incoming, "local-a.flac"))
+	writeToneWAV(t, filepath.Join(incoming, "local-b.wav"), 440)
+	releaseLibraryFile(t, application, "local-a.flac", "local-1", "Artist", "Album", "Song", 1)
+	loser := releaseLibraryFile(t, application, "local-b.wav", "local-2", "Artist", "Album", "Song", 1)
+	loserPath := filepath.Join(application.Dir, "library-audio", loser.File)
+	post(t, application, "/v1/settings/qbittorrent", map[string]any{"base_url": "http://127.0.0.1:1", "username": "user", "password": "pass"})
+	groups := duplicateGroups(t, application)
+	if len(groups) != 1 || groups[0].State != "ready" {
+		t.Fatal(groups)
+	}
+	code, decoded := mediaPost(t, application, "/v1/library/duplicates/merge", map[string]any{"group_id": groups[0].GroupID})
+	if code != http.StatusOK || decoded["ok"] != true {
+		t.Fatalf("local duplicate merge code=%d body=%v", code, decoded)
+	}
+	if _, err := os.Stat(loserPath); !os.IsNotExist(err) {
+		t.Fatal("local duplicate was not quarantined", err)
 	}
 }

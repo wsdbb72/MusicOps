@@ -10,6 +10,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/wsdbb72/MusicOps/native/core/internal/audiorelease"
 )
 
 const defaultAudioCacheBytes int64 = 8 << 30
@@ -211,6 +213,80 @@ func pruneStaleAudioCache(dir string, need int64, maxAge time.Duration, now time
 	return freed, nil
 }
 
+// prunePublishedStreamAudioCache removes old stream copies only after a
+// currently present library file with the same SHA-256 proves that the bytes
+// were already published. The cache reservation mutex ensures an active
+// download/stream write cannot race the cleanup.
+func (a *App) prunePublishedStreamAudioCache(dir string, maxAge time.Duration, now time.Time) (int64, int, error) {
+	if a == nil || a.engine == nil || strings.TrimSpace(dir) == "" {
+		return 0, 0, nil
+	}
+	audioCacheMu.Lock()
+	defer audioCacheMu.Unlock()
+	entries, err := audiorelease.ListIndexed(a.engine)
+	if err != nil {
+		return 0, 0, err
+	}
+	bySHA := map[string][]audiorelease.Entry{}
+	for _, entry := range entries {
+		if entry.SHA256 != "" && entry.FilePresent {
+			bySHA[entry.SHA256] = append(bySHA[entry.SHA256], entry)
+		}
+	}
+	type candidate struct {
+		path string
+		size int64
+	}
+	var candidates []candidate
+	err = filepath.WalkDir(dir, func(path string, entry fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if !entry.Type().IsRegular() || !managedAudioCacheFile(dir, path) {
+			return nil
+		}
+		name := strings.ToLower(filepath.Base(path))
+		if !(strings.HasPrefix(name, "stream-") || strings.HasPrefix(name, "scraped-stream-")) {
+			return nil
+		}
+		info, statErr := entry.Info()
+		if statErr != nil {
+			return statErr
+		}
+		if !info.ModTime().Before(now.Add(-maxAge)) {
+			return nil
+		}
+		candidates = append(candidates, candidate{path: path, size: info.Size()})
+		return nil
+	})
+	if err != nil {
+		return 0, 0, err
+	}
+	var freed int64
+	removed := 0
+	for _, item := range candidates {
+		digest, hashErr := hashFile(item.path)
+		if hashErr != nil {
+			continue
+		}
+		published := false
+		for _, entry := range bySHA[digest] {
+			if entry.PresenceUnchanged() {
+				published = true
+				break
+			}
+		}
+		if !published {
+			continue
+		}
+		if removeErr := os.Remove(item.path); removeErr != nil && !os.IsNotExist(removeErr) {
+			return freed, removed, removeErr
+		}
+		freed += item.size
+		removed++
+	}
+	return freed, removed, nil
+}
 func removePublishedStreamStaging(dir, source, staged string) {
 	base := filepath.Base(source)
 	if !(strings.HasPrefix(base, "netease-") || strings.HasPrefix(base, "stream-")) || !strings.HasSuffix(base, ".flac") || staged != "scraped-"+base {

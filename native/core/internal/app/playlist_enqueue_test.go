@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -643,5 +644,17 @@ func TestPlaylistLibraryReusesPreparedIndexUntilExplicitInvalidation(t *testing.
 	third := application.playlistLibrary()
 	if third.presence == first.presence || third.metadata == first.metadata {
 		t.Fatal("library mutation invalidation left stale playlist caches in use")
+	}
+}
+
+func TestPlaylistPresenceStopsAfterRequestCancellation(t *testing.T) {
+	application := newApp(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, err := playlistPresenceForIndexContext(ctx, application.playlistLibrary(), []playlistTrack{
+		{Artist: "Artist", Album: "Album", Title: "Song"},
+	})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled playlist request continued: %v", err)
 	}
 }

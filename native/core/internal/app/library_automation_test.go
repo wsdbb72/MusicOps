@@ -191,7 +191,7 @@ func TestAlbumExpansionRequiresConfirmedMultiTrackRelease(t *testing.T) {
 	application := newApp(t)
 	catalog := newFakeMusicBrainz(t, catalogCompletionSearch, scrapeDetailJSON, http.StatusOK)
 	track := localWorkflowTrack{Codec: "mp3", Artist: "Some Artist", Album: "First Album", Title: "Opening", Duration: 240.25}
-	expand, err := application.albumNeedsExpansion(context.Background(), catalogClientForTest(catalog.server.URL), track)
+	expand, err := application.albumNeedsExpansion(context.Background(), catalogClientForTest(catalog.server.URL), []localWorkflowTrack{track})
 	if err != nil || !expand {
 		t.Fatalf("multi-track release was not expandable: expand=%v err=%v", expand, err)
 	}
@@ -199,7 +199,7 @@ func TestAlbumExpansionRequiresConfirmedMultiTrackRelease(t *testing.T) {
 	single := newApp(t)
 	singleDetail := `{"id":"cccccccc-dddd-eeee-ffff-111111111111","title":"Single","date":"2020-01-01","artist-credit":[{"artist":{"name":"Some Artist"},"name":"Some Artist"}],"release-group":{"id":"dddddddd-eeee-ffff-1111-222222222222"},"media":[{"position":1,"track-count":1,"tracks":[{"id":"t1","title":"Opening","position":1,"length":240250,"artist-credit":[{"artist":{"name":"Some Artist"},"name":"Some Artist"}]}]}]}`
 	catalogSingle := newFakeMusicBrainz(t, catalogCompletionSearch, singleDetail, http.StatusOK)
-	expand, err = single.albumNeedsExpansion(context.Background(), catalogClientForTest(catalogSingle.server.URL), track)
+	expand, err = single.albumNeedsExpansion(context.Background(), catalogClientForTest(catalogSingle.server.URL), []localWorkflowTrack{track})
 	if err != nil || expand {
 		t.Fatalf("single release was marked for expansion: expand=%v err=%v", expand, err)
 	}
@@ -491,5 +491,34 @@ func TestLibraryAutomationStopsArtworkBatchAfterServiceFailure(t *testing.T) {
 	}
 	if hits.Load() > int64(libraryAutomationArtworkWorkers*2) {
 		t.Fatalf("service failure caused %d requests; circuit breaker did not stop the batch", hits.Load())
+	}
+}
+
+func TestLocalAlbumNeedsCatalogCheckHandlesSmallAndNumberedGaps(t *testing.T) {
+	small := []localWorkflowTrack{{Path: "01 A.flac"}, {Path: "02 B.flac"}}
+	if !localAlbumNeedsCatalogCheck(small) {
+		t.Fatal("two-track folder was not checked for missing album tracks")
+	}
+	full := []localWorkflowTrack{{Path: "01 A.flac"}, {Path: "02 B.flac"}, {Path: "03 C.flac"}, {Path: "04 D.flac"}}
+	if localAlbumNeedsCatalogCheck(full) {
+		t.Fatal("complete four-track folder caused an unbounded catalogue lookup")
+	}
+	gapped := []localWorkflowTrack{{Path: "01 A.flac"}, {Path: "02 B.flac"}, {Path: "04 D.flac"}, {Path: "05 E.flac"}}
+	if !localAlbumNeedsCatalogCheck(gapped) {
+		t.Fatal("numbered track gap was not sent for catalogue verification")
+	}
+}
+
+func TestAlbumExpansionSupportsPartialMultiTrackDirectory(t *testing.T) {
+	application := newApp(t)
+	detail := `{"id":"aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee","title":"First Album","date":"2019-01-02","artist-credit":[{"artist":{"name":"Some Artist"},"name":"Some Artist"}],"release-group":{"id":"bbbbbbbb-cccc-dddd-eeee-ffffffffffff"},"media":[{"position":1,"track-count":3,"tracks":[{"id":"t1","title":"Opening","position":1,"length":240250,"artist-credit":[{"artist":{"name":"Some Artist"},"name":"Some Artist"}]},{"id":"t2","title":"Closing","position":2,"length":180500,"artist-credit":[{"artist":{"name":"Some Artist"},"name":"Some Artist"}]},{"id":"t3","title":"Encore","position":3,"length":150000,"artist-credit":[{"artist":{"name":"Some Artist"},"name":"Some Artist"}]}]}]}`
+	catalog := newFakeMusicBrainz(t, catalogCompletionSearch, detail, http.StatusOK)
+	tracks := []localWorkflowTrack{
+		{Path: "01 Opening.flac", Codec: "flac", Artist: "Some Artist", Album: "First Album", Title: "Opening", Duration: 240.25},
+		{Path: "02 Closing.flac", Codec: "flac", Artist: "Some Artist", Album: "First Album", Title: "Closing", Duration: 180.5},
+	}
+	expand, err := application.albumNeedsExpansion(context.Background(), catalogClientForTest(catalog.server.URL), tracks)
+	if err != nil || !expand {
+		t.Fatalf("two present tracks of a three-track release were not expandable: expand=%v err=%v", expand, err)
 	}
 }

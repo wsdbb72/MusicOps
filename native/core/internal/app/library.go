@@ -53,21 +53,22 @@ import (
 
 // duplicateFile is one library file inside a duplicate group.
 type duplicateFile struct {
-	RequestID     string  `json:"request_id"`
-	File          string  `json:"file"`
-	Format        string  `json:"format"`
-	Codec         string  `json:"codec"`
-	SHA256        string  `json:"sha256"`
-	PCMSHA256     string  `json:"pcm_sha256"`
-	SampleRate    uint32  `json:"sample_rate"`
-	Channels      int     `json:"channels"`
-	BitsPerSample int     `json:"bits_per_sample"`
-	BitRate       int64   `json:"bit_rate"`
-	Duration      float64 `json:"duration"`
-	Lossless      bool    `json:"lossless"`
-	Valid         bool    `json:"valid"`
-	ProbeError    string  `json:"probe_error,omitempty"`
-	Rank          []int   `json:"rank"`
+	RequestID      string  `json:"request_id"`
+	File           string  `json:"file"`
+	Format         string  `json:"format"`
+	Codec          string  `json:"codec"`
+	SHA256         string  `json:"sha256"`
+	PCMSHA256      string  `json:"pcm_sha256"`
+	SampleRate     uint32  `json:"sample_rate"`
+	Channels       int     `json:"channels"`
+	BitsPerSample  int     `json:"bits_per_sample"`
+	BitRate        int64   `json:"bit_rate"`
+	Duration       float64 `json:"duration"`
+	Lossless       bool    `json:"lossless"`
+	Valid          bool    `json:"valid"`
+	ProbeError     string  `json:"probe_error,omitempty"`
+	TorrentManaged bool    `json:"torrent_managed,omitempty"`
+	Rank           []int   `json:"rank"`
 	// LibraryDir is the absolute library root the file was published
 	// under, empty for records written before it was stored.
 	LibraryDir string `json:"library_dir,omitempty"`
@@ -482,7 +483,7 @@ func (a *App) fingerprintDuplicateFile(ctx context.Context, entry audiorelease.E
 		RequestID: entry.RequestID, File: entry.File, Format: strings.ToLower(entry.Format),
 		Codec: audioInfo.Codec, SHA256: fileSHA, SampleRate: audioInfo.SampleRate, Channels: audioInfo.Channels,
 		BitsPerSample: audioInfo.BitsPerSample, BitRate: audioInfo.BitRate, Duration: audioInfo.Duration,
-		Lossless: losslessAudioCodec(audioInfo.Codec), LibraryDir: entry.LibraryDir,
+		Lossless: losslessAudioCodec(audioInfo.Codec), LibraryDir: entry.LibraryDir, TorrentManaged: entry.TorrentManaged,
 	}
 	if strings.EqualFold(file.Format, "flac") {
 		if tags, err := readFLACTagsPrefix(full); err == nil && isLossyFLACProvenance(firstTagValue(tags.Raw, "COMMENT")) {
@@ -526,7 +527,7 @@ func duplicateFileFromFingerprint(entry audiorelease.Entry, fingerprint cachedDu
 		SampleRate: fingerprint.SampleRate, Channels: fingerprint.Channels,
 		BitsPerSample: fingerprint.BitsPerSample, BitRate: fingerprint.BitRate,
 		Duration: fingerprint.Duration, Lossless: fingerprint.Lossless, Valid: fingerprint.Valid,
-		ProbeError: fingerprint.ProbeError, LibraryDir: entry.LibraryDir,
+		ProbeError: fingerprint.ProbeError, LibraryDir: entry.LibraryDir, TorrentManaged: entry.TorrentManaged,
 	}
 }
 
@@ -962,6 +963,19 @@ func (a *App) fillMissingTags(group *duplicateGroup) ([]string, error) {
 // check" is not "it is safe". Without saved qBittorrent settings there is
 // nothing to check against, and the merge proceeds as before.
 func (a *App) mergeSeedingGuard(group *duplicateGroup) (string, string) {
+	managedByTorrent := false
+	for _, file := range group.Files {
+		if file.TorrentManaged {
+			managedByTorrent = true
+			break
+		}
+	}
+	// A configured but stopped client cannot seed a streaming/local import.
+	// Only files explicitly published by this app's torrent lane need the
+	// client-side seeding check.
+	if !managedByTorrent {
+		return "", ""
+	}
 	settings, err := a.loadQBittorrentSettings()
 	if err != nil || strings.TrimSpace(settings.BaseURL) == "" {
 		return "", ""

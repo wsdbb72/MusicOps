@@ -207,3 +207,16 @@ func TestLibrarySelectionBuildsDurableSnapshotPlan(t *testing.T) {
 		t.Fatalf("local identity plan=%+v", plan.Identity)
 	}
 }
+
+func TestLosslessSourcesAreNotBlindlyReplacedByLowerResolutionFLAC(t *testing.T) {
+	for _, codec := range []string{"ape", "wav", "alac", "pcm_s16le", "pcm_s24le", "pcm_s32le"} {
+		if isLossyUpgradeSource(codec) {
+			t.Fatalf("lossless source %q was treated as a blind downgrade candidate", codec)
+		}
+	}
+	for _, codec := range []string{"invalid", "mp3", "aac", "flac-lossy"} {
+		if !isLossyUpgradeSource(codec) {
+			t.Fatalf("lossy source %q was not eligible for replacement", codec)
+		}
+	}
+}

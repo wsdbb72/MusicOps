@@ -76,6 +76,7 @@ type Request struct {
 	Library          string
 	Decoder          Decoder
 	InternalDownload bool
+	TorrentManaged   bool
 	// ReplacePath authorizes replacing this exact library file. The release path
 	// still computes the destination independently and will not overwrite any
 	// other existing file.
@@ -129,8 +130,9 @@ type record struct {
 	// Downloaded is retained only so records written before the local-import
 	// correction still decode. New records always leave it false: a verified
 	// local import is not a download.
-	Downloaded  bool         `json:"downloaded"`
-	IndexedStat *indexedStat `json:"indexed_stat,omitempty"`
+	Downloaded     bool         `json:"downloaded"`
+	TorrentManaged bool         `json:"torrent_managed,omitempty"`
+	IndexedStat    *indexedStat `json:"indexed_stat,omitempty"`
 }
 
 // Release verifies the incoming file and publishes a copy. The source stays in place.
@@ -374,7 +376,7 @@ func Release(ctx context.Context, engine *dataengine.Engine, input Request) (Res
 	}
 	rec := record{
 		RequestID: input.RequestID, RootID: input.RootID, Path: dest, SHA256: digest, Format: format,
-		DecodeState: decodeState, Origin: origin, SourceName: input.SourceName,
+		DecodeState: decodeState, Origin: origin, SourceName: input.SourceName, TorrentManaged: input.TorrentManaged,
 		State: "published", Verified: true, LibraryPublished: true, Library: library, IndexedStat: snapshot,
 		// Downloaded stays false: a verified local import is not a download.
 	}
@@ -831,16 +833,17 @@ func Albums(engine *dataengine.Engine) (map[string]bool, error) {
 
 // Entry is one verified library record, as the operations library view shows it.
 type Entry struct {
-	RequestID   string `json:"request_id"`
-	RootID      string `json:"root_id"`
-	Track       int    `json:"track"`
-	File        string `json:"file"`
-	Format      string `json:"format"`
-	DecodeState string `json:"decode_state"`
-	SHA256      string `json:"sha256"`
-	Origin      string `json:"origin"`
-	SourceName  string `json:"source_name"`
-	FilePresent bool   `json:"file_present"`
+	RequestID      string `json:"request_id"`
+	RootID         string `json:"root_id"`
+	Track          int    `json:"track"`
+	File           string `json:"file"`
+	Format         string `json:"format"`
+	DecodeState    string `json:"decode_state"`
+	SHA256         string `json:"sha256"`
+	Origin         string `json:"origin"`
+	SourceName     string `json:"source_name"`
+	TorrentManaged bool   `json:"torrent_managed,omitempty"`
+	FilePresent    bool   `json:"file_present"`
 	// LibraryDir is the absolute library root the file was published
 	// under, empty for records written before it was stored. Library
 	// maintenance resolves File against it.
@@ -930,7 +933,7 @@ func list(engine *dataengine.Engine, checkPresence bool) ([]Entry, error) {
 			entry := Entry{
 				RequestID: rec.RequestID, RootID: rec.RootID, Track: track,
 				File: libraryFileFor(rec.Path, rec.Library), Format: rec.Format, DecodeState: rec.DecodeState,
-				SHA256: rec.SHA256, Origin: rec.Origin, SourceName: rec.SourceName,
+				SHA256: rec.SHA256, Origin: rec.Origin, SourceName: rec.SourceName, TorrentManaged: rec.TorrentManaged,
 				FilePresent: present, LibraryDir: rec.Library, fullPath: rec.Path, metadataChanged: metadataChanged,
 			}
 			if rec.IndexedStat != nil {

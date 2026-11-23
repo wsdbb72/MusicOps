@@ -591,14 +591,22 @@ func (index playlistLibraryIndex) presenceWorker() playlistLibraryIndex {
 // per-file unchanged check on external/mechanical library disks, so serial
 // iteration made a 4,000-track list block for minutes even though catalogue
 // matching itself was in memory.
-func (a *App) playlistPresence(rows []playlistTrack) []bool {
+func (a *App) playlistPresence(ctx context.Context, rows []playlistTrack) ([]bool, error) {
 	// The cached name index and shared verification memo stay valid for this
 	// cache window. Every library mutation explicitly invalidates both, while
 	// a repeated preview/enqueue no longer rebuilds the 75k-record map.
-	return playlistPresenceForIndex(a.playlistLibrary(), rows)
+	return playlistPresenceForIndexContext(ctx, a.playlistLibrary(), rows)
 }
 
 func playlistPresenceForIndex(index playlistLibraryIndex, rows []playlistTrack) []bool {
+	present, _ := playlistPresenceForIndexContext(context.Background(), index, rows)
+	return present
+}
+
+func playlistPresenceForIndexContext(ctx context.Context, index playlistLibraryIndex, rows []playlistTrack) ([]bool, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	present := make([]bool, len(rows))
 	workers := playlistPresenceWorkers
 	if len(rows) < workers {
@@ -607,10 +615,13 @@ func playlistPresenceForIndex(index playlistLibraryIndex, rows []playlistTrack) 
 	if workers <= 1 {
 		local := index.presenceWorker()
 		for i, row := range rows {
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
 			present[i] = local.hasPlaylistRow(row)
 		}
 		local.commitPresenceSnapshots()
-		return present
+		return present, nil
 	}
 	type result struct {
 		index   int
@@ -625,14 +636,25 @@ func playlistPresenceForIndex(index playlistLibraryIndex, rows []playlistTrack) 
 		go func() {
 			defer wg.Done()
 			for i := range jobs {
-				results <- result{index: i, present: local.hasPlaylistRow(rows[i])}
+				if ctx.Err() != nil {
+					return
+				}
+				select {
+				case results <- result{index: i, present: local.hasPlaylistRow(rows[i])}:
+				case <-ctx.Done():
+					return
+				}
 			}
 		}()
 	}
 	go func() {
 		defer close(jobs)
 		for i := range rows {
-			jobs <- i
+			select {
+			case jobs <- i:
+			case <-ctx.Done():
+				return
+			}
 		}
 	}()
 	go func() {
@@ -642,8 +664,11 @@ func playlistPresenceForIndex(index playlistLibraryIndex, rows []playlistTrack) 
 	for item := range results {
 		present[item.index] = item.present
 	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	index.commitPresenceSnapshots()
-	return present
+	return present, nil
 }
 
 // invalidatePlaylistLibraryCache makes the next presence check observe a
@@ -1157,7 +1182,10 @@ func (a *App) enqueuePlaylistTracks(ctx context.Context, playlistJobID string, r
 		}
 		selectedRows[position] = rows[index]
 	}
-	selectedPresence := playlistPresenceForIndex(library, selectedRows)
+	selectedPresence, presenceErr := playlistPresenceForIndexContext(ctx, library, selectedRows)
+	if presenceErr != nil {
+		return report, presenceErr
+	}
 	present := make(map[int]bool, len(indices))
 	for position, index := range indices {
 		present[index] = selectedPresence[position]
@@ -1468,7 +1496,13 @@ func (a *App) playlistTracksView(w http.ResponseWriter, r *http.Request) {
 		Present bool   `json:"present"`
 	}
 	out := make([]rowView, 0, len(rows))
-	present := a.playlistPresence(rows)
+	present, presenceErr := a.playlistPresence(r.Context(), rows)
+	if presenceErr != nil {
+		if r.Context().Err() == nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "code": "PLAYLIST_PRESENCE_FAILED"})
+		}
+		return
+	}
 	for i, row := range rows {
 		out = append(out, rowView{Index: i, Artist: row.Artist, Title: row.Title, Album: row.Album, Present: present[i]})
 	}

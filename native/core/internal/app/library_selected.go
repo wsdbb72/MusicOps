@@ -161,8 +161,8 @@ func isLossyFLACProvenance(comment string) bool {
 	return strings.Contains(comment, "musicops source=") && strings.Contains(comment, "-lossy")
 }
 func isLossyUpgradeSource(codec string) bool {
-	switch codec {
-	case "invalid", "mp3", "aac", "opus", "vorbis", "flac-lossy", "eac3", "ac3", "ape", "wav", "alac", "pcm_s16le", "pcm_s24le", "pcm_s32le", "pcm_f32le":
+	switch strings.ToLower(strings.TrimSpace(codec)) {
+	case "invalid", "mp3", "mp2", "aac", "opus", "vorbis", "flac-lossy", "eac3", "ac3", "wma", "wmav1", "wmav2":
 		return true
 	}
 	return false

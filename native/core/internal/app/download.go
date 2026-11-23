@@ -1601,7 +1601,7 @@ func (a *App) ingestDownload(ctx context.Context, plan downloadPlan, meta qbitto
 				return publishComponent(publishedAlbumArtist)
 			}(), Album: publishComponent(publishedAlbum), Title: publishComponent(title), Track: position,
 			SourceName: incomingName, Origin: "local_import",
-			Incoming: incoming, Library: library, Decoder: audiorelease.SystemDecoder(), InternalDownload: true,
+			Incoming: incoming, Library: library, Decoder: audiorelease.SystemDecoder(), InternalDownload: true, TorrentManaged: true,
 		})
 		if err != nil {
 			class := "INGEST_FAILED"

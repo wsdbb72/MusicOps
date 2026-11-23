@@ -1,6 +1,7 @@
 package app
 
 import (
+	"errors"
 	"testing"
 
 	"github.com/wsdbb72/MusicOps/native/core/internal/downloadpolicy"
@@ -62,5 +63,30 @@ func TestLegacyNeteasePlanIsPromotedToSourceFallback(t *testing.T) {
 	decision, err := searchdecision.Decide(report)
 	if err != nil || decision.Action != searchdecision.ActionFallback {
 		t.Fatal(decision, err)
+	}
+}
+
+func TestNeteaseNoSourceCanContinueTheFallbackWalk(t *testing.T) {
+	err := error(&neteaseAlbumContinue{message: "no source", class: downloadpolicy.ClassNoResult})
+	var keepGoing *neteaseAlbumContinue
+	if !errors.As(err, &keepGoing) || keepGoing.class != downloadpolicy.ClassNoResult {
+		t.Fatal("NetEase no-source result was not classified as safe to continue")
+	}
+}
+
+func TestGelatoSameAlbumRemixAliasRequiresIdentityAndDuration(t *testing.T) {
+	plan := SearchPlan{ExpectedArtist: "Gelato", ExpectedTitle: "野狼王的士高", PlaylistTrack: "兔子舞", ExpectedDuration: 241}
+	match := streamSong{Name: "兔子舞 (Remix)", Artist: "Gelato", Album: "野狼王的士高", Duration: 241}
+	if !streamTitleIdentityMatches(plan, match) {
+		t.Fatal("same artist, album and duration did not admit the Gelato Remix label")
+	}
+	match.Duration = 340
+	if streamTitleIdentityMatches(plan, match) {
+		t.Fatal("duration mismatch was admitted by the Gelato alias")
+	}
+	match.Duration = 241
+	plan.ExpectedArtist = "Another Artist"
+	if streamTitleIdentityMatches(plan, match) {
+		t.Fatal("different artist was admitted by the Gelato alias")
 	}
 }

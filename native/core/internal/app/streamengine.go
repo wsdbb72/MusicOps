@@ -523,6 +523,9 @@ func streamTitleIdentityMatches(plan SearchPlan, song streamSong) bool {
 	if neteaseAlternateTitleMatches(expected, song.Name) {
 		return true
 	}
+	if streamGelatoRemixAlias(plan, song) {
+		return true
+	}
 	expectedCompact := compactIdentityText(expected)
 	candidateCompact := compactIdentityText(song.Name)
 	// The same Gelato recording is distributed under both names. This alias is
@@ -539,6 +542,19 @@ func streamTitleIdentityMatches(plan SearchPlan, song streamSong) bool {
 		}
 	}
 	return false
+}
+func streamGelatoRemixAlias(plan SearchPlan, song streamSong) bool {
+	if compactIdentityText(strings.TrimSpace(plan.PlaylistTrack)) != "兔子舞" ||
+		!strings.Contains(compactIdentityText(strings.TrimSpace(plan.ExpectedArtist)), "gelato") ||
+		!strings.Contains(compactIdentityText(song.Name), "兔子舞") ||
+		normalizeKey(plan.ExpectedTitle) != normalizeKey(song.Album) ||
+		plan.ExpectedDuration <= 0 || song.Duration <= 0 || absInt(song.Duration-plan.ExpectedDuration) > 3 {
+		return false
+	}
+	// Gelato's identical recording is published on Kugou as
+	// "兔子舞 (Remix)" inside the same compilation. Artist, album and measured
+	// duration all agree; this alias does not admit unrelated Remix versions.
+	return true
 }
 func (a *App) streamDownload(ctx context.Context, base string, song *streamSong, token string) ([]byte, string, error) {
 	endpoint, err := url.Parse(base + "/download")

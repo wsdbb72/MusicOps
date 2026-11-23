@@ -179,9 +179,14 @@ type libraryAutomationReport struct {
 	DuplicateChecked    int      `json:"duplicate_checked"`
 	DuplicateGroups     int      `json:"duplicate_groups"`
 	Deduplicated        int      `json:"deduplicated"`
+	CacheReclaimedFiles int      `json:"cache_reclaimed_files"`
+	CacheReclaimedBytes int64    `json:"cache_reclaimed_bytes"`
 	UpgradeJobs         int      `json:"upgrade_jobs"`
 	ExpandJobs          int      `json:"expand_jobs"`
 	Errors              []string `json:"errors,omitempty"`
+	ErrorCount          int      `json:"error_count"`
+	BlockedBy           string   `json:"blocked_by,omitempty"`
+	BlockedReason       string   `json:"blocked_reason,omitempty"`
 	Note                string   `json:"note,omitempty"`
 }
 
@@ -229,8 +234,13 @@ func (s *libraryAutomationState) addError(err error) {
 		return
 	}
 	s.mu.Lock()
+	s.report.ErrorCount++
+	message := scrub(err.Error())
 	if len(s.report.Errors) < 20 {
-		s.report.Errors = append(s.report.Errors, scrub(err.Error()))
+		s.report.Errors = append(s.report.Errors, message)
+	} else {
+		copy(s.report.Errors, s.report.Errors[1:])
+		s.report.Errors[len(s.report.Errors)-1] = message
 	}
 	s.mu.Unlock()
 }
@@ -479,6 +489,16 @@ func (a *App) runLibraryAutomationPass(ctx context.Context, settings libraryAuto
 	if err != nil {
 		return err
 	}
+	state.setPhase("cache")
+	state.touch("cache", "正在回收已入库的旧流媒体缓存")
+	freedBytes, freedFiles, cacheErr := a.prunePublishedStreamAudioCache(a.workPath("incoming"), audioCacheStaleAfter, a.now())
+	if cacheErr != nil {
+		state.addError(fmt.Errorf("流媒体缓存回收失败: %w", cacheErr))
+	}
+	state.update(func(report *libraryAutomationReport) {
+		report.CacheReclaimedBytes = freedBytes
+		report.CacheReclaimedFiles = freedFiles
+	})
 	if settings.Scrape {
 		state.setPhase("scrape")
 		a.runAutomatedScrape(ctx, root, paths, settings.Upgrade)
@@ -1398,7 +1418,15 @@ func (a *App) runAutomatedDeduplication(ctx context.Context) bool {
 		state.addError(fmt.Errorf("自动去重 %s 跳过: %v %s", group.GroupID, mergeErr, strings.TrimSpace(string(raw))))
 		if failure.Code == "MERGE_QBITTORRENT_UNAVAILABLE" {
 			// The client state is unknown. Do not try every candidate while the
-			// seeding guard cannot answer; retry the whole pass later.
+			// seeding guard cannot answer; expose one persistent blocker instead
+			// of letting later scrape errors bury the cause.
+			state.update(func(report *libraryAutomationReport) {
+				report.BlockedBy = "qBittorrent"
+				report.BlockedReason = strings.TrimSpace(failure.Error)
+				if report.BlockedReason == "" {
+					report.BlockedReason = "qBittorrent 不可达，无法确认种子文件是否仍在做种"
+				}
+			})
 			return true
 		}
 	}
@@ -1437,7 +1465,6 @@ func (a *App) enqueueLibraryMaintenanceWorkflows(ctx context.Context, byDir map[
 		if len(tracks) == 0 {
 			continue
 		}
-		queuedUpgrade := false
 		if settings.Upgrade {
 			lossy := make([]localWorkflowTrack, 0)
 			for _, track := range tracks {
@@ -1453,13 +1480,12 @@ func (a *App) enqueueLibraryMaintenanceWorkflows(ctx context.Context, byDir map[
 				// streaming plan cannot silently leave the other 31 tracks behind.
 				if a.enqueueMaintenanceWorkflow(ctx, "upgrade", []localWorkflowTrack{track}, dir) {
 					jobs++
-					queuedUpgrade = true
 					state.update(func(report *libraryAutomationReport) { report.UpgradeJobs++ })
 				}
 			}
 		}
-		if settings.Expand && !queuedUpgrade && jobs < libraryAutomationMaxJobs && len(tracks) == 1 {
-			expand, checkErr := a.albumNeedsExpansion(ctx, catalogClient, tracks[0])
+		if settings.Expand && jobs < libraryAutomationMaxJobs && localAlbumNeedsCatalogCheck(tracks) {
+			expand, checkErr := a.albumNeedsExpansion(ctx, catalogClient, tracks)
 			if checkErr != nil {
 				state.addError(fmt.Errorf("%s: 整专补全核查失败: %w", filepath.Base(dir), checkErr))
 				state.update(func(report *libraryAutomationReport) {
@@ -1480,27 +1506,63 @@ func (a *App) enqueueLibraryMaintenanceWorkflows(ctx context.Context, byDir map[
 	}
 }
 
+// localAlbumNeedsCatalogCheck bounds catalogue lookups to small albums and
+// folders whose numbered filenames already prove a gap. Full 10-track folders
+// are not queried again on every maintenance pass.
+func localAlbumNeedsCatalogCheck(tracks []localWorkflowTrack) bool {
+	if len(tracks) == 0 {
+		return false
+	}
+	if len(tracks) <= 3 {
+		return true
+	}
+	seen := map[int]bool{}
+	maxTrack := 0
+	for _, track := range tracks {
+		number := trackNumberFromName(filepath.Base(track.Path))
+		if number > 0 {
+			seen[number] = true
+			if number > maxTrack {
+				maxTrack = number
+			}
+		}
+	}
+	return maxTrack > len(seen)
+}
+
 // albumNeedsExpansion consults the catalogue before creating an expansion
 // workflow. A one-file directory is often a legitimate single, and an
 // unconfirmed release can still be a different edition; neither proves that
 // tracks are missing. Only a confirmed local track on a release with at least
 // two catalogue tracks is safe enough to expand automatically.
-func (a *App) albumNeedsExpansion(ctx context.Context, client *musicbrainz.Client, track localWorkflowTrack) (bool, error) {
-	duration := track.Duration
+func (a *App) albumNeedsExpansion(ctx context.Context, client *musicbrainz.Client, tracks []localWorkflowTrack) (bool, error) {
+	if len(tracks) == 0 {
+		return false, nil
+	}
+	requestTracks := make([]catalogTrackRequest, 0, len(tracks))
+	for _, track := range tracks {
+		duration := track.Duration
+		requestTracks = append(requestTracks, catalogTrackRequest{Title: track.Title, Artists: []string{track.Artist}, Duration: &duration})
+	}
 	lookup, err := identifyCatalogLookup(ctx, client, a.engine, catalogIdentifyRequest{
-		Artist: track.Artist,
-		Album:  track.Album,
-		Tracks: []catalogTrackRequest{{Title: track.Title, Artists: []string{track.Artist}, Duration: &duration}},
+		Artist: tracks[0].Artist,
+		Album:  tracks[0].Album,
+		Tracks: requestTracks,
 	}, catalogBudget, catalogTTL)
 	if err != nil {
 		return false, err
 	}
 	view := lookup.MusicBrainz
-	if view == nil || view.TrackCount <= 1 || len(view.Tracks) <= 1 {
+	if view == nil || view.TrackCount <= len(tracks) {
 		return false, nil
 	}
-	if len(lookup.Results) == 0 || !lookup.Results[0].IdentityConfirmed {
+	if len(lookup.Results) != len(tracks) {
 		return false, nil
+	}
+	for _, result := range lookup.Results {
+		if !result.IdentityConfirmed {
+			return false, nil
+		}
 	}
 	return true, nil
 }

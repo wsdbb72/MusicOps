@@ -348,6 +348,12 @@ func (a *App) acquireFallback(ctx context.Context, execution *scheduler.Executio
 			if step.Name == "netease" && neteaseAlbum && a.neteaseCookie() != "" {
 				outcome, err := a.acquireNeteaseAlbum(ctx, execution, held, job, plan)
 				if err != nil {
+					var keepGoing *neteaseAlbumContinue
+					if errors.As(err, &keepGoing) {
+						outcomes = append(outcomes, downloadpolicy.Outcome{Source: step.Name, Class: keepGoing.class})
+						notes = append(notes, keepGoing.message)
+						continue
+					}
 					return scheduler.Outcome{}, err
 				}
 				if err := ctx.Err(); err != nil {

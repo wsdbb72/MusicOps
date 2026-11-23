@@ -151,3 +151,46 @@ func TestReserveAudioCachePrunesReconstructibleStagingAboveSeventyFivePercent(t 
 		t.Fatal("user audio was removed", err)
 	}
 }
+
+func TestPublishedStreamCacheIsReclaimedOnlyWithMatchingLibraryBytes(t *testing.T) {
+	application := newApp(t)
+	incoming := application.workPath("incoming")
+	if err := os.MkdirAll(incoming, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	sourceWAV := filepath.Join(incoming, "cache-copy.wav")
+	sourceFLAC := filepath.Join(incoming, "stream-cache-source.flac")
+	writeToneWAV(t, sourceWAV, 440)
+	writeFLACFromWAV(t, sourceWAV, sourceFLAC)
+	releaseLibraryFile(t, application, filepath.Base(sourceFLAC), "cache-gc-root", "Artist", "Album", "Song", 1)
+
+	publishedCopy := filepath.Join(incoming, "stream-published.flac")
+	otherCopy := filepath.Join(incoming, "stream-other.flac")
+	publishedBytes, err := os.ReadFile(sourceFLAC)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(publishedCopy, publishedBytes, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(otherCopy, []byte("different unpublished bytes"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now()
+	old := now.Add(-3 * time.Hour)
+	for _, path := range []string{publishedCopy, otherCopy} {
+		if err := os.Chtimes(path, old, old); err != nil {
+			t.Fatal(err)
+		}
+	}
+	freed, removed, err := application.prunePublishedStreamAudioCache(incoming, time.Hour, now)
+	if err != nil || removed != 1 || freed != int64(len(publishedBytes)) {
+		t.Fatalf("freed=%d removed=%d err=%v", freed, removed, err)
+	}
+	if _, err := os.Stat(publishedCopy); !os.IsNotExist(err) {
+		t.Fatal("published stream copy survived", err)
+	}
+	if _, err := os.Stat(otherCopy); err != nil {
+		t.Fatal("unpublished stream copy was removed", err)
+	}
+}

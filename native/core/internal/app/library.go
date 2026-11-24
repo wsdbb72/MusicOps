@@ -141,7 +141,7 @@ func (a *App) scanDuplicatesWithProgress(ctx context.Context, progress func(chec
 // is never mutated concurrently. The returned updates are safe to merge into
 // the persisted maintenance cache after every worker has stopped.
 func (a *App) scanDuplicatesWithOptions(ctx context.Context, limit int, root string, cached map[string]cachedLibraryScan, progress func(checked, total int, current string), checkpoint func(map[string]cachedDuplicateFingerprint)) ([]duplicateGroup, string, bool, map[string]cachedDuplicateFingerprint, error) {
-	entries, err := audiorelease.List(a.engine)
+	entries, err := audiorelease.ListIndexed(a.engine)
 	if err != nil {
 		return nil, "", false, nil, err
 	}
@@ -413,7 +413,7 @@ func (a *App) fingerprintGroupWithCache(ctx context.Context, rows []audiorelease
 			cachedEntry = cached[cacheKey]
 		}
 		file, fingerprint := a.fingerprintDuplicateFile(ctx, entry, full, decoder, cachedEntry, cacheKey != "")
-		if cacheKey != "" {
+		if cacheKey != "" && (cachedEntry.Duplicate == nil || *cachedEntry.Duplicate != fingerprint) {
 			updates[cacheKey] = fingerprint
 		}
 		file.Rank = duplicateRank(file)

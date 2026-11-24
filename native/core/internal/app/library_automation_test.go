@@ -522,3 +522,26 @@ func TestAlbumExpansionSupportsPartialMultiTrackDirectory(t *testing.T) {
 		t.Fatalf("two present tracks of a three-track release were not expandable: expand=%v err=%v", expand, err)
 	}
 }
+
+func TestDuplicateScanWithUnchangedCacheProducesNoCheckpointUpdates(t *testing.T) {
+	application := newApp(t)
+	incoming := filepath.Join(application.Dir, "incoming")
+	firstWAV := filepath.Join(incoming, "cache-a.wav")
+	secondWAV := filepath.Join(incoming, "cache-b.wav")
+	writeToneWAV(t, firstWAV, 440)
+	writeToneWAV(t, secondWAV, 880)
+	writeFLACFromWAV(t, firstWAV, filepath.Join(incoming, "cache-a.flac"))
+	releaseLibraryFile(t, application, "cache-a.flac", "cache-key-1", "Artist", "Album", "Song", 1)
+	releaseLibraryFile(t, application, "cache-b.wav", "cache-key-2", "Artist", "Album", "Song", 1)
+	root := application.libraryDir()
+	empty := application.loadLibraryAutomationScanCache(root)
+	_, _, _, updates, err := application.scanDuplicatesWithOptions(context.Background(), 0, root, empty.Files, nil, nil)
+	if err != nil || len(updates) == 0 {
+		t.Fatalf("initial duplicate scan updates=%d err=%v", len(updates), err)
+	}
+	mergeDuplicateFingerprintCache(&empty, updates)
+	_, _, _, secondUpdates, err := application.scanDuplicatesWithOptions(context.Background(), 0, root, empty.Files, nil, nil)
+	if err != nil || len(secondUpdates) != 0 {
+		t.Fatalf("unchanged cache generated %d checkpoint updates: %v", len(secondUpdates), err)
+	}
+}

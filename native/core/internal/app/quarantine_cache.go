@@ -77,7 +77,8 @@ func (a *App) pruneSuccessfulQuarantineLocked(maxAge time.Duration, now time.Tim
 			if !found || receipt.Restored || receipt.CreatedNS <= 0 || receipt.CreatedNS > now.Add(-maxAge).UnixNano() {
 				continue
 			}
-			if !mergeKeeperPresent(entries, receipt.Keep) {
+			keeper, keeperOK := mergeKeeperEntry(entries, receipt.Keep)
+			if !keeperOK {
 				continue
 			}
 			candidate := receiptCandidate{}
@@ -113,7 +114,7 @@ func (a *App) pruneSuccessfulQuarantineLocked(maxAge time.Duration, now time.Tim
 					protected = true
 					break
 				}
-				if !move.Sidecar && quarantineMoveNeedsProtection(path, rows, index) {
+				if !move.Sidecar && quarantineMoveNeedsProtection(path, rows, index, keeper) {
 					protected = true
 					break
 				}
@@ -167,17 +168,17 @@ func entriesForPlaylistIndex(index playlistLibraryIndex) []audiorelease.Entry {
 	}
 	return out
 }
-func mergeKeeperPresent(entries []audiorelease.Entry, keep string) bool {
+func mergeKeeperEntry(entries []audiorelease.Entry, keep string) (audiorelease.Entry, bool) {
 	keep = strings.ToLower(filepath.ToSlash(filepath.Clean(filepath.FromSlash(strings.TrimSpace(keep)))))
 	if keep == "" || keep == "." {
-		return false
+		return audiorelease.Entry{}, false
 	}
 	for _, entry := range entries {
 		if entry.FilePresent && entry.PresenceUnchanged() && strings.EqualFold(filepath.ToSlash(entry.File), keep) {
-			return true
+			return entry, true
 		}
 	}
-	return false
+	return audiorelease.Entry{}, false
 }
 
 func quarantineRequestReferenced(request string, references []string) bool {
@@ -195,16 +196,19 @@ func quarantineRequestReferenced(request string, references []string) bool {
 
 // quarantineMoveNeedsProtection checks only playlist rows that can actually
 // match this quarantined recording. The old implementation verified all 4,000+
-// playlist rows before every cache pass, repeatedly decoding the whole library
-// even though almost none of those rows could use the file.
-func quarantineMoveNeedsProtection(path string, rows []playlistTrack, index playlistLibraryIndex) bool {
+// playlist rows before every cache pass, then searched the entire library for
+// each match even though the receipt already names the surviving keeper.
+func quarantineMoveNeedsProtection(path string, rows []playlistTrack, index playlistLibraryIndex, keeper audiorelease.Entry) bool {
 	artists, album, title, duration := playlistRecordingEvidence(path)
 	pathArtist, pathAlbum, pathTitle := trackPathOf(path)
 	for _, row := range rows {
 		if !quarantineMoveMatchesRow(row, artists, album, title, duration, pathArtist, pathAlbum, pathTitle) {
 			continue
 		}
-		if !index.hasPlaylistRow(row) {
+		// The receipt already identifies the one surviving file for this
+		// merge. Match that keeper directly instead of searching every
+		// title/album candidate in the 75k-file library for each move.
+		if !index.playlistIDMatches(row, keeper.RequestID) {
 			return true
 		}
 	}

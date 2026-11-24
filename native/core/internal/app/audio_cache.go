@@ -891,14 +891,15 @@ func (a *App) pruneExpiredDownloadCacheLocked(roots []string, maxAge time.Durati
 	return freed, removedFiles, nil
 }
 
-// removeDownloadCacheTree verifies that the directory has actually vanished.
-// Windows can briefly report a path after RemoveAll returns, especially when
-// Defender or the search indexer still has its metadata cached.
+// removeDownloadCacheTree atomically retires the visible task directory before
+// recursively deleting it. Windows may keep a delete-pending directory visible
+// under its old name for several seconds; a tombstone rename prevents an
+// apparently successful reclaim from leaving the original path behind.
 func removeDownloadCacheTree(path string) error {
-	// Resolve Windows 8.3 names and symlinked ancestors before deleting. A
-	// short-name alias can appear absent while the real directory still exists.
 	path = canonicalPath(path)
-	var lastErr error
+	parent := filepath.Dir(path)
+	var tombstone string
+	var renameErr error
 	delay := 20 * time.Millisecond
 	for attempt := 0; attempt < 8; attempt++ {
 		if attempt > 0 {
@@ -907,33 +908,30 @@ func removeDownloadCacheTree(path string) error {
 				delay *= 2
 			}
 		}
-		if err := os.RemoveAll(path); err != nil {
-			lastErr = err
-		} else {
-			lastErr = nil
+		candidate := filepath.Join(parent, "process-deleting-"+strconv.FormatInt(time.Now().UnixNano(), 36))
+		renameErr = os.Rename(path, candidate)
+		if renameErr == nil {
+			tombstone = candidate
+			break
 		}
-		if _, err := os.Lstat(path); os.IsNotExist(err) {
-			if runtime.GOOS != "windows" {
-				return nil
-			}
-			// Windows may expose a directory again while a delete is pending.
-			// Require a second observation after a short settling window.
-			time.Sleep(125 * time.Millisecond)
-			if _, confirmErr := os.Lstat(path); os.IsNotExist(confirmErr) {
-				return nil
-			} else if confirmErr != nil {
-				lastErr = confirmErr
-			}
-		} else if err != nil {
-			lastErr = err
+		if os.IsNotExist(renameErr) {
+			return nil
+		}
+		if !retryableAtomicRename(renameErr) {
+			break
 		}
 	}
-	if lastErr == nil {
-		lastErr = errors.New("path still exists after RemoveAll")
+	if tombstone == "" {
+		if renameErr == nil {
+			renameErr = errors.New("cache path was not retired")
+		}
+		return fmt.Errorf("retire expired download cache %q: %w", path, renameErr)
 	}
-	return fmt.Errorf("remove expired download cache %q: %w", path, lastErr)
+	if err := os.RemoveAll(tombstone); err != nil {
+		return fmt.Errorf("remove expired download cache %q via %q: %w", path, tombstone, err)
+	}
+	return nil
 }
-
 func managedDownloadCacheEntry(entry fs.DirEntry) bool {
 	if !entry.IsDir() {
 		return false

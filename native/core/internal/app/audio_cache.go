@@ -881,7 +881,7 @@ func (a *App) pruneExpiredDownloadCacheLocked(roots []string, maxAge time.Durati
 			if !expired || files == 0 || (protect != nil && protect(path) && now.Sub(latest) < audioCacheAbandonedAge) {
 				continue
 			}
-			if err := os.RemoveAll(path); err != nil {
+			if err := removeDownloadCacheTree(path); err != nil {
 				return freed, removedFiles, err
 			}
 			freed += bytes
@@ -889,6 +889,36 @@ func (a *App) pruneExpiredDownloadCacheLocked(roots []string, maxAge time.Durati
 		}
 	}
 	return freed, removedFiles, nil
+}
+
+// removeDownloadCacheTree verifies that the directory has actually vanished.
+// Windows can briefly report a path after RemoveAll returns, especially when
+// Defender or the search indexer still has its metadata cached.
+func removeDownloadCacheTree(path string) error {
+	var lastErr error
+	delay := 20 * time.Millisecond
+	for attempt := 0; attempt < 8; attempt++ {
+		if attempt > 0 {
+			time.Sleep(delay)
+			if delay < 160*time.Millisecond {
+				delay *= 2
+			}
+		}
+		if err := os.RemoveAll(path); err != nil {
+			lastErr = err
+		} else {
+			lastErr = nil
+		}
+		if _, err := os.Lstat(path); os.IsNotExist(err) {
+			return nil
+		} else if err != nil {
+			lastErr = err
+		}
+	}
+	if lastErr == nil {
+		lastErr = errors.New("path still exists after RemoveAll")
+	}
+	return fmt.Errorf("remove expired download cache %q: %w", path, lastErr)
 }
 
 func managedDownloadCacheEntry(entry fs.DirEntry) bool {

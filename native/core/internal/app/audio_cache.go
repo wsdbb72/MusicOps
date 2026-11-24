@@ -896,7 +896,7 @@ func (a *App) pruneExpiredDownloadCacheLocked(roots []string, maxAge time.Durati
 // under its old name for several seconds; a tombstone rename prevents an
 // apparently successful reclaim from leaving the original path behind.
 func removeDownloadCacheTree(path string) error {
-	path = canonicalPath(path)
+	path = cacheRemovalPath(path)
 	parent := filepath.Dir(path)
 	var tombstone string
 	var renameErr error

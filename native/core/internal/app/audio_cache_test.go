@@ -528,6 +528,8 @@ func TestExpiredDownloadCachePrunesOnlyCompleteInactiveTaskTree(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	oldCheck := cacheRemovalPath(oldDir)
+	abandonedCheck := cacheRemovalPath(abandonedDir)
 	now := time.Now()
 	old := now.Add(-2 * time.Hour)
 	for _, dir := range []string{oldDir, protectedDir} {
@@ -552,7 +554,7 @@ func TestExpiredDownloadCachePrunesOnlyCompleteInactiveTaskTree(t *testing.T) {
 		t.Fatalf("freed=%d files=%d", freed, files)
 	}
 	deadline := time.Now().Add(5 * time.Second)
-	for _, dir := range []string{oldDir, abandonedDir} {
+	for _, dir := range []string{oldCheck, abandonedCheck} {
 		for {
 			_, statErr := os.Stat(dir)
 			if os.IsNotExist(statErr) {

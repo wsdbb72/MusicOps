@@ -14,6 +14,9 @@ func audioCacheFreeBytes(dir string) (uint64, error) {
 	return available, err
 }
 
+func cacheRemovalPath(path string) string {
+	return windowsLongPath(canonicalPath(path))
+}
 func retireDownloadCacheDirectory(from, to string) error {
 	from = windowsLongPath(from)
 	to = windowsLongPath(to)

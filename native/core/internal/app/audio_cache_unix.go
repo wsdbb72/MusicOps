@@ -16,6 +16,9 @@ func audioCacheFreeBytes(dir string) (uint64, error) {
 	return uint64(stat.Bavail) * uint64(stat.Bsize), nil
 }
 
+func cacheRemovalPath(path string) string {
+	return canonicalPath(path)
+}
 func retireDownloadCacheDirectory(from, to string) error {
 	return os.Rename(from, to)
 }

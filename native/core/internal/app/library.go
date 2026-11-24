@@ -422,6 +422,14 @@ func (a *App) fingerprintGroupWithCache(ctx context.Context, rows []audiorelease
 			valid = append(valid, file)
 		}
 	}
+	for _, file := range files {
+		if strings.TrimSpace(file.SHA256) == "" {
+			// ListIndexed is intentionally cheap and does not stat all 75k
+			// records. A candidate whose bytes cannot now be hashed has been
+			// removed or raced, so it must not remain as a stale merge group.
+			return nil, updates, nil
+		}
+	}
 	group := &duplicateGroup{
 		GroupID: duplicateGroupID(rows), Album: album, Artists: []string{artist}, Files: files,
 		IdentityUsed: "album-title-duration",

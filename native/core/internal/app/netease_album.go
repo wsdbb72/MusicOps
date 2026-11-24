@@ -539,7 +539,10 @@ func (a *App) acquireNeteaseAlbum(ctx context.Context, execution *scheduler.Exec
 			return review(message+"；将由自动核对重试", "STREAM_RETRY")
 		}
 		if len(receipts) == 0 {
-			return finishSkip(message + "；已有限重试三轮")
+			if plan.NeteaseOnly {
+				return finishSkip(message + "；已有限重试三轮")
+			}
+			return scheduler.Outcome{}, &neteaseAlbumContinue{message: message + "；已有限重试三轮", class: downloadpolicy.ClassNoResult}
 		}
 		return finishPlaylist(message+"；已有限重试三轮，先校验本轮已入库曲目", receipts, missing...)
 	}
@@ -551,14 +554,15 @@ func (a *App) acquireNeteaseAlbum(ctx context.Context, execution *scheduler.Exec
 			return review(ingestFailure.Error(), "STREAM_INGEST_FAILED")
 		}
 		if len(missing) > 0 {
-			// The NetEase album and selected song ids are durable catalogue
-			// evidence. Once every available quality has been tried, keep the
-			// row terminal instead of returning the same unavailable track to
-			// human review on every scheduler pass.
-			if plan.NeteaseSongID > 0 && plan.NeteaseAlbumID > 0 {
-				return finishSkip("网易云已核实该发行版但未提供可用音频，已自动结束：" + missing[0])
+			// NetEase is the first source for a NetEase-origin playlist, not a
+			// terminal source. With no published receipt, return control to the
+			// outer fallback walk so MiGu, Qianqian, JOOX and later providers can
+			// still acquire the target without another token request.
+			message := "网易云已核实该发行版但未提供可用音频：" + missing[0]
+			if plan.NeteaseOnly {
+				return finishSkip(message + "；仅网易云模式已自动结束")
 			}
-			return review("没有可入库的可用缺轨："+missing[0], "NETEASE_ALBUM_INCOMPLETE")
+			return scheduler.Outcome{}, &neteaseAlbumContinue{message: message, class: downloadpolicy.ClassNoResult}
 		}
 		if plan.NeteaseTrackOnly {
 			return finishSkip("网易云歌单目标曲目已在库")

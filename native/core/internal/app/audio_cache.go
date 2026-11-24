@@ -910,7 +910,17 @@ func removeDownloadCacheTree(path string) error {
 			lastErr = nil
 		}
 		if _, err := os.Lstat(path); os.IsNotExist(err) {
-			return nil
+			if runtime.GOOS != "windows" {
+				return nil
+			}
+			// Windows may expose a directory again while a delete is pending.
+			// Require a second observation after a short settling window.
+			time.Sleep(125 * time.Millisecond)
+			if _, confirmErr := os.Lstat(path); os.IsNotExist(confirmErr) {
+				return nil
+			} else if confirmErr != nil {
+				lastErr = confirmErr
+			}
 		} else if err != nil {
 			lastErr = err
 		}

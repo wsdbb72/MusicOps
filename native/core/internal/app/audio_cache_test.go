@@ -544,7 +544,8 @@ func TestExpiredDownloadCachePrunesOnlyCompleteInactiveTaskTree(t *testing.T) {
 	}
 	audioCacheMu.Lock()
 	freed, files, err := application.pruneExpiredDownloadCacheLocked([]string{downloads, seeds}, time.Hour, now, 800, func(path string) bool {
-		return samePath(path, protectedDir) || samePath(path, abandonedDir)
+		resolved := cacheRemovalPath(path)
+		return samePath(resolved, cacheRemovalPath(protectedDir)) || samePath(resolved, cacheRemovalPath(abandonedDir))
 	})
 	audioCacheMu.Unlock()
 	if err != nil {

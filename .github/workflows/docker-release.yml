@@ -95,12 +95,16 @@ jobs:
         env:
           VERSION: ${{ inputs.version }}
           REVISION: ${{ github.sha }}
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           image="wsdbb72/muiscops:${VERSION}"
           if docker manifest inspect "$image" >/dev/null 2>&1; then
-            echo "Version already exists; refusing to overwrite $image" >&2
-            exit 1
+            if gh release view "v${VERSION}" >/dev/null 2>&1; then
+              echo "Published version already exists; refusing to overwrite $image" >&2
+              exit 1
+            fi
+            echo "Replacing an unpublished orphan image tag $image"
           fi
           docker tag musicops-ci:tested "$image"
           docker push "$image"

@@ -23,6 +23,7 @@ const defaultAudioCacheBytes int64 = 8 << 30
 const audioCacheStaleAfter = time.Hour
 const audioCacheTrimTargetBytes int64 = 256 << 20
 const audioCacheDiskReserveBytes int64 = 2 << 30
+const audioCacheAbandonedAge = 72 * time.Hour
 
 var (
 	audioCacheMu            sync.Mutex
@@ -55,13 +56,21 @@ func audioCacheReclaimNeed(used, limit int64) int64 {
 	if limit <= 0 {
 		return 0
 	}
-	target := limit - limit/4
-	if used <= target {
+	highWater := limit - limit/4
+	if used <= highWater {
 		return 0
 	}
-	over := used - target
-	if limit <= audioCacheTrimTargetBytes || over > limit-audioCacheTrimTargetBytes {
-		return limit
+	// Reclaim enough to leave half the configured quota free for the next
+	// download or transcode. The old implementation capped the work at one
+	// quota even when usage was several times the limit, so it returned success
+	// while admission still failed on the very next byte.
+	if limit <= audioCacheTrimTargetBytes {
+		return used
+	}
+	over := used - highWater
+	const maxInt64 = int64(^uint64(0) >> 1)
+	if over > maxInt64-audioCacheTrimTargetBytes {
+		return maxInt64
 	}
 	return over + audioCacheTrimTargetBytes
 }
@@ -85,7 +94,7 @@ func (a *App) audioCacheRoots(current string) []string {
 	candidates := []string{current}
 	work := a.workDir()
 	for _, root := range []string{a.Dir, work} {
-		for _, name := range []string{"incoming", "downloads", "seeds", "quarantine"} {
+		for _, name := range []string{"incoming", "downloads", "seeds"} {
 			candidates = append(candidates, filepath.Join(root, name))
 		}
 	}
@@ -153,9 +162,21 @@ func (a *App) reserveAudioCache(dir string, bytes int64) (func(), error) {
 		return nil, err
 	}
 	roots := a.audioCacheRoots(dir)
+	protect := func(path string) bool { return cachePathReferencedByTasks(path, references) }
 	return reserveAudioCacheRootsProtected(roots, dir, bytes, func(need int64, now time.Time) (int64, int, error) {
-		return a.prunePublishedAudioCacheRootsLocked(roots, audioCacheStaleAfter, now, need)
-	}, func(path string) bool { return cachePathReferencedByTasks(path, references) })
+		freed, files, err := a.pruneExpiredDownloadCacheLocked(roots, audioCacheStaleAfter, now, need, protect)
+		if err != nil || freed >= need {
+			return freed, files, err
+		}
+		publishedFreed, publishedFiles, publishedErr := a.prunePublishedAudioCacheRootsLocked(roots, 0, now, need-freed)
+		freed += publishedFreed
+		files += publishedFiles
+		if publishedErr != nil || freed >= need {
+			return freed, files, publishedErr
+		}
+		quarantineFreed, quarantineFiles, quarantineErr := a.pruneSuccessfulQuarantineLocked(0, now, need-freed)
+		return freed + quarantineFreed, files + quarantineFiles, quarantineErr
+	}, protect)
 }
 
 // reserveAudioCacheRoots serializes bounded audio writes, including concurrent
@@ -259,6 +280,27 @@ func setAudioCacheReservationLocked(id, dir string, bytes int64) {
 	audioCacheReservations[id] = audioCacheReservation{dir: dir, bytes: bytes}
 }
 
+// updateAudioCacheDownloadRemaining keeps a running torrent reservation equal
+// to its actual remaining bytes. The files already written are measured by the
+// normal cache walker, so retaining the original total here would count them a
+// second time and can block a small lossy-to-FLAC fallback.
+func (a *App) updateAudioCacheDownloadRemaining(id string, bytes int64) {
+	audioCacheMu.Lock()
+	defer audioCacheMu.Unlock()
+	audioCacheReservationMu.Lock()
+	defer audioCacheReservationMu.Unlock()
+	reservation, ok := audioCacheReservations[id]
+	if !ok {
+		return
+	}
+	if bytes <= 0 {
+		delete(audioCacheReservations, id)
+		return
+	}
+	reservation.bytes = bytes
+	audioCacheReservations[id] = reservation
+}
+
 func (a *App) reserveAudioCacheDownload(id, dir string, bytes int64) error {
 	if a == nil {
 		return errors.New("audio cache reservation requires an application")
@@ -276,11 +318,23 @@ func (a *App) reserveAudioCacheDownload(id, dir string, bytes int64) error {
 		return err
 	}
 	roots := a.audioCacheRoots(dir)
+	protect := func(path string) bool { return cachePathReferencedByTasks(path, references) }
 	release, err := reserveAudioCacheRootsProtectedWithReservation(roots, dir, bytes, id, func() {
 		setAudioCacheReservationLocked(id, dir, bytes)
 	}, func(need int64, now time.Time) (int64, int, error) {
-		return a.prunePublishedAudioCacheRootsLocked(roots, audioCacheStaleAfter, now, need)
-	}, func(path string) bool { return cachePathReferencedByTasks(path, references) })
+		freed, files, err := a.pruneExpiredDownloadCacheLocked(roots, audioCacheStaleAfter, now, need, protect)
+		if err != nil || freed >= need {
+			return freed, files, err
+		}
+		publishedFreed, publishedFiles, publishedErr := a.prunePublishedAudioCacheRootsLocked(roots, 0, now, need-freed)
+		freed += publishedFreed
+		files += publishedFiles
+		if publishedErr != nil || freed >= need {
+			return freed, files, publishedErr
+		}
+		quarantineFreed, quarantineFiles, quarantineErr := a.pruneSuccessfulQuarantineLocked(0, now, need-freed)
+		return freed + quarantineFreed, files + quarantineFiles, quarantineErr
+	}, protect)
 	if err != nil {
 		return err
 	}
@@ -588,7 +642,11 @@ func (a *App) pruneAudioCacheAll(maxAge time.Duration, now time.Time) (int64, in
 	limit := audioCacheLimitBytes()
 	need := audioCacheReclaimNeed(used, limit)
 	if need <= 0 {
-		return 0, 0, nil
+		// Quarantine is recoverable dedupe history, not active download cache.
+		// It is excluded from the admission quota, but maintenance still drains
+		// every safely proven old receipt without risking a data loss tradeoff.
+		const maxInt64 = int64(^uint64(0) >> 1)
+		return a.pruneSuccessfulQuarantineLocked(0, now, maxInt64)
 	}
 	activeReferences, err := a.activeAudioCacheReferences()
 	if err != nil {
@@ -605,23 +663,38 @@ func (a *App) pruneAudioCacheAll(maxAge time.Duration, now time.Time) (int64, in
 		return staleBytes, staleFiles, err
 	}
 	need = audioCacheReclaimNeed(used, limit)
-	publishedBytes, publishedFiles := int64(0), 0
+	downloadBytes, downloadFiles := int64(0), 0
 	if need > 0 {
-		publishedBytes, publishedFiles, err = a.prunePublishedAudioCacheRootsLocked(roots, maxAge, now, need)
+		downloadBytes, downloadFiles, err = a.pruneExpiredDownloadCacheLocked(roots, audioCacheStaleAfter, now, need, func(path string) bool {
+			return cachePathReferencedByTasks(path, activeReferences)
+		})
 		if err != nil {
-			return staleBytes + publishedBytes, staleFiles + publishedFiles, err
+			return staleBytes + downloadBytes, staleFiles + downloadFiles, err
 		}
 		used, err = audioCacheUsageRoots(roots)
 		if err != nil {
-			return staleBytes + publishedBytes, staleFiles + publishedFiles, err
+			return staleBytes + downloadBytes, staleFiles + downloadFiles, err
 		}
 		need = audioCacheReclaimNeed(used, limit)
 	}
-	quarantineBytes, quarantineFiles := int64(0), 0
+	publishedBytes, publishedFiles := int64(0), 0
 	if need > 0 {
-		quarantineBytes, quarantineFiles, err = a.pruneSuccessfulQuarantineLocked(maxAge, now, need)
+		publishedBytes, publishedFiles, err = a.prunePublishedAudioCacheRootsLocked(roots, 0, now, need)
+		if err != nil {
+			return staleBytes + publishedBytes + downloadBytes, staleFiles + publishedFiles + downloadFiles, err
+		}
+		used, err = audioCacheUsageRoots(roots)
+		if err != nil {
+			return staleBytes + publishedBytes + downloadBytes, staleFiles + publishedFiles + downloadFiles, err
+		}
+		need = audioCacheReclaimNeed(used, limit)
 	}
-	return staleBytes + publishedBytes + quarantineBytes, staleFiles + publishedFiles + quarantineFiles, err
+	const maxInt64 = int64(^uint64(0) >> 1)
+	quarantineBytes, quarantineFiles, quarantineErr := a.pruneSuccessfulQuarantineLocked(0, now, maxInt64)
+	if err == nil {
+		err = quarantineErr
+	}
+	return staleBytes + publishedBytes + downloadBytes + quarantineBytes, staleFiles + publishedFiles + downloadFiles + quarantineFiles, err
 }
 
 func (a *App) prunePublishedAudioCacheRootsLocked(roots []string, maxAge time.Duration, now time.Time, need int64) (int64, int, error) {
@@ -729,6 +802,123 @@ func (a *App) prunePublishedAudioCacheRootsLocked(roots []string, maxAge time.Du
 	}
 	pruneEmptyCacheParents(roots, touched)
 	return freed, removed, nil
+}
+
+// pruneExpiredDownloadCacheLocked is the capacity fallback for task-owned
+// download and seeding directories whose bytes changed during scraping. They
+// are reproducible cache inputs, not library files. Delete a complete task
+// directory only when every file is older than the retention window, no active
+// task references it, and qBittorrent is not using that path.
+func (a *App) pruneExpiredDownloadCacheLocked(roots []string, maxAge time.Duration, now time.Time, need int64, protect func(string) bool) (int64, int, error) {
+	if need <= 0 {
+		return 0, 0, nil
+	}
+	if maxAge < audioCacheStaleAfter {
+		maxAge = audioCacheStaleAfter
+	}
+	seedRoots, err := a.activeQBittorrentSeedRoots()
+	if err != nil {
+		return 0, 0, err
+	}
+	cutoff := now.Add(-maxAge)
+	var freed int64
+	removedFiles := 0
+	for _, root := range normalizeAudioCacheRoots(roots) {
+		base := strings.ToLower(filepath.Base(root))
+		if base != "downloads" && base != "seeds" {
+			continue
+		}
+		entries, readErr := os.ReadDir(root)
+		if readErr != nil {
+			if os.IsNotExist(readErr) {
+				continue
+			}
+			return freed, removedFiles, readErr
+		}
+		for _, entry := range entries {
+			if freed >= need {
+				return freed, removedFiles, nil
+			}
+			path := filepath.Join(root, entry.Name())
+			if entry.Type()&os.ModeSymlink != 0 || !managedDownloadCacheEntry(entry) || !insideDir(root, path) {
+				continue
+			}
+			if cachePathOverlapsRoots(path, seedRoots) {
+				continue
+			}
+			var bytes int64
+			files := 0
+			expired := true
+			latest := time.Time{}
+			walkErr := filepath.WalkDir(path, func(candidate string, file fs.DirEntry, walkErr error) error {
+				if walkErr != nil {
+					return walkErr
+				}
+				if file.IsDir() {
+					return nil
+				}
+				if !file.Type().IsRegular() {
+					return nil
+				}
+				info, infoErr := file.Info()
+				if infoErr != nil {
+					return infoErr
+				}
+				if !info.ModTime().Before(cutoff) {
+					expired = false
+					return fs.SkipAll
+				}
+				if info.ModTime().After(latest) {
+					latest = info.ModTime()
+				}
+				bytes += info.Size()
+				files++
+				return nil
+			})
+			if walkErr != nil && !errors.Is(walkErr, fs.SkipAll) && !os.IsNotExist(walkErr) {
+				return freed, removedFiles, walkErr
+			}
+			if !expired || files == 0 || (protect != nil && protect(path) && now.Sub(latest) < audioCacheAbandonedAge) {
+				continue
+			}
+			if err := os.RemoveAll(path); err != nil {
+				return freed, removedFiles, err
+			}
+			freed += bytes
+			removedFiles += files
+		}
+	}
+	return freed, removedFiles, nil
+}
+
+func managedDownloadCacheEntry(entry fs.DirEntry) bool {
+	if !entry.IsDir() {
+		return false
+	}
+	name := strings.ToLower(entry.Name())
+	if strings.HasPrefix(name, ".") {
+		return false
+	}
+	for _, prefix := range []string{"process-", "dl-", "netease-", "stream-", "search-"} {
+		if strings.HasPrefix(name, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
+func cachePathOverlapsRoots(path string, roots []string) bool {
+	path = canonicalPath(path)
+	for _, root := range roots {
+		root = canonicalPath(root)
+		if root == "" {
+			continue
+		}
+		if samePath(path, root) || insideDir(path, root) || insideDir(root, path) {
+			return true
+		}
+	}
+	return false
 }
 
 // reclaimablePublishedCacheCopy is intentionally narrow about extensions but

@@ -1,8 +1,10 @@
 package app
 
 import (
+	"log"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -18,6 +20,49 @@ type quarantinePruneCandidate struct {
 	mod  time.Time
 }
 
+type quarantinePlaylistRowIndex struct {
+	rows    []playlistTrack
+	byTitle map[string][]int
+}
+
+func newQuarantinePlaylistRowIndex(rows []playlistTrack) quarantinePlaylistRowIndex {
+	index := quarantinePlaylistRowIndex{rows: rows, byTitle: map[string][]int{}}
+	for i, row := range rows {
+		for _, key := range quarantineTitleKeys(row.Title) {
+			index.byTitle[key] = append(index.byTitle[key], i)
+		}
+	}
+	return index
+}
+
+func (index quarantinePlaylistRowIndex) candidates(titles ...string) []playlistTrack {
+	seen := map[int]bool{}
+	out := []playlistTrack{}
+	for _, title := range titles {
+		for _, key := range quarantineTitleKeys(title) {
+			for _, i := range index.byTitle[key] {
+				if !seen[i] {
+					seen[i] = true
+					out = append(out, index.rows[i])
+				}
+			}
+		}
+	}
+	return out
+}
+
+func quarantineTitleKeys(title string) []string {
+	folded := foldPlaylistMatchText(title)
+	versions := neteaseTitleVersionTokens(folded)
+	tokens := make([]string, 0, len(versions))
+	for token := range versions {
+		tokens = append(tokens, token)
+	}
+	sort.Strings(tokens)
+	normalized := foldTagText(stripNeteaseTitleQualifiers(folded)) + "\x00" + strings.Join(tokens, "\x00")
+	return []string{"exact\x00" + folded, "normalized\x00" + normalized}
+}
+
 // pruneSuccessfulQuarantineLocked removes quarantine payloads only when the
 // successful merge receipt, keeper, hashes, active-task references and the
 // current playlist inventory all agree. The caller holds audioCacheMu.
@@ -26,14 +71,18 @@ type quarantinePruneCandidate struct {
 // a move that could satisfy a missing row is retained with its whole receipt.
 // Unrelated old receipts can still be reclaimed, which avoids a cache deadlock
 // when one playlist row is legitimately absent from the library.
+const quarantineActiveReferenceRetention = 6 * time.Hour
+const quarantineMoveSettleWindow = 10 * time.Minute
+
 func (a *App) pruneSuccessfulQuarantineLocked(maxAge time.Duration, now time.Time, need int64) (int64, int, error) {
 	if a == nil || a.engine == nil || need <= 0 {
 		return 0, 0, nil
 	}
+	trace := os.Getenv("MUSICOPS_CACHE_TRACE") == "1"
 	if maxAge < quarantinePruneMinimumAge {
 		maxAge = quarantinePruneMinimumAge
 	}
-	roots := quarantineCacheRoots(a.audioCacheRoots(""))
+	roots := a.quarantineCacheRoots()
 	if len(roots) == 0 {
 		return 0, 0, nil
 	}
@@ -53,8 +102,21 @@ func (a *App) pruneSuccessfulQuarantineLocked(maxAge time.Duration, now time.Tim
 	if len(entries) == 0 {
 		return 0, 0, nil
 	}
+	rowIndex := newQuarantinePlaylistRowIndex(rows)
+	keepers := make(map[string]audiorelease.Entry, len(entries))
+	for _, entry := range entries {
+		if !entry.FilePresent {
+			continue
+		}
+		key := normalizedKeeperPath(entry.File)
+		if _, exists := keepers[key]; !exists {
+			keepers[key] = entry
+		}
+	}
+	log.Printf("cache: quarantine reclaim started need=%d rows=%d library_entries=%d", need, len(rows), len(entries))
 	var freed int64
 	removed := 0
+	receipts := 0
 	touched := map[string]struct{}{}
 reclaimLoop:
 	for _, root := range roots {
@@ -72,6 +134,12 @@ reclaimLoop:
 			if !entry.IsDir() || !strings.HasPrefix(entry.Name(), "merge-") {
 				continue
 			}
+			receipts++
+			if trace {
+				log.Printf("cache trace: receipt %d start %s", receipts, entry.Name())
+			} else if receipts%50 == 0 {
+				log.Printf("cache: quarantine progress receipts=%d freed=%d removed=%d", receipts, freed, removed)
+			}
 			receiptRoot := filepath.Join(root, entry.Name())
 			receipt, found, receiptErr := a.readMergeReceipt(entry.Name())
 			if receiptErr != nil {
@@ -80,14 +148,18 @@ reclaimLoop:
 			if !found || receipt.Restored || receipt.CreatedNS <= 0 || receipt.CreatedNS > now.Add(-maxAge).UnixNano() {
 				continue
 			}
-			keeper, keeperOK := mergeKeeperEntry(entries, receipt.Keep)
+			keeper, keeperOK := mergeKeeperEntry(keepers, receipt.Keep)
 			if !keeperOK {
 				continue
 			}
 			var candidateMoves []quarantinePruneCandidate
 			protected := false
+			protectActiveReferences := receipt.CreatedNS > now.Add(-quarantineActiveReferenceRetention).UnixNano()
 			for _, move := range receipt.Moved {
-				if quarantineRequestReferenced(move.RequestID, activeReferences) {
+				if trace {
+					log.Printf("cache trace: receipt %d move %s", receipts, move.Quarantine)
+				}
+				if protectActiveReferences && quarantineRequestReferenced(move.RequestID, activeReferences) {
 					protected = true
 					break
 				}
@@ -96,7 +168,7 @@ reclaimLoop:
 					protected = true
 					break
 				}
-				if cachePathReferencedByTasks(path, activeReferences) {
+				if protectActiveReferences && cachePathReferencedByTasks(path, activeReferences) {
 					protected = true
 					break
 				}
@@ -112,12 +184,18 @@ reclaimLoop:
 					protected = true
 					break
 				}
-				digest, hashErr := hashFile(path)
-				if hashErr != nil || !strings.EqualFold(digest, move.SHA256) {
-					protected = true
-					break
+				// The receipt is written immediately after the checked move.
+				// If the quarantined file has not been modified since then, its
+				// bytes are still the hash that moveCheckedFile verified; avoid
+				// rereading dozens of gigabytes on every maintenance pass.
+				if info.ModTime().After(time.Unix(0, receipt.CreatedNS).Add(quarantineMoveSettleWindow)) {
+					digest, hashErr := hashFile(path)
+					if hashErr != nil || !strings.EqualFold(digest, move.SHA256) {
+						protected = true
+						break
+					}
 				}
-				if !move.Sidecar && quarantineMoveNeedsProtection(path, rows, index, keeper) {
+				if !move.Sidecar && quarantineMoveNeedsProtection(path, rowIndex, index, keeper) {
 					protected = true
 					break
 				}
@@ -153,17 +231,19 @@ reclaimLoop:
 		}
 	}
 	pruneEmptyCacheParents(roots, touched)
+	log.Printf("cache: quarantine reclaim finished receipts=%d freed=%d removed=%d", receipts, freed, removed)
 	return freed, removed, nil
 }
 
-func quarantineCacheRoots(roots []string) []string {
-	out := []string{}
-	for _, root := range normalizeAudioCacheRoots(roots) {
-		if strings.EqualFold(filepath.Base(root), "quarantine") {
-			out = append(out, root)
-		}
+func (a *App) quarantineCacheRoots() []string {
+	if a == nil {
+		return nil
 	}
-	return out
+	candidates := []string{}
+	for _, root := range []string{a.Dir, a.workDir()} {
+		candidates = append(candidates, filepath.Join(root, "quarantine"))
+	}
+	return normalizeAudioCacheRoots(candidates)
 }
 
 func entriesForPlaylistIndex(index playlistLibraryIndex) []audiorelease.Entry {
@@ -173,17 +253,20 @@ func entriesForPlaylistIndex(index playlistLibraryIndex) []audiorelease.Entry {
 	}
 	return out
 }
-func mergeKeeperEntry(entries []audiorelease.Entry, keep string) (audiorelease.Entry, bool) {
-	keep = strings.ToLower(filepath.ToSlash(filepath.Clean(filepath.FromSlash(strings.TrimSpace(keep)))))
+func normalizedKeeperPath(path string) string {
+	return strings.ToLower(filepath.ToSlash(filepath.Clean(filepath.FromSlash(strings.TrimSpace(path)))))
+}
+
+func mergeKeeperEntry(entries map[string]audiorelease.Entry, keep string) (audiorelease.Entry, bool) {
+	keep = normalizedKeeperPath(keep)
 	if keep == "" || keep == "." {
 		return audiorelease.Entry{}, false
 	}
-	for _, entry := range entries {
-		if entry.FilePresent && entry.PresenceUnchanged() && strings.EqualFold(filepath.ToSlash(entry.File), keep) {
-			return entry, true
-		}
+	entry, found := entries[keep]
+	if !found || !entry.PresenceUnchanged() {
+		return audiorelease.Entry{}, false
 	}
-	return audiorelease.Entry{}, false
+	return entry, true
 }
 
 func quarantineRequestReferenced(request string, references []string) bool {
@@ -203,10 +286,17 @@ func quarantineRequestReferenced(request string, references []string) bool {
 // match this quarantined recording. The old implementation verified all 4,000+
 // playlist rows before every cache pass, then searched the entire library for
 // each match even though the receipt already names the surviving keeper.
-func quarantineMoveNeedsProtection(path string, rows []playlistTrack, index playlistLibraryIndex, keeper audiorelease.Entry) bool {
+func quarantineMoveNeedsProtection(path string, rows quarantinePlaylistRowIndex, index playlistLibraryIndex, keeper audiorelease.Entry) bool {
+	trace := os.Getenv("MUSICOPS_CACHE_TRACE") == "1"
+	if trace {
+		log.Printf("cache trace: evidence start %s", path)
+	}
 	artists, album, title, duration := playlistRecordingEvidence(path)
+	if trace {
+		log.Printf("cache trace: evidence done title=%q candidates=%d", title, len(rows.candidates(title)))
+	}
 	pathArtist, pathAlbum, pathTitle := trackPathOf(path)
-	for _, row := range rows {
+	for _, row := range rows.candidates(title, pathTitle) {
 		if !quarantineMoveMatchesRow(row, artists, album, title, duration, pathArtist, pathAlbum, pathTitle) {
 			continue
 		}

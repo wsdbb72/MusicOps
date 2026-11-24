@@ -348,6 +348,48 @@ func TestLibraryIndexReportsIncrementalProgress(t *testing.T) {
 	}
 }
 
+func TestLibraryIndexRechecksChangedVisitedSnapshot(t *testing.T) {
+	application := newApp(t)
+	library := t.TempDir()
+	folder := filepath.Join(library, "Artist", "Album")
+	if err := os.MkdirAll(folder, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(folder, "01 Track.flac")
+	body, err := flactags.WriteBytes(syntheticFLAC(t, false), flactags.Tags{Title: "Track", Artist: "Artist", Album: "Album", TrackNumber: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, body, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if added, _, _, err := application.indexLibraryTree(context.Background(), library); err != nil || added != 1 {
+		t.Fatalf("first index: added=%d err=%v", added, err)
+	}
+	if added, _, _, err := application.indexLibraryTree(context.Background(), library); err != nil || added != 0 {
+		t.Fatalf("unchanged index: added=%d err=%v", added, err)
+	}
+	if tracks := application.verifiedPlaylistAlbumTracks(library, "Artist", "Album", "Album"); len(tracks) != 1 {
+		t.Fatalf("unchanged snapshot disappeared: %v", tracks)
+	}
+	if err := os.WriteFile(path, append(body, 1), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	changed := time.Now().Add(2 * time.Second)
+	if err := os.Chtimes(path, changed, changed); err != nil {
+		t.Fatal(err)
+	}
+	if tracks := application.verifiedPlaylistAlbumTracks(library, "Artist", "Album", "Album"); len(tracks) != 0 {
+		t.Fatalf("changed file retained the old snapshot: %v", tracks)
+	}
+	if _, _, _, err := application.indexLibraryTree(context.Background(), library); err != nil {
+		t.Fatal(err)
+	}
+	if tracks := application.verifiedPlaylistAlbumTracks(library, "Artist", "Album", "Album"); len(tracks) != 1 {
+		t.Fatalf("changed snapshot was not refreshed: %v", tracks)
+	}
+}
+
 func TestCatalogBackoffUsesRateLimitOrServerDefaults(t *testing.T) {
 	rateDelay, ok := catalogBackoffDelay(&musicbrainz.RateLimitError{RetryAfter: 3 * time.Minute, StatusCode: http.StatusTooManyRequests})
 	if !ok || rateDelay != 3*time.Minute {

@@ -1129,6 +1129,16 @@ func (a *App) pollDownload(ctx context.Context, execution *scheduler.Execution, 
 		progress := 0.0
 		if len(rows) == 1 {
 			progress = rows[0].Progress * 100
+			if rows[0].Size > 0 {
+				remainingProgress := 1 - rows[0].Progress
+				if remainingProgress < 0 {
+					remainingProgress = 0
+				}
+				if remainingProgress > 1 {
+					remainingProgress = 1
+				}
+				a.updateAudioCacheDownloadRemaining(rec.TaskID, int64(math.Ceil(float64(rows[0].Size)*remainingProgress)))
+			}
 		}
 		if err := execution.Checkpoint(ctx, "download_poll", progress, "正在下载"); err != nil {
 			return scheduler.Outcome{}, false, err

@@ -460,6 +460,28 @@ func IndexSnapshots(engine *dataengine.Engine, items []Existing) (int, error) {
 // history remain visible. Only one full library scan calls this, after the
 // walk has succeeded, and paths outside the configured library are ignored.
 func PruneMissingIndexed(engine *dataengine.Engine, root string) (int, error) {
+	return pruneMissingIndexed(engine, root, func(path string) (bool, error) {
+		_, err := os.Stat(path)
+		if err == nil {
+			return true, nil
+		}
+		if os.IsNotExist(err) {
+			return false, nil
+		}
+		return false, err
+	})
+}
+
+// PruneMissingIndexedPaths uses the exact audio paths visited by a completed
+// directory walk. It avoids a second stat for every indexed track while still
+// deleting records whose stored path was not present in that walk.
+func PruneMissingIndexedPaths(engine *dataengine.Engine, root string, present map[string]bool) (int, error) {
+	return pruneMissingIndexed(engine, root, func(path string) (bool, error) {
+		return present[strings.ToLower(filepath.Clean(path))], nil
+	})
+}
+
+func pruneMissingIndexed(engine *dataengine.Engine, root string, isPresent func(string) (bool, error)) (int, error) {
 	if engine == nil || root == "" || !filepath.IsAbs(root) || root != filepath.Clean(root) {
 		return 0, dataengine.ErrInvalidRequest
 	}
@@ -487,10 +509,12 @@ func PruneMissingIndexed(engine *dataengine.Engine, root string) (int, error) {
 				if rec.Library != root && !inside(root, rec.Path) {
 					continue
 				}
-				if _, statErr := os.Stat(rec.Path); statErr == nil {
+				present, presenceErr := isPresent(rec.Path)
+				if presenceErr != nil {
+					return presenceErr
+				}
+				if present {
 					continue
-				} else if !os.IsNotExist(statErr) {
-					return statErr
 				}
 				group := stale[rec.RequestID]
 				if group == nil {

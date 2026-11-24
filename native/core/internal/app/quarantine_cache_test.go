@@ -17,6 +17,7 @@ import (
 type quarantinePruneFixture struct {
 	quarantine string
 	keeperPath string
+	mergeID    string
 }
 
 func seedQuarantinePruneFixture(t *testing.T, application *App, playlistTitle, quarantineTitle string) quarantinePruneFixture {
@@ -70,6 +71,7 @@ func seedQuarantinePruneFixtureWithKeeperTitle(t *testing.T, application *App, p
 	return quarantinePruneFixture{
 		quarantine: quarantine,
 		keeperPath: filepath.Join(keeper.LibraryDir, filepath.FromSlash(keeper.File)),
+		mergeID:    mergeID,
 	}
 }
 
@@ -129,6 +131,52 @@ func TestQuarantineReclaimStopsOnceTheRequestedBytesAreFreed(t *testing.T) {
 		t.Fatalf("cleanup continued scanning after reaching the reclaim target: %v", err)
 	}
 }
+
+func TestOldSuccessfulQuarantineOutlivesActiveTaskReference(t *testing.T) {
+	application := newApp(t)
+	fixture := seedQuarantinePruneFixture(t, application, "Song", "Song")
+	if _, err := application.tasks.Enqueue("quarantine-old-active", taskrepo.Spec{
+		ID: "quarantine-loser", Command: "fixture", Lane: "download", Priority: 1, CreatedNS: time.Now().UnixNano(),
+	}, []byte(`{}`)); err != nil {
+		t.Fatal(err)
+	}
+	key := mergeReceiptKey(fixture.mergeID)
+	var oldRaw []byte
+	found := false
+	err := application.engine.View(func(v *dataengine.View) error {
+		var readErr error
+		oldRaw, found, readErr = v.Get(key)
+		return readErr
+	})
+	if err != nil || !found {
+		t.Fatalf("read receipt: found=%v err=%v", found, err)
+	}
+	var receipt mergeReceipt
+	if err := json.Unmarshal(oldRaw, &receipt); err != nil {
+		t.Fatal(err)
+	}
+	receipt.CreatedNS = time.Now().Add(-7 * time.Hour).UnixNano()
+	newRaw, err := json.Marshal(receipt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ok, err := application.engine.CompareAndSwap(
+		[]dataengine.Condition{{Key: key, Value: oldRaw}},
+		[]dataengine.Mutation{{Key: key, Value: newRaw}},
+	); err != nil || !ok {
+		t.Fatalf("update receipt: ok=%v err=%v", ok, err)
+	}
+	audioCacheMu.Lock()
+	_, removed, err := application.pruneSuccessfulQuarantineLocked(time.Hour, time.Now(), 1)
+	audioCacheMu.Unlock()
+	if err != nil || removed == 0 {
+		t.Fatalf("removed=%d err=%v", removed, err)
+	}
+	if _, err := os.Stat(fixture.quarantine); !os.IsNotExist(err) {
+		t.Fatalf("old successful quarantine survived: %v", err)
+	}
+}
+
 func TestQuarantineHashOrKeeperMismatchIsPreserved(t *testing.T) {
 	for _, test := range []struct {
 		name   string

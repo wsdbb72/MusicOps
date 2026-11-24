@@ -327,7 +327,7 @@ func TestNeteaseExactEngineRestoresDiscreteArtistsAndCover(t *testing.T) {
 	application := newApp(t)
 	saveNeteaseTestCookie(t, application)
 	cover := solidJPEG(color.RGBA{R: 18, G: 92, B: 140, A: 255})
-	credits := []string{"雪霏岚岚", "早木旋子", "张小她", "倒悬的橘子"}
+	credits := []string{"雪霏岚岚", "早木旋子", "张小她", "倒悬的橘子", "双笙（陈元汐）", "宁采臣丶在唱歌", "A路人", "漆柚", "YUKIri", "warma", "LKs", "洛天依Official", "乐正绫", "LS"}
 	title := "【bilibili音乐】一话一世界 《一花依世界》方言合唱版"
 	audio := oneSecondFLAC(t, strings.Join(credits, " / "), title)
 	netease := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

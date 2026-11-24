@@ -54,25 +54,29 @@ func (a *App) indexLibraryTreeWithProgress(ctx context.Context, root string, pro
 	if !info.IsDir() {
 		return 0, 0, 0, fs.ErrInvalid
 	}
-	existing, err := audiorelease.List(a.engine)
+	if progress != nil {
+		progress(0, "正在读取现有索引")
+	}
+	// Presence is reconciled by the WalkDir below. Loading the catalogue with
+	// List here statted every file before this function could emit one progress
+	// update, which made a 75k-track library appear frozen for minutes. Keep the
+	// stored metadata snapshot and compare it only when the walk reaches that
+	// path.
+	existing, err := audiorelease.ListIndexed(a.engine)
 	if err != nil {
 		return 0, 0, 0, err
 	}
 	seen := map[string]bool{}
 	seenPaths := map[string]bool{}
-	stale := map[string]bool{}
+	presentPaths := map[string]bool{}
+	byID := make(map[string]audiorelease.Entry, len(existing))
 	for _, entry := range existing {
 		seen[entry.RequestID] = true
+		byID[entry.RequestID] = entry
 		if entry.FilePresent {
 			path := filepath.Clean(a.entryFilePath(entry))
 			seenPaths[strings.ToLower(path)] = true
-			if entry.MetadataSnapshotChanged() && entry.RequestID == libraryFileID(path) {
-				stale[entry.RequestID] = true
-			}
 		}
-	}
-	if progress != nil {
-		progress(0, "正在读取现有索引")
 	}
 	const indexBatchSize = 128
 	checked := 0
@@ -104,6 +108,7 @@ func (a *App) indexLibraryTreeWithProgress(ctx context.Context, root string, pro
 		if !entry.Type().IsRegular() {
 			return nil
 		}
+		presentPaths[strings.ToLower(filepath.Clean(path))] = true
 		checked++
 		if progress != nil && checked%250 == 0 {
 			progress(checked, path)
@@ -114,7 +119,15 @@ func (a *App) indexLibraryTreeWithProgress(ctx context.Context, root string, pro
 		}
 		track := trackNumberFromName(filepath.Base(path))
 		requestID := libraryFileID(abs)
-		if !stale[requestID] && (seen[requestID] || seenPaths[strings.ToLower(abs)]) {
+		metadataChanged := false
+		if prior, ok := byID[requestID]; ok && prior.SHA256 == "" {
+			info, infoErr := entry.Info()
+			if infoErr != nil {
+				return infoErr
+			}
+			metadataChanged = !prior.IndexedStatMatches(info.Size(), info.ModTime().UnixNano())
+		}
+		if !metadataChanged && (seen[requestID] || seenPaths[strings.ToLower(abs)]) {
 			kept++
 			return nil
 		}
@@ -134,7 +147,7 @@ func (a *App) indexLibraryTreeWithProgress(ctx context.Context, root string, pro
 		progress(checked, "正在清理已不存在的索引")
 	}
 	if err == nil {
-		pruned, err = audiorelease.PruneMissingIndexed(a.engine, filepath.Clean(root))
+		pruned, err = audiorelease.PruneMissingIndexedPaths(a.engine, filepath.Clean(root), presentPaths)
 	}
 	if err == nil && progress != nil {
 		progress(checked, "索引完成")

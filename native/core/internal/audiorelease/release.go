@@ -862,6 +862,13 @@ type Entry struct {
 // that makes future presence checks O(1) instead of a full-file hash.
 func (e Entry) HasIndexedStat() bool { return e.hasIndexedStat }
 
+// IndexedStatMatches compares a fresh stat result with the snapshot stored
+// when this library record was indexed. It lets incremental reindex validate
+// only the files it visits instead of statting the entire catalogue up front.
+func (e Entry) IndexedStatMatches(size, modifiedNS int64) bool {
+	return e.hasIndexedStat && e.indexedSize == size && e.indexedModifiedNS == modifiedNS
+}
+
 // MetadataSnapshotChanged reports a stale local index snapshot observed by List.
 // Published receipts with a verified digest are excluded.
 func (e Entry) MetadataSnapshotChanged() bool { return e.metadataChanged }

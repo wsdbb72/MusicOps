@@ -78,7 +78,7 @@ func TestStreamEngineAcceptsOnlyValidatedAudio(t *testing.T) {
 }
 
 func TestStreamEngineWritesSlashSeparatedCreditsAsDiscreteArtists(t *testing.T) {
-	const credits = "雪霏岚岚 / 早木旋子 / 张小她 / 倒悬的橘子"
+	const credits = "雪霏岚岚 / 早木旋子 / 张小她 / 倒悬的橘子 / 双笙（陈元汐） / 宁采臣丶在唱歌 / A路人 / 漆柚 / YUKIri / warma / LKs / 洛天依Official / 乐正绫 / LS"
 	const title = "【bilibili音乐】一话一世界 《一花依世界》方言合唱版"
 	audio := oneSecondFLAC(t, credits, title)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -114,7 +114,7 @@ func TestStreamEngineWritesSlashSeparatedCreditsAsDiscreteArtists(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := []string{"雪霏岚岚", "早木旋子", "张小她", "倒悬的橘子"}
+	want := []string{"雪霏岚岚", "早木旋子", "张小她", "倒悬的橘子", "双笙（陈元汐）", "宁采臣丶在唱歌", "A路人", "漆柚", "YUKIri", "warma", "LKs", "洛天依Official", "乐正绫", "LS"}
 	if len(tags.Artists) != len(want) || strings.Join(tags.Artists, "\x00") != strings.Join(want, "\x00") {
 		t.Fatalf("artists=%q want discrete %q", tags.Artists, want)
 	}

@@ -1050,16 +1050,12 @@ func (a *App) quarantineFile(receipt *mergeReceipt, file duplicateFile, quaranti
 	if err != nil || !info.Mode().IsRegular() {
 		return errors.Join(errors.New("quarantine source is not a regular file"), err)
 	}
-	// Copying into quarantine adds the loser to the managed SSD footprint
-	// before the library source is removed. Reserve that peak through the same
-	// global 8 GiB quota as stream downloads; otherwise whole-library dedupe
-	// could keep growing quarantine while every other write was correctly
-	// paused by the cache limit.
-	release, err := a.reserveAudioCache(quarantineRoot, info.Size())
-	if err != nil {
-		return fmt.Errorf("quarantine cache limit: %w", err)
+	// Quarantine is recoverable dedupe history, not active download cache. It
+	// is outside the 8 GiB admission quota, but the copy still must leave the
+	// configured disk reserve intact.
+	if err := audioCacheDiskHeadroom(filepath.Dir(quarantineRoot), 2*info.Size()+65536); err != nil {
+		return fmt.Errorf("quarantine copy headroom: %w", err)
 	}
-	defer release()
 	dest, err := duplicateQuarantineDestination(quarantineRoot, file)
 	if err != nil {
 		return err

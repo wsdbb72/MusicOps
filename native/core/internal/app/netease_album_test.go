@@ -473,6 +473,13 @@ func TestIdentifyRecoversLegacyNeteaseIdentityWithoutManualReview(t *testing.T) 
 	}
 }
 
+func TestSplitPlaylistArtistsPreservesCompactSlashNames(t *testing.T) {
+	got := splitPlaylistArtists("AC/DC / Florence + the Machine")
+	if len(got) != 2 || got[0] != "AC/DC" || got[1] != "Florence + the Machine" {
+		t.Fatalf("splitPlaylistArtists=%q", got)
+	}
+}
+
 func TestPlaylistArtistsMatchSplitsVorbisAndSourceSeparators(t *testing.T) {
 	tests := []struct {
 		name string

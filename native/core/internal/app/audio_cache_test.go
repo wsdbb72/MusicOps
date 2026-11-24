@@ -9,6 +9,8 @@ import (
 	"github.com/wsdbb72/MusicOps/native/core/internal/taskrepo"
 	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"testing"
 	"time"
 )
@@ -37,7 +39,7 @@ func TestAudioCacheUsageCountsAudioStagingButNotManifests(t *testing.T) {
 	}
 }
 
-func TestAudioCacheRootsCountLegacyAndConfiguredTreesOnce(t *testing.T) {
+func TestAudioCacheRootsCountLegacyAndConfiguredActiveTreesOnce(t *testing.T) {
 	application := newApp(t)
 	work := t.TempDir()
 	if _, err := application.saveLibrarySettings(librarySettings{WorkDir: work}); err != nil {
@@ -45,14 +47,12 @@ func TestAudioCacheRootsCountLegacyAndConfiguredTreesOnce(t *testing.T) {
 	}
 	roots := application.audioCacheRoots(filepath.Join(work, "incoming"))
 	want := map[string]bool{
-		filepath.Join(application.Dir, "incoming"):   false,
-		filepath.Join(application.Dir, "downloads"):  false,
-		filepath.Join(application.Dir, "seeds"):      false,
-		filepath.Join(application.Dir, "quarantine"): false,
-		filepath.Join(work, "incoming"):              false,
-		filepath.Join(work, "downloads"):             false,
-		filepath.Join(work, "seeds"):                 false,
-		filepath.Join(work, "quarantine"):            false,
+		filepath.Join(application.Dir, "incoming"):  false,
+		filepath.Join(application.Dir, "downloads"): false,
+		filepath.Join(application.Dir, "seeds"):     false,
+		filepath.Join(work, "incoming"):             false,
+		filepath.Join(work, "downloads"):            false,
+		filepath.Join(work, "seeds"):                false,
 	}
 	for _, root := range roots {
 		key := filepath.Clean(root)
@@ -229,7 +229,7 @@ func TestReserveAudioCacheUsesOneGlobalQuotaAcrossLegacyAndWorkTrees(t *testing.
 	write(legacy, 600)
 	write(current, 300)
 	write(quarantine, 200)
-	t.Setenv("MUSICOPS_AUDIO_CACHE_BYTES", "1000")
+	t.Setenv("MUSICOPS_AUDIO_CACHE_BYTES", "800")
 	if release, err := application.reserveAudioCache(filepath.Join(work, "incoming"), 100); err == nil {
 		release()
 		t.Fatal("global cache quota ignored files in another managed root")
@@ -243,7 +243,7 @@ func TestReserveAudioCacheUsesOneGlobalQuotaAcrossLegacyAndWorkTrees(t *testing.
 	}
 }
 
-func TestQuarantineCopyHonorsGlobalCacheQuotaBeforeMoving(t *testing.T) {
+func TestQuarantineCopyIsRecoveryStorageOutsideActiveCacheQuota(t *testing.T) {
 	application := newApp(t)
 	library := t.TempDir()
 	relative := filepath.Join("Artist", "Album", "01 Song.flac")
@@ -261,14 +261,14 @@ func TestQuarantineCopyHonorsGlobalCacheQuotaBeforeMoving(t *testing.T) {
 	err := application.quarantineFile(&receipt, duplicateFile{
 		RequestID: "source-copy", File: relative, LibraryDir: library, SHA256: hex.EncodeToString(sum[:]),
 	}, filepath.Join(application.Dir, "quarantine", "merge-limit"))
-	if err == nil || !isTemporaryAudioCacheError(err) {
-		t.Fatalf("quarantine over quota error=%T %v", err, err)
+	if err != nil {
+		t.Fatalf("recovery quarantine was blocked by the active download-cache quota: %v", err)
 	}
-	if _, err := os.Stat(source); err != nil {
-		t.Fatalf("source moved despite the cache limit: %v", err)
+	if _, err := os.Stat(source); !os.IsNotExist(err) {
+		t.Fatalf("source was not moved into recovery quarantine: %v", err)
 	}
-	if len(receipt.Moved) != 0 {
-		t.Fatalf("partial quarantine receipt recorded: %+v", receipt.Moved)
+	if len(receipt.Moved) != 1 {
+		t.Fatalf("quarantine receipt was not recorded: %+v", receipt.Moved)
 	}
 }
 
@@ -354,8 +354,31 @@ func TestAudioCacheReclaimNeedTargetsHeadroomBelowTheLimit(t *testing.T) {
 	if got := audioCacheReclaimNeed(maxInt, maxInt); got <= 0 || got > maxInt {
 		t.Fatalf("near-int64 need overflowed: got %d", got)
 	}
-	if got := audioCacheReclaimNeed(2*limit, limit); got != limit {
-		t.Fatalf("need above used window = %d, want bounded %d", got, limit)
+	if got := audioCacheReclaimNeed(2*limit, limit); got != 3*limit/2 {
+		t.Fatalf("need at twice the limit = %d, want half-quota headroom %d", got, 3*limit/2)
+	}
+}
+
+func TestAudioCacheQuotaExcludesRecoveryQuarantine(t *testing.T) {
+	application := newApp(t)
+	quarantine := filepath.Join(application.Dir, "quarantine", "merge-test", "track.flac")
+	if err := os.MkdirAll(filepath.Dir(quarantine), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(quarantine, make([]byte, 1024), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	used, _, roots, err := application.audioCacheUsageSnapshot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if used != 0 {
+		t.Fatalf("recovery quarantine was counted as active cache: used=%d", used)
+	}
+	for _, root := range roots {
+		if strings.EqualFold(filepath.Base(root), "quarantine") {
+			t.Fatalf("active cache roots include recovery quarantine: %v", roots)
+		}
 	}
 }
 
@@ -431,6 +454,115 @@ func TestAudioCacheTorrentReservationsPreventConcurrentOversubscription(t *testi
 		t.Fatalf("reservation did not become available after release: %v", err)
 	}
 }
+func TestAudioCacheTorrentReservationDoesNotCountDownloadedBytesTwice(t *testing.T) {
+	application := newApp(t)
+	firstDir := t.TempDir()
+	secondDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(firstDir, "partial.bin"), make([]byte, 250), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("MUSICOPS_AUDIO_CACHE_BYTES", "1000")
+	t.Cleanup(func() {
+		application.clearAudioCacheDownload("first")
+		application.clearAudioCacheDownload("second")
+	})
+	if err := application.reserveAudioCacheDownload("first", firstDir, 500); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(firstDir, "progress.bin"), make([]byte, 350), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	application.updateAudioCacheDownloadRemaining("first", 150)
+	if err := application.reserveAudioCacheDownload("second", secondDir, 100); err != nil {
+		t.Fatalf("downloaded bytes were counted both as usage and remaining reservation: %v", err)
+	}
+}
+
+func TestAudioCacheAdmissionReclaimsRecentPublishedCopy(t *testing.T) {
+	application := newApp(t)
+	incoming := filepath.Join(application.Dir, "incoming")
+	sourceWAV := filepath.Join(t.TempDir(), "recent-cache-source.wav")
+	sourceFLAC := filepath.Join(incoming, "recent-cache-source.flac")
+	writeToneWAV(t, sourceWAV, 440)
+	writeFLACFromWAV(t, sourceWAV, sourceFLAC)
+	releaseLibraryFile(t, application, filepath.Base(sourceFLAC), "recent-cache-root", "Artist", "First Album", "Recent Cache Song", 1)
+	entries, err := audiorelease.List(application.engine)
+	if err != nil || len(entries) == 0 {
+		t.Fatal(entries, err)
+	}
+	body, err := os.ReadFile(filepath.Join(entries[0].LibraryDir, filepath.FromSlash(entries[0].File)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(sourceFLAC, filepath.Join(t.TempDir(), "source-outside-cache.flac")); err != nil {
+		t.Fatal(err)
+	}
+	cacheCopy := filepath.Join(incoming, "stream-recent-published.flac")
+	if err := os.WriteFile(cacheCopy, body, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("MUSICOPS_AUDIO_CACHE_BYTES", strconv.Itoa(len(body)+32))
+	release, err := application.reserveAudioCache(incoming, 64)
+	if err != nil {
+		t.Fatalf("capacity pressure did not reclaim a recent published copy: %v", err)
+	}
+	defer release()
+	if _, err := os.Stat(cacheCopy); !os.IsNotExist(err) {
+		t.Fatalf("recent published cache copy survived pressure admission: %v", err)
+	}
+}
+
+func TestExpiredDownloadCachePrunesOnlyCompleteInactiveTaskTree(t *testing.T) {
+	application := newApp(t)
+	downloads := application.workPath("downloads")
+	seeds := application.workPath("seeds")
+	oldDir := filepath.Join(downloads, "process-old-task")
+	recentDir := filepath.Join(seeds, "process-recent-task")
+	protectedDir := filepath.Join(seeds, "process-protected-task")
+	abandonedDir := filepath.Join(seeds, "process-abandoned-task")
+	for _, dir := range []string{oldDir, recentDir, protectedDir, abandonedDir} {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, "audio.flac"), make([]byte, 400), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	now := time.Now()
+	old := now.Add(-2 * time.Hour)
+	for _, dir := range []string{oldDir, protectedDir} {
+		path := filepath.Join(dir, "audio.flac")
+		if err := os.Chtimes(path, old, old); err != nil {
+			t.Fatal(err)
+		}
+	}
+	abandoned := now.Add(-80 * time.Hour)
+	if err := os.Chtimes(filepath.Join(abandonedDir, "audio.flac"), abandoned, abandoned); err != nil {
+		t.Fatal(err)
+	}
+	audioCacheMu.Lock()
+	freed, files, err := application.pruneExpiredDownloadCacheLocked([]string{downloads, seeds}, time.Hour, now, 800, func(path string) bool {
+		return samePath(path, protectedDir) || samePath(path, abandonedDir)
+	})
+	audioCacheMu.Unlock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if freed != 800 || files != 2 {
+		t.Fatalf("freed=%d files=%d", freed, files)
+	}
+	for _, dir := range []string{oldDir, abandonedDir} {
+		if _, err := os.Stat(dir); !os.IsNotExist(err) {
+			t.Fatalf("expired task cache %s survived: %v", dir, err)
+		}
+	}
+	for _, dir := range []string{recentDir, protectedDir} {
+		if _, err := os.Stat(dir); err != nil {
+			t.Fatalf("protected cache %s was removed: %v", dir, err)
+		}
+	}
+}
+
 func TestAudioCacheCapacityClassificationDoesNotCatchUnrelatedErrors(t *testing.T) {
 	if !isTemporaryAudioCacheError(&audioCacheCapacityError{reason: "full"}) {
 		t.Fatal("capacity error was not temporary")
@@ -699,7 +831,7 @@ func TestActiveTaskProtectsStaleNeteaseStagingFromMaintenancePrune(t *testing.T)
 	}, []byte(`{}`)); err != nil {
 		t.Fatal(err)
 	}
-	t.Setenv("MUSICOPS_AUDIO_CACHE_BYTES", "1000")
+	t.Setenv("MUSICOPS_AUDIO_CACHE_BYTES", "800")
 	freed, files, err := application.pruneAudioCacheAll(time.Hour, now)
 	if err != nil || freed != 0 || files != 0 {
 		t.Fatalf("freed=%d files=%d err=%v", freed, files, err)

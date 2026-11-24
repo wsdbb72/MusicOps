@@ -1017,7 +1017,7 @@ func playlistArtistFallbackMatches(expected, pathArtist string) bool {
 		return false
 	}
 	normalized := strings.NewReplacer(
-		",", "/", "，", "/", "&", "/", "＆", "/", "+", "/", "＋", "/", " and ", "/", " & ", "/",
+		",", " / ", "，", " / ", "&", " / ", "＆", " / ", "+", " / ", "＋", " / ", " and ", " / ", " & ", " / ",
 	).Replace(pathArtist)
 	return playlistArtistsMatch(want, splitPlaylistArtists(normalized))
 }

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -661,6 +662,28 @@ func TestLoginFailure(t *testing.T) {
 	// A failed login must not authenticate later calls.
 	if _, _, err := client.Version(context.Background()); !errors.Is(err, ErrNotAuthenticated) {
 		t.Fatalf("Version after failed login = %v, want ErrNotAuthenticated", err)
+	}
+}
+
+func TestLoginClassifiesARefusedConnectionAsUnavailable(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	address := listener.Addr().String()
+	if err := listener.Close(); err != nil {
+		t.Fatal(err)
+	}
+	client, err := NewClient(Config{
+		BaseURL: "http://" + address, Username: "user", Password: "pass",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := client.Login(ctx); !errors.Is(err, ErrUnavailable) {
+		t.Fatalf("login error = %v, want ErrUnavailable", err)
 	}
 }
 

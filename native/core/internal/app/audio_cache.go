@@ -42,6 +42,21 @@ func audioCacheLimitBytes() int64 {
 	return defaultAudioCacheBytes
 }
 
+func audioCacheReclaimNeed(used, limit int64) int64 {
+	if limit <= 0 {
+		return 0
+	}
+	target := limit - limit/4
+	if used <= target {
+		return 0
+	}
+	need := used - target + audioCacheTrimTargetBytes
+	if need > limit {
+		return limit
+	}
+	return need
+}
+
 func (a *App) audioCacheUsageSnapshot() (used, limit int64, roots []string, err error) {
 	roots = a.audioCacheRoots("")
 	audioCacheMu.Lock()
@@ -129,7 +144,7 @@ func (a *App) reserveAudioCache(dir string, bytes int64) (func(), error) {
 	}
 	roots := a.audioCacheRoots(dir)
 	return reserveAudioCacheRootsProtected(roots, dir, bytes, func(need int64, now time.Time) (int64, int, error) {
-		return a.prunePublishedAudioCacheRootsLocked(roots, audioCacheStaleAfter, now)
+		return a.prunePublishedAudioCacheRootsLocked(roots, audioCacheStaleAfter, now, need)
 	}, func(path string) bool { return cachePathReferencedByTasks(path, references) })
 }
 
@@ -146,7 +161,7 @@ func reserveAudioCacheRootsProtected(roots []string, writeDir string, bytes int6
 	roots = normalizeAudioCacheRoots(roots)
 	used, err := audioCacheUsageRoots(roots)
 	if err == nil && bytes > 0 {
-		target := limit * 3 / 4
+		target := limit - limit/4
 		need := int64(0)
 		if used > target {
 			need = used - target + audioCacheTrimTargetBytes
@@ -340,15 +355,19 @@ func pruneStaleAudioCacheRootsWithCountProtected(roots []string, need int64, max
 	if need <= 0 {
 		return 0, 0, nil
 	}
-	type candidate struct {
-		path string
-		size int64
-		mod  time.Time
-	}
-	var candidates []candidate
+	roots = normalizeAudioCacheRoots(roots)
 	seen := map[string]struct{}{}
-	for _, root := range normalizeAudioCacheRoots(roots) {
-		err := filepath.WalkDir(root, func(path string, entry fs.DirEntry, err error) error {
+	touched := map[string]struct{}{}
+	var freed int64
+	removed := 0
+	for _, root := range roots {
+		if freed >= need {
+			break
+		}
+		walkErr := filepath.WalkDir(root, func(path string, entry fs.DirEntry, err error) error {
+			if freed >= need {
+				return fs.SkipAll
+			}
 			if err != nil {
 				if os.IsNotExist(err) {
 					return nil
@@ -376,66 +395,62 @@ func pruneStaleAudioCacheRootsWithCountProtected(roots []string, need int64, max
 				return nil
 			}
 			seen[key] = struct{}{}
-			candidates = append(candidates, candidate{path: path, size: info.Size(), mod: info.ModTime()})
+			if removeErr := os.Remove(path); removeErr != nil {
+				if os.IsNotExist(removeErr) {
+					return nil
+				}
+				return removeErr
+			}
+			freed += info.Size()
+			removed++
+			touched[filepath.Dir(path)] = struct{}{}
+			if freed >= need {
+				return fs.SkipAll
+			}
 			return nil
 		})
-		if err != nil && !os.IsNotExist(err) {
-			return 0, 0, err
+		if walkErr != nil && !errors.Is(walkErr, fs.SkipAll) && !os.IsNotExist(walkErr) {
+			return freed, removed, walkErr
 		}
 	}
-	sort.Slice(candidates, func(i, j int) bool { return candidates[i].mod.Before(candidates[j].mod) })
-	var freed int64
-	removed := 0
-	for _, item := range candidates {
-		if freed >= need {
-			break
-		}
-		if err := os.Remove(item.path); err != nil && !os.IsNotExist(err) {
-			return freed, removed, err
-		}
-		freed += item.size
-		removed++
-	}
-	pruneEmptyQuarantineDirs(roots)
+	pruneEmptyCacheParents(roots, touched)
 	return freed, removed, nil
 }
 
-// pruneEmptyQuarantineDirs only removes directories; it never deletes a
-// quarantined recording or sidecar. Old failed merges used to leave these
-// directories behind even after every file had rolled back successfully.
-// pruneEmptyCacheDirs removes directories emptied by a safe cache cleanup. It
-// never removes a cache root itself and never removes a non-empty directory.
-func pruneEmptyCacheDirs(roots []string) {
-	for _, root := range normalizeAudioCacheRoots(roots) {
-		var directories []string
-		_ = filepath.WalkDir(root, func(path string, entry fs.DirEntry, err error) error {
-			if err != nil {
-				if os.IsNotExist(err) {
-					return nil
+// pruneEmptyCacheParents removes only directories touched by this reclaim pass.
+// It deliberately avoids rescanning an unrelated cache tree after the reclaim
+// target has already been reached.
+func pruneEmptyCacheParents(roots []string, touched map[string]struct{}) {
+	roots = normalizeAudioCacheRoots(roots)
+	for dir := range touched {
+		dir = filepath.Clean(dir)
+		for {
+			owner := ""
+			for _, root := range roots {
+				if dir != root && !insideDir(root, dir) {
+					continue
 				}
-				return err
+				if len(root) > len(owner) {
+					owner = root
+				}
 			}
-			if entry.IsDir() && path != root {
-				directories = append(directories, path)
+			if owner == "" {
+				break
 			}
-			return nil
-		})
-		sort.Slice(directories, func(i, j int) bool {
-			return len(directories[i]) > len(directories[j])
-		})
-		for _, path := range directories {
-			_ = os.Remove(path)
+			sameRoot := dir == owner
+			if runtime.GOOS == "windows" {
+				sameRoot = strings.EqualFold(dir, owner)
+			}
+			if sameRoot || os.Remove(dir) != nil {
+				break
+			}
+			parent := filepath.Dir(dir)
+			if parent == dir {
+				break
+			}
+			dir = parent
 		}
 	}
-}
-func pruneEmptyQuarantineDirs(roots []string) {
-	quarantine := []string{}
-	for _, root := range roots {
-		if strings.EqualFold(filepath.Base(filepath.Clean(root)), "quarantine") {
-			quarantine = append(quarantine, root)
-		}
-	}
-	pruneEmptyCacheDirs(quarantine)
 }
 
 // prunePublishedAudioCache removes a managed cache copy only when a different,
@@ -448,7 +463,7 @@ func (a *App) prunePublishedStreamAudioCache(dir string, maxAge time.Duration, n
 	}
 	audioCacheMu.Lock()
 	defer audioCacheMu.Unlock()
-	return a.prunePublishedAudioCacheRootsLocked([]string{dir}, maxAge, now)
+	return a.prunePublishedAudioCacheRootsLocked([]string{dir}, maxAge, now, 0)
 }
 
 // prunePublishedStreamAudioCacheAll scans both the current work tree and the
@@ -460,10 +475,10 @@ func (a *App) prunePublishedStreamAudioCacheAll(maxAge time.Duration, now time.T
 	}
 	audioCacheMu.Lock()
 	defer audioCacheMu.Unlock()
-	return a.prunePublishedAudioCacheRootsLocked(a.audioCacheRoots(""), maxAge, now)
+	return a.prunePublishedAudioCacheRootsLocked(a.audioCacheRoots(""), maxAge, now, 0)
 }
 
-// pruneAudioCacheAll performs both safe passes under one cache lock and returns
+// pruneAudioCacheAll performs bounded safe passes under one cache lock and returns
 // the combined reclaim count. Stale NetEase/transcode staging is reproducible;
 // all other managed copies are removed only after their exact bytes are present
 // in the indexed library.
@@ -479,12 +494,9 @@ func (a *App) pruneAudioCacheAll(maxAge time.Duration, now time.Time) (int64, in
 		return 0, 0, err
 	}
 	limit := audioCacheLimitBytes()
-	need := int64(0)
-	if target := limit * 3 / 4; used > target {
-		need = used - target + audioCacheTrimTargetBytes
-		if need > limit {
-			need = limit
-		}
+	need := audioCacheReclaimNeed(used, limit)
+	if need <= 0 {
+		return 0, 0, nil
 	}
 	activeReferences, err := a.activeAudioCacheReferences()
 	if err != nil {
@@ -496,15 +508,31 @@ func (a *App) pruneAudioCacheAll(maxAge time.Duration, now time.Time) (int64, in
 	if err != nil {
 		return staleBytes, staleFiles, err
 	}
-	publishedBytes, publishedFiles, err := a.prunePublishedAudioCacheRootsLocked(roots, maxAge, now)
+	used, err = audioCacheUsageRoots(roots)
 	if err != nil {
-		return staleBytes + publishedBytes, staleFiles + publishedFiles, err
+		return staleBytes, staleFiles, err
 	}
-	quarantineBytes, quarantineFiles, err := a.pruneSuccessfulQuarantineLocked(maxAge, now)
+	need = audioCacheReclaimNeed(used, limit)
+	publishedBytes, publishedFiles := int64(0), 0
+	if need > 0 {
+		publishedBytes, publishedFiles, err = a.prunePublishedAudioCacheRootsLocked(roots, maxAge, now, need)
+		if err != nil {
+			return staleBytes + publishedBytes, staleFiles + publishedFiles, err
+		}
+		used, err = audioCacheUsageRoots(roots)
+		if err != nil {
+			return staleBytes + publishedBytes, staleFiles + publishedFiles, err
+		}
+		need = audioCacheReclaimNeed(used, limit)
+	}
+	quarantineBytes, quarantineFiles := int64(0), 0
+	if need > 0 {
+		quarantineBytes, quarantineFiles, err = a.pruneSuccessfulQuarantineLocked(maxAge, now, need)
+	}
 	return staleBytes + publishedBytes + quarantineBytes, staleFiles + publishedFiles + quarantineFiles, err
 }
 
-func (a *App) prunePublishedAudioCacheRootsLocked(roots []string, maxAge time.Duration, now time.Time) (int64, int, error) {
+func (a *App) prunePublishedAudioCacheRootsLocked(roots []string, maxAge time.Duration, now time.Time, need int64) (int64, int, error) {
 	if a == nil || a.engine == nil {
 		return 0, 0, nil
 	}
@@ -527,21 +555,23 @@ func (a *App) prunePublishedAudioCacheRootsLocked(roots []string, maxAge time.Du
 		}
 	}
 	roots = normalizeAudioCacheRoots(roots)
-	type candidate struct {
-		path string
-		root string
-		size int64
-		mod  time.Time
-	}
-	var candidates []candidate
 	seen := map[string]struct{}{}
+	touched := map[string]struct{}{}
+	var freed int64
+	removed := 0
 	for _, root := range roots {
+		if need > 0 && freed >= need {
+			break
+		}
 		if strings.EqualFold(filepath.Base(root), "quarantine") {
 			// Non-empty quarantine files remain recoverable until the merge
 			// receipt and retention policy proves otherwise.
 			continue
 		}
-		err = filepath.WalkDir(root, func(path string, entry fs.DirEntry, walkErr error) error {
+		walkErr := filepath.WalkDir(root, func(path string, entry fs.DirEntry, walkErr error) error {
+			if need > 0 && freed >= need {
+				return fs.SkipAll
+			}
 			if walkErr != nil {
 				if os.IsNotExist(walkErr) {
 					return nil
@@ -569,41 +599,43 @@ func (a *App) prunePublishedAudioCacheRootsLocked(roots []string, maxAge time.Du
 				return nil
 			}
 			seen[key] = struct{}{}
-			candidates = append(candidates, candidate{path: path, root: root, size: info.Size(), mod: info.ModTime()})
+			digest, hashErr := hashFile(path)
+			if hashErr != nil {
+				return nil
+			}
+			published := false
+			for _, entry := range bySHA[digest] {
+				if a.libraryAddsDifferentPublishedCopy(entry, path, roots) {
+					published = true
+					break
+				}
+			}
+			if !published {
+				return nil
+			}
+			latest, statErr := os.Lstat(path)
+			if statErr != nil || !latest.Mode().IsRegular() || latest.Size() != info.Size() || !latest.ModTime().Equal(info.ModTime()) {
+				return nil
+			}
+			if removeErr := os.Remove(path); removeErr != nil {
+				if os.IsNotExist(removeErr) {
+					return nil
+				}
+				return removeErr
+			}
+			freed += info.Size()
+			removed++
+			touched[filepath.Dir(path)] = struct{}{}
+			if need > 0 && freed >= need {
+				return fs.SkipAll
+			}
 			return nil
 		})
-		if err != nil && !os.IsNotExist(err) {
-			return 0, 0, err
+		if walkErr != nil && !errors.Is(walkErr, fs.SkipAll) && !os.IsNotExist(walkErr) {
+			return freed, removed, walkErr
 		}
 	}
-	var freed int64
-	removed := 0
-	for _, item := range candidates {
-		digest, hashErr := hashFile(item.path)
-		if hashErr != nil {
-			continue
-		}
-		published := false
-		for _, entry := range bySHA[digest] {
-			if a.libraryAddsDifferentPublishedCopy(entry, item.path, roots) {
-				published = true
-				break
-			}
-		}
-		if !published {
-			continue
-		}
-		latest, statErr := os.Lstat(item.path)
-		if statErr != nil || !latest.Mode().IsRegular() || latest.Size() != item.size || !latest.ModTime().Equal(item.mod) {
-			continue
-		}
-		if removeErr := os.Remove(item.path); removeErr != nil && !os.IsNotExist(removeErr) {
-			return freed, removed, removeErr
-		}
-		freed += item.size
-		removed++
-	}
-	pruneEmptyCacheDirs(roots)
+	pruneEmptyCacheParents(roots, touched)
 	return freed, removed, nil
 }
 
@@ -641,9 +673,8 @@ func (a *App) libraryAddsDifferentPublishedCopy(entry audiorelease.Entry, cacheP
 }
 
 // activeQBittorrentSeedRoots protects files that the configured qBittorrent
-// client is still using. A stopped client cannot be seeding, so a connection
-// failure is treated as "no active root"; an authentication or API-contract
-// failure is not silently treated as safe and aborts the cache pass.
+// client is still using. A refused connection proves the client is stopped and
+// therefore cannot seed a local file; any uncertain failure aborts the pass.
 func (a *App) activeQBittorrentSeedRoots() ([]string, error) {
 	if a == nil {
 		return nil, nil
@@ -666,12 +697,12 @@ func (a *App) activeQBittorrentSeedRoots() ([]string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	if err := client.Login(ctx); err != nil {
-		if errors.Is(err, qbittorrent.ErrAuthFailed) || errors.Is(err, qbittorrent.ErrBanned) {
-			return nil, err
+		if errors.Is(err, qbittorrent.ErrUnavailable) {
+			// Only a refused connection proves the configured client is stopped.
+			// A timeout or ambiguous transport failure must block cache deletion.
+			return nil, nil
 		}
-		// A refused connection means the client is not running and therefore
-		// cannot be seeding these local files.
-		return nil, nil
+		return nil, err
 	}
 	rows, err := client.InfoByTag(ctx, qbittorrent.ProjectTag)
 	if err != nil {

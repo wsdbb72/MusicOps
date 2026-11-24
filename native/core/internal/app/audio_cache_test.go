@@ -116,7 +116,7 @@ func TestAudioCacheCleanupOnlyRemovesEmptyQuarantineDirectories(t *testing.T) {
 	if err := os.WriteFile(keep, []byte("unique"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	pruneEmptyQuarantineDirs([]string{filepath.Join(root, "quarantine")})
+	pruneEmptyCacheParents([]string{filepath.Join(root, "quarantine")}, map[string]struct{}{empty: {}})
 	if _, err := os.Stat(filepath.Join(root, "quarantine", "merge-empty")); !os.IsNotExist(err) {
 		t.Fatalf("empty quarantine tree survived: %v", err)
 	}
@@ -342,6 +342,69 @@ func TestAutomationCacheCleanupScansLegacyAndConfiguredRoots(t *testing.T) {
 	}
 }
 
+func TestAudioCacheReclaimNeedTargetsHeadroomBelowTheLimit(t *testing.T) {
+	const limit = int64(1 << 30)
+	if got := audioCacheReclaimNeed(700<<20, limit); got != 0 {
+		t.Fatalf("need below target = %d, want 0", got)
+	}
+	if got, want := audioCacheReclaimNeed(900<<20, limit), int64(388<<20); got != want {
+		t.Fatalf("need at high-water mark = %d, want %d", got, want)
+	}
+	maxInt := int64(^uint64(0) >> 1)
+	if got := audioCacheReclaimNeed(maxInt, maxInt); got <= 0 || got > maxInt {
+		t.Fatalf("near-int64 need overflowed: got %d", got)
+	}
+	if got := audioCacheReclaimNeed(2*limit, limit); got != limit {
+		t.Fatalf("need above used window = %d, want bounded %d", got, limit)
+	}
+}
+
+func TestPublishedCacheReclaimStopsAtTheRequestedNeed(t *testing.T) {
+	application := newApp(t)
+	incoming := application.workPath("incoming")
+	sourceWAV := filepath.Join(incoming, "bounded-cache-source.wav")
+	sourceFLAC := filepath.Join(incoming, "bounded-cache-source.flac")
+	writeToneWAV(t, sourceWAV, 987)
+	writeFLACFromWAV(t, sourceWAV, sourceFLAC)
+	releaseLibraryFile(t, application, filepath.Base(sourceFLAC), "bounded-cache-root", "Artist", "Album", "Bounded Song", 1)
+	entries, err := audiorelease.List(application.engine)
+	if err != nil || len(entries) == 0 {
+		t.Fatal(entries, err)
+	}
+	body, err := os.ReadFile(filepath.Join(entries[0].LibraryDir, filepath.FromSlash(entries[0].File)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	first := filepath.Join(incoming, "stream-00-bounded.flac")
+	second := filepath.Join(incoming, "stream-01-bounded.flac")
+	for _, path := range []string{first, second} {
+		if err := os.WriteFile(path, body, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	now := time.Now()
+	old := now.Add(-3 * time.Hour)
+	for _, path := range []string{first, second} {
+		if err := os.Chtimes(path, old, old); err != nil {
+			t.Fatal(err)
+		}
+	}
+	audioCacheMu.Lock()
+	freed, removed, err := application.prunePublishedAudioCacheRootsLocked([]string{incoming}, time.Hour, now, int64(len(body)))
+	audioCacheMu.Unlock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if removed != 1 || freed != int64(len(body)) {
+		t.Fatalf("freed=%d removed=%d want one bounded cache copy", freed, removed)
+	}
+	if _, err := os.Stat(first); !os.IsNotExist(err) {
+		t.Fatalf("first published copy survived: %v", err)
+	}
+	if _, err := os.Stat(second); err != nil {
+		t.Fatalf("cleanup continued after reaching need: %v", err)
+	}
+}
 func TestAudioCacheCapacityClassificationDoesNotCatchUnrelatedErrors(t *testing.T) {
 	if !isTemporaryAudioCacheError(&audioCacheCapacityError{reason: "full"}) {
 		t.Fatal("capacity error was not temporary")

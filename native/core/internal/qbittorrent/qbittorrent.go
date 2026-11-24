@@ -28,6 +28,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 )
 
@@ -42,6 +43,10 @@ const maxResponseBytes = 20 << 20
 const httpTimeout = 15 * time.Second
 
 var (
+	// ErrUnavailable distinguishes a refused local connection from a timeout or
+	// other uncertain transport failure. Cache maintenance may treat only the
+	// former as proof that a stopped client cannot reference local seed files.
+	ErrUnavailable = errors.New("qbittorrent: connection refused")
 	// ErrInvalidBaseURL is returned when a base URL is not a clean origin or
 	// uses plain HTTP for a public host.
 	ErrInvalidBaseURL = errors.New("qbittorrent: invalid base URL")
@@ -293,7 +298,7 @@ type Client struct {
 	password string
 	http     *http.Client
 
-	mu            sync.Mutex
+	mu sync.Mutex
 	// cookie is the whole session cookie ("SID=..." on 4.x,
 	// "QBT_SID_8085=..." on 5.x), sent back verbatim.
 	cookie        string
@@ -361,8 +366,8 @@ func (c *Client) newRequest(ctx context.Context, method, endpoint string, body i
 }
 
 // do performs one request and returns the status, body and headers. The body
-// is capped at 20 MiB. Network failures are reported as plain errors with no
-// credentials or URL details.
+// is capped at 20 MiB. Network failures omit credentials and URL details; a
+// refused connection is typed so callers can distinguish a stopped client.
 func (c *Client) do(ctx context.Context, method, endpoint string, body io.Reader, contentType string) (int, []byte, http.Header, error) {
 	req, err := c.newRequest(ctx, method, endpoint, body, contentType)
 	if err != nil {
@@ -370,10 +375,7 @@ func (c *Client) do(ctx context.Context, method, endpoint string, body io.Reader
 	}
 	resp, err := c.http.Do(req)
 	if err != nil {
-		if ctx.Err() != nil {
-			return 0, nil, nil, ctx.Err()
-		}
-		return 0, nil, nil, errors.New("qbittorrent: request failed")
+		return 0, nil, nil, qbittorrentTransportError(ctx, err)
 	}
 	defer resp.Body.Close()
 	data, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBytes+1))
@@ -384,6 +386,17 @@ func (c *Client) do(ctx context.Context, method, endpoint string, body io.Reader
 		return 0, nil, nil, errors.New("qbittorrent: response too large")
 	}
 	return resp.StatusCode, data, resp.Header, nil
+}
+
+func qbittorrentTransportError(ctx context.Context, err error) error {
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return ctxErr
+	}
+	var errno syscall.Errno
+	if errors.As(err, &errno) && (errno == syscall.ECONNREFUSED || uintptr(errno) == 10061 || uintptr(errno) == 111) {
+		return ErrUnavailable
+	}
+	return errors.New("qbittorrent: request failed")
 }
 
 func (c *Client) getText(ctx context.Context, endpoint string) (string, error) {
@@ -445,10 +458,7 @@ func (c *Client) Login(ctx context.Context) error {
 	req.Header.Set("Referer", c.baseURL)
 	resp, err := c.http.Do(req)
 	if err != nil {
-		if ctx.Err() != nil {
-			return ctx.Err()
-		}
-		return errors.New("qbittorrent: request failed")
+		return qbittorrentTransportError(ctx, err)
 	}
 	defer resp.Body.Close()
 	body, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBytes+1))

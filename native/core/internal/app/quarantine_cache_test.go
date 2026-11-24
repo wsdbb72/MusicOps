@@ -21,10 +21,16 @@ type quarantinePruneFixture struct {
 
 func seedQuarantinePruneFixture(t *testing.T, application *App, playlistTitle, quarantineTitle string) quarantinePruneFixture {
 	t.Helper()
+	return seedQuarantinePruneFixtureWithKeeperTitle(t, application, playlistTitle, quarantineTitle, playlistTitle)
+}
+
+func seedQuarantinePruneFixtureWithKeeperTitle(t *testing.T, application *App, playlistTitle, quarantineTitle, keeperTitle string) quarantinePruneFixture {
+	t.Helper()
 	incoming := application.workPath("incoming")
-	keeperSource := filepath.Join(incoming, "quarantine-keeper.wav")
+	slug := strings.ReplaceAll(strings.ToLower(playlistTitle), " ", "-")
+	keeperSource := filepath.Join(incoming, "quarantine-keeper-"+slug+".wav")
 	writeToneWAV(t, keeperSource, 440)
-	keeper := releaseLibraryFile(t, application, filepath.Base(keeperSource), "quarantine-keeper", "Artist", "Album", "Song", 1)
+	keeper := releaseLibraryFile(t, application, filepath.Base(keeperSource), "quarantine-keeper-"+slug, "Artist", "Album", keeperTitle, 1)
 
 	playlistDir := application.savedPlaylistsDir()
 	if err := os.MkdirAll(playlistDir, 0o700); err != nil {
@@ -32,11 +38,11 @@ func seedQuarantinePruneFixture(t *testing.T, application *App, playlistTitle, q
 	}
 	content := "#PLAYLIST:Cache\n#MUSICOPS-ALBUM:Album\n#MUSICOPS-NETEASE:1:1\n#EXTINF:1,Artist - " + playlistTitle + "\n.\n"
 
-	if err := os.WriteFile(filepath.Join(playlistDir, "cache.m3u"), []byte(content), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(playlistDir, slug+".m3u"), []byte(content), 0o600); err != nil {
 		t.Fatal(err)
 	}
 
-	mergeID := "merge-cache-prune-" + strings.ReplaceAll(strings.ToLower(playlistTitle), " ", "-")
+	mergeID := "merge-cache-prune-" + slug
 	quarantine := filepath.Join(application.Dir, "quarantine", mergeID, "Artist", "Album", "02 "+quarantineTitle+".wav")
 	if err := os.MkdirAll(filepath.Dir(quarantine), 0o700); err != nil {
 		t.Fatal(err)
@@ -70,6 +76,7 @@ func seedQuarantinePruneFixture(t *testing.T, application *App, playlistTitle, q
 func TestSuccessfulQuarantineIsReclaimedAfterPlaylistAndHashProof(t *testing.T) {
 	application := newApp(t)
 	fixture := seedQuarantinePruneFixture(t, application, "Song", "Song")
+	t.Setenv("MUSICOPS_AUDIO_CACHE_BYTES", "1")
 
 	now := time.Now()
 	freed, removed, err := application.pruneAudioCacheAll(time.Hour, now)
@@ -86,10 +93,9 @@ func TestSuccessfulQuarantineIsReclaimedAfterPlaylistAndHashProof(t *testing.T) 
 
 func TestQuarantineMoveForMissingPlaylistRowIsPreserved(t *testing.T) {
 	application := newApp(t)
-	fixture := seedQuarantinePruneFixture(t, application, "Missing Song", "Missing Song")
-	now := time.Now()
+	fixture := seedQuarantinePruneFixtureWithKeeperTitle(t, application, "Missing Song", "Missing Song", "Different Keeper")
 	audioCacheMu.Lock()
-	_, _, err := application.pruneSuccessfulQuarantineLocked(time.Hour, now)
+	_, _, err := application.pruneSuccessfulQuarantineLocked(time.Hour, time.Now(), 1)
 	audioCacheMu.Unlock()
 	if err != nil {
 		t.Fatal(err)
@@ -99,6 +105,30 @@ func TestQuarantineMoveForMissingPlaylistRowIsPreserved(t *testing.T) {
 	}
 }
 
+func TestQuarantineReclaimStopsOnceTheRequestedBytesAreFreed(t *testing.T) {
+	application := newApp(t)
+	first := seedQuarantinePruneFixture(t, application, "First Song", "First Song")
+	second := seedQuarantinePruneFixture(t, application, "Second Song", "Second Song")
+	info, err := os.Stat(first.quarantine)
+	if err != nil {
+		t.Fatal(err)
+	}
+	audioCacheMu.Lock()
+	freed, removed, err := application.pruneSuccessfulQuarantineLocked(time.Hour, time.Now(), info.Size())
+	audioCacheMu.Unlock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if freed < info.Size() || removed != 1 {
+		t.Fatalf("freed=%d removed=%d want exactly the first receipt", freed, removed)
+	}
+	if _, err := os.Stat(first.quarantine); !os.IsNotExist(err) {
+		t.Fatalf("first proven quarantine survived: %v", err)
+	}
+	if _, err := os.Stat(second.quarantine); err != nil {
+		t.Fatalf("cleanup continued scanning after reaching the reclaim target: %v", err)
+	}
+}
 func TestQuarantineHashOrKeeperMismatchIsPreserved(t *testing.T) {
 	for _, test := range []struct {
 		name   string
@@ -120,7 +150,7 @@ func TestQuarantineHashOrKeeperMismatchIsPreserved(t *testing.T) {
 			fixture := seedQuarantinePruneFixture(t, application, "Song", "Song")
 			test.mutate(t, application, fixture)
 			audioCacheMu.Lock()
-			_, _, err := application.pruneSuccessfulQuarantineLocked(time.Hour, time.Now())
+			_, _, err := application.pruneSuccessfulQuarantineLocked(time.Hour, time.Now(), 1)
 			audioCacheMu.Unlock()
 			if err != nil {
 				t.Fatal(err)
@@ -141,7 +171,7 @@ func TestActiveTaskReferencePreservesSuccessfulQuarantine(t *testing.T) {
 		t.Fatal(err)
 	}
 	audioCacheMu.Lock()
-	_, _, err := application.pruneSuccessfulQuarantineLocked(time.Hour, time.Now())
+	_, _, err := application.pruneSuccessfulQuarantineLocked(time.Hour, time.Now(), 1)
 	audioCacheMu.Unlock()
 	if err != nil {
 		t.Fatal(err)

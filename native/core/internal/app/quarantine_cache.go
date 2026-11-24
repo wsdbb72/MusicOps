@@ -26,8 +26,8 @@ type quarantinePruneCandidate struct {
 // a move that could satisfy a missing row is retained with its whole receipt.
 // Unrelated old receipts can still be reclaimed, which avoids a cache deadlock
 // when one playlist row is legitimately absent from the library.
-func (a *App) pruneSuccessfulQuarantineLocked(maxAge time.Duration, now time.Time) (int64, int, error) {
-	if a == nil || a.engine == nil {
+func (a *App) pruneSuccessfulQuarantineLocked(maxAge time.Duration, now time.Time, need int64) (int64, int, error) {
+	if a == nil || a.engine == nil || need <= 0 {
 		return 0, 0, nil
 	}
 	if maxAge < quarantinePruneMinimumAge {
@@ -53,26 +53,29 @@ func (a *App) pruneSuccessfulQuarantineLocked(maxAge time.Duration, now time.Tim
 	if len(entries) == 0 {
 		return 0, 0, nil
 	}
-	type receiptCandidate struct {
-		moves []quarantinePruneCandidate
-	}
-	var receipts []receiptCandidate
+	var freed int64
+	removed := 0
+	touched := map[string]struct{}{}
+reclaimLoop:
 	for _, root := range roots {
 		dirEntries, readErr := os.ReadDir(root)
 		if readErr != nil {
 			if os.IsNotExist(readErr) {
 				continue
 			}
-			return 0, 0, readErr
+			return freed, removed, readErr
 		}
 		for _, entry := range dirEntries {
+			if freed >= need {
+				break reclaimLoop
+			}
 			if !entry.IsDir() || !strings.HasPrefix(entry.Name(), "merge-") {
 				continue
 			}
 			receiptRoot := filepath.Join(root, entry.Name())
 			receipt, found, receiptErr := a.readMergeReceipt(entry.Name())
 			if receiptErr != nil {
-				return 0, 0, receiptErr
+				return freed, removed, receiptErr
 			}
 			if !found || receipt.Restored || receipt.CreatedNS <= 0 || receipt.CreatedNS > now.Add(-maxAge).UnixNano() {
 				continue
@@ -81,7 +84,7 @@ func (a *App) pruneSuccessfulQuarantineLocked(maxAge time.Duration, now time.Tim
 			if !keeperOK {
 				continue
 			}
-			candidate := receiptCandidate{}
+			var candidateMoves []quarantinePruneCandidate
 			protected := false
 			for _, move := range receipt.Moved {
 				if quarantineRequestReferenced(move.RequestID, activeReferences) {
@@ -118,36 +121,38 @@ func (a *App) pruneSuccessfulQuarantineLocked(maxAge time.Duration, now time.Tim
 					protected = true
 					break
 				}
-				candidate.moves = append(candidate.moves, quarantinePruneCandidate{path: path, size: info.Size(), mod: info.ModTime()})
+				candidateMoves = append(candidateMoves, quarantinePruneCandidate{path: path, size: info.Size(), mod: info.ModTime()})
 			}
-			if protected || len(candidate.moves) == 0 {
+			if protected || len(candidateMoves) == 0 {
 				continue
 			}
-			receipts = append(receipts, candidate)
-		}
-	}
-	var freed int64
-	removed := 0
-	for _, candidate := range receipts {
-		for _, item := range candidate.moves {
-			latest, statErr := os.Lstat(item.path)
-			if statErr != nil {
-				if os.IsNotExist(statErr) {
+			for _, item := range candidateMoves {
+				latest, statErr := os.Lstat(item.path)
+				if statErr != nil {
+					if os.IsNotExist(statErr) {
+						continue
+					}
+					return freed, removed, statErr
+				}
+				if !latest.Mode().IsRegular() || latest.Size() != item.size || !latest.ModTime().Equal(item.mod) {
 					continue
 				}
-				return freed, removed, statErr
+				if removeErr := os.Remove(item.path); removeErr != nil {
+					if !os.IsNotExist(removeErr) {
+						return freed, removed, removeErr
+					}
+					continue
+				}
+				freed += item.size
+				removed++
+				touched[filepath.Dir(item.path)] = struct{}{}
 			}
-			if !latest.Mode().IsRegular() || latest.Size() != item.size || !latest.ModTime().Equal(item.mod) {
-				continue
+			if freed >= need {
+				break reclaimLoop
 			}
-			if removeErr := os.Remove(item.path); removeErr != nil && !os.IsNotExist(removeErr) {
-				return freed, removed, removeErr
-			}
-			freed += item.size
-			removed++
 		}
 	}
-	pruneEmptyCacheDirs(roots)
+	pruneEmptyCacheParents(roots, touched)
 	return freed, removed, nil
 }
 

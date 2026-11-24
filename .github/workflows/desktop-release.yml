@@ -92,6 +92,10 @@ jobs:
           }
           if (-not $compilerPath) { throw 'The native installer compiler was not found' }
           "INNO_ISCC=$compilerPath" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          $ffmpegPath = (Get-Command ffmpeg).Source
+          $ffprobePath = (Get-Command ffprobe).Source
+          "MUSICOPS_FFMPEG_EXE=$ffmpegPath" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "MUSICOPS_FFPROBE_EXE=$ffprobePath" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           ffmpeg -version
           ffprobe -version
       - name: Compile and test the native installer before the longer regression suite
@@ -128,19 +132,21 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          # Resolve the real ffmpeg/ffprobe binaries: `choco install ffmpeg`
-          # only puts shim launchers on PATH; copying a shim into the bundle
-          # would ship a ffmpeg.exe that cannot run without its .shim file.
-          $chocoLib = if ($env:ChocolateyInstall) { $env:ChocolateyInstall } else { 'C:\ProgramData\chocolatey' }
-          $ffmpeg = Get-ChildItem -LiteralPath (Join-Path $chocoLib 'lib\ffmpeg\tools') -Recurse -Filter 'ffmpeg.exe' -File -ErrorAction SilentlyContinue | Select-Object -First 1
-          $ffprobe = Get-ChildItem -LiteralPath (Join-Path $chocoLib 'lib\ffmpeg\tools') -Recurse -Filter 'ffprobe.exe' -File -ErrorAction SilentlyContinue | Select-Object -First 1
-          if (-not $ffmpeg -or -not $ffprobe) { throw 'The real ffmpeg/ffprobe binaries were not found under the Chocolatey ffmpeg package' }
-          # Scrub the Chocolatey shims from PATH for this step so the Go
-          # smoke inside the build script exercises the bundled
-          # ffmpeg/ffprobe copies instead of the shims on PATH
-          # (checkFFmpeg prefers PATH first).
+          # The build must receive real executables, never Chocolatey shims. Prefer
+          # the exact paths exported by the media-tool setup step, then fall back
+          # to a local Chocolatey package if this workflow is run manually.
+          $ffmpegPath = $env:MUSICOPS_FFMPEG_EXE
+          $ffprobePath = $env:MUSICOPS_FFPROBE_EXE
+          if (-not $ffmpegPath -or -not $ffprobePath) {
+            $chocoLib = if ($env:ChocolateyInstall) { $env:ChocolateyInstall } else { 'C:\ProgramData\chocolatey' }
+            $ffmpegPath = (Get-ChildItem -LiteralPath (Join-Path $chocoLib 'lib\ffmpeg\tools') -Recurse -Filter 'ffmpeg.exe' -File -ErrorAction SilentlyContinue | Select-Object -First 1).FullName
+            $ffprobePath = (Get-ChildItem -LiteralPath (Join-Path $chocoLib 'lib\ffmpeg\tools') -Recurse -Filter 'ffprobe.exe' -File -ErrorAction SilentlyContinue | Select-Object -First 1).FullName
+          }
+          if (-not (Test-Path -LiteralPath $ffmpegPath) -or -not (Test-Path -LiteralPath $ffprobePath)) { throw 'The real ffmpeg/ffprobe binaries were not found' }
+          # Scrub the Chocolatey shims from PATH for this step so the Go smoke
+          # inside the build script exercises the bundled ffmpeg/ffprobe copies.
           $env:PATH = ($env:PATH -split ';' | Where-Object { $_ -notlike '*chocolatey*bin*' }) -join ';'
-          & ./packaging/build_windows_go.ps1 -Version '${{ steps.identity.outputs.version }}' -Python (Get-Command python).Source -Ffmpeg $ffmpeg.FullName -Ffprobe $ffprobe.FullName -Compiler $env:INNO_ISCC
+          & ./packaging/build_windows_go.ps1 -Version '${{ steps.identity.outputs.version }}' -Python (Get-Command python).Source -Ffmpeg $ffmpegPath -Ffprobe $ffprobePath -Compiler $env:INNO_ISCC
           if ($LASTEXITCODE -ne 0) { throw 'Go application build failed' }
           Copy-Item -LiteralPath work/build-go/smoke-windows.json -Destination dist/windows/reports/go-smoke.json
           Copy-Item -LiteralPath work/build-go/installer-windows.json -Destination dist/windows/reports/go-installer.json

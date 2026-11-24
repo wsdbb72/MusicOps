@@ -405,6 +405,32 @@ func TestPublishedCacheReclaimStopsAtTheRequestedNeed(t *testing.T) {
 		t.Fatalf("cleanup continued after reaching need: %v", err)
 	}
 }
+func TestAudioCacheTorrentReservationsPreventConcurrentOversubscription(t *testing.T) {
+	application := newApp(t)
+	firstDir := t.TempDir()
+	secondDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(firstDir, "partial.bin"), make([]byte, 250), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("MUSICOPS_AUDIO_CACHE_BYTES", "800")
+	t.Cleanup(func() {
+		application.clearAudioCacheDownload("first")
+		application.clearAudioCacheDownload("second")
+	})
+	if err := application.reserveAudioCacheDownload("first", firstDir, 500); err != nil {
+		t.Fatal(err)
+	}
+	if err := application.reserveAudioCacheDownload("first", firstDir, 500); err != nil {
+		t.Fatalf("updating the same reservation double-counted itself: %v", err)
+	}
+	if err := application.reserveAudioCacheDownload("second", secondDir, 100); err == nil || !isTemporaryAudioCacheError(err) {
+		t.Fatalf("second torrent reservation error=%T %v, want capacity refusal", err, err)
+	}
+	application.clearAudioCacheDownload("first")
+	if err := application.reserveAudioCacheDownload("second", secondDir, 100); err != nil {
+		t.Fatalf("reservation did not become available after release: %v", err)
+	}
+}
 func TestAudioCacheCapacityClassificationDoesNotCatchUnrelatedErrors(t *testing.T) {
 	if !isTemporaryAudioCacheError(&audioCacheCapacityError{reason: "full"}) {
 		t.Fatal("capacity error was not temporary")

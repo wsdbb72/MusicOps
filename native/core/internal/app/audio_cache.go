@@ -24,7 +24,16 @@ const audioCacheStaleAfter = time.Hour
 const audioCacheTrimTargetBytes int64 = 256 << 20
 const audioCacheDiskReserveBytes int64 = 2 << 30
 
-var audioCacheMu sync.Mutex
+var (
+	audioCacheMu            sync.Mutex
+	audioCacheReservationMu sync.Mutex
+	audioCacheReservations  = map[string]audioCacheReservation{}
+)
+
+type audioCacheReservation struct {
+	dir   string
+	bytes int64
+}
 
 type audioCacheCapacityError struct{ reason string }
 
@@ -50,11 +59,11 @@ func audioCacheReclaimNeed(used, limit int64) int64 {
 	if used <= target {
 		return 0
 	}
-	need := used - target + audioCacheTrimTargetBytes
-	if need > limit {
+	over := used - target
+	if limit <= audioCacheTrimTargetBytes || over > limit-audioCacheTrimTargetBytes {
 		return limit
 	}
-	return need
+	return over + audioCacheTrimTargetBytes
 }
 
 func (a *App) audioCacheUsageSnapshot() (used, limit int64, roots []string, err error) {
@@ -80,6 +89,7 @@ func (a *App) audioCacheRoots(current string) []string {
 			candidates = append(candidates, filepath.Join(root, name))
 		}
 	}
+	candidates = append(candidates, audioCacheReservedRootsExcept("")...)
 	return normalizeAudioCacheRoots(candidates)
 }
 
@@ -156,50 +166,132 @@ func reserveAudioCacheRoots(roots []string, writeDir string, bytes int64, pruneP
 }
 
 func reserveAudioCacheRootsProtected(roots []string, writeDir string, bytes int64, prunePublished func(int64, time.Time) (int64, int, error), protect func(string) bool) (func(), error) {
+	return reserveAudioCacheRootsProtectedWithReservation(roots, writeDir, bytes, "", nil, prunePublished, protect)
+}
+
+func reserveAudioCacheRootsProtectedWithReservation(roots []string, writeDir string, bytes int64, excludeReservation string, admitted func(), prunePublished func(int64, time.Time) (int64, int, error), protect func(string) bool) (func(), error) {
 	audioCacheMu.Lock()
 	limit := audioCacheLimitBytes()
-	roots = normalizeAudioCacheRoots(roots)
+	roots = normalizeAudioCacheRoots(append(roots, audioCacheReservedRootsExcept(excludeReservation)...))
 	used, err := audioCacheUsageRoots(roots)
+	reserved := audioCacheReservedBytesExcept(excludeReservation)
+	projected := saturatingAudioCacheBytes(used, reserved, bytes)
 	if err == nil && bytes > 0 {
-		target := limit - limit/4
-		need := int64(0)
-		if used > target {
-			need = used - target + audioCacheTrimTargetBytes
-		}
-		if used+bytes > limit {
-			overLimit := used + bytes - limit + audioCacheTrimTargetBytes
-			if overLimit > need {
-				need = overLimit
-			}
-		}
-		if need > limit {
-			need = limit
-		}
+		need := audioCacheReclaimNeed(projected, limit)
 		if need > 0 {
 			now := time.Now()
 			_, _, err = pruneStaleAudioCacheRootsWithCountProtected(roots, need, audioCacheStaleAfter, now, protect)
 			if err == nil {
 				used, err = audioCacheUsageRoots(roots)
+				projected = saturatingAudioCacheBytes(used, reserved, bytes)
 			}
-			if err == nil && used+bytes > target && prunePublished != nil {
-				_, _, err = prunePublished(used-target+audioCacheTrimTargetBytes, now)
+			if err == nil && audioCacheReclaimNeed(projected, limit) > 0 && prunePublished != nil {
+				_, _, err = prunePublished(audioCacheReclaimNeed(projected, limit), now)
 				if err == nil {
 					used, err = audioCacheUsageRoots(roots)
+					projected = saturatingAudioCacheBytes(used, reserved, bytes)
 				}
 			}
 		}
 	}
-	if err == nil && bytes <= limit-used {
-		err = audioCacheDiskHeadroom(writeDir, bytes)
+	if err == nil {
+		err = audioCacheDiskHeadroom(writeDir, saturatingAudioCacheBytes(bytes, reserved))
 	}
-	if err != nil || bytes > limit-used {
+	if err != nil || projected > limit {
 		audioCacheMu.Unlock()
 		if err != nil {
 			return nil, err
 		}
-		return nil, &audioCacheCapacityError{reason: fmt.Sprintf("音频缓存总占用 %.2f GiB，达到 %.2f GiB 上限，暂缓写入", float64(used)/(1<<30), float64(limit)/(1<<30))}
+		return nil, &audioCacheCapacityError{reason: fmt.Sprintf("音频缓存预计占用 %.2f GiB，达到 %.2f GiB 上限，暂缓写入", float64(projected)/(1<<30), float64(limit)/(1<<30))}
+	}
+	if admitted != nil {
+		admitted()
 	}
 	return audioCacheMu.Unlock, nil
+}
+
+func saturatingAudioCacheBytes(values ...int64) int64 {
+	const maxInt64 = int64(^uint64(0) >> 1)
+	total := int64(0)
+	for _, value := range values {
+		if value <= 0 {
+			continue
+		}
+		if total > maxInt64-value {
+			return maxInt64
+		}
+		total += value
+	}
+	return total
+}
+
+func audioCacheReservedBytesExcept(exclude string) int64 {
+	audioCacheReservationMu.Lock()
+	defer audioCacheReservationMu.Unlock()
+	values := make([]int64, 0, len(audioCacheReservations))
+	for id, reservation := range audioCacheReservations {
+		if id != exclude {
+			values = append(values, reservation.bytes)
+		}
+	}
+	return saturatingAudioCacheBytes(values...)
+}
+
+func audioCacheReservedRootsExcept(exclude string) []string {
+	audioCacheReservationMu.Lock()
+	defer audioCacheReservationMu.Unlock()
+	roots := make([]string, 0, len(audioCacheReservations))
+	for id, reservation := range audioCacheReservations {
+		if id != exclude && strings.TrimSpace(reservation.dir) != "" {
+			roots = append(roots, reservation.dir)
+		}
+	}
+	return roots
+}
+
+func setAudioCacheReservationLocked(id, dir string, bytes int64) {
+	audioCacheReservationMu.Lock()
+	defer audioCacheReservationMu.Unlock()
+	if strings.TrimSpace(id) == "" || bytes <= 0 {
+		delete(audioCacheReservations, id)
+		return
+	}
+	audioCacheReservations[id] = audioCacheReservation{dir: dir, bytes: bytes}
+}
+
+func (a *App) reserveAudioCacheDownload(id, dir string, bytes int64) error {
+	if a == nil {
+		return errors.New("audio cache reservation requires an application")
+	}
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return errors.New("audio cache reservation requires a task id")
+	}
+	if bytes <= 0 {
+		a.clearAudioCacheDownload(id)
+		return nil
+	}
+	references, err := a.activeAudioCacheReferences()
+	if err != nil {
+		return err
+	}
+	roots := a.audioCacheRoots(dir)
+	release, err := reserveAudioCacheRootsProtectedWithReservation(roots, dir, bytes, id, func() {
+		setAudioCacheReservationLocked(id, dir, bytes)
+	}, func(need int64, now time.Time) (int64, int, error) {
+		return a.prunePublishedAudioCacheRootsLocked(roots, audioCacheStaleAfter, now, need)
+	}, func(path string) bool { return cachePathReferencedByTasks(path, references) })
+	if err != nil {
+		return err
+	}
+	release()
+	return nil
+}
+
+func (a *App) clearAudioCacheDownload(id string) {
+	audioCacheMu.Lock()
+	defer audioCacheMu.Unlock()
+	setAudioCacheReservationLocked(id, "", 0)
 }
 
 func audioCacheUsage(dir string) (int64, error) {

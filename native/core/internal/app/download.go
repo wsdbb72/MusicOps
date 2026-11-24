@@ -930,6 +930,7 @@ func (a *App) download(ctx context.Context, execution *scheduler.Execution, payl
 	// the plan on every attempt, and the start-attempt budget resets with
 	// it (a retry gets a fresh three attempts).
 	rec.CreationIntent = true
+	defer a.clearAudioCacheDownload(taskID)
 	evidence := qbittorrent.FreeEvidence{Confirmed: plan.FreeConfirmed, InfoHash: plan.InfoHash, Free: qbittorrent.FreePtr(true)}
 	if err := execution.Checkpoint(ctx, "download_add", 0, "正在确认 qBittorrent 任务"); err != nil {
 		return scheduler.Outcome{}, err
@@ -952,6 +953,9 @@ func (a *App) download(ctx context.Context, execution *scheduler.Execution, payl
 		}
 		return a.failDownload(execution, "ARCHIVE_FAILED", "归档失败")
 	}
+	// The seeding move can briefly duplicate bytes across volumes. Keep the reserved
+	// quota until the archive is safely complete, then release it before ingest.
+	a.clearAudioCacheDownload(taskID)
 	receipts, err := a.ingestDownload(ctx, plan, meta, seedDir)
 	if err != nil {
 		if df, ok := err.(*downloadFailure); ok {
@@ -1022,11 +1026,11 @@ func (a *App) ensureTorrent(ctx context.Context, execution *scheduler.Execution,
 		}
 	}
 	if remainingBytes > 0 {
-		release, cacheErr := a.reserveAudioCache(filepath.Dir(rec.SourcePath), remainingBytes)
-		if cacheErr != nil {
+		if cacheErr := a.reserveAudioCacheDownload(rec.TaskID, filepath.Dir(rec.SourcePath), remainingBytes); cacheErr != nil {
 			return a.failDownloadStep(execution, "CACHE_LIMIT", "SSD 缓存空间不足，未继续下载种子："+cacheErr.Error())
 		}
-		release()
+	} else {
+		a.clearAudioCacheDownload(rec.TaskID)
 	}
 	if row == nil {
 		if _, err := client.AddStopped(ctx, rec, torrent, evidence); err != nil {

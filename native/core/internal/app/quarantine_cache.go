@@ -1,7 +1,6 @@
 package app
 
 import (
-	"context"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -54,17 +53,6 @@ func (a *App) pruneSuccessfulQuarantineLocked(maxAge time.Duration, now time.Tim
 	if len(entries) == 0 {
 		return 0, 0, nil
 	}
-	present, err := playlistPresenceForIndexContext(context.Background(), index, rows)
-	if err != nil {
-		return 0, 0, err
-	}
-	missing := make([]playlistTrack, 0)
-	for i, row := range rows {
-		if i >= len(present) || !present[i] {
-			missing = append(missing, row)
-		}
-	}
-
 	type receiptCandidate struct {
 		moves []quarantinePruneCandidate
 	}
@@ -125,7 +113,7 @@ func (a *App) pruneSuccessfulQuarantineLocked(maxAge time.Duration, now time.Tim
 					protected = true
 					break
 				}
-				if !move.Sidecar && quarantineMoveMatchesMissing(path, missing) {
+				if !move.Sidecar && quarantineMoveNeedsProtection(path, rows, index) {
 					protected = true
 					break
 				}
@@ -204,39 +192,46 @@ func quarantineRequestReferenced(request string, references []string) bool {
 	}
 	return false
 }
-func quarantineMoveMatchesMissing(path string, missing []playlistTrack) bool {
-	if len(missing) == 0 {
-		return false
-	}
+
+// quarantineMoveNeedsProtection checks only playlist rows that can actually
+// match this quarantined recording. The old implementation verified all 4,000+
+// playlist rows before every cache pass, repeatedly decoding the whole library
+// even though almost none of those rows could use the file.
+func quarantineMoveNeedsProtection(path string, rows []playlistTrack, index playlistLibraryIndex) bool {
 	artists, album, title, duration := playlistRecordingEvidence(path)
 	pathArtist, pathAlbum, pathTitle := trackPathOf(path)
-	for _, row := range missing {
-		actualTitle := title
-		if strings.TrimSpace(actualTitle) == "" {
-			actualTitle = pathTitle
-		}
-		if !neteaseAlternateTitleMatches(row.Title, actualTitle) && !neteaseAlternateTitleMatches(row.Title, pathTitle) {
+	for _, row := range rows {
+		if !quarantineMoveMatchesRow(row, artists, album, title, duration, pathArtist, pathAlbum, pathTitle) {
 			continue
 		}
-		artistMatches := playlistArtistTagMatches(row.Artist, artists) || playlistArtistFallbackMatches(row.Artist, pathArtist)
-		if !artistMatches {
-			continue
-		}
-		albumMatches := strings.TrimSpace(row.Album) == "" || playlistAlbumTagMatches(row.Album, album) || playlistMatchKey(row.Album) == playlistMatchKey(pathAlbum)
-		if !albumMatches {
-			continue
-		}
-		seconds, parseErr := strconv.ParseFloat(strings.TrimSpace(row.Duration), 64)
-		if parseErr != nil || !(seconds > 0 && seconds <= 24*3600) || duration <= 0 {
-			return true
-		}
-		delta := int64(duration*1000) - int64(seconds*1000)
-		if delta < 0 {
-			delta = -delta
-		}
-		if delta <= 3000 {
+		if !index.hasPlaylistRow(row) {
 			return true
 		}
 	}
 	return false
+}
+
+func quarantineMoveMatchesRow(row playlistTrack, artists []string, album, title string, duration float64, pathArtist, pathAlbum, pathTitle string) bool {
+	actualTitle := title
+	if strings.TrimSpace(actualTitle) == "" {
+		actualTitle = pathTitle
+	}
+	if !neteaseAlternateTitleMatches(row.Title, actualTitle) && !neteaseAlternateTitleMatches(row.Title, pathTitle) {
+		return false
+	}
+	if !playlistArtistTagMatches(row.Artist, artists) && !playlistArtistFallbackMatches(row.Artist, pathArtist) {
+		return false
+	}
+	if strings.TrimSpace(row.Album) != "" && !playlistAlbumTagMatches(row.Album, album) && playlistMatchKey(row.Album) != playlistMatchKey(pathAlbum) {
+		return false
+	}
+	seconds, parseErr := strconv.ParseFloat(strings.TrimSpace(row.Duration), 64)
+	if parseErr != nil || !(seconds > 0 && seconds <= 24*3600) || duration <= 0 {
+		return true
+	}
+	delta := int64(duration*1000) - int64(seconds*1000)
+	if delta < 0 {
+		delta = -delta
+	}
+	return delta <= 3000
 }

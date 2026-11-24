@@ -196,7 +196,7 @@ func (a *App) tryConfiguredStreamSong(ctx context.Context, source string, plan S
 		return "", source + " 校验通过但没有写入：" + err.Error(), downloadpolicy.ClassNoResult
 	}
 	path := filepath.Join(dir, name)
-	release, cacheErr := reserveAudioCache(dir, 2*int64(len(body))+65536)
+	release, cacheErr := a.reserveAudioCache(dir, 2*int64(len(body))+65536)
 	if cacheErr != nil {
 		return "", cacheErr.Error(), downloadpolicy.ClassRateLimited
 	}
@@ -267,7 +267,7 @@ func (a *App) transcodeEngineAudio(ctx context.Context, body []byte, source stri
 	// ffmpeg may finish the current frame after reaching -fs. Keep room for
 	// the muxer and stop above the accepted size so a capped FLAC is rejected.
 	const stopAt = audiorelease.MaxStagedAudioBytes + (1 << 20)
-	release, err := reserveAudioCache(incoming, int64(len(body))+stopAt+(1<<20))
+	release, err := a.reserveAudioCache(incoming, int64(len(body))+stopAt+(1<<20))
 	if err != nil {
 		return nil, err
 	}

@@ -181,6 +181,9 @@ type libraryAutomationReport struct {
 	Deduplicated        int      `json:"deduplicated"`
 	CacheReclaimedFiles int      `json:"cache_reclaimed_files"`
 	CacheReclaimedBytes int64    `json:"cache_reclaimed_bytes"`
+	CacheUsedBytes      int64    `json:"cache_used_bytes"`
+	CacheLimitBytes     int64    `json:"cache_limit_bytes"`
+	CacheOverLimit      bool     `json:"cache_over_limit,omitempty"`
 	UpgradeJobs         int      `json:"upgrade_jobs"`
 	ExpandJobs          int      `json:"expand_jobs"`
 	Errors              []string `json:"errors,omitempty"`
@@ -491,13 +494,20 @@ func (a *App) runLibraryAutomationPass(ctx context.Context, settings libraryAuto
 	}
 	state.setPhase("cache")
 	state.touch("cache", "正在回收已入库的旧流媒体缓存")
-	freedBytes, freedFiles, cacheErr := a.prunePublishedStreamAudioCache(a.workPath("incoming"), audioCacheStaleAfter, a.now())
+	freedBytes, freedFiles, cacheErr := a.pruneAudioCacheAll(audioCacheStaleAfter, a.now())
 	if cacheErr != nil {
 		state.addError(fmt.Errorf("流媒体缓存回收失败: %w", cacheErr))
+	}
+	cacheUsed, cacheLimit, _, cacheUsageErr := a.audioCacheUsageSnapshot()
+	if cacheUsageErr != nil {
+		state.addError(fmt.Errorf("读取 SSD 缓存占用失败: %w", cacheUsageErr))
 	}
 	state.update(func(report *libraryAutomationReport) {
 		report.CacheReclaimedBytes = freedBytes
 		report.CacheReclaimedFiles = freedFiles
+		report.CacheUsedBytes = cacheUsed
+		report.CacheLimitBytes = cacheLimit
+		report.CacheOverLimit = cacheLimit > 0 && cacheUsed > cacheLimit
 	})
 	if settings.Scrape {
 		state.setPhase("scrape")

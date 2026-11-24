@@ -109,7 +109,7 @@ func (a *App) scrapePlaylistIncoming(ctx context.Context, incoming, name, artist
 			if err != nil {
 				return "", "", nil, err
 			}
-			release, err := reserveAudioCache(incoming, int64(len(body)))
+			release, err := a.reserveAudioCache(incoming, int64(len(body)))
 			if err != nil {
 				return "", "", nil, err
 			}

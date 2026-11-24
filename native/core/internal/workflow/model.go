@@ -113,6 +113,7 @@ type Job struct {
 	RecoveryRetryCount  uint8  `json:"recovery_retry_count,omitempty"`
 	AIResearchCount     uint8  `json:"ai_research_count,omitempty"`
 	SearchRetryAfterSec int    `json:"search_retry_after_sec,omitempty"`
+	RetryAfterNS        int64  `json:"retry_after_ns,omitempty"`
 	Revision            uint64 `json:"revision"`
 	CreatedNS           int64  `json:"created_ns"`
 	UpdatedNS           int64  `json:"updated_ns"`

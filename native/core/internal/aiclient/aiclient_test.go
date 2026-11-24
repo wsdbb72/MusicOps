@@ -505,3 +505,116 @@ func TestAdviseDrivesClient(t *testing.T) {
 		t.Fatalf("result = %+v", result)
 	}
 }
+
+func aliasJSON(query string, aliases []string, artist string) string {
+	raw, err := json.Marshal(map[string]any{"query": query, "aliases": aliases, "artist": artist})
+	if err != nil {
+		panic(err)
+	}
+	return string(raw)
+}
+
+func TestSuggestAliasUsesAuthenticatedResponsesContract(t *testing.T) {
+	fake := &fakeAI{status: http.StatusOK, body: responsesBody("completed", aliasJSON("Canonical Artist Album", []string{"规范艺人 专辑"}, "Canonical Artist"))}
+	srv := httptest.NewTLSServer(fake)
+	defer srv.Close()
+	client := newTestClient(t, srv)
+	got, err := client.SuggestAlias(context.Background(), AliasRequest{
+		Artist: "Artist", AlbumArtist: "Album Artist", Title: "Album", Query: "old query",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Query != "Canonical Artist Album" || got.Artist != "Canonical Artist" || len(got.Aliases) != 1 || got.Aliases[0] != "规范艺人 专辑" {
+		t.Fatalf("suggestion=%+v", got)
+	}
+	path, auth, contentType, lastBody, hits := fake.request(t)
+	if hits != 1 || path != "/responses" || auth != "Bearer test-key" || contentType != "application/json" {
+		t.Fatalf("request = path %q auth %q content-type %q hits %d", path, auth, contentType, hits)
+	}
+	var sent map[string]any
+	if err := json.Unmarshal(lastBody, &sent); err != nil {
+		t.Fatal(err)
+	}
+	if sent["model"] != "test-model" || sent["max_output_tokens"] != float64(2048) || sent["temperature"] != 0.2 {
+		t.Fatalf("request fields = %v", sent)
+	}
+	format, ok := sent["text"].(map[string]any)["format"].(map[string]any)
+	if !ok || format["name"] != "musicops_alias_research" || format["type"] != "json_schema" {
+		t.Fatalf("text.format = %v", sent["text"])
+	}
+	input, ok := sent["input"].([]any)
+	if !ok || len(input) != 2 {
+		t.Fatalf("input = %v", sent["input"])
+	}
+	user, ok := input[1].(map[string]any)
+	if !ok || user["role"] != "user" || !strings.Contains(user["content"].(string), `"query":"old query"`) || !strings.Contains(user["content"].(string), `"album_artist":"Album Artist"`) {
+		t.Fatalf("user message = %v", input[1])
+	}
+}
+
+func TestSuggestAliasRetriesWithoutUnsupportedStructuredOutput(t *testing.T) {
+	var mu sync.Mutex
+	calls := 0
+	structured := []bool{}
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var request map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		mu.Lock()
+		calls++
+		_, hasText := request["text"]
+		structured = append(structured, hasText)
+		call := calls
+		mu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		if call == 1 {
+			w.WriteHeader(http.StatusBadRequest)
+			_, _ = w.Write([]byte(`{"error":{"message":"unsupported text.format"}}`))
+			return
+		}
+		_, _ = w.Write([]byte(responsesBody("completed", aliasJSON("alias from plain response", nil, ""))))
+	}))
+	defer server.Close()
+	client := newTestClient(t, server)
+	got, err := client.SuggestAlias(context.Background(), AliasRequest{Title: "Album", Query: "old query"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Query != "alias from plain response" {
+		t.Fatalf("suggestion=%+v", got)
+	}
+	mu.Lock()
+	gotCalls := calls
+	gotStructured := append([]bool(nil), structured...)
+	mu.Unlock()
+	if gotCalls != 2 || len(gotStructured) != 2 || !gotStructured[0] || gotStructured[1] {
+		t.Fatalf("calls=%d structured=%v", gotCalls, gotStructured)
+	}
+}
+
+func TestSuggestAliasRejectsInvalidResponseAndAuthenticationFailure(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		status int
+		body   string
+		want   error
+	}{
+		{name: "bad json", status: http.StatusOK, body: responsesBody("completed", `{"query":`), want: ErrContract},
+		{name: "empty names", status: http.StatusOK, body: responsesBody("completed", aliasJSON("", nil, "")), want: ErrEmptyOutput},
+		{name: "auth", status: http.StatusUnauthorized, body: `{"error":{"message":"denied"}}`, want: ErrAuthFailed},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			fake := &fakeAI{status: test.status, body: test.body}
+			srv := httptest.NewTLSServer(fake)
+			defer srv.Close()
+			client := newTestClient(t, srv)
+			_, err := client.SuggestAlias(context.Background(), AliasRequest{Title: "Album", Query: "old query"})
+			if !errors.Is(err, test.want) {
+				t.Fatalf("err=%v want %v", err, test.want)
+			}
+		})
+	}
+}

@@ -24,7 +24,7 @@ func TestTokenReviewDecisionNeverReplaysAnUncertainSpend(t *testing.T) {
 		{name: "transient read retries", class: "network", disposition: tokenReviewRetry},
 		{name: "detail rate limit retries", class: "detail", message: "detail response HTTP 429 is rate limited for 22 seconds", disposition: tokenReviewRetry},
 		{name: "retry limit falls back", class: "account_token_hold", retries: tokenReviewRetryLimit, fallback: true, disposition: tokenReviewFallback},
-		{name: "retry limit settles", class: "account_token_hold", retries: tokenReviewRetryLimit, disposition: tokenReviewSkip},
+		{name: "retry limit remains safe while balance is empty", class: "account_token_hold", retries: tokenReviewRetryLimit, disposition: tokenReviewRetry},
 		{name: "unknown waits for balance proof", class: "REQUEST_UNKNOWN", disposition: tokenReviewWait},
 		{name: "unknown uses streaming", class: "REQUEST_UNKNOWN", fallback: true, disposition: tokenReviewFallback},
 		{name: "spent candidate settles", class: "token_spent", disposition: tokenReviewSkip},
@@ -38,6 +38,22 @@ func TestTokenReviewDecisionNeverReplaysAnUncertainSpend(t *testing.T) {
 				t.Fatalf("decision=%s want=%s", got, tc.disposition)
 			}
 		})
+	}
+}
+
+func TestTokenReviewRetryCooldownIsLongerOnlyForPersistentSafeHold(t *testing.T) {
+	now := time.Now().UnixNano()
+	fast := tokenReviewRetryAt(workflow.Job{ErrorClass: "network"}, false, now)
+	if fast-now != int64(tokenReviewTransientDelay) {
+		t.Fatalf("transient delay=%s", time.Duration(fast-now))
+	}
+	hold := tokenReviewRetryAt(workflow.Job{ErrorClass: "account_token_hold", TokenRetryCount: 1}, false, now)
+	if hold-now != int64(tokenReviewAccountDelay) {
+		t.Fatalf("account delay=%s", time.Duration(hold-now))
+	}
+	long := tokenReviewRetryAt(workflow.Job{ErrorClass: "account_token_hold", TokenRetryCount: tokenReviewRetryLimit}, false, now)
+	if long-now != int64(tokenReviewLongHoldDelay) {
+		t.Fatalf("long hold delay=%s", time.Duration(long-now))
 	}
 }
 

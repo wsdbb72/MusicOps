@@ -117,6 +117,7 @@ type jobView struct {
 	LibraryPublished bool            `json:"library_published,omitempty"`
 	Result           *jobResultView  `json:"result,omitempty"`
 	UpdatedNS        int64           `json:"updated_ns"`
+	RetryAfterNS     int64           `json:"retry_after_ns,omitempty"`
 	RootStatus       *rootStatusView `json:"root_status,omitempty"`
 }
 
@@ -139,6 +140,7 @@ type rootStatusView struct {
 	LibraryPublished bool           `json:"library_published,omitempty"`
 	Result           *jobResultView `json:"result,omitempty"`
 	UpdatedNS        int64          `json:"updated_ns"`
+	RetryAfterNS     int64          `json:"retry_after_ns,omitempty"`
 }
 
 // jobResultView is the sanitized failure result shown to the UI and returned
@@ -160,6 +162,7 @@ func publicJob(job workflow.Job) jobView {
 		ID: job.ID, RootID: job.RootID, ParentID: job.ParentJobID, Scene: job.Scene, Stage: job.Stage,
 		Label: scrub(job.Label), Message: scrub(job.Message), ReviewKind: job.ReviewKind,
 		ErrorClass: job.ErrorClass, Paused: job.Paused, CancelRequested: job.CancelRequested, UpdatedNS: job.UpdatedNS,
+		RetryAfterNS: job.RetryAfterNS,
 	}
 }
 
@@ -370,6 +373,7 @@ func summarizeRootJobs(tree []jobView) rootStatusView {
 		JobID: rep.ID, Stage: rep.Stage, ExecutionState: state, Progress: progress, Headline: headline,
 		Message: rep.Message, ReviewKind: rep.ReviewKind, ErrorClass: rep.ErrorClass,
 		Paused: rep.Paused, CancelRequested: rep.CancelRequested, Downloaded: rep.Downloaded, LibraryPublished: rep.LibraryPublished, Result: rep.Result, UpdatedNS: rep.UpdatedNS,
+		RetryAfterNS: rep.RetryAfterNS,
 	}
 	for _, job := range tree {
 		out.Downloaded = out.Downloaded || job.Downloaded

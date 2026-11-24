@@ -195,6 +195,174 @@ func (c *Client) TestConnection(ctx context.Context) error {
 	return err
 }
 
+// AliasRequest is the secret-free identity evidence used for one catalog-name
+// research call. The result only becomes a search query; it never confirms a
+// release or authorizes a token request.
+type AliasRequest struct {
+	Artist      string `json:"artist"`
+	AlbumArtist string `json:"album_artist,omitempty"`
+	Title       string `json:"title"`
+	Query       string `json:"query"`
+}
+
+// AliasSuggestion is the validated shape returned by SuggestAlias.
+type AliasSuggestion struct {
+	Query   string   `json:"query"`
+	Aliases []string `json:"aliases"`
+	Artist  string   `json:"artist"`
+}
+
+const aliasSystemPrompt = "你是 MusicOps 音乐目录名称研究助手。用途仅是帮助后续本地检索找到同一录音或发行，不能确认下载候选、不能编造曲目、不能授权令牌。请结合给定艺人、艺名、曲名和现有查询，给出规范名、常见译名、官方英文名或站点常用别名。若当前模型具备公开联网检索能力，可以查阅权威音乐目录；若不具备，只能依据已知事实回答，不得声称已经联网验证。返回字段 query、aliases、artist；每项去掉首尾空白，最多 8 个别名，每项不超过 300 字。"
+
+func aliasSchema() map[string]any {
+	return map[string]any{
+		"type":                 "object",
+		"additionalProperties": false,
+		"required":             []string{"query", "aliases", "artist"},
+		"properties": map[string]any{
+			"query": map[string]any{"type": "string", "maxLength": 300},
+			"aliases": map[string]any{
+				"type": "array", "maxItems": 8,
+				"items": map[string]any{"type": "string", "minLength": 1, "maxLength": 300},
+			},
+			"artist": map[string]any{"type": "string", "maxLength": 300},
+		},
+	}
+}
+
+// SuggestAlias uses the exact configured Responses endpoint, Bearer key,
+// timeout, model and structured-output contract. A gateway that rejects the
+// optional text.format schema is retried once without it, then the local
+// bounds below still validate every returned string.
+func (c *Client) SuggestAlias(ctx context.Context, request AliasRequest) (AliasSuggestion, error) {
+	request.Artist = strings.TrimSpace(request.Artist)
+	request.AlbumArtist = strings.TrimSpace(request.AlbumArtist)
+	request.Title = strings.TrimSpace(request.Title)
+	request.Query = strings.TrimSpace(request.Query)
+	if request.Title == "" || request.Query == "" {
+		return AliasSuggestion{}, fmt.Errorf("%w: alias request lacks title or query", ErrContract)
+	}
+	for _, value := range []string{request.Artist, request.AlbumArtist, request.Title, request.Query} {
+		if utf8.RuneCountInString(value) > 300 {
+			return AliasSuggestion{}, fmt.Errorf("%w: alias request field exceeds 300 runes", ErrRequestTooLarge)
+		}
+	}
+	user, err := json.Marshal(request)
+	if err != nil {
+		return AliasSuggestion{}, err
+	}
+	schemaJSON, err := json.Marshal(aliasSchema())
+	if err != nil {
+		return AliasSuggestion{}, fmt.Errorf("%w: cannot encode alias schema: %v", ErrContract, err)
+	}
+	input := []inputMessage{
+		{Role: "system", Content: aliasSystemPrompt + " 只返回符合此 schema 的 JSON：" + string(schemaJSON)},
+		{Role: "user", Content: string(user)},
+	}
+	text, err := c.callAlias(ctx, input, true)
+	if errors.Is(err, ErrContract) {
+		text, err = c.call(ctx, input, false)
+	}
+	if err != nil {
+		return AliasSuggestion{}, err
+	}
+	var suggestion AliasSuggestion
+	if err := json.Unmarshal([]byte(text), &suggestion); err != nil {
+		return AliasSuggestion{}, fmt.Errorf("%w: invalid alias JSON: %v", ErrContract, err)
+	}
+	suggestion.Query = strings.TrimSpace(suggestion.Query)
+	suggestion.Artist = strings.TrimSpace(suggestion.Artist)
+	aliases := suggestion.Aliases[:0]
+	for _, alias := range suggestion.Aliases {
+		alias = strings.TrimSpace(alias)
+		if alias == "" || utf8.RuneCountInString(alias) > 300 || len(aliases) >= 8 {
+			continue
+		}
+		aliases = append(aliases, alias)
+	}
+	suggestion.Aliases = aliases
+	if utf8.RuneCountInString(suggestion.Query) > 300 || utf8.RuneCountInString(suggestion.Artist) > 300 {
+		return AliasSuggestion{}, fmt.Errorf("%w: alias response field exceeds 300 runes", ErrContract)
+	}
+	if suggestion.Query == "" && suggestion.Artist == "" && len(suggestion.Aliases) == 0 {
+		return AliasSuggestion{}, fmt.Errorf("%w: alias response has no usable name", ErrEmptyOutput)
+	}
+	return suggestion, nil
+}
+
+// callAlias is the structured-output counterpart of call. Both paths share
+// the same HTTPS enforcement, endpoint, Bearer header, timeout, request budget
+// and HTTP error classification; only text.format differs.
+func (c *Client) callAlias(ctx context.Context, input []inputMessage, structured bool) (string, error) {
+	if strings.TrimSpace(c.Model) == "" {
+		return "", errors.New("aiclient: model is required")
+	}
+	if strings.TrimSpace(c.apiKey) == "" {
+		return "", errors.New("aiclient: API key is required")
+	}
+	endpoint, err := c.endpoint()
+	if err != nil {
+		return "", err
+	}
+	maxTokens := c.MaxOutputTokens
+	if maxTokens <= 0 {
+		maxTokens = defaultMaxOutputTokens
+	}
+	body := responsesRequest{
+		Input: input, Model: c.Model,
+		MaxOutputTokens: maxTokens, Temperature: c.Temperature,
+	}
+	if structured {
+		body.Text = &responsesText{Format: responsesFormat{
+			Type: "json_schema", Name: "musicops_alias_research",
+			Strict: true, Schema: aliasSchema(),
+		}}
+	}
+	encoded, err := json.Marshal(body)
+	if err != nil {
+		return "", fmt.Errorf("%w: cannot encode AI request: %v", ErrContract, err)
+	}
+	if len(encoded) > maxRequestBytes {
+		return "", fmt.Errorf("%w: request is %d bytes", ErrRequestTooLarge, len(encoded))
+	}
+	timeout := c.Timeout
+	if timeout <= 0 {
+		timeout = defaultTimeout
+	}
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	httpClient := c.HTTPClient
+	if httpClient == nil {
+		httpClient = http.DefaultClient
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(encoded))
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("Authorization", "Bearer "+c.apiKey)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	payload, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", fmt.Errorf("aiclient: cannot read AI response: %w", err)
+	}
+	switch {
+	case resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden:
+		return "", fmt.Errorf("%w: HTTP %d", ErrAuthFailed, resp.StatusCode)
+	case resp.StatusCode == http.StatusTooManyRequests:
+		return "", fmt.Errorf("%w: HTTP %d", ErrRateLimited, resp.StatusCode)
+	case resp.StatusCode >= 500:
+		return "", fmt.Errorf("%w: HTTP %d", ErrTransient, resp.StatusCode)
+	case resp.StatusCode != http.StatusOK:
+		return "", fmt.Errorf("%w: HTTP %d", ErrContract, resp.StatusCode)
+	}
+	return extractOutputText(payload)
+}
+
 // recognitionSystemPrompt is the Python recognize_candidate instruction:
 // pick only from the given candidates, weigh aliases, release, version and
 // full duration, and never equate a live, cover, remix or re-recording with

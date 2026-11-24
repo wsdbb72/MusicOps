@@ -203,11 +203,7 @@ func TestWorkflowPagesAndConfirmsBeforeStarting(t *testing.T) {
 
 func TestAliasSkipsAnAliasThatRepeatsTheQuery(t *testing.T) {
 	application := newApp(t)
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		_, _ = io.WriteString(w, `{"query":"old query","aliases":["old query","Fresh Alias"]}`)
-	}))
-	defer server.Close()
-	post(t, application, "/v1/settings/ai", map[string]any{"enabled": true, "base_url": server.URL, "model": "alias"})
+	configureAliasAI(t, application, `{"query":"old query","aliases":["old query","Fresh Alias"]}`)
 	query, ok := application.researchAlias(context.Background(), workflow.Job{}, SearchPlan{Query: "old query", ExpectedTitle: "Album"}, searchdecision.Decision{Action: searchdecision.ActionReviewSearch})
 	if !ok || query != "Fresh Alias" {
 		t.Fatal(query, ok)

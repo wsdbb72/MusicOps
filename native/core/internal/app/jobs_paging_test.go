@@ -111,6 +111,9 @@ func TestJobsCountsOnlyIncludesLiveRuntimeState(t *testing.T) {
 	if _, ok := body["pipeline_paused"]; !ok {
 		t.Fatalf("counts-only response has no pipeline_paused: %s", recorder.Body.String())
 	}
+	if _, ok := body["auto_review"]; !ok {
+		t.Fatalf("counts-only response has no auto-review runtime: %s", recorder.Body.String())
+	}
 }
 
 func TestRootSummaryDoesNotHideFailedDescendant(t *testing.T) {

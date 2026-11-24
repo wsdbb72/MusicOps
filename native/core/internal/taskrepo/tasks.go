@@ -403,11 +403,11 @@ func (r *Repository) Control(requestID, id, action string, nowNS int64) (Result,
 	}
 	intent := struct{ Operation, ID, Action string }{"control", id, action}
 	return r.apply(requestID, id, intent, func(v *dataengine.View, current *Task) (*Task, []dataengine.Mutation, error) {
-		return controlDecision(v, current, id, action, nowNS, false)
+		return controlDecision(v, current, id, action, nowNS, false, 0)
 	}, nil)
 }
 
-func controlDecision(v *dataengine.View, current *Task, id, action string, nowNS int64, allowOwned bool) (*Task, []dataengine.Mutation, error) {
+func controlDecision(v *dataengine.View, current *Task, id, action string, nowNS int64, allowOwned bool, retryNotBeforeNS int64) (*Task, []dataengine.Mutation, error) {
 	if current != nil && current.WorkflowJobID != "" && !allowOwned {
 		return nil, nil, ErrWorkflowOwned
 	}
@@ -499,6 +499,10 @@ func controlDecision(v *dataengine.View, current *Task, id, action string, nowNS
 		}
 		next.State = "queued"
 		next.QueuedAtNS = effectiveTime(nowNS, current)
+		next.NotBeforeNS = 0
+		if action == "retry" && retryNotBeforeNS > nowNS {
+			next.NotBeforeNS = retryNotBeforeNS
+		}
 		next.Owner = ""
 		next.Execution = ""
 		next.PauseRequested = false

@@ -299,7 +299,7 @@ func (a *App) reviewWithAI(w http.ResponseWriter, r *http.Request, id, requestID
 		return
 	}
 	if inspection.Job.ReviewKind == "token" {
-		a.reviewTokenCheckpoint(w, requestID, id, nowNS, inspection.Job)
+		a.reviewTokenCheckpoint(w, requestID, id, nowNS, inspection.Job, r.Header.Get("X-MusicOps-Auto-Review") == "1")
 		return
 	}
 	if inspection.Job.TaskType != "search" {
@@ -646,7 +646,7 @@ func (a *App) writeReviewResult(w http.ResponseWriter, result workflow.Result, e
 	for _, child := range result.Children {
 		children = append(children, publicJob(child))
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "job": publicJob(*job), "stage": job.Stage, "children": children})
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "job": publicJob(*job), "stage": job.Stage, "retry_after_ns": job.RetryAfterNS, "children": children})
 }
 
 // batchJobs applies one control action to a list of jobs and reports the

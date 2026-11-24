@@ -64,6 +64,9 @@ type ReviewDecision struct {
 	// Plan is the enriched search plan payload for the process child task,
 	// accept only.
 	Plan []byte
+	// RetryAfterNS delays a retry until a durable background cooldown expires.
+	// Zero keeps ordinary manual retries immediate.
+	RetryAfterNS int64
 }
 
 // ReviewAction is one decision the review page can offer, with the reason it
@@ -213,7 +216,7 @@ func (r *Repository) Review(requestID, jobID string, in ReviewDecision, nowNS in
 		if job.ReviewKind == "interrupted" {
 			return r.recoverInterruptedExplicit(requestID, job.ID, nowNS)
 		}
-		return r.reviewRetry(requestID, *job, task, nowNS)
+		return r.reviewRetry(requestID, *job, task, in, nowNS)
 	}
 }
 
@@ -665,7 +668,7 @@ func (r *Repository) reviewSkip(requestID string, job Job, task *taskrepo.Task, 
 	return decode(result, err)
 }
 
-func (r *Repository) reviewRetry(requestID string, job Job, task *taskrepo.Task, nowNS int64) (Result, error) {
+func (r *Repository) reviewRetry(requestID string, job Job, task *taskrepo.Task, in ReviewDecision, nowNS int64) (Result, error) {
 	switch job.Stage {
 	case "needs_review":
 		if task.State != "blocked" || !reviewRetryKinds[job.ReviewKind] {
@@ -682,8 +685,15 @@ func (r *Repository) reviewRetry(requestID string, job Job, task *taskrepo.Task,
 	if err != nil {
 		return Result{}, err
 	}
-	extra, _ := json.Marshal(struct{ JobID, Action string }{job.ID, "retry"})
-	result, err := r.tasks.ControlOwned(requestID, task.ID, "retry", nowNS, extra, func(v *dataengine.View, _, after *taskrepo.Task, _ []taskrepo.Task) ([]dataengine.Condition, []dataengine.Mutation, json.RawMessage, error) {
+	retryAfterNS := int64(0)
+	if in.RetryAfterNS > nowNS {
+		retryAfterNS = in.RetryAfterNS
+	}
+	extra, _ := json.Marshal(struct {
+		JobID, Action string
+		RetryAfterNS  int64
+	}{job.ID, "retry", retryAfterNS})
+	result, err := r.tasks.RetryOwned(requestID, task.ID, retryAfterNS, nowNS, extra, func(v *dataengine.View, _, after *taskrepo.Task, _ []taskrepo.Task) ([]dataengine.Condition, []dataengine.Mutation, json.RawMessage, error) {
 		live, raw, err := readJob(v, job.ID)
 		if err != nil || live == nil {
 			if err != nil {
@@ -706,6 +716,7 @@ func (r *Repository) reviewRetry(requestID string, job Job, task *taskrepo.Task,
 		next.ErrorClass = ""
 		next.SearchAction = ""
 		next.SearchRetryAfterSec = 0
+		next.RetryAfterNS = retryAfterNS
 		if live.ReviewKind == "token" && live.TokenRetryCount < 255 {
 			next.TokenRetryCount = live.TokenRetryCount + 1
 		}
@@ -728,7 +739,10 @@ func (r *Repository) reviewRetry(requestID string, job Job, task *taskrepo.Task,
 			// chain instead of returning to the same review forever.
 			next.SearchRetryCount++
 		}
-		next.Message = "已安排重新执行"
+		next.Message = "已安排后台冷却重试，将自动继续"
+		if retryAfterNS == 0 {
+			next.Message = "已安排重新执行"
+		}
 		updated, err := bump(next, nowNS, next.Stage != live.Stage)
 		if err != nil {
 			return nil, nil, nil, err

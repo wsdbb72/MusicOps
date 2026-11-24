@@ -306,7 +306,7 @@ func TestOpenReportsStartupStagesAndHealthReadsStore(t *testing.T) {
 	request := httptest.NewRequest(http.MethodGet, "/healthz", nil)
 	recorder := httptest.NewRecorder()
 	application.Handler().ServeHTTP(recorder, request)
-	if recorder.Code != http.StatusOK || !strings.Contains(recorder.Body.String(), `"scheduler_stopping":false`) {
+	if recorder.Code != http.StatusOK || !strings.Contains(recorder.Body.String(), `"scheduler_stopping":false`) || !strings.Contains(recorder.Body.String(), `"auto_review"`) {
 		t.Fatal(recorder.Code, recorder.Body.String())
 	}
 }

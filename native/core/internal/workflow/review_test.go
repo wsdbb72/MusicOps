@@ -243,6 +243,28 @@ func TestReviewRetryRequeuesSearchAndCountsIt(t *testing.T) {
 	}
 }
 
+func TestReviewRetryPersistsBackgroundCooldown(t *testing.T) {
+	repo, tasks := fixture(t)
+	searchReviewJob(t, repo, tasks, 0)
+	retryAt := int64(30000)
+	result, err := repo.Review("review-delayed-retry", "search:album1", ReviewDecision{Action: "retry", RetryAfterNS: retryAt}, 5000)
+	if err != nil || result.Job == nil || result.Job.RetryAfterNS != retryAt || result.Job.Stage != "searching" {
+		t.Fatalf("job=%+v err=%v", result.Job, err)
+	}
+	task, err := tasks.Get("search:album1")
+	if err != nil || task == nil || task.State != "queued" || task.NotBeforeNS != retryAt {
+		t.Fatalf("task=%+v err=%v", task, err)
+	}
+	before, err := tasks.Claim("claim-before-cooldown", "identify", "owner", retryAt-1)
+	if err != nil || before.Task != nil {
+		t.Fatalf("task was claimable before cooldown: %+v err=%v", before.Task, err)
+	}
+	after, err := tasks.Claim("claim-at-cooldown", "identify", "owner", retryAt)
+	if err != nil || after.Task == nil || after.Task.ID != "search:album1" {
+		t.Fatalf("task was not claimable after cooldown: %+v err=%v", after.Task, err)
+	}
+}
+
 func TestReviewSkipAbandonsSearch(t *testing.T) {
 	repo, tasks := fixture(t)
 	searchReviewJob(t, repo, tasks, 0)

@@ -1,0 +1,152 @@
+package app
+
+import (
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/wsdbb72/MusicOps/native/core/internal/dataengine"
+	"github.com/wsdbb72/MusicOps/native/core/internal/taskrepo"
+)
+
+type quarantinePruneFixture struct {
+	quarantine string
+	keeperPath string
+}
+
+func seedQuarantinePruneFixture(t *testing.T, application *App, playlistTitle, quarantineTitle string) quarantinePruneFixture {
+	t.Helper()
+	incoming := application.workPath("incoming")
+	keeperSource := filepath.Join(incoming, "quarantine-keeper.wav")
+	writeToneWAV(t, keeperSource, 440)
+	keeper := releaseLibraryFile(t, application, filepath.Base(keeperSource), "quarantine-keeper", "Artist", "Album", "Song", 1)
+
+	playlistDir := application.savedPlaylistsDir()
+	if err := os.MkdirAll(playlistDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	content := "#PLAYLIST:Cache\n#MUSICOPS-ALBUM:Album\n#MUSICOPS-NETEASE:1:1\n#EXTINF:1,Artist - " + playlistTitle + "\n.\n"
+
+	if err := os.WriteFile(filepath.Join(playlistDir, "cache.m3u"), []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	mergeID := "merge-cache-prune-" + strings.ReplaceAll(strings.ToLower(playlistTitle), " ", "-")
+	quarantine := filepath.Join(application.Dir, "quarantine", mergeID, "Artist", "Album", "02 "+quarantineTitle+".wav")
+	if err := os.MkdirAll(filepath.Dir(quarantine), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	body := pcmWAV(660)
+	if err := os.WriteFile(quarantine, body, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	sum := sha256.Sum256(body)
+	receipt := mergeReceipt{
+		MergeID: mergeID, GroupID: "group-" + mergeID, Keep: keeper.File,
+		Moved:     []mergeMove{{RequestID: "quarantine-loser", From: filepath.Join(application.Dir, "library-other", "Artist", "Album", "02 "+quarantineTitle+".wav"), Quarantine: quarantine, SHA256: hex.EncodeToString(sum[:])}},
+		CreatedNS: time.Now().Add(-2 * time.Hour).UnixNano(),
+	}
+	raw, err := json.Marshal(receipt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := application.engine.CompareAndSwap(
+		[]dataengine.Condition{{Key: mergeReceiptKey(mergeID), Absent: true}},
+		[]dataengine.Mutation{{Key: mergeReceiptKey(mergeID), Value: raw}},
+	); err != nil {
+		t.Fatal(err)
+	}
+	return quarantinePruneFixture{
+		quarantine: quarantine,
+		keeperPath: filepath.Join(keeper.LibraryDir, filepath.FromSlash(keeper.File)),
+	}
+}
+
+func TestSuccessfulQuarantineIsReclaimedAfterPlaylistAndHashProof(t *testing.T) {
+	application := newApp(t)
+	fixture := seedQuarantinePruneFixture(t, application, "Song", "Song")
+
+	now := time.Now()
+	freed, removed, err := application.pruneAudioCacheAll(time.Hour, now)
+	if err != nil || removed == 0 || freed <= 0 {
+		t.Fatalf("freed=%d removed=%d err=%v", freed, removed, err)
+	}
+	if _, err := os.Stat(fixture.quarantine); !os.IsNotExist(err) {
+		t.Fatalf("successful quarantine survived: %v", err)
+	}
+	if _, err := os.Stat(filepath.Dir(filepath.Dir(filepath.Dir(fixture.quarantine)))); !os.IsNotExist(err) {
+		t.Fatalf("empty quarantine merge directory survived: %v", err)
+	}
+}
+
+func TestQuarantineMoveForMissingPlaylistRowIsPreserved(t *testing.T) {
+	application := newApp(t)
+	fixture := seedQuarantinePruneFixture(t, application, "Missing Song", "Missing Song")
+	now := time.Now()
+	audioCacheMu.Lock()
+	_, _, err := application.pruneSuccessfulQuarantineLocked(time.Hour, now)
+	audioCacheMu.Unlock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(fixture.quarantine); err != nil {
+		t.Fatalf("quarantine that could restore missing playlist row was deleted: %v", err)
+	}
+}
+
+func TestQuarantineHashOrKeeperMismatchIsPreserved(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		mutate func(t *testing.T, application *App, fixture quarantinePruneFixture)
+	}{
+		{name: "hash mismatch", mutate: func(t *testing.T, _ *App, fixture quarantinePruneFixture) {
+			if err := os.WriteFile(fixture.quarantine, pcmWAV(880), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{name: "keeper missing", mutate: func(t *testing.T, _ *App, fixture quarantinePruneFixture) {
+			if err := os.Remove(fixture.keeperPath); err != nil {
+				t.Fatal(err)
+			}
+		}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			application := newApp(t)
+			fixture := seedQuarantinePruneFixture(t, application, "Song", "Song")
+			test.mutate(t, application, fixture)
+			audioCacheMu.Lock()
+			_, _, err := application.pruneSuccessfulQuarantineLocked(time.Hour, time.Now())
+			audioCacheMu.Unlock()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := os.Stat(fixture.quarantine); err != nil {
+				t.Fatalf("unproven quarantine was deleted: %v", err)
+			}
+		})
+	}
+}
+
+func TestActiveTaskReferencePreservesSuccessfulQuarantine(t *testing.T) {
+	application := newApp(t)
+	fixture := seedQuarantinePruneFixture(t, application, "Song", "Song")
+	if _, err := application.tasks.Enqueue("quarantine-active", taskrepo.Spec{
+		ID: "quarantine-loser", Command: "fixture", Lane: "download", Priority: 1, CreatedNS: time.Now().UnixNano(),
+	}, []byte(`{}`)); err != nil {
+		t.Fatal(err)
+	}
+	audioCacheMu.Lock()
+	_, _, err := application.pruneSuccessfulQuarantineLocked(time.Hour, time.Now())
+	audioCacheMu.Unlock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(fixture.quarantine); err != nil {
+		t.Fatalf("active-task quarantine was deleted: %v", err)
+	}
+}

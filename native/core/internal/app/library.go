@@ -71,7 +71,8 @@ type duplicateFile struct {
 	Rank           []int   `json:"rank"`
 	// LibraryDir is the absolute library root the file was published
 	// under, empty for records written before it was stored.
-	LibraryDir string `json:"library_dir,omitempty"`
+	LibraryDir   string   `json:"library_dir,omitempty"`
+	PlaylistKeys []string `json:"playlist_keys,omitempty"`
 }
 
 // duplicateGroup is one (artist, album, slot) set with more than one file.
@@ -145,6 +146,10 @@ func (a *App) scanDuplicatesWithOptions(ctx context.Context, limit int, root str
 	if err != nil {
 		return nil, "", false, nil, err
 	}
+	playlistGuard, err := a.duplicatePlaylistGuard(entries)
+	if err != nil {
+		return nil, "", false, nil, err
+	}
 	decoder := audiorelease.SystemDecoder()
 	method := "pcm"
 	if decoder == nil {
@@ -205,6 +210,7 @@ func (a *App) scanDuplicatesWithOptions(ctx context.Context, limit int, root str
 			defer workerWG.Done()
 			for index := range jobs {
 				group, updates, fingerprintErr := a.fingerprintGroupWithCache(judge, byRecording[candidateKeys[index]], decoder, root, cacheSnapshot)
+				playlistGuard.annotate(group)
 				select {
 				case results <- scanResult{index: index, group: group, updates: updates, err: fingerprintErr}:
 				case <-judge.Done():
@@ -816,6 +822,12 @@ func (a *App) duplicateMerge(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusUnprocessableEntity, map[string]any{"ok": false, "code": "MERGE_TAG_FAILED", "error": "补写标签失败，文件没有移动", "restored": true})
 		return
 	}
+	if len(filled) > 0 {
+		// fillMissingTags rewrote the keeper's bytes and refreshed its digest.
+		// Drop the old stat snapshot before any later merge step can fail, so
+		// playlist presence cannot remain stale until the cache TTL expires.
+		a.invalidatePlaylistLibraryCache()
+	}
 	mergeSum := sha256.Sum256([]byte(body.GroupID + ":" + group.Keep.RequestID))
 	mergeID := "merge-" + hex.EncodeToString(mergeSum[:8])
 	quarantineRoot := filepath.Join(a.Dir, "quarantine", mergeID)
@@ -835,6 +847,8 @@ func (a *App) duplicateMerge(w http.ResponseWriter, r *http.Request) {
 				if restoreErr := moveCheckedFile(move.Quarantine, move.From, move.SHA256); restoreErr != nil {
 					err = errors.Join(err, restoreErr)
 					unrestored = append(unrestored, move)
+				} else {
+					removeEmptyParents(filepath.Dir(move.Quarantine), quarantineRoot)
 				}
 			}
 			if len(unrestored) > 0 {
@@ -848,12 +862,14 @@ func (a *App) duplicateMerge(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if len(receipt.Moved) == 0 {
+		removeEmptyParents(quarantineRoot, filepath.Join(a.Dir, "quarantine"))
 		writeJSON(w, http.StatusConflict, map[string]any{"ok": false, "code": "MERGE_NOT_READY", "error": "没有可合并的重复文件"})
 		return
 	}
 	encoded, err := json.Marshal(receipt)
 	if err != nil {
 		_ = rollbackMergeMoves(receipt.Moved)
+		cleanupMergeQuarantine(receipt.Moved, quarantineRoot)
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "code": "LIBRARY_UNAVAILABLE"})
 		return
 	}
@@ -863,6 +879,7 @@ func (a *App) duplicateMerge(w http.ResponseWriter, r *http.Request) {
 	)
 	if err != nil {
 		_ = rollbackMergeMoves(receipt.Moved)
+		cleanupMergeQuarantine(receipt.Moved, quarantineRoot)
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "code": "LIBRARY_UNAVAILABLE"})
 		return
 	}
@@ -872,14 +889,16 @@ func (a *App) duplicateMerge(w http.ResponseWriter, r *http.Request) {
 		existing, found, err := a.readMergeReceipt(mergeID)
 		if err != nil || !found {
 			_ = rollbackMergeMoves(receipt.Moved)
+			cleanupMergeQuarantine(receipt.Moved, quarantineRoot)
 			writeJSON(w, http.StatusConflict, map[string]any{"ok": false, "code": "MERGE_CONFLICT"})
 			return
 		}
-		a.invalidatePlaylistLibraryCache()
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "replayed": true, "merge_id": existing.MergeID, "group_id": existing.GroupID, "kept": existing.Keep, "quarantined": existing.Moved})
 		return
 	}
-	a.invalidatePlaylistLibraryCache()
+	// The keeper is proven to satisfy the same playlist bindings as every
+	// quarantined copy above. Keep the immutable playlist index warm; each
+	// removed path is still re-verified and the keeper now answers the row.
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "merge_id": receipt.MergeID, "group_id": receipt.GroupID, "kept": receipt.Keep, "quarantined": receipt.Moved, "filled_fields": filled})
 }
 
@@ -1027,16 +1046,40 @@ func (a *App) mergeSeedingGuard(group *duplicateGroup) (string, string) {
 // present) into the merge quarantine directory, recording each move.
 func (a *App) quarantineFile(receipt *mergeReceipt, file duplicateFile, quarantineRoot string) error {
 	from := a.libraryFilePath(file.LibraryDir, file.File)
-	dest := filepath.Join(quarantineRoot, file.File)
+	info, err := os.Stat(from)
+	if err != nil || !info.Mode().IsRegular() {
+		return errors.Join(errors.New("quarantine source is not a regular file"), err)
+	}
+	// Copying into quarantine adds the loser to the managed SSD footprint
+	// before the library source is removed. Reserve that peak through the same
+	// global 8 GiB quota as stream downloads; otherwise whole-library dedupe
+	// could keep growing quarantine while every other write was correctly
+	// paused by the cache limit.
+	release, err := a.reserveAudioCache(quarantineRoot, info.Size())
+	if err != nil {
+		return fmt.Errorf("quarantine cache limit: %w", err)
+	}
+	defer release()
+	dest, err := duplicateQuarantineDestination(quarantineRoot, file)
+	if err != nil {
+		return err
+	}
 	if err := os.MkdirAll(filepath.Dir(dest), 0o700); err != nil {
 		return err
 	}
+	movedAudio := false
+	defer func() {
+		if !movedAudio {
+			removeEmptyParents(filepath.Dir(dest), quarantineRoot)
+		}
+	}()
 	if _, err := os.Lstat(dest); err == nil {
 		return fmt.Errorf("quarantine destination already exists: %s", dest)
 	}
 	if err := moveCheckedFile(from, dest, file.SHA256); err != nil {
 		return err
 	}
+	movedAudio = true
 	receipt.Moved = append(receipt.Moved, mergeMove{RequestID: file.RequestID, From: from, Quarantine: dest, SHA256: file.SHA256})
 	// The sidecar travels with its audio file; a missing sidecar is fine.
 	// Both spellings are moved: the standard "<track>.lrc" this build writes
@@ -1059,6 +1102,41 @@ func (a *App) quarantineFile(receipt *mergeReceipt, file duplicateFile, quaranti
 		receipt.Moved = append(receipt.Moved, mergeMove{RequestID: file.RequestID, From: sidecarFrom, Quarantine: sidecarDest, SHA256: hex.EncodeToString(sum[:]), Sidecar: true})
 	}
 	return nil
+}
+
+// duplicateQuarantineDestination includes a stable source identity in the
+// path. Multiple library roots can legitimately contain the same relative
+// artist/album/file name; using only file.File made the second and later
+// copies collide and aborted every three-copy merge.
+func duplicateQuarantineDestination(root string, file duplicateFile) (string, error) {
+	relative := filepath.Clean(filepath.FromSlash(file.File))
+	if relative == "." || filepath.IsAbs(relative) || relative == ".." || strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
+		return "", errors.New("quarantine source path is unsafe")
+	}
+	sum := sha256.Sum256([]byte(file.RequestID + "\x00" + file.LibraryDir + "\x00" + file.File))
+	return filepath.Join(root, "items", hex.EncodeToString(sum[:8]), relative), nil
+}
+
+// removeEmptyParents removes directories emptied by a rollback or restore.
+// It never removes root or anything outside it.
+func removeEmptyParents(path, root string) {
+	path = filepath.Clean(path)
+	root = filepath.Clean(root)
+	for insideDir(root, path) && path != root {
+		if os.Remove(path) != nil {
+			return
+		}
+		path = filepath.Dir(path)
+	}
+	if path == root {
+		_ = os.Remove(root)
+	}
+}
+
+func cleanupMergeQuarantine(moves []mergeMove, root string) {
+	for _, move := range moves {
+		removeEmptyParents(filepath.Dir(move.Quarantine), root)
+	}
 }
 
 // Copy, verify and only then remove the source. Unlike rename this
@@ -1196,6 +1274,7 @@ func (a *App) duplicateRestore(w http.ResponseWriter, r *http.Request) {
 			if hex.EncodeToString(sum[:]) == move.SHA256 {
 				_ = os.Remove(move.Quarantine)
 				restored = append(restored, move)
+				removeEmptyParents(filepath.Dir(move.Quarantine), filepath.Join(a.Dir, "quarantine"))
 				continue
 			}
 		}
@@ -1208,6 +1287,7 @@ func (a *App) duplicateRestore(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		restored = append(restored, move)
+		removeEmptyParents(filepath.Dir(move.Quarantine), filepath.Join(a.Dir, "quarantine"))
 	}
 	receipt.Restored = true
 	encoded, err := json.Marshal(receipt)

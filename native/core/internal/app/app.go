@@ -94,6 +94,7 @@ type App struct {
 	autoReviewMu      sync.Mutex
 	autoReviewRetryAt map[string]time.Time
 	autoReviewCursor  []byte
+	autoReviewRuntime autoReviewRuntime
 	// lastTokenRead bounds the background balance reads to one per site per
 	// minute. The ledger's read hold only exists for failures; a successful
 	// read leaves no trace there, and a 30-second ticker would otherwise read
@@ -296,8 +297,9 @@ func open(dir, backup, password string, logger StartupLogger) (*App, error) {
 	app.stopReconcile = make(chan struct{})
 	stopReconcile := app.stopReconcile
 	app.startBackground("token-reconcile", func() { app.runTokenReconciler(stopReconcile) })
-	// Safe review items are retried by the core itself. Token holds remain
-	// excluded by aiReviewEligible and still require an explicit FL decision.
+	// Safe review items are retried by the core itself. Token checkpoints use
+	// the deterministic pre-spend/reconciliation policy; uncertain effects are
+	// never replayed and are resolved from ledger evidence or streaming fallback.
 	app.stopAutoReview = make(chan struct{})
 	stopAutoReview := app.stopAutoReview
 	app.startBackground("auto-review", func() { app.runAutoReview(stopAutoReview) })

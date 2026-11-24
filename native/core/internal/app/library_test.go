@@ -3,7 +3,9 @@ package app
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/binary"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -125,6 +127,24 @@ func duplicateGroups(t *testing.T, application *App) []duplicateGroup {
 		t.Fatal(err)
 	}
 	return groups
+}
+
+func filesWithExtension(t *testing.T, root, extension string) []string {
+	t.Helper()
+	files := []string{}
+	err := filepath.WalkDir(root, func(path string, entry os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if !entry.IsDir() && strings.EqualFold(filepath.Ext(path), extension) {
+			files = append(files, path)
+		}
+		return nil
+	})
+	if err != nil && !os.IsNotExist(err) {
+		t.Fatal(err)
+	}
+	return files
 }
 
 func TestDuplicateRankUsesRealQualityAndValidDecode(t *testing.T) {
@@ -307,9 +327,9 @@ func TestDuplicateMergeAndRestoreRoundTrip(t *testing.T) {
 	}
 	// Exactly one of the two files stays; the other is quarantined,
 	// never deleted.
-	quarantine, err := filepath.Glob(filepath.Join(application.Dir, "quarantine", mergeID, "Artist", "Album", "*.wav"))
-	if err != nil || len(quarantine) != 1 {
-		t.Fatal(quarantine, err)
+	quarantine := filesWithExtension(t, filepath.Join(application.Dir, "quarantine", mergeID), ".wav")
+	if len(quarantine) != 1 {
+		t.Fatal(quarantine)
 	}
 	// The quarantined bytes are the loser audio, and its sidecar went too.
 	quarantined, err := os.ReadFile(quarantine[0])
@@ -366,6 +386,9 @@ func TestDuplicateMergeAndRestoreRoundTrip(t *testing.T) {
 	}
 	if _, err := os.Stat(loserPath + ".lrc"); err != nil {
 		t.Fatal("sidecar did not come back", err)
+	}
+	if _, err := os.Stat(filepath.Join(application.Dir, "quarantine", mergeID)); !os.IsNotExist(err) {
+		t.Fatal("empty merge quarantine directory was not removed")
 	}
 	// A second restore replays.
 	code, decoded = mediaPost(t, application, "/v1/library/duplicates/restore", map[string]any{"merge_id": mergeID})
@@ -909,6 +932,113 @@ func TestDuplicateAcrossTrackSlotsWithSameTitleAndPCM(t *testing.T) {
 	groups := duplicateGroups(t, application)
 	if len(groups) != 1 || groups[0].State != "ready" || len(groups[0].Files) != 2 {
 		t.Fatal(groups)
+	}
+}
+
+func TestDuplicateScanProtectsPlaylistBoundIdentity(t *testing.T) {
+	application := newApp(t)
+	incoming := filepath.Join(application.Dir, "incoming")
+	writeToneWAV(t, filepath.Join(incoming, "guard-a.wav"), 440)
+	writeToneWAV(t, filepath.Join(incoming, "guard-b.wav"), 440)
+	publisherStyled := releaseLibraryFile(t, application, "guard-a.wav", "guard-a", "Artist", "Album", "Artist - Song", 1)
+	playlistStyled := releaseLibraryFile(t, application, "guard-b.wav", "guard-b", "Artist", "Album", "Song", 1)
+	playlistDir := application.savedPlaylistsDir()
+	if err := os.MkdirAll(playlistDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	content := "#PLAYLIST:Guard\n#MUSICOPS-ALBUM:Album\n#EXTINF:1,Artist - Song\n.\n"
+	if err := os.WriteFile(filepath.Join(playlistDir, "guard.m3u"), []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	groups := duplicateGroups(t, application)
+	if len(groups) != 1 {
+		t.Fatalf("groups=%+v", groups)
+	}
+	group := groups[0]
+	if group.State != "review" || group.Keep != nil || !strings.Contains(group.Reason, "歌单") {
+		t.Fatalf("playlist-bound merge was not refused: %+v", group)
+	}
+	keys := map[string][]string{}
+	for _, file := range group.Files {
+		keys[file.RequestID] = file.PlaylistKeys
+	}
+	if len(keys[publisherStyled.RequestID]) != 0 || len(keys[playlistStyled.RequestID]) != 1 {
+		t.Fatalf("playlist bindings were not preserved independently: %+v", keys)
+	}
+}
+
+func TestDuplicateMergeKeepsWarmPlaylistPresence(t *testing.T) {
+	application := newApp(t)
+	incoming := filepath.Join(application.Dir, "incoming")
+	writeToneWAV(t, filepath.Join(incoming, "same-a.wav"), 440)
+	writeToneWAV(t, filepath.Join(incoming, "same-b.wav"), 440)
+	releaseLibraryFile(t, application, "same-a.wav", "same-a", "Artist", "Album", "Song", 1)
+	releaseLibraryFile(t, application, "same-b.wav", "same-b", "Artist", "Album", "Song", 1)
+	playlistDir := application.savedPlaylistsDir()
+	if err := os.MkdirAll(playlistDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	content := "#PLAYLIST:Guard\n#MUSICOPS-ALBUM:Album\n#EXTINF:1,Artist - Song\n.\n"
+	if err := os.WriteFile(filepath.Join(playlistDir, "same.m3u"), []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	rows := []playlistTrack{{Artist: "Artist", Album: "Album", Title: "Song", Duration: "1"}}
+	before, err := application.playlistPresence(context.Background(), rows)
+	if err != nil || len(before) != 1 || !before[0] {
+		t.Fatalf("before=%v err=%v", before, err)
+	}
+	groups := duplicateGroups(t, application)
+	if len(groups) != 1 || groups[0].State != "ready" {
+		t.Fatalf("groups=%+v", groups)
+	}
+	code, decoded := mediaPost(t, application, "/v1/library/duplicates/merge", map[string]any{"group_id": groups[0].GroupID})
+	if code != http.StatusOK {
+		t.Fatal(code, decoded)
+	}
+	after, err := application.playlistPresence(context.Background(), rows)
+	if err != nil || len(after) != 1 || !after[0] {
+		t.Fatalf("playlist disappeared after safe merge: after=%v err=%v", after, err)
+	}
+}
+
+func TestQuarantineFileKeepsSameRelativeCopiesDistinct(t *testing.T) {
+	application := newApp(t)
+	root := filepath.Join(application.Dir, "quarantine", "merge-three-copies")
+	receipt := mergeReceipt{MergeID: "merge-three-copies"}
+	destinations := map[string]bool{}
+	for index := 0; index < 3; index++ {
+		library := filepath.Join(application.Dir, fmt.Sprintf("library-%d", index))
+		relative := filepath.Join("Artist", "Album", "01 Song.flac")
+		path := filepath.Join(library, relative)
+		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		body := []byte(fmt.Sprintf("copy-%d", index))
+		if err := os.WriteFile(path, body, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		sum := sha256.Sum256(body)
+		file := duplicateFile{RequestID: fmt.Sprintf("copy-%d", index), LibraryDir: library, File: filepath.ToSlash(relative), SHA256: hex.EncodeToString(sum[:])}
+		if err := application.quarantineFile(&receipt, file, root); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if len(receipt.Moved) != 3 {
+		t.Fatalf("moved=%+v", receipt.Moved)
+	}
+	for _, move := range receipt.Moved {
+		key := strings.ToLower(filepath.Clean(move.Quarantine))
+		if destinations[key] {
+			t.Fatalf("duplicate quarantine destination: %s", move.Quarantine)
+		}
+		destinations[key] = true
+		if _, err := os.Stat(move.Quarantine); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := os.Stat(move.From); !os.IsNotExist(err) {
+			t.Fatalf("source still exists: %s", move.From)
+		}
 	}
 }
 

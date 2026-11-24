@@ -1,14 +1,11 @@
 package app
 
 import (
-	"bytes"
 	"context"
-	"encoding/json"
-	"io"
-	"net/http"
 	"strings"
 	"time"
 
+	"github.com/wsdbb72/MusicOps/native/core/internal/aiclient"
 	"github.com/wsdbb72/MusicOps/native/core/internal/searchdecision"
 	"github.com/wsdbb72/MusicOps/native/core/internal/workflow"
 )
@@ -24,45 +21,35 @@ func (a *App) researchAlias(ctx context.Context, job workflow.Job, plan SearchPl
 		return "", false
 	}
 	settings, err := a.loadAISettings()
-	if err != nil || !settings.Enabled || strings.TrimSpace(settings.BaseURL) == "" {
+	if err != nil || !settings.Enabled || strings.TrimSpace(settings.BaseURL) == "" || strings.TrimSpace(settings.Model) == "" || a.vault == nil {
 		return "", false
 	}
-	payload, err := json.Marshal(map[string]string{
-		"task": "alias-search", "artist": plan.ExpectedArtist, "album": plan.ExpectedTitle, "query": plan.Query,
+	_, host, err := cleanURL(settings.BaseURL, false)
+	if err != nil || host == "" {
+		return "", false
+	}
+	key, found, err := a.vault.Get(aiKeyRef, host)
+	if err != nil || !found || strings.TrimSpace(key) == "" {
+		return "", false
+	}
+	client, err := aiclient.New(settings.BaseURL, settings.Model, key)
+	if err != nil {
+		return "", false
+	}
+	a.useAIHTTPClient(client)
+	client.Timeout = time.Duration(settings.Timeout) * time.Second
+	client.MaxOutputTokens = settings.MaxOutputTokens
+	client.Temperature = settings.Temperature
+	suggestion, err := client.SuggestAlias(ctx, aiclient.AliasRequest{
+		Artist: plan.ExpectedArtist, AlbumArtist: plan.AlbumArtist, Title: plan.ExpectedTitle, Query: plan.Query,
 	})
 	if err != nil {
 		return "", false
 	}
-	endpoint := strings.TrimRight(settings.BaseURL, "/") + "/responses"
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(payload))
-	if err != nil {
-		return "", false
-	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Accept", "application/json")
-	client := &http.Client{Timeout: 5 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error {
-		return http.ErrUseLastResponse
-	}}
-	response, err := client.Do(req)
-	if err != nil {
-		return "", false
-	}
-	defer response.Body.Close()
-	if response.StatusCode != http.StatusOK {
-		return "", false
-	}
-	var decoded struct {
-		Query   string   `json:"query"`
-		Aliases []string `json:"aliases"`
-		Artist  string   `json:"artist"`
-	}
-	if json.NewDecoder(io.LimitReader(response.Body, 1<<20)).Decode(&decoded) != nil {
-		return "", false
-	}
-	candidates := []string{decoded.Query}
-	candidates = append(candidates, decoded.Aliases...)
-	if strings.TrimSpace(decoded.Artist) != "" {
-		candidates = append(candidates, decoded.Artist+" "+plan.ExpectedTitle)
+	candidates := []string{suggestion.Query}
+	candidates = append(candidates, suggestion.Aliases...)
+	if strings.TrimSpace(suggestion.Artist) != "" && strings.TrimSpace(plan.ExpectedTitle) != "" {
+		candidates = append(candidates, suggestion.Artist+" "+plan.ExpectedTitle)
 	}
 	original := strings.TrimSpace(plan.Query)
 	for _, candidate := range candidates {

@@ -102,11 +102,7 @@ func TestWorkflowUsesTheSelectedFileWithoutSpending(t *testing.T) {
 
 func TestAliasCanUseAnAliasAsSearchText(t *testing.T) {
 	application := newApp(t)
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		_, _ = io.WriteString(w, `{"aliases":["Other Name"],"artist":"Canonical"}`)
-	}))
-	defer server.Close()
-	post(t, application, "/v1/settings/ai", map[string]any{"enabled": true, "base_url": server.URL, "model": "alias"})
+	configureAliasAI(t, application, `{"aliases":["Other Name"],"artist":"Canonical"}`)
 	query, ok := application.researchAlias(context.Background(), workflow.Job{}, SearchPlan{Query: "old query", ExpectedTitle: "Album", ExpectedArtist: "Artist"}, searchdecision.Decision{Action: searchdecision.ActionReviewSearch})
 	if !ok || query != "Other Name" {
 		t.Fatal(query, ok)

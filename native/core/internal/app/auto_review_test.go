@@ -40,7 +40,7 @@ func TestAutoReviewPassRunsWithoutAButtonAndCoolsRepeatedMetadataRetry(t *testin
 		t.Fatalf("scan did not resume and wrap at the end: %+v", stats)
 	}
 	stats := application.autoReviewPass(context.Background())
-	if stats.Candidates != 1 || stats.Accepted != 0 || stats.Held != 1 {
+	if stats.Candidates != 1 || stats.Accepted != 1 || stats.Held != 0 {
 		t.Fatalf("stats=%+v", stats)
 	}
 	if !application.autoReviewCoolingDown("auto-review-metadata", application.now()) {
@@ -68,6 +68,24 @@ func TestAutoReviewCooldownBlocksImmediateRepeatedAttempts(t *testing.T) {
 	application.setAutoReviewCooldown("token-hold", now)
 	if !application.autoReviewCoolingDown("token-hold", now.Add(time.Minute)) {
 		t.Fatal("cooldown was not applied")
+	}
+}
+
+func TestAutoReviewMovesTokenHoldToDurableCooldown(t *testing.T) {
+	application, _, processID := seedTokenReviewJob(t, false, "account_token_hold")
+	stats := application.autoReviewPass(context.Background())
+	if stats.Candidates != 1 || stats.Accepted != 1 || stats.Held != 0 || stats.Failed != 0 {
+		t.Fatalf("stats=%+v", stats)
+	}
+	inspection := inspect(t, application, processID)
+	if inspection.Job.Stage != "requesting" || inspection.Job.ReviewKind != "" || inspection.Job.RetryAfterNS <= time.Now().UnixNano() {
+		t.Fatalf("job did not enter a durable cooldown: %+v", inspection.Job)
+	}
+	if inspection.Task == nil || inspection.Task.State != "queued" || inspection.Task.NotBeforeNS != inspection.Job.RetryAfterNS {
+		t.Fatalf("task=%+v", inspection.Task)
+	}
+	if !application.autoReviewCoolingDown(processID, application.now()) && stats.Held != 0 {
+		t.Fatal("a queued retry was incorrectly treated as a held review")
 	}
 }
 

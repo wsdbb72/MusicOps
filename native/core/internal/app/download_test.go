@@ -501,6 +501,31 @@ func TestDownloadExecutorFullChain(t *testing.T) {
 	}
 }
 
+func TestDownloadRejectsTorrentBeforeAddWhenCacheWouldOverflow(t *testing.T) {
+	wav1, wav2 := pcmWAV(100), pcmWAV(200)
+	torrent := buildTestTorrent(t, []testTorrentFile{{"01.wav", wav1}, {"02.wav", wav2}})
+	application := newApp(t)
+	job := candidateJob(t, application, "album-cache-limit", torrent)
+	downloads := application.workPath("downloads")
+	if err := os.MkdirAll(downloads, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(downloads, "existing-user-data.bin"), make([]byte, 1<<20), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("MUSICOPS_AUDIO_CACHE_BYTES", "1024")
+	fake := newFakeQBT(t, map[string][]byte{"album/01.wav": wav1, "album/02.wav": wav2}, 1<<30)
+	if recorder := postDownload(t, application, job.ID, downloadBody(fake.url(), "secret-pass")); recorder.Code != http.StatusAccepted {
+		t.Fatal(recorder.Code, recorder.Body.String())
+	}
+	failed := waitJob(t, application, job.ID, "failed")
+	if failed.ErrorClass != "CACHE_LIMIT" {
+		t.Fatal(failed)
+	}
+	if fake.addCallsCount() != 0 {
+		t.Fatal("torrent was added after the cache quota rejected its declared size")
+	}
+}
 func TestDownloadTimeoutResumesWithoutAddingTwice(t *testing.T) {
 	wav1, wav2 := pcmWAV(100), pcmWAV(200)
 	torrent := buildTestTorrent(t, []testTorrentFile{{"01.wav", wav1}, {"02.wav", wav2}})

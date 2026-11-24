@@ -280,6 +280,7 @@ func (a *App) health(w http.ResponseWriter, _ *http.Request) {
 			return
 		}
 	}
+	body["auto_review"] = a.autoReviewHealth()
 	body["ok"] = true
 	writeJSON(w, http.StatusOK, body)
 }
@@ -493,7 +494,7 @@ func (a *App) jobs(w http.ResponseWriter, r *http.Request) {
 		if a.runner != nil {
 			activeCount = len(a.runner.Health().Active)
 		}
-		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "counts": counts, "active_count": activeCount, "pipeline_paused": a.pipelinePaused()})
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "counts": counts, "active_count": activeCount, "pipeline_paused": a.pipelinePaused(), "auto_review": a.autoReviewHealth()})
 		return
 	}
 
@@ -601,7 +602,7 @@ func (a *App) jobs(w http.ResponseWriter, r *http.Request) {
 		activeCount = len(a.runner.Health().Active)
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"ok": true, "jobs": jobs, "next": next, "counts": counts, "active_count": activeCount, "pipeline_paused": a.pipelinePaused(), "downloaded": downloaded, "library_published": published, "production_verified": false, "python": false,
+		"ok": true, "jobs": jobs, "next": next, "counts": counts, "active_count": activeCount, "pipeline_paused": a.pipelinePaused(), "auto_review": a.autoReviewHealth(), "downloaded": downloaded, "library_published": published, "production_verified": false, "python": false,
 	})
 }
 

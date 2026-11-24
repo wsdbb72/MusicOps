@@ -263,6 +263,23 @@ func resolveDecision(v *dataengine.View, current *Task, end Completion, hash str
 	return &next, extra, nil
 }
 
+// RetryOwned requeues a workflow-owned task with an optional durable earliest
+// claim time. A token checkpoint can therefore leave human review immediately
+// while its retry remains visible as queued work until the cooldown expires.
+func (r *Repository) RetryOwned(requestID, id string, notBeforeNS, nowNS int64, extra []byte, domain Domain) (Result, error) {
+	if !validID(id) || nowNS <= 0 || notBeforeNS < 0 || domain == nil {
+		return Result{}, dataengine.ErrInvalidRequest
+	}
+	intent := struct {
+		Operation, ID, Action string
+		NotBeforeNS           int64
+		Extra                 []byte
+	}{"workflow_control", id, "retry", notBeforeNS, extra}
+	return r.apply(requestID, id, intent, func(v *dataengine.View, current *Task) (*Task, []dataengine.Mutation, error) {
+		return controlDecision(v, current, id, "retry", nowNS, true, notBeforeNS)
+	}, domain)
+}
+
 // ControlOwned records a pause, resume, cancel, retry or startup recovery on a
 // workflow-owned task. Recovery is only issued after the prior owner is known
 // to be gone and the command is idempotent for a restart.
@@ -280,7 +297,7 @@ func (r *Repository) ControlOwned(requestID, id, action string, nowNS int64, ext
 		Extra                 []byte
 	}{"workflow_control", id, action, extra}
 	return r.apply(requestID, id, intent, func(v *dataengine.View, current *Task) (*Task, []dataengine.Mutation, error) {
-		return controlDecision(v, current, id, action, nowNS, true)
+		return controlDecision(v, current, id, action, nowNS, true, 0)
 	}, domain)
 }
 

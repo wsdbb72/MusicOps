@@ -4,11 +4,17 @@ import (
 	"encoding/json"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/wsdbb72/MusicOps/native/core/internal/workflow"
 )
 
-const tokenReviewRetryLimit = 3
+const (
+	tokenReviewRetryLimit     = 3
+	tokenReviewTransientDelay = 2 * time.Minute
+	tokenReviewAccountDelay   = 15 * time.Minute
+	tokenReviewLongHoldDelay  = time.Hour
+)
 
 type tokenReviewDisposition string
 
@@ -32,8 +38,16 @@ func tokenReviewDecisionFor(job workflow.Job, fallbackUsable bool) tokenReviewDi
 			class = normalized
 		}
 	}
-	if tokenReviewRetrySafe(class) && job.TokenRetryCount < tokenReviewRetryLimit {
-		return tokenReviewRetry
+	if tokenReviewRetrySafe(class) {
+		if job.TokenRetryCount < tokenReviewRetryLimit {
+			return tokenReviewRetry
+		}
+		// A token-balance hold is a durable pre-spend condition. Without a
+		// usable fallback, retry it periodically instead of permanently
+		// skipping a safe checkpoint merely because the balance stayed empty.
+		if class == "account_token_hold" && !fallbackUsable {
+			return tokenReviewRetry
+		}
 	}
 	if fallbackUsable {
 		return tokenReviewFallback
@@ -55,6 +69,23 @@ func tokenReviewRetrySafe(class string) bool {
 	default:
 		return false
 	}
+}
+
+// tokenReviewRetryAt keeps every safe token checkpoint out of the human review
+// queue while it waits. The delay belongs to the durable task, so a process
+// restart cannot make it fire early. A held balance without a fallback gets a
+// longer periodic check after the bounded fast-retry window.
+func tokenReviewRetryAt(job workflow.Job, fallbackUsable bool, nowNS int64) int64 {
+	delay := tokenReviewTransientDelay
+	if strings.TrimSpace(job.ErrorClass) == "account_token_hold" {
+		delay = tokenReviewAccountDelay
+		if fallbackUsable && job.TokenRetryCount >= tokenReviewRetryLimit {
+			delay = tokenReviewTransientDelay
+		} else if !fallbackUsable && job.TokenRetryCount >= tokenReviewRetryLimit {
+			delay = tokenReviewLongHoldDelay
+		}
+	}
+	return nowNS + int64(delay)
 }
 
 func tokenReviewFallbackUsable(job workflow.Job, plan SearchPlan) bool {
@@ -103,7 +134,7 @@ func tokenReviewFallbackReason(class string) string {
 // reviewTokenCheckpoint is the automatic counterpart to a human pressing
 // "AI review" on a token checkpoint. It never sends usetoken and never invokes
 // the language model.
-func (a *App) reviewTokenCheckpoint(w http.ResponseWriter, requestID, id string, nowNS int64, job workflow.Job) {
+func (a *App) reviewTokenCheckpoint(w http.ResponseWriter, requestID, id string, nowNS int64, job workflow.Job, background bool) {
 	plan := a.tokenReviewPlan(job)
 	class := strings.TrimSpace(job.ErrorClass)
 	if class == "" || class == "detail" {
@@ -111,10 +142,15 @@ func (a *App) reviewTokenCheckpoint(w http.ResponseWriter, requestID, id string,
 			job.ErrorClass = normalized
 		}
 	}
-	decision := tokenReviewDecisionFor(job, tokenReviewFallbackUsable(job, plan))
+	fallbackUsable := tokenReviewFallbackUsable(job, plan)
+	decision := tokenReviewDecisionFor(job, fallbackUsable)
 	switch decision {
 	case tokenReviewRetry:
-		result, err := a.flows.Review(requestID, id, workflow.ReviewDecision{Action: "retry"}, nowNS)
+		retryAfterNS := int64(0)
+		if background {
+			retryAfterNS = tokenReviewRetryAt(job, fallbackUsable, nowNS)
+		}
+		result, err := a.flows.Review(requestID, id, workflow.ReviewDecision{Action: "retry", RetryAfterNS: retryAfterNS}, nowNS)
 		a.writeReviewResult(w, result, err, "ai")
 	case tokenReviewFallback:
 		result, err := a.flows.RequeueTokenFallback(requestID, id, nowNS, tokenReviewFallbackReason(job.ErrorClass))

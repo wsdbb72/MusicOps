@@ -64,6 +64,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -933,7 +934,7 @@ func (a *App) download(ctx context.Context, execution *scheduler.Execution, payl
 	if err := execution.Checkpoint(ctx, "download_add", 0, "正在确认 qBittorrent 任务"); err != nil {
 		return scheduler.Outcome{}, err
 	}
-	if outcome, done, err := a.ensureTorrent(ctx, execution, client, &rec, torrent, evidence); err != nil {
+	if outcome, done, err := a.ensureTorrent(ctx, execution, client, &rec, torrent, meta.TotalSize, evidence); err != nil {
 		return scheduler.Outcome{}, err
 	} else if done {
 		return outcome, nil
@@ -1004,10 +1005,28 @@ func (a *App) cancelDownload(execution *scheduler.Execution) (scheduler.Outcome,
 // resumes the existing one (after re-verifying ownership) when it does, so
 // a retry never adds the same torrent twice. It returns done=true with a
 // failDownload outcome when the step cannot proceed.
-func (a *App) ensureTorrent(ctx context.Context, execution *scheduler.Execution, client *qbittorrent.Client, rec *qbittorrent.Record, torrent []byte, evidence qbittorrent.FreeEvidence) (scheduler.Outcome, bool, error) {
+func (a *App) ensureTorrent(ctx context.Context, execution *scheduler.Execution, client *qbittorrent.Client, rec *qbittorrent.Record, torrent []byte, requiredBytes int64, evidence qbittorrent.FreeEvidence) (scheduler.Outcome, bool, error) {
 	row, err := client.Query(ctx, *rec)
 	if err != nil {
 		return a.failDownloadStep(execution, "QBITTORENT_UNAVAILABLE", "qBittorrent 查询失败")
+	}
+	remainingBytes := requiredBytes
+	if row != nil {
+		if row.Size > remainingBytes {
+			remainingBytes = row.Size
+		}
+		if row.Progress >= 1 {
+			remainingBytes = 0
+		} else if row.Progress > 0 && remainingBytes > 0 {
+			remainingBytes = int64(math.Ceil(float64(remainingBytes) * (1 - row.Progress)))
+		}
+	}
+	if remainingBytes > 0 {
+		release, cacheErr := a.reserveAudioCache(filepath.Dir(rec.SourcePath), remainingBytes)
+		if cacheErr != nil {
+			return a.failDownloadStep(execution, "CACHE_LIMIT", "SSD 缓存空间不足，未继续下载种子："+cacheErr.Error())
+		}
+		release()
 	}
 	if row == nil {
 		if _, err := client.AddStopped(ctx, rec, torrent, evidence); err != nil {
@@ -1557,7 +1576,7 @@ func (a *App) ingestDownload(ctx context.Context, plan downloadPlan, meta qbitto
 		}
 		incomingName := fmt.Sprintf("dl-%s-%02d-%s", short, track, filepath.Base(f.Path))
 		copiedName := incomingName
-		if err := copyIncoming(source, filepath.Join(incoming, incomingName)); err != nil {
+		if err := a.copyIncoming(source, filepath.Join(incoming, incomingName)); err != nil {
 			if df, ok := err.(*downloadFailure); ok {
 				return nil, df
 			}
@@ -1774,7 +1793,7 @@ func truncateName(name string) string {
 // copyIncoming copies a seed file into incoming/ (or reuses the copy when
 // the same bytes are already there, so a re-run does not ingest twice). A
 // different file under the same name is a conflict, never an overwrite.
-func copyIncoming(source, dest string) error {
+func (a *App) copyIncoming(source, dest string) error {
 	info, err := os.Lstat(source)
 	if err != nil || !info.Mode().IsRegular() || info.Size() > audiorelease.MaxStagedAudioBytes {
 		return downloadError("AUDIO_REJECTED", "做种音频不是普通文件或超出入库大小限制")
@@ -1791,7 +1810,7 @@ func copyIncoming(source, dest string) error {
 	} else if err != nil && !os.IsNotExist(err) {
 		return err
 	}
-	release, err := reserveAudioCache(filepath.Dir(dest), int64(len(body)))
+	release, err := a.reserveAudioCache(filepath.Dir(dest), int64(len(body)))
 	if err != nil {
 		return downloadError("CACHE_LIMIT", err.Error())
 	}

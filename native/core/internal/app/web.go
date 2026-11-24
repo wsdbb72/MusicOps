@@ -5,7 +5,7 @@ const appJS = `(function () {
   var active = {identifying: true, searching: true, requesting: true, downloading: true, fallback: true, validating: true, publishing: true};
   var view = "tasks";
   var jobs = [];
-  var activeCount = 0, pipelinePaused = false, globalJobCounts = null;
+  var activeCount = 0, pipelinePaused = false, globalJobCounts = null, autoReviewStatus = null;
   var currentJob = null;
   var currentActionJobID = "";
   var currentActionStage = "";
@@ -55,10 +55,27 @@ const appJS = `(function () {
     status.textContent = text;
   }
 
+  function retryAt(job) {
+    if (!job) return 0;
+    return Number(job.retry_after_ns || (job.root_status && job.root_status.retry_after_ns) || 0);
+  }
+  function retryPending(job) { return retryAt(job) > Date.now(); }
+  function retryLabel(value) {
+    var when = new Date(Number(value) / 1000000);
+    return isNaN(when.getTime()) ? "冷却重试中" : "冷却至 " + when.toLocaleTimeString([], {hour:"2-digit", minute:"2-digit"});
+  }
+  function autoReviewLabel() {
+    if (!autoReviewStatus) return "自动 AI 核对状态未知";
+    if (!autoReviewStatus.enabled) return "自动 AI 核对已停止";
+    if (autoReviewStatus.active) return "自动 AI 核对正在运行";
+    if (autoReviewStatus.next_run_ns) return "自动 AI 核对等待下一轮";
+    return "自动 AI 核对空闲";
+  }
   function pill(job) {
-    var moving = job.progress === "检索中" || job.progress === "获取中" || job.progress === "识别中" || job.progress === "已排队流媒体" || job.progress === "正在入库";
-    var kind = job.progress === "待核对" ? "review" : (job.progress === "未能继续" ? "fail" : (job.progress === "部分入库" ? "partial" : (moving ? "queue" : "")));
-    return '<span class="pill ' + kind + '">' + escapeText(job.progress || "未下载") + "</span>";
+    var progress = retryPending(job) ? retryLabel(retryAt(job)) : (job.progress || "未下载");
+    var moving = progress === "检索中" || progress === "获取中" || progress === "识别中" || progress === "已排队流媒体" || progress === "正在入库" || progress.indexOf("冷却至") === 0;
+    var kind = progress === "待核对" ? "review" : (progress === "未能继续" ? "fail" : (progress === "部分入库" ? "partial" : (moving ? "queue" : "")));
+    return '<span class="pill ' + kind + '">' + escapeText(progress) + "</span>";
   }
   function escapeText(value) {
     return String(value == null ? "" : value).replace(/[&<>"]/g, function (ch) {
@@ -91,8 +108,9 @@ const appJS = `(function () {
     loading = next;
     document.querySelectorAll("#nav button[data-view], #back").forEach(function (button) { button.disabled = next; });
   }
-  function executionLabel(state, paused) {
+  function executionLabel(state, paused, retryAfterNS) {
     if (paused) return "已暂停";
+    if (Number(retryAfterNS || 0) > Date.now()) return retryLabel(retryAfterNS);
     return ({queued:"排队中", running:"运行中", paused:"已暂停", failed:"已失败", cancelled:"已取消", blocked:"待核对", recovery_required:"已中断", completed:"已完成"})[state] || "";
   }
   async function reviewAllAI() {
@@ -162,7 +180,7 @@ const appJS = `(function () {
       return;
     }
     setStatus("", "");
-    var html = '<p class="meta" id="pipeline-status">后台调度 ' + (pipelinePaused ? "已暂停" : "已开启") + " · 正在执行 " + activeCount + " 项</p>";
+    var html = '<p class="meta" id="pipeline-status">后台调度 ' + (pipelinePaused ? "已暂停" : "已开启") + " · 正在执行 " + activeCount + " 项 · " + autoReviewLabel() + "</p>";
     if (view === "tasks") {
       html += '<p class="meta" id="job-counts">共 ' + counts.total + ' 个任务：执行中 ' + counts.running + ' · 待执行 ' + (counts.queued || 0) + ' · 待核对 ' + counts.review + ' · 失败 ' + (counts.failed || 0) + ' · 已完成 ' + counts.finished + '。点任务查看详情。</p>';
       html += newTaskCard() + pipelineBar() + batchBar();
@@ -174,7 +192,7 @@ const appJS = `(function () {
     rows.forEach(function (job) {
       var checked = selectedJobs[job.job_id] ? " checked" : "";
       var box = (view === "tasks" || view === "queue") ? '<label><input type="checkbox" data-batch="' + escapeText(job.job_id) + '"' + checked + '> 批量</label>' : "";
-      var state = executionLabel(job.execution_state, job.paused);
+      var state = executionLabel(job.execution_state, job.paused, retryAt(job));
       var stage = (state ? " · " + escapeText(state) : "") + (view === "queue" ? ' · ' + escapeText(stageLabel(job.stage)) : "");
       html += '<article>' + box + '<button type="button" class="card-link" data-job="' + escapeText(job.job_id) + '"><h2>' + escapeText(job.label || "未命名") + '</h2><p class="meta">' + pill(job) + stage + '</p><p>' + escapeText(job.headline || "") + "</p></button></article>";
     });
@@ -205,9 +223,10 @@ const appJS = `(function () {
               globalJobCounts = counts;
               activeCount = body.active_count || 0;
               pipelinePaused = !!body.pipeline_paused;
+              autoReviewStatus = body.auto_review || autoReviewStatus;
               label.textContent = "共 " + counts.total + " 个任务，执行中 " + counts.running + "，待执行 " + (counts.queued || 0) + "，待核对 " + counts.review + "，失败 " + (counts.failed || 0) + "，已完成 " + counts.finished + "。点任务查看详情。";
               var pipelineStatus = document.getElementById("pipeline-status");
-              if (pipelineStatus) pipelineStatus.textContent = "后台调度 " + (pipelinePaused ? "已暂停" : "已开启") + " · 正在执行 " + activeCount + " 项";
+              if (pipelineStatus) pipelineStatus.textContent = "后台调度 " + (pipelinePaused ? "已暂停" : "已开启") + " · 正在执行 " + activeCount + " 项 · " + autoReviewLabel();
             }
           }
         } catch (err) { /* The next refresh retries a transient connection failure. */ }
@@ -1431,6 +1450,12 @@ const appJS = `(function () {
     }
   }
   var libraryRunTimer = 0;
+  function libraryByteCount(bytes) {
+    var value = Number(bytes || 0);
+    if (value >= 1073741824) return (value / 1073741824).toFixed(2) + " GiB";
+    if (value >= 1048576) return (value / 1048576).toFixed(1) + " MiB";
+    return Math.round(value / 1024) + " KiB";
+  }
   function libraryAutomationSummary(report, running) {
     report = report || {};
     var phaseNames = {queued:"排队", reindex:"索引", scrape:"刮削", dedupe:"去重", library_workflows:"升级与补专", done:"完成"};
@@ -1444,6 +1469,7 @@ const appJS = `(function () {
     if (report.artwork_candidates) text += " · 歌词封面 " + (report.artwork_processed || 0) + "/" + report.artwork_candidates;
     if (report.duplicate_candidates) text += " · 去重 " + (report.duplicate_checked || 0) + "/" + report.duplicate_candidates;
     text += " · 写入 " + (report.scrape_written || 0) + " · 跳过 " + ((report.scrape_skipped || 0) + (report.artwork_skipped || 0)) + " · 失败 " + ((report.scrape_failed || 0) + (report.artwork_failed || 0)) + " · 去重 " + (report.deduplicated || 0) + " · 升级 " + (report.upgrade_jobs || 0) + " · 补专 " + (report.expand_jobs || 0);
+    if (report.cache_limit_bytes) text += " · SSD 缓存 " + libraryByteCount(report.cache_used_bytes) + "/" + libraryByteCount(report.cache_limit_bytes) + (report.cache_over_limit ? "（已达上限，新写入暂停）" : "");
     if (report.note) text += " · " + report.note;
     if (report.blocked_by) text += " · 已暂停：" + report.blocked_by + (report.blocked_reason ? "，" + report.blocked_reason : "");
     if (report.errors && report.errors.length) text += " · " + report.errors.slice(-2).join(" | ");
@@ -2200,7 +2226,7 @@ const appJS = `(function () {
       detail.hidden = false;
       document.getElementById("detail-title").textContent = job.label || "未命名";
       detailFields.replaceChildren();
-      field("整体状态", executionLabel(summary.execution_state, summary.paused) || "未知");
+      field("整体状态", executionLabel(summary.execution_state, summary.paused, summary.retry_after_ns) || "未知");
       if (actionID && actionID !== job.job_id) field("当前环节", actionID);
       field("进度", body.progress);
       field("说明", body.headline);
@@ -2336,7 +2362,9 @@ const appJS = `(function () {
         setStatus("fail", (body && body.message) || ("核对操作失败。" + (body && body.code ? "（" + body.code + "）" : "")));
         return;
       }
-      if (body.held || body.stage === "needs_review") {
+      if (Number(body.retry_after_ns || 0) > Date.now()) {
+        setStatus("ok", "已排除人工核对并进入后台冷却重试，将在 " + new Date(Number(body.retry_after_ns) / 1000000).toLocaleTimeString([], {hour:"2-digit", minute:"2-digit"}) + " 自动继续。");
+      } else if (body.held || body.stage === "needs_review") {
         setStatus("review", body.message || "已提交余额对账，稍后自动收敛。");
       } else if (body.stage === "fallback") {
         setStatus("ok", "已自动切换流媒体回退，未重复使用令牌。");
@@ -2511,6 +2539,7 @@ const appJS = `(function () {
         globalJobCounts = body.counts || null;
         activeCount = body.active_count || 0;
         pipelinePaused = !!body.pipeline_paused;
+        autoReviewStatus = body.auto_review || autoReviewStatus;
       }
       if (detail.hidden) render();
       arm();

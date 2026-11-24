@@ -65,7 +65,7 @@ func (a *App) uploadIncoming(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "code": "LIBRARY_UNAVAILABLE"})
 		return
 	}
-	release, err := reserveAudioCache(incoming, header.Size)
+	release, err := a.reserveAudioCache(incoming, header.Size)
 	if err != nil {
 		writeJSON(w, http.StatusInsufficientStorage, map[string]any{"ok": false, "code": "CACHE_LIMIT", "error": err.Error()})
 		return

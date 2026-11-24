@@ -90,7 +90,11 @@ func TestStreamEngineWritesSlashSeparatedCreditsAsDiscreteArtists(t *testing.T) 
 	}))
 	defer server.Close()
 	application := newApp(t)
-	work, err := os.MkdirTemp("E:\\", "musicops-stream-slash-test-")
+	workBase := ""
+	if _, statErr := os.Stat("E:\\"); statErr == nil {
+		workBase = "E:\\"
+	}
+	work, err := os.MkdirTemp(workBase, "musicops-stream-slash-test-")
 	if err != nil {
 		t.Fatal(err)
 	}

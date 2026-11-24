@@ -832,7 +832,20 @@ func (a *App) stageNeteaseSongWithEngine(ctx context.Context, plan SearchPlan, s
 			Artist: strings.Join(song.Artists, " / "), Album: song.Album, Duration: (song.DurationMS + 500) / 1000,
 		}
 		if enginePath, engineNote, engineClass := a.tryConfiguredStreamSong(ctx, "netease", plan, exact); enginePath != "" {
-			return enginePath, primaryNote + "；网易云内置下载引擎：" + engineNote, downloadpolicy.ClassDownload, true
+			coverErr := a.ensureNeteaseAlternateCover(ctx, enginePath, song, song)
+			if tagErr := a.rewriteNeteaseRecoveredPlaylistTags(enginePath, plan); tagErr != nil {
+				_ = os.Remove(enginePath)
+				primaryNote += "；网易云内置下载引擎：" + engineNote + "；恢复歌单歌手和专辑失败：" + tagErr.Error()
+				primaryClass = preferStreamFailure(primaryClass, downloadpolicy.ClassDownload)
+			} else {
+				detail := "；已恢复歌单中的分离歌手和专辑"
+				if coverErr == nil {
+					detail += "及歌曲封面"
+				} else {
+					detail += "；封面暂由后续刮削补齐：" + coverErr.Error()
+				}
+				return enginePath, primaryNote + "；网易云内置下载引擎：" + engineNote + detail, downloadpolicy.ClassDownload, true
+			}
 		} else {
 			primaryNote += "；网易云内置下载引擎：" + engineNote
 			primaryClass = preferStreamFailure(primaryClass, engineClass)

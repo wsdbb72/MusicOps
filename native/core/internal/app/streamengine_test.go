@@ -4,6 +4,7 @@ import (
 	"encoding/binary"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -76,6 +77,44 @@ func TestStreamEngineAcceptsOnlyValidatedAudio(t *testing.T) {
 	}
 }
 
+func TestStreamEngineWritesSlashSeparatedCreditsAsDiscreteArtists(t *testing.T) {
+	const credits = "雪霏岚岚 / 早木旋子 / 张小她 / 倒悬的橘子"
+	const title = "【bilibili音乐】一话一世界 《一花依世界》方言合唱版"
+	audio := oneSecondFLAC(t, credits, title)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/download" {
+			_, _ = w.Write(audio)
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer server.Close()
+	application := newApp(t)
+	work, err := os.MkdirTemp("E:\\", "musicops-stream-slash-test-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(work) })
+	if _, err := application.saveLibrarySettings(librarySettings{WorkDir: work}); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("MUSICOPS_ENGINE_URL", server.URL)
+	plan := SearchPlan{RootJobID: "slash-credit-root", ExpectedTitle: "一话一世界", ExpectedArtist: credits, PlaylistTrack: title, ExpectedDuration: 1}
+	song := &streamSong{ID: "slash-credit", Source: "joox", Artist: credits, Name: title, Album: "一话一世界", Duration: 1}
+	path, note, _ := application.tryConfiguredStreamSong(t.Context(), "joox", plan, song)
+	if path == "" {
+		t.Fatal(note)
+	}
+	t.Cleanup(func() { _ = os.Remove(path) })
+	tags, err := flactags.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"雪霏岚岚", "早木旋子", "张小她", "倒悬的橘子"}
+	if len(tags.Artists) != len(want) || strings.Join(tags.Artists, "\x00") != strings.Join(want, "\x00") {
+		t.Fatalf("artists=%q want discrete %q", tags.Artists, want)
+	}
+}
 func TestStreamEngineSkipsAudioThatFailsValidation(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/search" && r.URL.Query().Get("sources") == "tidal" {

@@ -206,8 +206,12 @@ func (a *App) tryConfiguredStreamSong(ctx context.Context, source string, plan S
 	}
 	// The identity the engine reported is written into the file: ffmpeg's own
 	// output carries no tags, and the pipeline reads the album from them.
+	artists := splitPlaylistArtists(song.Artist)
+	if len(artists) == 0 {
+		artists = []string{song.Artist}
+	}
 	tags := flactags.Tags{
-		Title: song.Name, Artists: []string{song.Artist}, Album: song.Album, AlbumArtist: song.Artist,
+		Title: song.Name, Artists: artists, Album: song.Album, AlbumArtist: song.Artist,
 	}
 	if lossySource {
 		tags.Raw = map[string][]string{"COMMENT": {"MusicOps source=" + source + "-lossy"}}

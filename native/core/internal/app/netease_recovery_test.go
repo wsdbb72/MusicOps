@@ -246,7 +246,7 @@ func TestNeteaseRecoveredTagsKeepFullLongMetadata(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if tags.Title != longTitle || tags.Album != longAlbum || tags.AlbumArtist != longArtist {
+	if len(tags.Artists) != 5 || tags.Title != longTitle || tags.Album != longAlbum || tags.AlbumArtist != longArtist {
 		t.Fatalf("long metadata was truncated: title=%q album=%q album_artist=%q", tags.Title, tags.Album, tags.AlbumArtist)
 	}
 	if strings.Join(tags.Artists, " / ") != longArtist {
@@ -322,6 +322,56 @@ func TestNeteaseSecondaryStreamRestoresOriginalReleaseIdentity(t *testing.T) {
 	}
 }
 
+func TestNeteaseExactEngineRestoresDiscreteArtistsAndCover(t *testing.T) {
+	vaultKey(t)
+	application := newApp(t)
+	saveNeteaseTestCookie(t, application)
+	cover := solidJPEG(color.RGBA{R: 18, G: 92, B: 140, A: 255})
+	credits := []string{"雪霏岚岚", "早木旋子", "张小她", "倒悬的橘子"}
+	title := "【bilibili音乐】一话一世界 《一花依世界》方言合唱版"
+	audio := oneSecondFLAC(t, strings.Join(credits, " / "), title)
+	netease := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.HasPrefix(r.URL.Path, "/api/song/enhance/player/url"):
+			_, _ = w.Write([]byte(`{"code":200,"data":[{"id":42,"url":"","type":"flac","code":-110}]}`))
+		case strings.HasPrefix(r.URL.Path, "/song/media/outer/url"):
+			http.NotFound(w, r)
+		case r.URL.Path == "/cover.jpg":
+			w.Header().Set("Content-Type", "image/jpeg")
+			_, _ = w.Write(cover)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer netease.Close()
+	application.neteaseBases = map[string]string{"api": netease.URL}
+	engine := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/download" && r.URL.Query().Get("source") == "netease" && r.URL.Query().Get("id") == "42" {
+			_, _ = w.Write(audio)
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer engine.Close()
+	t.Setenv("MUSICOPS_ENGINE_URL", engine.URL)
+	plan := SearchPlan{
+		RootJobID: "exact-engine-slash-artists", Scene: "expand", ExpectedTitle: "一话一世界", ExpectedArtist: strings.Join(credits, " / "),
+		PlaylistTrack: title, StreamingEnabled: true, NeteaseOnly: true, NeteaseTrackOnly: true, NeteaseSongID: 42, NeteaseAlbumID: 7,
+	}
+	anchor := &neteaseSong{ID: 42, Name: title, Artists: credits, Album: "一话一世界", AlbumID: 7, DurationMS: 1000, CoverURL: netease.URL + "/cover.jpg", CatalogVerified: true}
+	path, note, class, handled := application.stageNeteaseSongWithEngine(t.Context(), plan, anchor)
+	if !handled || path == "" || class != downloadpolicy.ClassDownload || !strings.Contains(note, "分离歌手") {
+		t.Fatalf("handled=%v path=%q class=%q note=%q", handled, path, class, note)
+	}
+	tags := readTags(t, path)
+	if len(tags.Artists) != len(credits) || strings.Join(tags.Artists, "\x00") != strings.Join(credits, "\x00") {
+		t.Fatalf("exact engine artists=%q want discrete %q", tags.Artists, credits)
+	}
+	body, err := os.ReadFile(path)
+	if err != nil || !bytes.Equal(flactags.FrontCover(body), cover) {
+		t.Fatalf("exact engine cover was not restored: %v", err)
+	}
+}
 func TestNeteaseRecoveryArtistAliasesAreConservative(t *testing.T) {
 	got := neteaseRecoveryArtistAliases("DJ奶小深", "洛天依Official", "Alexandra Stan")
 	joined := strings.Join(got, "|")

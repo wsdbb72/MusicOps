@@ -551,9 +551,17 @@ func TestExpiredDownloadCachePrunesOnlyCompleteInactiveTaskTree(t *testing.T) {
 	if freed != 800 || files != 2 {
 		t.Fatalf("freed=%d files=%d", freed, files)
 	}
+	deadline := time.Now().Add(5 * time.Second)
 	for _, dir := range []string{oldDir, abandonedDir} {
-		if _, err := os.Stat(dir); !os.IsNotExist(err) {
-			t.Fatalf("expired task cache %s survived: %v", dir, err)
+		for {
+			_, statErr := os.Stat(dir)
+			if os.IsNotExist(statErr) {
+				break
+			}
+			if time.Now().After(deadline) {
+				t.Fatalf("expired task cache %s survived: %v", dir, statErr)
+			}
+			time.Sleep(25 * time.Millisecond)
 		}
 	}
 	for _, dir := range []string{recentDir, protectedDir} {

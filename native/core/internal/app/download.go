@@ -1231,13 +1231,13 @@ func (a *App) fallbackStalledDownload(execution *scheduler.Execution, jobID stri
 // completes the chain (see finishValidating), and the root can also be
 // published again through POST /v1/audio/release.
 func (a *App) finishDownload(execution *scheduler.Execution, held taskrepo.Token, plan downloadPlan, receipts []publishReceipt, archived []archiveFile) (scheduler.Outcome, error) {
-	receiptsJSON, err := json.Marshal(receipts)
+	requestID, err := publishReceiptRequestID(plan.RootJobID, receipts, nil)
 	if err != nil {
 		return scheduler.Outcome{}, err
 	}
 	payload := publishPayload{
 		RootID:    plan.RootJobID,
-		RequestID: publishRequestID(plan.RootJobID, "receipts", hex.EncodeToString(receiptsJSON)[:16]),
+		RequestID: requestID,
 		Receipts:  receipts,
 	}
 	payloadJSON, err := json.Marshal(payload)

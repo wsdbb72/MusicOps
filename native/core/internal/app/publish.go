@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"path/filepath"
 
 	"github.com/wsdbb72/MusicOps/native/core/internal/audiopublish"
 	"github.com/wsdbb72/MusicOps/native/core/internal/audiorelease"
@@ -141,6 +142,7 @@ func (a *App) publishControlled(ctx context.Context, execution *scheduler.Execut
 func (a *App) publishReceipts(ctx context.Context, execution *scheduler.Execution, receipt publishPayload) (scheduler.Outcome, error) {
 	evidence := make([]workflow.EvidenceInput, 0, len(receipt.Receipts))
 	verified := make([]audiorelease.Result, 0, len(receipt.Receipts))
+	partialAlbumPaths := map[string][]string{}
 	for _, item := range receipt.Receipts {
 		if item.RequestID == "" || item.SHA256 == "" {
 			return a.failPublish(execution, receipt, "INVALID_PAYLOAD", "publish task has a receipt without request id or digest")
@@ -153,6 +155,10 @@ func (a *App) publishReceipts(ctx context.Context, execution *scheduler.Executio
 			return a.failPublish(execution, receipt, "VERIFY_FAILED", "library record does not match the release receipt")
 		}
 		verified = append(verified, record)
+		if path, found, pathErr := audiorelease.PathFor(a.engine, item.RequestID); pathErr == nil && found {
+			dir := filepath.Dir(path)
+			partialAlbumPaths[dir] = append(partialAlbumPaths[dir], path)
+		}
 		encoded, err := json.Marshal(struct {
 			audiorelease.Result
 			Scrape *playlistScrapeResult `json:"scrape,omitempty"`
@@ -180,7 +186,26 @@ func (a *App) publishReceipts(ctx context.Context, execution *scheduler.Executio
 		evidence = append(evidence, workflow.EvidenceInput{ID: "result-" + receipt.RequestID, Kind: "catalog", Source: "local-library", SubjectID: receipt.RootID, Payload: summary, TracklistVerified: len(receipt.MissingTracks) == 0})
 	}
 	if len(receipt.MissingTracks) > 0 {
-		message = fmt.Sprintf("已部分入库并校验：%d 首；仍缺 %d 首无损。首个缺口：%s", len(verified), len(receipt.MissingTracks), receipt.MissingTracks[0])
+		message = fmt.Sprintf("已部分入库并校验：%d 首；仍缺 %d 首。首个缺口：%s", len(verified), len(receipt.MissingTracks), receipt.MissingTracks[0])
+		queued := 0
+		if len(verified) > 0 && len(partialAlbumPaths) > 0 {
+			queued = a.queueIncompleteAlbumExpansion(ctx, partialAlbumPaths)
+		}
+		if queued > 0 {
+			message += fmt.Sprintf("；已立即创建 %d 个整专补全任务", queued)
+		} else if a.startIncompleteAlbumAutomationFollowup() {
+			message += "；已启动后台整库补全任务"
+		} else {
+			message += "；整专缺口已记录到维护 backlog，下一轮继续"
+		}
+		if payload, marshalErr := json.Marshal(map[string]any{
+			"queued": queued, "album_paths": partialAlbumPaths,
+		}); marshalErr == nil {
+			evidence = append(evidence, workflow.EvidenceInput{
+				ID: "partial-followup-" + receipt.RequestID, Kind: "catalog", Source: "library-automation",
+				SubjectID: receipt.RootID, Payload: payload, TracklistVerified: false,
+			})
+		}
 	}
 	if err := a.completePublish(ctx, execution, receipt, message, evidence, result); err != nil {
 		return scheduler.Outcome{}, err
@@ -230,6 +255,18 @@ func publishRequestID(parts ...string) string {
 	return "pub-" + hex.EncodeToString(sum[:16])
 }
 
+func publishReceiptRequestID(root string, receipts []publishReceipt, missing []string) (string, error) {
+	envelope := struct {
+		Receipts      []publishReceipt `json:"receipts"`
+		MissingTracks []string         `json:"missing_tracks,omitempty"`
+	}{Receipts: receipts, MissingTracks: missing}
+	encoded, err := json.Marshal(envelope)
+	if err != nil {
+		return "", err
+	}
+	digest := sha256.Sum256(encoded)
+	return publishRequestID(root, "receipts", hex.EncodeToString(digest[:16])), nil
+}
 func joinParts(parts []string) string {
 	out := ""
 	for i, part := range parts {

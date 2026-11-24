@@ -12,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/wsdbb72/MusicOps/native/core/internal/audiorelease"
 )
@@ -136,5 +137,96 @@ func TestPublishRejectsTamperedReceipt(t *testing.T) {
 	held := inspect(t, application, "pub-tamper")
 	if held.Job.Stage != "failed" {
 		t.Fatal("tampered publish did not fail the job", held.Job.Stage)
+	}
+}
+
+func TestPublishMissingTracksQueuesIncompleteAlbumExpansion(t *testing.T) {
+	application := newApp(t)
+	type followup struct {
+		dirs  map[string][]string
+		ctxOK bool
+	}
+	calls := make(chan followup, 1)
+	application.missingAlbumFollowup = func(ctx context.Context, dirs map[string][]string) int {
+		copied := make(map[string][]string, len(dirs))
+		for dir, paths := range dirs {
+			copied[dir] = append([]string(nil), paths...)
+		}
+		calls <- followup{dirs: copied, ctxOK: ctx.Err() == nil}
+		return 1
+	}
+	startSearchJob(t, application, "pub-partial")
+	first := ingestTrack(t, application, "pub-partial", 1, 24)
+	posted := postCode(t, application, "/v1/audio/publish", map[string]any{
+		"job_id": "pub-partial",
+		"receipts": []map[string]any{
+			{"track_id": "1", "request_id": first.RequestID, "sha256": first.SHA256, "format": first.Format, "origin": first.Origin, "source_name": first.SourceName, "decode_state": first.DecodeState},
+		},
+		"missing_tracks": []string{"03 Missing Track：source unavailable"},
+	})
+	if posted.Code != http.StatusOK {
+		t.Fatal(posted.Code, posted.Body.String())
+	}
+	job := waitJob(t, application, "pub-partial", "completed")
+	if !strings.Contains(job.Message, "已立即创建 1 个整专补全任务") {
+		t.Fatalf("partial completion did not record follow-up: %q", job.Message)
+	}
+	select {
+	case got := <-calls:
+		if !got.ctxOK {
+			t.Fatal("follow-up received a cancelled context")
+		}
+		albumDir := filepath.Join(application.Dir, "library-audio", "Artist", "Album")
+		paths := got.dirs[albumDir]
+		if len(paths) != 1 || filepath.Base(paths[0]) != "01 Title 1.wav" {
+			t.Fatalf("follow-up paths = %#v", got.dirs)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("missing tracks did not trigger an immediate album expansion")
+	}
+}
+
+func TestPublishCompleteAlbumSkipsExpansionFollowup(t *testing.T) {
+	application := newApp(t)
+	called := make(chan struct{}, 1)
+	application.missingAlbumFollowup = func(context.Context, map[string][]string) int {
+		called <- struct{}{}
+		return 1
+	}
+	startSearchJob(t, application, "pub-complete")
+	first := ingestTrack(t, application, "pub-complete", 1, 24)
+	posted := postCode(t, application, "/v1/audio/publish", map[string]any{
+		"job_id": "pub-complete",
+		"receipts": []map[string]any{
+			{"track_id": "1", "request_id": first.RequestID, "sha256": first.SHA256, "format": first.Format, "origin": first.Origin, "source_name": first.SourceName, "decode_state": first.DecodeState},
+		},
+	})
+	if posted.Code != http.StatusOK {
+		t.Fatal(posted.Code, posted.Body.String())
+	}
+	waitJob(t, application, "pub-complete", "completed")
+	select {
+	case <-called:
+		t.Fatal("complete album unexpectedly triggered expansion")
+	case <-time.After(200 * time.Millisecond):
+	}
+}
+
+func TestPublishReceiptRequestIDIncludesMissingTracks(t *testing.T) {
+	receipts := []publishReceipt{{TrackID: "1", RequestID: "rel-1", SHA256: "digest"}}
+	complete, err := publishReceiptRequestID("root", receipts, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	firstMissing, err := publishReceiptRequestID("root", receipts, []string{"02 Missing"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondMissing, err := publishReceiptRequestID("root", receipts, []string{"03 Missing"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if complete == firstMissing || firstMissing == secondMissing {
+		t.Fatalf("request ids did not include missing tracks: %q %q %q", complete, firstMissing, secondMissing)
 	}
 }

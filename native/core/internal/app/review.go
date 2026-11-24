@@ -369,7 +369,7 @@ func (a *App) reviewWithAI(w http.ResponseWriter, r *http.Request, id, requestID
 		writeJSON(w, http.StatusBadGateway, map[string]any{"ok": false, "code": "AI_CALL_FAILED", "reason": advice.Reason, "message": "AI 调用失败，候选仍待核对"})
 		return
 	}
-	writeJSON(w, http.StatusConflict, map[string]any{"ok": false, "code": "AI_NO_CONFIRMED_MATCH", "reason": advice.Reason, "message": "AI 未能核实可下载的发行版"})
+	a.settleReviewWithoutAIMatch(w, requestID, id, nowNS, advice.Reason, "AI 未能核实可下载的发行版；已安全结束该任务")
 }
 
 const reviewAICandidateLimit = 64
@@ -488,7 +488,7 @@ func (a *App) acceptNeteasePlaylistFallback(w http.ResponseWriter, id, requestID
 		return
 	}
 	if decision.Action != searchdecision.ActionFallback {
-		writeJSON(w, http.StatusConflict, map[string]any{"ok": false, "code": "AI_NO_CONFIRMED_MATCH", "reason": decision.Reason, "message": "检索证据还不能安全推进；仍保留在待核对"})
+		a.settleReviewWithoutAIMatch(w, requestID, id, nowNS, decision.Reason, "检索证据不能安全推进；已安全结束该任务")
 		return
 	}
 	plan.SelectedSite, plan.SelectedCandidateID = "", ""
@@ -500,6 +500,29 @@ func (a *App) acceptNeteasePlaylistFallback(w http.ResponseWriter, id, requestID
 	}
 	result, err := a.flows.Review(requestID, id, workflow.ReviewDecision{Action: "accept", Search: &report, Plan: encoded}, nowNS)
 	a.writeReviewResult(w, result, err, "ai")
+}
+
+// settleReviewWithoutAIMatch turns a definitive AI no-match into one
+// consistent terminal decision. The evidence gate has already rejected an
+// accept; leaving the job at needs_review made manual AI review appear to do
+// nothing. Skipping is safe and leaves durable diagnostics without downloading.
+func (a *App) settleReviewWithoutAIMatch(w http.ResponseWriter, requestID, id string, nowNS int64, reason, message string) {
+	if reason = strings.TrimSpace(reason); reason != "" {
+		message += "（" + clipText(reason, 240) + "）"
+	}
+	result, err := a.flows.Review(requestID+"-skip", id, workflow.ReviewDecision{Action: "skip"}, nowNS)
+	if errors.Is(err, workflow.ErrStale) {
+		// Background review may have settled the same job between the initial
+		// inspection and this skip. Treat an already skipped job as success.
+		if inspection, inspectErr := a.flows.Inspect(id); inspectErr == nil && inspection.Job.Stage == "skipped" {
+			result = workflow.Result{Job: &inspection.Job}
+			err = nil
+		}
+	}
+	if err == nil && result.Job != nil {
+		result.Job.Message = message
+	}
+	a.writeReviewResult(w, result, err, "skip")
 }
 
 // aiReviewEligible keeps single and batch AI review on the same safe set.

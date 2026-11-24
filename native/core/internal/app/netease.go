@@ -961,14 +961,6 @@ func (a *App) recoverNeteaseFromSecondaryStreams(ctx context.Context, plan Searc
 		}
 		class = preferStreamFailure(class, recoveredClass)
 	}
-	if recovered, recoveredNote, recoveredClass := a.recoverNeteaseByTitleDuration(ctx, plan, anchor); recovered != "" {
-		return recovered, recoveredNote, downloadpolicy.ClassDownload
-	} else {
-		if len(notes) < 8 {
-			notes = append(notes, recoveredNote)
-		}
-		class = preferStreamFailure(class, recoveredClass)
-	}
 	if len(notes) == 0 {
 		notes = append(notes, "没有可用的备用流媒体检索词")
 	}

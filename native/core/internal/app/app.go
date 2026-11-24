@@ -71,6 +71,10 @@ type App struct {
 	// neteaseBases replaces the NetEase API origin in tests, the same seam as
 	// playlistBases. Production leaves it nil.
 	neteaseBases map[string]string
+	// missingAlbumFollowup is a test seam for the publish path's immediate
+	// incomplete-album expansion. Production leaves it nil and uses the real
+	// durable maintenance workflow queue.
+	missingAlbumFollowup func(context.Context, map[string][]string) int
 	// aiHTTPClient overrides the HTTP client the review model and the AI
 	// connection test use. It is nil in production (aiclient.New then
 	// uses http.DefaultClient); tests set it to a fake server's client

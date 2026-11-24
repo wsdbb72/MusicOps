@@ -129,13 +129,17 @@ func (a *App) autoReviewPass(ctx context.Context) autoReviewStats {
 			code, body := a.autoReviewJob(ctx, job.ID)
 			if code == http.StatusOK {
 				inspection, inspectErr := a.flows.Inspect(job.ID)
-				if inspectErr != nil || inspection.Job.Stage == "needs_review" {
+				switch {
+				case inspectErr != nil || inspection.Job.Stage == "needs_review":
 					// Only a decision that still leaves the job at the human
 					// checkpoint belongs in the held count. A token item can now
 					// move to a durable delayed retry and is not still in review.
 					stats.Held++
 					a.setAutoReviewCooldown(job.ID, a.now())
-				} else {
+				case inspection.Job.Stage == "skipped":
+					stats.Settled++
+					a.clearAutoReviewCooldown(job.ID)
+				default:
 					stats.Accepted++
 					if job.ReviewKind == "metadata" {
 						a.setAutoReviewCooldown(job.ID, a.now())

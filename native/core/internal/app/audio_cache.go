@@ -895,6 +895,9 @@ func (a *App) pruneExpiredDownloadCacheLocked(roots []string, maxAge time.Durati
 // Windows can briefly report a path after RemoveAll returns, especially when
 // Defender or the search indexer still has its metadata cached.
 func removeDownloadCacheTree(path string) error {
+	// Resolve Windows 8.3 names and symlinked ancestors before deleting. A
+	// short-name alias can appear absent while the real directory still exists.
+	path = canonicalPath(path)
 	var lastErr error
 	delay := 20 * time.Millisecond
 	for attempt := 0; attempt < 8; attempt++ {

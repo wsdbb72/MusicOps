@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -218,5 +219,58 @@ func TestLosslessSourcesAreNotBlindlyReplacedByLowerResolutionFLAC(t *testing.T)
 		if !isLossyUpgradeSource(codec) {
 			t.Fatalf("lossy source %q was not eligible for replacement", codec)
 		}
+	}
+}
+
+func TestLibraryWorkflowExpandAcceptsMultiArtistAlbum(t *testing.T) {
+	ffmpeg, err := exec.LookPath("ffmpeg")
+	if err != nil {
+		t.Skip("ffmpeg unavailable")
+	}
+	if _, err := exec.LookPath("ffprobe"); err != nil {
+		t.Skip("ffprobe unavailable")
+	}
+	application := newApp(t)
+	library := t.TempDir()
+	post(t, application, "/v1/settings/library", map[string]any{"library_dir": library})
+	folder := filepath.Join(library, "Various Artists", "Shared Album")
+	if err := os.MkdirAll(folder, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	artists := []string{"Artist One", "Artist Two"}
+	paths := make([]string, 0, len(artists))
+	for i, artist := range artists {
+		path := filepath.Join(folder, fmt.Sprintf("%02d Song.mp3", i+1))
+		command := exec.Command(ffmpeg, "-nostdin", "-v", "error", "-y", "-f", "lavfi", "-i", "sine=frequency=440:duration=1",
+			"-metadata", "artist="+artist, "-metadata", "album_artist=Various Artists", "-metadata", "album=Shared Album", "-metadata", fmt.Sprintf("title=Song %d", i+1), path)
+		if output, err := command.CombinedOutput(); err != nil {
+			t.Fatal(err, string(output))
+		}
+		paths = append(paths, path)
+	}
+	result := post(t, application, "/v1/library/workflow", map[string]any{"scene": "expand", "paths": paths, "confirmed": true, "key": "multi-artist-expand"})
+	id, _ := result["job_id"].(string)
+	if id == "" || result["started"] != true {
+		t.Fatal(result)
+	}
+	deadline := time.Now().Add(8 * time.Second)
+	var job *workflow.Job
+	for time.Now().Before(deadline) {
+		job, _ = application.flows.Job(id)
+		if job != nil && job.SearchJobID != "" {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if job == nil || job.SearchJobID == "" {
+		t.Fatalf("multi-artist album did not advance to search: %+v", job)
+	}
+	raw, found, err := application.tasks.Data(job.SearchJobID, "arguments", 0)
+	var plan SearchPlan
+	if err != nil || !found || json.Unmarshal(raw, &plan) != nil {
+		t.Fatal(found, err)
+	}
+	if plan.ExpectedArtist != "Various Artists" || plan.AlbumArtist != "Various Artists" || len(plan.LibraryTracks) != 2 || plan.LibraryTracks[0].Artist == plan.LibraryTracks[1].Artist {
+		t.Fatalf("multi-artist plan = %+v", plan)
 	}
 }

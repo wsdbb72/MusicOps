@@ -17,6 +17,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -70,6 +71,7 @@ func metadataHost(host string) bool {
 }
 
 func streamServiceName(source string) (string, bool) {
+	source = strings.ToLower(strings.TrimSpace(source))
 	switch source {
 	case "tidal":
 		return "tidal", true
@@ -129,24 +131,75 @@ func (a *App) tryConfiguredStreamSong(ctx context.Context, source string, plan S
 			}
 		}
 	}
-	song := knownSong
-	var status string
-	if song == nil {
-		song, status, err = a.streamSearch(ctx, base, service, plan, token)
+
+	var candidates []streamSong
+	status := ""
+	if knownSong != nil {
+		candidate := *knownSong
+		rawSource := strings.ToLower(strings.TrimSpace(candidate.Source))
+		if rawSource == "" {
+			candidate.Source = service
+		} else if normalized, ok := streamServiceName(rawSource); ok {
+			candidate.Source = normalized
+		} else {
+			candidate.Source = rawSource
+		}
+		if candidate.Source != service {
+			return "", source + " 返回了其他音源的候选", downloadpolicy.ClassNoResult
+		}
+		candidates = []streamSong{candidate}
+	} else {
+		candidates, status, err = a.streamSearchCandidates(ctx, base, service, plan, token)
 	}
 	if err != nil {
-		if status == downloadpolicy.ClassAuth {
-			return "", source + " 需要用户自己的账号，没有绕过访问控制", downloadpolicy.ClassAuth
-		}
 		if status == "" {
 			status = downloadpolicy.ClassNoResult
+		}
+		if status == downloadpolicy.ClassAuth {
+			return "", source + " 需要用户自己的账号，没有绕过访问控制", downloadpolicy.ClassAuth
 		}
 		return "", source + " 没有连上本机引擎", status
 	}
-	if song == nil {
+	if len(candidates) == 0 {
 		return "", source + " 未找到可通过校验的音频", downloadpolicy.ClassNoResult
 	}
-	body, status, err := a.streamDownload(ctx, base, song, token)
+	const candidateAttemptLimit = 8
+	if len(candidates) > candidateAttemptLimit {
+		candidates = candidates[:candidateAttemptLimit]
+	}
+
+	notes := make([]string, 0, len(candidates))
+	class := downloadpolicy.ClassNoResult
+	for i := range candidates {
+		path, note, stepClass := a.stageConfiguredStreamSong(ctx, base, source, plan, candidates[i], token)
+		if path != "" {
+			return path, note, stepClass
+		}
+		class = preferStreamFailure(class, stepClass)
+		if note != "" && len(notes) < 6 {
+			notes = append(notes, note)
+		}
+		if streamFailureStopsCandidateWalk(stepClass) {
+			return "", source + " 候选音频暂时不可取：" + strings.Join(notes, "；"), stepClass
+		}
+	}
+	if len(notes) == 0 {
+		notes = append(notes, source+" 的候选均未通过音频校验")
+	}
+	return "", source + " 未找到可通过校验的音频：" + strings.Join(notes, "；"), class
+}
+
+func streamFailureStopsCandidateWalk(class string) bool {
+	switch class {
+	case downloadpolicy.ClassAuth, downloadpolicy.ClassNetwork, downloadpolicy.ClassRateLimited:
+		return true
+	default:
+		return false
+	}
+}
+
+func (a *App) stageConfiguredStreamSong(ctx context.Context, base, source string, plan SearchPlan, song streamSong, token string) (string, string, string) {
+	body, status, err := a.streamDownload(ctx, base, &song, token)
 	if err != nil {
 		if status == downloadpolicy.ClassAuth {
 			return "", source + " 需要用户自己的账号，没有绕过访问控制", downloadpolicy.ClassAuth
@@ -154,14 +207,14 @@ func (a *App) tryConfiguredStreamSong(ctx context.Context, source string, plan S
 		if status == "" {
 			status = downloadpolicy.ClassNoResult
 		}
-		return "", source + " 没有取到音频", status
+		return "", source + " 没有取到音频（候选 " + song.ID + "）", status
 	}
 	// The bundled engine hands back mp3 for the lossy sources. The library is
 	// FLAC-only, so a decodable lossy file is converted with the bundled
 	// ffmpeg and kept as FLAC; the note says the source was lossy.
 	lossySource := false
 	if !isKnownAudio(body) {
-		return "", source + " 返回的内容没有通过音频校验", downloadpolicy.ClassNoResult
+		return "", source + " 返回的内容没有通过音频校验（候选 " + song.ID + "）", downloadpolicy.ClassNoResult
 	}
 	if string(body[:4]) != "fLaC" {
 		// Playlist fallbacks may only offer a trusted lossy stream. The title,
@@ -180,7 +233,7 @@ func (a *App) tryConfiguredStreamSong(ctx context.Context, source string, plan S
 		expectedSeconds = song.Duration
 	}
 	if err := validStreamAudio(body, "", "", expectedSeconds); err != nil {
-		return "", source + " 返回的内容没有通过音频校验", downloadpolicy.ClassNoResult
+		return "", source + " 返回的内容没有通过音频校验（候选 " + song.ID + "）", downloadpolicy.ClassNoResult
 	}
 	// The same album job acquires several recordings. Account for both
 	// identity and bytes so a retry cannot adopt an older scraped copy.
@@ -332,6 +385,18 @@ func engineIDField(raw any) string {
 	return ""
 }
 func (a *App) streamSearch(ctx context.Context, base, service string, plan SearchPlan, token string) (*streamSong, string, error) {
+	candidates, status, err := a.streamSearchCandidates(ctx, base, service, plan, token)
+	if err != nil || len(candidates) == 0 {
+		return nil, status, err
+	}
+	return &candidates[0], status, nil
+}
+
+// streamSearchCandidates returns every safe match in best-first order. A
+// direct fallback may reject the first download after inspecting its bytes, so
+// callers need the remaining candidates instead of treating the first search
+// hit as the only possible recording.
+func (a *App) streamSearchCandidates(ctx context.Context, base, service string, plan SearchPlan, token string) ([]streamSong, string, error) {
 	query := strings.TrimSpace(plan.Query)
 	if query == "" {
 		query = strings.TrimSpace(plan.ExpectedArtist + " " + plan.ExpectedTitle)
@@ -349,76 +414,133 @@ func (a *App) streamSearch(ctx context.Context, base, service string, plan Searc
 	if err != nil {
 		return nil, class, err
 	}
-	// Two contracts exist in the wild: older bridges answer JSON, and the
-	// bundled go-music-dl answers the rendered page (one <li class="song-card"
-	// data-...> per hit). Accept both instead of forcing one.
-	var cards []streamSong
-	if trimmed := bytes.TrimSpace(body); len(trimmed) > 0 && trimmed[0] == '{' {
+	cards := parseStreamEngineSongs(body)
+	if len(cards) == 0 {
+		return nil, downloadpolicy.ClassNoResult, nil
+	}
+	return rankStreamCandidates(plan, service, cards), "", nil
+}
+
+// parseStreamEngineSongs accepts both contracts used by engine bridges: JSON
+// song arrays and the rendered song-card page shipped by the bundled engine.
+func parseStreamEngineSongs(body []byte) []streamSong {
+	trimmed := bytes.TrimSpace(body)
+	if len(trimmed) > 0 && trimmed[0] == '{' {
 		var decoded struct {
 			Songs []map[string]any `json:"songs"`
 		}
 		if json.Unmarshal(trimmed, &decoded) == nil {
+			cards := make([]streamSong, 0, len(decoded.Songs))
 			for _, row := range decoded.Songs {
 				cards = append(cards, streamSong{
 					ID: engineIDField(row["id"]), Source: textField(row["source"]), Name: textField(row["name"]),
 					Artist: textField(row["artist"]), Album: textField(row["album"]), Duration: intField(row["duration"]),
 				})
 			}
+			return cards
 		}
-	} else {
-		cards = parseEngineCards(body)
+		return nil
 	}
-	if cards == nil {
-		return nil, downloadpolicy.ClassNoResult, nil
+	return parseEngineCards(body)
+}
+
+func rankStreamCandidates(plan SearchPlan, service string, cards []streamSong) []streamSong {
+	type ranked struct {
+		song  streamSong
+		score int64
+		order int
 	}
-	wantTitle := foldTagText(plan.ExpectedTitle)
-	wantAlbum := ""
-	playlistTrack := neteasePlaylistTitle(plan)
-	if playlistTrack != "" {
-		wantTitle = foldTagText(playlistTrack)
-		if normalizeKey(playlistTrack) != normalizeKey(plan.ExpectedTitle) {
-			wantAlbum = normalizeKey(normalizePlaylistAlbumTitle(plan.ExpectedTitle))
-		}
-	}
-	wantArtist := foldTagText(plan.ExpectedArtist)
+	matches := make([]ranked, 0, len(cards))
 	wantNeteaseID := ""
 	if service == "netease" && plan.NeteaseSongID > 0 {
 		wantNeteaseID = strconv.FormatInt(plan.NeteaseSongID, 10)
 	}
-	for i := range cards {
-		song := cards[i]
-		if song.Source == "" {
-			song.Source = service
+	for _, card := range cards {
+		cardSource := strings.TrimSpace(card.Source)
+		if cardSource == "" {
+			cardSource = service
+		} else if normalized, ok := streamServiceName(cardSource); ok {
+			cardSource = normalized
 		}
-		if !strings.EqualFold(strings.TrimSpace(song.Source), service) {
+		if !strings.EqualFold(cardSource, service) {
 			continue
 		}
+		card.Source = service
 		if wantNeteaseID != "" {
 			// A durable NetEase recording id is stronger than a re-tagged album
 			// or compilation label. Never accept a different id heuristically.
-			if strings.TrimSpace(song.ID) == wantNeteaseID {
-				return &song, "", nil
-			}
-			continue
-		}
-		if playlistTrack != "" {
-			if !streamPlaylistCardMatches(plan, song) {
+			if strings.TrimSpace(card.ID) != wantNeteaseID {
 				continue
 			}
-			return &song, "", nil
-		}
-		if wantAlbum != "" && normalizeKey(normalizePlaylistAlbumTitle(song.Album)) != wantAlbum {
+			matches = append(matches, ranked{song: card, score: -(1 << 60), order: len(matches)})
 			continue
 		}
-		if wantTitle != "" && !neteaseAlternateTitleMatches(plan.ExpectedTitle, song.Name) {
+		score, ok := streamCandidateScore(plan, card)
+		if !ok {
 			continue
 		}
-		if wantArtist != "" && song.Artist != "" && !strings.Contains(foldTagText(song.Artist), wantArtist) {
-			continue
-		}
-		return &song, "", nil
+		matches = append(matches, ranked{song: card, score: score, order: len(matches)})
 	}
-	return nil, "", nil
+	sort.SliceStable(matches, func(i, j int) bool {
+		if matches[i].score != matches[j].score {
+			return matches[i].score < matches[j].score
+		}
+		return matches[i].order < matches[j].order
+	})
+	out := make([]streamSong, 0, len(matches))
+	for _, match := range matches {
+		out = append(out, match.song)
+	}
+	return out
+}
+
+func streamCandidateScore(plan SearchPlan, song streamSong) (int64, bool) {
+	expectedTitle := strings.TrimSpace(plan.ExpectedTitle)
+	playlistTrack := strings.TrimSpace(neteasePlaylistTitle(plan))
+	if playlistTrack != "" {
+		if !streamPlaylistCardMatches(plan, song) {
+			return 0, false
+		}
+	} else {
+		if !streamTitleIdentityMatches(plan, song) {
+			return 0, false
+		}
+		if strings.TrimSpace(plan.ExpectedArtist) != "" && strings.TrimSpace(song.Artist) != "" && !streamArtistIdentityMatches(plan.ExpectedArtist, song.Artist) {
+			return 0, false
+		}
+		if plan.ExpectedDuration > 0 && song.Duration > 0 && absInt(song.Duration-plan.ExpectedDuration) > 3 {
+			return 0, false
+		}
+		if streamVersionConflict(expectedTitle, song.Name) {
+			return 0, false
+		}
+	}
+
+	score := int64(0)
+	if playlistTrack == "" {
+		playlistTrack = expectedTitle
+	}
+	if normalizeKey(playlistTrack) == normalizeKey(song.Name) {
+		score -= 1_000_000
+	} else if normalizeKey(stripNeteaseTitleQualifiers(playlistTrack)) == normalizeKey(stripNeteaseTitleQualifiers(song.Name)) {
+		score -= 500_000
+	}
+	if strings.TrimSpace(song.Artist) == "" {
+		score += 100_000
+	} else if normalizeNeteaseArtist(plan.ExpectedArtist) == normalizeNeteaseArtist(song.Artist) {
+		score -= 250_000
+	}
+	if plan.ExpectedDuration > 0 {
+		if song.Duration > 0 {
+			score += int64(absInt(song.Duration-plan.ExpectedDuration)) * 1_000
+		} else {
+			score += 50_000
+		}
+	}
+	if normalizeKey(normalizePlaylistAlbumTitle(song.Album)) == normalizeKey(normalizePlaylistAlbumTitle(expectedTitle)) {
+		score -= 10_000
+	}
+	return score, true
 }
 
 // engineCard matches one song card on the engine's result page.

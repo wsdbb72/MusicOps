@@ -1045,14 +1045,15 @@ func (a *App) releaseAudio(w http.ResponseWriter, r *http.Request) {
 // until the task runs.
 func (a *App) publishAudio(w http.ResponseWriter, r *http.Request) {
 	var body struct {
-		JobID     string           `json:"job_id"`
-		RequestID string           `json:"request_id"`
-		SourceURL string           `json:"source_url"`
-		Artist    string           `json:"artist"`
-		Album     string           `json:"album"`
-		Title     string           `json:"title"`
-		Track     int              `json:"track"`
-		Receipts  []publishReceipt `json:"receipts"`
+		JobID         string           `json:"job_id"`
+		RequestID     string           `json:"request_id"`
+		SourceURL     string           `json:"source_url"`
+		Artist        string           `json:"artist"`
+		Album         string           `json:"album"`
+		Title         string           `json:"title"`
+		Track         int              `json:"track"`
+		Receipts      []publishReceipt `json:"receipts"`
+		MissingTracks []string         `json:"missing_tracks,omitempty"`
 	}
 	if err := decode(r, &body); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "code": "INVALID_REQUEST", "downloaded": false, "library_published": false, "production_verified": false})
@@ -1108,19 +1109,30 @@ func (a *App) publishAudio(w http.ResponseWriter, r *http.Request) {
 		payload.Title = body.Title
 		payload.Track = body.Track
 	} else {
+		if len(body.MissingTracks) > 1000 {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "code": "INVALID_REQUEST", "downloaded": false, "library_published": false, "production_verified": false})
+			return
+		}
+		for _, missing := range body.MissingTracks {
+			if strings.TrimSpace(missing) == "" || len(missing) > 4096 {
+				writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "code": "INVALID_REQUEST", "downloaded": false, "library_published": false, "production_verified": false})
+				return
+			}
+		}
 		for _, item := range body.Receipts {
 			if item.RequestID == "" || item.SHA256 == "" {
 				writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "code": "INVALID_REQUEST", "downloaded": false, "library_published": false, "production_verified": false})
 				return
 			}
 		}
-		encoded, err := json.Marshal(body.Receipts)
+		requestID, err := publishReceiptRequestID(root, body.Receipts, body.MissingTracks)
 		if err != nil {
 			writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "code": "LIBRARY_UNAVAILABLE", "downloaded": false, "library_published": false, "production_verified": false})
 			return
 		}
-		payload.RequestID = publishRequestID(root, "receipts", hex.EncodeToString(encoded)[:16])
+		payload.RequestID = requestID
 		payload.Receipts = body.Receipts
+		payload.MissingTracks = append([]string(nil), body.MissingTracks...)
 		source = "local-library"
 	}
 	receipt, err := json.Marshal(payload)
@@ -1130,7 +1142,7 @@ func (a *App) publishAudio(w http.ResponseWriter, r *http.Request) {
 	}
 	recorded, err := a.flows.RecordRelease(workflow.RecordReleaseInput{
 		JobID: root, RequestID: "record-" + payload.RequestID,
-		Evidence: workflow.EvidenceInput{ID: "pub-" + payload.RequestID, Kind: "catalog", Source: source, SubjectID: root, TracklistVerified: true, Payload: receipt},
+		Evidence: workflow.EvidenceInput{ID: "pub-" + payload.RequestID, Kind: "catalog", Source: source, SubjectID: root, TracklistVerified: len(payload.MissingTracks) == 0, Payload: receipt},
 		Payload:  receipt, NowNS: time.Now().UnixNano(),
 	})
 	if err != nil {

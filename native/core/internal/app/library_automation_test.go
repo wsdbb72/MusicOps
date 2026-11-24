@@ -587,3 +587,10 @@ func TestDuplicateScanWithUnchangedCacheProducesNoCheckpointUpdates(t *testing.T
 		t.Fatalf("unchanged cache generated %d checkpoint updates: %v", len(secondUpdates), err)
 	}
 }
+
+func TestIncompleteAlbumFollowupRunsOnlyExpansion(t *testing.T) {
+	got := incompleteAlbumOnlySettings(libraryAutomationSettings{Enabled: false, Scrape: true, Dedupe: true, Upgrade: true, Expand: false, IntervalHours: 2})
+	if !got.Enabled || got.Scrape || got.Dedupe || got.Upgrade || !got.Expand || got.IntervalHours != 2 {
+		t.Fatalf("partial-album settings = %+v", got)
+	}
+}

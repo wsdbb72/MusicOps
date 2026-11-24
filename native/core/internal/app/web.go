@@ -116,7 +116,7 @@ const appJS = `(function () {
   async function reviewAllAI() {
     if (loading) return;
     setBusy(true);
-    var ids = new Set(), checked = 0, accepted = 0, held = 0, failed = 0, already = 0, failures = {};
+    var ids = new Set(), checked = 0, accepted = 0, settled = 0, held = 0, failed = 0, already = 0, failures = {};
     try {
       var cursor = "";
       setStatus("info", "正在读取全部待核对任务");
@@ -140,10 +140,11 @@ const appJS = `(function () {
         } else checked++;
         if (response.ok && result.ok) {
           if (result.held || result.stage === "needs_review") held++;
+          else if (result.stage === "skipped") settled++;
           else accepted++;
         }
       }
-      await reloadThen("ok", "AI 已核对 " + checked + " 项，自动推进 " + accepted + " 项，余额对账中 " + held + " 项，调用或提交失败 " + failed + " 项，已处理 " + already + " 项。" + Object.keys(failures).map(function(code) { return code + " " + failures[code] + " 项"; }).join(" · "));
+      await reloadThen("ok", "AI 已核对 " + checked + " 项，自动推进 " + accepted + " 项，自动结束 " + settled + " 项，余额对账中 " + held + " 项，调用或提交失败 " + failed + " 项，已处理 " + already + " 项。" + Object.keys(failures).map(function(code) { return code + " " + failures[code] + " 项"; }).join(" · "));
     } catch(err) {
       setStatus("fail", err.message + "。已核对 " + checked + " 项，确认推进 " + accepted + " 项。");
     } finally { setBusy(false); }

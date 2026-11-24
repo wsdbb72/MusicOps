@@ -288,9 +288,14 @@ func (a *App) libraryWorkflow(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, http.StatusUnprocessableEntity, map[string]any{"ok": false, "code": "LOCAL_IDENTITY_UNAVAILABLE", "error": err.Error()})
 			return
 		}
-		if len(tracks) > 0 && (normalizeKey(track.Album) != normalizeKey(tracks[0].Album) || normalizeKey(track.Artist) != normalizeKey(tracks[0].Artist)) {
-			writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "code": "MIXED_ALBUM", "error": "请选择同一专辑的文件"})
-			return
+		if len(tracks) > 0 {
+			albumMismatch := normalizeKey(track.Album) != normalizeKey(tracks[0].Album)
+			artistMismatch := normalizeKey(track.Artist) != normalizeKey(tracks[0].Artist)
+			dirMismatch := body.Scene == "expand" && !samePath(filepath.Dir(track.Path), filepath.Dir(tracks[0].Path))
+			if albumMismatch || dirMismatch || body.Scene != "expand" && artistMismatch {
+				writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "code": "MIXED_ALBUM", "error": "请选择同一目录中的同一专辑文件"})
+				return
+			}
 		}
 		if body.Scene == "upgrade" && !isLossyUpgradeSource(track.Codec) {
 			writeJSON(w, http.StatusUnprocessableEntity, map[string]any{"ok": false, "code": "QUALITY_NOT_PROVEN", "error": "此入口只自动处理有损转无损；现有无损文件不以格式变化当升级"})
@@ -299,7 +304,22 @@ func (a *App) libraryWorkflow(w http.ResponseWriter, r *http.Request) {
 		tracks = append(tracks, track)
 	}
 	first := tracks[0]
-	label := first.Artist + " — " + first.Album
+	expectedArtist := first.Artist
+	albumArtist := first.AlbumArtist
+	if body.Scene == "expand" {
+		if albumArtist == "" {
+			if folderArtist, _, _, ok := localWorkflowIdentityFromPath(first.Path); ok {
+				albumArtist = strings.TrimSpace(folderArtist)
+			}
+		}
+		if albumArtist != "" {
+			expectedArtist = albumArtist
+		}
+	}
+	if albumArtist == "" {
+		albumArtist = expectedArtist
+	}
+	label := expectedArtist + " — " + first.Album
 	id := libraryFileID(body.Scene + "|" + label + "|" + strconv.FormatInt(a.now().UnixNano(), 10))
 	var existing *workflow.Job
 	if strings.TrimSpace(body.Key) != "" {
@@ -319,7 +339,7 @@ func (a *App) libraryWorkflow(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	settings, _ := a.loadDownloadSettings()
-	plan := SearchPlan{RootJobID: id, Scene: body.Scene, Query: first.Artist + " " + first.Album, ExpectedTitle: first.Album, ExpectedArtist: first.Artist, PlaylistTrack: first.Title, ExpectedDuration: int(first.Duration + 0.5), Budget: settings.TokenBudget, StreamingEnabled: true, LibraryTracks: tracks}
+	plan := SearchPlan{RootJobID: id, Scene: body.Scene, Query: expectedArtist + " " + first.Album, ExpectedTitle: first.Album, ExpectedArtist: expectedArtist, AlbumArtist: albumArtist, PlaylistTrack: first.Title, ExpectedDuration: int(first.Duration + 0.5), Budget: settings.TokenBudget, StreamingEnabled: true, LibraryTracks: tracks}
 	raw, err := json.Marshal(plan)
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "code": "INVALID_REQUEST"})

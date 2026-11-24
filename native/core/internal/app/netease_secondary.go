@@ -51,7 +51,7 @@ func (a *App) recoverNeteaseByTitleDuration(ctx context.Context, plan SearchPlan
 			class = preferStreamFailure(class, stepClass)
 			continue
 		}
-		cards := parseEngineCards(body)
+		cards := parseStreamEngineSongs(body)
 		type candidate struct {
 			song  streamSong
 			delta int64

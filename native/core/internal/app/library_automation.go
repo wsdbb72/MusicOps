@@ -34,11 +34,11 @@ const (
 	libraryAutomationScanWorkers    = 8
 	duplicateFingerprintWorkers     = 8
 	libraryAutomationCheckpoint     = 20_000
-	libraryAutomationScanVersion    = 2
+	libraryAutomationScanVersion    = 3
 	libraryAutomationStallTimeout   = 45 * time.Minute
 	libraryAutomationScrapeSlice    = 45 * time.Minute
 	libraryAutomationArtworkWorkers = 6
-	libraryAutomationPolicyVersion  = 2
+	libraryAutomationPolicyVersion  = 3
 	libraryAutomationSkippedRetry   = 24 * time.Hour
 )
 
@@ -115,6 +115,7 @@ type cachedLibraryScan struct {
 	Codec         string                      `json:"codec,omitempty"`
 	Duration      float64                     `json:"duration,omitempty"`
 	Artist        string                      `json:"artist,omitempty"`
+	AlbumArtist   string                      `json:"album_artist,omitempty"`
 	Album         string                      `json:"album,omitempty"`
 	Title         string                      `json:"title,omitempty"`
 	Duplicate     *cachedDuplicateFingerprint `json:"duplicate,omitempty"`
@@ -608,6 +609,7 @@ func scanAutomationFile(ctx context.Context, input libraryAutomationScanInput) l
 		}
 		entry.Duration, _ = flacDuration(tags.StreamInfo)
 		entry.Artist = strings.TrimSpace(tags.Artist)
+		entry.AlbumArtist = strings.TrimSpace(tags.AlbumArtist)
 		entry.Album = strings.TrimSpace(tags.Album)
 		entry.Title = strings.TrimSpace(tags.Title)
 	} else {
@@ -621,6 +623,7 @@ func scanAutomationFile(ctx context.Context, input libraryAutomationScanInput) l
 		entry.Codec = genericInfo.Codec
 		entry.Duration = genericInfo.Duration
 		entry.Artist = genericInfo.Artist
+		entry.AlbumArtist = genericInfo.AlbumArtist
 		entry.Album = genericInfo.Album
 		entry.Title = genericInfo.Title
 	}
@@ -1020,7 +1023,7 @@ func (entry cachedLibraryScan) localWorkflowTrack(path string) (localWorkflowTra
 	if entry.Codec == "" || entry.Duration <= 0 || entry.Duration >= 86400 || strings.TrimSpace(entry.Artist) == "" || strings.TrimSpace(entry.Album) == "" || strings.TrimSpace(entry.Title) == "" {
 		return localWorkflowTrack{}, false
 	}
-	return localWorkflowTrack{Path: path, Artist: entry.Artist, Album: entry.Album, Title: entry.Title, Codec: entry.Codec, Duration: entry.Duration}, true
+	return localWorkflowTrack{Path: path, Artist: entry.Artist, AlbumArtist: entry.AlbumArtist, Album: entry.Album, Title: entry.Title, Codec: entry.Codec, Duration: entry.Duration}, true
 }
 
 func (a *App) runAutomatedScrapeChunk(ctx context.Context, paths []string, withArtwork bool) (automationScrapeCounts, error) {
@@ -1443,6 +1446,109 @@ func (a *App) runAutomatedDeduplication(ctx context.Context) bool {
 	return ctx.Err() == nil && (truncated || len(candidates) > merged)
 }
 
+// queueIncompleteAlbumExpansion is the immediate follow-up for a publish that
+// verified some tracks but was told the source release still has missing
+// tracks. It is synchronous so the publish evidence can record whether the
+// follow-up was started; the actual expansion workflow runs normally.
+func (a *App) queueIncompleteAlbumExpansion(ctx context.Context, byDir map[string][]string) int {
+	if a == nil || len(byDir) == 0 {
+		return 0
+	}
+	if hook := a.missingAlbumFollowup; hook != nil {
+		return hook(ctx, byDir)
+	}
+	return a.enqueueIncompleteAlbumExpansion(ctx, byDir)
+}
+
+func incompleteAlbumOnlySettings(settings libraryAutomationSettings) libraryAutomationSettings {
+	settings.Enabled = true
+	settings.Scrape = false
+	settings.Dedupe = false
+	settings.Upgrade = false
+	settings.Expand = true
+	return settings
+}
+
+func (a *App) startIncompleteAlbumAutomationFollowup() bool {
+	settings, err := a.loadLibraryAutomationSettings()
+	if err != nil {
+		if a.libraryAutomation != nil {
+			a.libraryAutomation.addError(fmt.Errorf("读取部分专辑补全设置失败: %w", err))
+			a.libraryAutomation.update(func(report *libraryAutomationReport) { report.Backlog = true })
+		}
+		return false
+	}
+	settings = incompleteAlbumOnlySettings(settings)
+	if a.startLibraryAutomationRunWithSettings("partial-album-followup", settings) {
+		return true
+	}
+	if a.libraryAutomation != nil {
+		a.libraryAutomation.update(func(report *libraryAutomationReport) { report.Backlog = true })
+	}
+	return false
+}
+func (a *App) enqueueIncompleteAlbumExpansion(ctx context.Context, byDir map[string][]string) int {
+	state := a.libraryAutomation
+	root := canonicalPath(a.libraryDir())
+	cache := a.loadLibraryAutomationScanCache(root)
+	dirs := make([]string, 0, len(byDir))
+	for dir, paths := range byDir {
+		if dir != "" && len(paths) > 0 && insideDir(root, dir) {
+			dirs = append(dirs, dir)
+		}
+	}
+	sort.Strings(dirs)
+	jobs := 0
+	for _, dir := range dirs {
+		if ctx.Err() != nil || jobs >= libraryAutomationMaxJobs {
+			break
+		}
+		paths := append([]string(nil), byDir[dir]...)
+		sort.Strings(paths)
+		seen := map[string]bool{}
+		tracks := make([]localWorkflowTrack, 0, len(paths))
+		for _, path := range paths {
+			key := automationCacheKey(root, path)
+			if seen[key] || !insideDir(root, path) {
+				continue
+			}
+			seen[key] = true
+			if entry, ok := cache.Files[key]; ok {
+				if track, valid := entry.localWorkflowTrack(path); valid {
+					tracks = append(tracks, track)
+					continue
+				}
+			}
+			track, err := probeLocalWorkflowTrackForRepair(ctx, path)
+			if err != nil {
+				if state != nil {
+					state.addError(fmt.Errorf("部分入库后整专补全读取曲目失败 %s: %w", filepath.Base(path), err))
+				}
+				continue
+			}
+			tracks = append(tracks, track)
+		}
+		if len(tracks) == 0 {
+			if state != nil {
+				state.update(func(report *libraryAutomationReport) { report.Backlog = true })
+			}
+			continue
+		}
+		if state != nil {
+			state.touch("partial_album_followup", dir)
+		}
+		if a.enqueueMaintenanceWorkflow(ctx, "expand", tracks, dir) {
+			jobs++
+			if state != nil {
+				state.update(func(report *libraryAutomationReport) { report.ExpandJobs++ })
+			}
+		}
+	}
+	if jobs >= libraryAutomationMaxJobs && state != nil {
+		state.update(func(report *libraryAutomationReport) { report.Backlog = true })
+	}
+	return jobs
+}
 func (a *App) enqueueLibraryMaintenanceWorkflows(ctx context.Context, byDir map[string][]string, settings libraryAutomationSettings) {
 	state := a.libraryAutomation
 	root := a.libraryDir()

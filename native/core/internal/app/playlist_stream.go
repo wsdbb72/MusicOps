@@ -210,7 +210,11 @@ func playlistReleaseError(err error, result audiorelease.Result) error {
 }
 
 func (a *App) finishPlaylistStreams(held taskrepo.Token, job workflow.Job, items []publishReceipt, message string, missing ...string) (scheduler.Outcome, error) {
-	payload, err := json.Marshal(publishPayload{RootID: job.RootID, RequestID: publishRequestID(job.RootID, "stream"),
+	requestID, err := publishReceiptRequestID(job.RootID, items, missing)
+	if err != nil {
+		return scheduler.Outcome{}, err
+	}
+	payload, err := json.Marshal(publishPayload{RootID: job.RootID, RequestID: requestID,
 		Receipts: items, MissingTracks: missing})
 	if err != nil {
 		return scheduler.Outcome{}, err

@@ -1,7 +1,11 @@
 package app
 
 import (
+	"bytes"
 	"encoding/binary"
+	"image"
+	"image/color"
+	"image/png"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -278,7 +282,7 @@ func TestStreamSearchRejectsVersionOrDurationDrift(t *testing.T) {
 			plan: SearchPlan{ExpectedTitle: "adrenaline!!!", ExpectedArtist: "TrySail", PlaylistTrack: "adrenaline!!!", ExpectedDuration: 274},
 		},
 		{
-			name: "wrong duration", response: `{"songs":[{"id":"long","source":"bilibili","name":"爱河","artist":"DJ奶小深","album":"Remix","duration":340}]}`,
+			name: "wrong duration", response: `{"songs":[{"id":"long","source":"joox","name":"爱河","artist":"DJ奶小深","album":"Remix","duration":340}]}`,
 			plan: SearchPlan{ExpectedTitle: "Remix", ExpectedArtist: "DJ奶小深", PlaylistTrack: "爱河", ExpectedDuration: 326},
 		},
 	}
@@ -294,5 +298,155 @@ func TestStreamSearchRejectsVersionOrDurationDrift(t *testing.T) {
 				t.Fatalf("unexpected match: song=%+v err=%v", song, err)
 			}
 		})
+	}
+}
+func TestStreamSearchRanksClosestDurationCandidate(t *testing.T) {
+	response := `{"songs":[{"id":"wrong","source":"joox","name":"爱河","artist":"DJ奶小深","album":"Remix","duration":340},{"id":"right","source":"joox","name":"爱河","artist":"DJ奶小深","album":"Remix","duration":326}]}`
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(response))
+	}))
+	defer server.Close()
+	plan := SearchPlan{ExpectedTitle: "Remix", ExpectedArtist: "DJ奶小深", PlaylistTrack: "爱河", ExpectedDuration: 326}
+	song, _, err := (&App{}).streamSearch(t.Context(), server.URL, "joox", plan, "")
+	if err != nil || song == nil || song.ID != "right" {
+		t.Fatalf("song=%+v err=%v", song, err)
+	}
+}
+
+func TestStreamEngineTriesNextCandidateWhenFirstDownloadIsInvalid(t *testing.T) {
+	audio := oneSecondFLAC(t, "Artist", "Example & Test")
+	downloads := []string{}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/search":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"songs":[{"id":"bad","source":"joox","name":"Example & Test","artist":"Artist","album":"First Album","duration":1},{"id":"good","source":"joox","name":"Example & Test","artist":"Artist","album":"First Album","duration":1}]}`))
+		case "/download":
+			id := r.URL.Query().Get("id")
+			downloads = append(downloads, id)
+			if id == "bad" {
+				_, _ = w.Write([]byte("not audio"))
+				return
+			}
+			_, _ = w.Write(audio)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+	application := newApp(t)
+	t.Setenv("MUSICOPS_ENGINE_URL", server.URL)
+	plan := SearchPlan{RootJobID: "candidate-retry", ExpectedTitle: "Example & Test", ExpectedArtist: "Artist", ExpectedDuration: 1}
+	path, note, class := application.tryConfiguredStreamSong(t.Context(), "joox", plan, nil)
+	if path == "" || class != "download" || strings.Join(downloads, ",") != "bad,good" {
+		t.Fatalf("path=%q note=%q class=%q downloads=%v", path, note, class, downloads)
+	}
+}
+
+func testCoverPNG(t *testing.T) []byte {
+	t.Helper()
+	img := image.NewRGBA(image.Rect(0, 0, 120, 120))
+	for y := 0; y < 120; y++ {
+		for x := 0; x < 120; x++ {
+			img.SetRGBA(x, y, color.RGBA{R: uint8(x), G: uint8(y), B: 96, A: 255})
+		}
+	}
+	var out bytes.Buffer
+	if err := png.Encode(&out, img); err != nil {
+		t.Fatal(err)
+	}
+	return out.Bytes()
+}
+
+func TestNeteaseTitleDurationRecoveryAcceptsJSONSearchContract(t *testing.T) {
+	audio, err := flactags.EmbedFrontCover(oneSecondFLAC(t, "Artist", "Example & Test"), testCoverPNG(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	searches, downloads := 0, []string{}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/search":
+			searches++
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"songs":[{"id":"wrong","source":"qq","name":"Example & Test","artist":"Artist","album":"Original Album","duration":340},{"id":"right","source":"qq","name":"Example & Test","artist":"Artist","album":"Original Album","duration":1}]}`))
+		case "/download":
+			downloads = append(downloads, r.URL.Query().Get("id"))
+			_, _ = w.Write(audio)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+	application := newApp(t)
+	t.Setenv("MUSICOPS_ENGINE_URL", server.URL)
+	plan := SearchPlan{RootJobID: "netease-json-recovery", ExpectedTitle: "Original Album", ExpectedArtist: "Artist", PlaylistTrack: "Example & Test", ExpectedDuration: 1}
+	anchor := &neteaseSong{Name: "Example & Test", Artists: []string{"Artist"}, Album: "Original Album", DurationMS: 1000}
+	path, note, class := application.recoverNeteaseByTitleDuration(t.Context(), plan, anchor)
+	if path == "" || class != "download" || searches != 1 || strings.Join(downloads, ",") != "right" {
+		t.Fatalf("path=%q note=%q class=%q searches=%d downloads=%v", path, note, class, searches, downloads)
+	}
+	body, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tags, err := flactags.ReadBytes(body)
+	if err != nil || tags.Title != "Example & Test" || tags.Album != "Original Album" {
+		t.Fatalf("tags=%+v err=%v", tags, err)
+	}
+}
+
+func TestNeteaseTitleDurationRecoveryQueriesEachSourceOnce(t *testing.T) {
+	searches := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/search" {
+			http.NotFound(w, r)
+			return
+		}
+		searches++
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"songs":[]}`))
+	}))
+	defer server.Close()
+	application := newApp(t)
+	t.Setenv("MUSICOPS_ENGINE_URL", server.URL)
+	plan := SearchPlan{ExpectedTitle: "Album", ExpectedArtist: "Artist", PlaylistTrack: "Song", ExpectedDuration: 1}
+	anchor := &neteaseSong{Name: "Song", Artists: []string{"Artist"}, DurationMS: 1000}
+	path, _, _ := application.recoverNeteaseByTitleDuration(t.Context(), plan, anchor)
+	if path != "" || searches != 3 {
+		t.Fatalf("path=%q searches=%d", path, searches)
+	}
+}
+
+func TestParseStreamEngineSongsAcceptsJSONAndHTML(t *testing.T) {
+	jsonCards := parseStreamEngineSongs([]byte(`{"songs":[{"id":"j","source":"joox","name":"JSON","artist":"Artist","album":"Album","duration":90}]}`))
+	htmlCards := parseStreamEngineSongs([]byte(`<li class="song-card" data-id="h" data-source="joox" data-name="HTML" data-artist="Artist" data-album="Album" data-duration="91"></li>`))
+	if len(jsonCards) != 1 || jsonCards[0].ID != "j" || len(htmlCards) != 1 || htmlCards[0].ID != "h" {
+		t.Fatalf("json=%+v html=%+v", jsonCards, htmlCards)
+	}
+}
+
+func TestStreamEngineStopsCandidateWalkOnRateLimit(t *testing.T) {
+	downloads := []string{}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/search":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"songs":[{"id":"first","source":"joox","name":"Example & Test","artist":"Artist","album":"First Album","duration":1},{"id":"second","source":"joox","name":"Example & Test","artist":"Artist","album":"First Album","duration":1}]}`))
+		case "/download":
+			downloads = append(downloads, r.URL.Query().Get("id"))
+			http.Error(w, "limited", http.StatusTooManyRequests)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+	application := newApp(t)
+	t.Setenv("MUSICOPS_ENGINE_URL", server.URL)
+	plan := SearchPlan{RootJobID: "candidate-rate-limit", ExpectedTitle: "Example & Test", ExpectedArtist: "Artist", ExpectedDuration: 1}
+	path, _, class := application.tryConfiguredStreamSong(t.Context(), "joox", plan, nil)
+	if path != "" || class != "rate_limited" || strings.Join(downloads, ",") != "first" {
+		t.Fatalf("path=%q class=%q downloads=%v", path, class, downloads)
 	}
 }

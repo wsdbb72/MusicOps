@@ -262,23 +262,20 @@ func TestModelPassCannotOverrideMissingEvidence(t *testing.T) {
 		t.Fatal(job.SearchAction, job.Message, calls.Load())
 	}
 	recorder := postCode(t, application, "/v1/jobs/"+job.ID+"/review", map[string]any{"action": "ai"})
-	if recorder.Code != http.StatusConflict || !strings.Contains(recorder.Body.String(), "AI_NO_CONFIRMED_MATCH") {
+	if recorder.Code != http.StatusOK || !strings.Contains(recorder.Body.String(), `"stage":"skipped"`) || !strings.Contains(recorder.Body.String(), "已安全结束") {
 		t.Fatal(recorder.Code, recorder.Body.String())
 	}
-	unchanged := inspect(t, application, job.ID)
-	if unchanged.Job.Stage != "needs_review" {
-		t.Fatal(unchanged.Job)
+	settled := inspect(t, application, job.ID)
+	if settled.Job.Stage != "skipped" || settled.Job.SearchAction == "queue_request" {
+		t.Fatal(settled.Job)
 	}
 	detail := getAuth(t, application, "/v1/jobs/"+job.ID)
-	var diagnostic struct {
-		Result struct {
-			State   string `json:"state"`
-			Phase   string `json:"phase"`
-			Message string `json:"message"`
-		} `json:"result"`
+	var shown struct {
+		Downloaded       bool `json:"downloaded"`
+		LibraryPublished bool `json:"library_published"`
 	}
-	if detail.Code != http.StatusOK || json.Unmarshal(detail.Body.Bytes(), &diagnostic) != nil || diagnostic.Result.State != "blocked" || diagnostic.Result.Phase == "" || diagnostic.Result.Message == "" {
-		t.Fatalf("blocked job diagnostic missing: %d %s", detail.Code, detail.Body.String())
+	if detail.Code != http.StatusOK || json.Unmarshal(detail.Body.Bytes(), &shown) != nil || shown.Downloaded || shown.LibraryPublished {
+		t.Fatalf("settled job unexpectedly downloaded or published: %d %s", detail.Code, detail.Body.String())
 	}
 }
 

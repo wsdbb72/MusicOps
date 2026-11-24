@@ -17,6 +17,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/wsdbb72/MusicOps/native/core/internal/audiorelease"
 	"github.com/wsdbb72/MusicOps/native/core/internal/flactags"
@@ -456,6 +457,20 @@ func releaseTaggedFLAC(t *testing.T, application *App, rootID, artist, album, ti
 	return releaseLibraryFile(t, application, sourceName, rootID, artist, album, title, track)
 }
 
+func renameTestDirectory(oldPath, newPath string) error {
+	var err error
+	for attempt := 0; attempt < 8; attempt++ {
+		if err = os.Rename(oldPath, newPath); err == nil {
+			return nil
+		}
+		if !retryableAtomicRename(err) {
+			return err
+		}
+		time.Sleep(time.Duration(attempt+1) * 25 * time.Millisecond)
+	}
+	return err
+}
+
 func TestArtistFolderPlanAndRelocate(t *testing.T) {
 	application := newApp(t)
 	library := filepath.Join(application.Dir, "library-audio")
@@ -472,7 +487,7 @@ func TestArtistFolderPlanAndRelocate(t *testing.T) {
 	// arrives, and point the record at it.
 	organized := filepath.Join(library, "Solo Artist", "My Album")
 	loose := filepath.Join(library, "My Album")
-	if err := os.Rename(organized, loose); err != nil {
+	if err := renameTestDirectory(organized, loose); err != nil {
 		t.Fatal(err)
 	}
 	looseFile := filepath.Join(loose, filepath.Base(entry.File))
@@ -529,7 +544,7 @@ func TestArtistFolderTargetExistsIsSkipped(t *testing.T) {
 	entry := releaseTaggedFLAC(t, application, "af-2", "Other Artist", "Other Album", "Track One", 1)
 	organized := filepath.Join(library, "Other Artist", "Other Album")
 	loose := filepath.Join(library, "Other Album")
-	if err := os.Rename(organized, loose); err != nil {
+	if err := renameTestDirectory(organized, loose); err != nil {
 		t.Fatal(err)
 	}
 	if err := audiorelease.Relocate(application.engine, entry.RequestID, filepath.Join(loose, filepath.Base(entry.File))); err != nil {
@@ -617,7 +632,7 @@ func TestArtistFolderSkipsWAVWithoutTags(t *testing.T) {
 	// skips it instead of guessing from the folder name.
 	organized := filepath.Join(library, "Some Artist", "Some Album")
 	loose := filepath.Join(library, "Some Album")
-	if err := os.Rename(organized, loose); err != nil {
+	if err := renameTestDirectory(organized, loose); err != nil {
 		t.Fatal(err)
 	}
 	if err := audiorelease.Relocate(application.engine, entry.RequestID, filepath.Join(loose, filepath.Base(entry.File))); err != nil {
@@ -684,7 +699,7 @@ func TestArtistFolderPlanUnderSymlinkedParent(t *testing.T) {
 	entry := releaseTaggedFLAC(t, application, "af-sym", "Solo Artist", "My Album", "Track One", 1)
 	organized := filepath.Join(library, "Solo Artist", "My Album")
 	loose := filepath.Join(library, "My Album")
-	if err := os.Rename(organized, loose); err != nil {
+	if err := renameTestDirectory(organized, loose); err != nil {
 		t.Fatal(err)
 	}
 	if err := audiorelease.Relocate(application.engine, entry.RequestID, filepath.Join(loose, filepath.Base(entry.File))); err != nil {

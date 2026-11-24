@@ -14,10 +14,10 @@ import (
 )
 
 type localWorkflowTrack struct {
-	Path                 string
-	Artist, Album, Title string
-	Codec                string
-	Duration             float64
+	Path                              string
+	Artist, AlbumArtist, Album, Title string
+	Codec                             string
+	Duration                          float64
 }
 
 func probeLocalWorkflowTrack(ctx context.Context, path string) (localWorkflowTrack, error) {
@@ -78,7 +78,7 @@ func probeLocalWorkflowTrackMode(ctx context.Context, path string, allowPathFall
 	if codec == "flac" && isLossyFLACProvenance(tags["comment"]) {
 		codec = "flac-lossy"
 	}
-	return localWorkflowTrack{Path: path, Artist: tags["artist"], Album: tags["album"], Title: tags["title"], Codec: codec, Duration: seconds}, nil
+	return localWorkflowTrack{Path: path, Artist: tags["artist"], AlbumArtist: firstNonEmpty(tags["albumartist"], tags["album_artist"], tags["album artist"]), Album: tags["album"], Title: tags["title"], Codec: codec, Duration: seconds}, nil
 }
 
 func localWorkflowTrackFromPath(path, codec string, duration float64) (localWorkflowTrack, error) {
@@ -92,7 +92,7 @@ func localWorkflowTrackFromPath(path, codec string, duration float64) (localWork
 	if duration < 0 || duration >= 86400 {
 		duration = 0
 	}
-	return localWorkflowTrack{Path: path, Artist: artist, Album: album, Title: title, Codec: strings.ToLower(codec), Duration: duration}, nil
+	return localWorkflowTrack{Path: path, Artist: artist, AlbumArtist: artist, Album: album, Title: title, Codec: strings.ToLower(codec), Duration: duration}, nil
 }
 
 func transientAudioProbeFailure(err error) bool {

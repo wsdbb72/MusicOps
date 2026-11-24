@@ -2,7 +2,11 @@
 
 package app
 
-import "golang.org/x/sys/unix"
+import (
+	"os"
+
+	"golang.org/x/sys/unix"
+)
 
 func audioCacheFreeBytes(dir string) (uint64, error) {
 	var stat unix.Statfs_t
@@ -10,4 +14,8 @@ func audioCacheFreeBytes(dir string) (uint64, error) {
 		return 0, err
 	}
 	return uint64(stat.Bavail) * uint64(stat.Bsize), nil
+}
+
+func retireDownloadCacheDirectory(from, to string) error {
+	return os.Rename(from, to)
 }

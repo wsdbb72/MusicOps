@@ -909,13 +909,17 @@ func removeDownloadCacheTree(path string) error {
 			}
 		}
 		candidate := filepath.Join(parent, "process-deleting-"+strconv.FormatInt(time.Now().UnixNano(), 36))
-		renameErr = os.Rename(path, candidate)
+		renameErr = retireDownloadCacheDirectory(path, candidate)
 		if renameErr == nil {
 			tombstone = candidate
 			break
 		}
 		if os.IsNotExist(renameErr) {
-			return nil
+			time.Sleep(125 * time.Millisecond)
+			if _, statErr := os.Lstat(path); os.IsNotExist(statErr) {
+				return nil
+			}
+			continue
 		}
 		if !retryableAtomicRename(renameErr) {
 			break

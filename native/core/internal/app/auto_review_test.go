@@ -111,6 +111,22 @@ func TestCanResetInterruptedSearchOnlyForExhaustedSafeSearch(t *testing.T) {
 	}
 }
 
+func TestInterruptedSearchRecoveryAlwaysHasTerminalOutcome(t *testing.T) {
+	task := &taskrepo.Task{Spec: taskrepo.Spec{Command: workflow.CommandSearch}, State: "recovery_required"}
+	job := workflow.Job{Stage: "needs_review", ReviewKind: "interrupted", SearchRetryCount: 1}
+	if got := interruptedSearchRecoveryAction(job, task); got != "retry" {
+		t.Fatalf("early interrupted search action = %q", got)
+	}
+	job.SearchRetryCount = 3
+	if got := interruptedSearchRecoveryAction(job, task); got != "abandon" {
+		t.Fatalf("exhausted interrupted search action = %q", got)
+	}
+	unsafe := *task
+	unsafe.Spec.Command = workflow.CommandProcess
+	if got := interruptedSearchRecoveryAction(job, &unsafe); got != "" {
+		t.Fatalf("unsafe process action = %q", got)
+	}
+}
 func TestAutoReviewSettlesDefinitiveModelNoMatch(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.Header.Get("X-MusicOps-Site") {

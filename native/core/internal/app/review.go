@@ -289,11 +289,14 @@ func (a *App) reviewWithAI(w http.ResponseWriter, r *http.Request, id, requestID
 			return
 		}
 		result, recoverErr := a.flows.RecoverInterrupted(requestID, id, nowNS)
-		if errors.Is(recoverErr, workflow.ErrStale) && canResetInterruptedSearch(inspection.Job, inspection.Task) {
-			// Automatic recovery is bounded. Once that budget is exhausted, the
-			// AI review path may start one explicit read-only search cycle; this
-			// still refuses token/download/acquire recovery.
-			result, recoverErr = a.flows.Review(requestID+"-fresh", id, workflow.ReviewDecision{Action: "retry"}, nowNS)
+		if errors.Is(recoverErr, workflow.ErrStale) {
+			switch interruptedSearchRecoveryAction(inspection.Job, inspection.Task) {
+			case "retry":
+				result, recoverErr = a.flows.Review(requestID+"-fresh", id, workflow.ReviewDecision{Action: "retry"}, nowNS)
+			case "abandon":
+				result, recoverErr = a.flows.AbandonInterrupted(requestID+"-exhausted", id, nowNS,
+					"安全搜索恢复和重试预算均已用尽；已自动结束，未下载、未入库")
+			}
 		}
 		a.writeReviewResult(w, result, recoverErr, "ai")
 		return
@@ -570,6 +573,16 @@ func interruptedProcessConverges(job workflow.Job, task *taskrepo.Task) bool {
 func canResetInterruptedSearch(job workflow.Job, task *taskrepo.Task) bool {
 	return job.ReviewKind == "interrupted" && job.RecoveryRetryCount >= 3 && !job.CancelRequested &&
 		task != nil && task.State == "recovery_required" && task.Command == workflow.CommandSearch && !task.CancelRequested
+}
+
+func interruptedSearchRecoveryAction(job workflow.Job, task *taskrepo.Task) string {
+	if !interruptedReviewSafe(job, task) {
+		return ""
+	}
+	if canResetInterruptedSearch(job, task) || job.SearchRetryCount < 3 {
+		return "retry"
+	}
+	return "abandon"
 }
 
 // interruptedReviewSafe identifies the interrupted paths that can be replayed

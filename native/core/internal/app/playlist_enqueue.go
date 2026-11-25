@@ -33,6 +33,7 @@ import (
 	"github.com/wsdbb72/MusicOps/native/core/internal/audiorelease"
 	"github.com/wsdbb72/MusicOps/native/core/internal/dataengine"
 	"github.com/wsdbb72/MusicOps/native/core/internal/musicbrainz"
+	"github.com/wsdbb72/MusicOps/native/core/internal/textnorm"
 	"github.com/wsdbb72/MusicOps/native/core/internal/workflow"
 )
 
@@ -339,8 +340,8 @@ var playlistTitleSeparators = strings.NewReplacer(
 )
 
 func normalizeKey(s string) string {
-	s = strings.ToLower(strings.TrimSpace(s))
-	replacer := strings.NewReplacer("_", " ", "-", " ", "/", " ", "　", " ", "’", "'", "‘", "'", "“", "\"", "”", "\"")
+	s = textnorm.Fold(strings.TrimSpace(s))
+	replacer := strings.NewReplacer("_", " ", "-", " ", "/", " ")
 	s = replacer.Replace(s)
 	return strings.Join(strings.Fields(s), " ")
 }
@@ -376,9 +377,9 @@ func trackKeyOfPath(file string) (artist, album, title string) {
 // those same recordings together without collapsing different worded albums.
 func libraryPathKey(value string) string {
 	var out strings.Builder
-	for _, r := range value {
+	for _, r := range textnorm.Fold(value) {
 		if unicode.IsLetter(r) || unicode.IsDigit(r) {
-			out.WriteRune(unicode.ToLower(r))
+			out.WriteRune(r)
 			continue
 		}
 		out.WriteByte(' ')

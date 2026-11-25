@@ -178,3 +178,15 @@ func TestLivePlaylistEvidenceMatchesBilingualReleaseAndSplitCredit(t *testing.T)
 		t.Fatal("different volume was accepted")
 	}
 }
+
+func TestUnicodeCompatibilityAndTypographyMatchWithoutCollapsingIdentity(t *testing.T) {
+	if !Compare("FLOWER — 夜", "ЁЖ", Hit{Title: "ＦＬＯＷＥＲ - 夜", Artists: []string{"ёж"}}).Pass {
+		t.Fatal("composed/full-width/Cyrillic case variants were rejected")
+	}
+	if !Compare("Beyoncé — Love", "Beyoncé", Hit{Title: "ＢＥＹＯＮＣＥ\u0301 – ＬＯＶＥ", Artists: []string{"ＢＥＹＯＮＣＥ\u0301"}}).Pass {
+		t.Fatal("Beyoncé accent variant was rejected")
+	}
+	if Compare("FLOWER — Night", "ЁЖ", Hit{Title: "ＦＬＯＷＥＲ - 夜", Artists: []string{"ёж"}}).Pass {
+		t.Fatal("different CJK title words were collapsed")
+	}
+}

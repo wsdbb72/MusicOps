@@ -8,6 +8,8 @@ import (
 	"strings"
 	"unicode"
 	"unicode/utf8"
+
+	"github.com/wsdbb72/MusicOps/native/core/internal/textnorm"
 )
 
 // Hit is evidence already present on a candidate. Aliases must come from that record.
@@ -244,15 +246,5 @@ func fold(value string) string {
 	if !utf8.ValidString(value) {
 		return ""
 	}
-	var b strings.Builder
-	for _, r := range value {
-		if r >= 0xFF01 && r <= 0xFF5E {
-			r -= 0xFEE0
-		}
-		if r == 0x3000 {
-			r = ' '
-		}
-		b.WriteRune(unicode.ToLower(r))
-	}
-	return strings.Join(strings.Fields(b.String()), " ")
+	return textnorm.Fold(value)
 }

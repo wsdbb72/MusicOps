@@ -17,6 +17,7 @@ import (
 	"github.com/wsdbb72/MusicOps/native/core/internal/scheduler"
 	"github.com/wsdbb72/MusicOps/native/core/internal/searchdecision"
 	"github.com/wsdbb72/MusicOps/native/core/internal/taskrepo"
+	"github.com/wsdbb72/MusicOps/native/core/internal/textnorm"
 	"github.com/wsdbb72/MusicOps/native/core/internal/trackersearch"
 	"github.com/wsdbb72/MusicOps/native/core/internal/workflow"
 )
@@ -696,11 +697,12 @@ func decodePlan(payload []byte) (SearchPlan, error) {
 }
 
 func boundedTrackerQuery(query, title, artist string) string {
-	query = strings.TrimSpace(query)
+	query = textnorm.Normalize(strings.TrimSpace(query))
 	if len([]rune(query)) <= 300 {
 		return query
 	}
-	title = strings.TrimSpace(title)
+	title = textnorm.Normalize(strings.TrimSpace(title))
+	artist = textnorm.Normalize(strings.TrimSpace(artist))
 	primaryArtist := strings.TrimSpace(strings.SplitN(artist, " / ", 2)[0])
 	for _, candidate := range []string{
 		strings.TrimSpace(primaryArtist + " " + title),

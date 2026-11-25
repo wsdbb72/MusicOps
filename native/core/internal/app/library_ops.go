@@ -23,6 +23,7 @@ import (
 	"github.com/wsdbb72/MusicOps/native/core/internal/audiorelease"
 	"github.com/wsdbb72/MusicOps/native/core/internal/flactags"
 	"github.com/wsdbb72/MusicOps/native/core/internal/musicbrainz"
+	"github.com/wsdbb72/MusicOps/native/core/internal/textnorm"
 	"github.com/wsdbb72/MusicOps/native/core/internal/workflow"
 )
 
@@ -843,17 +844,11 @@ func leadingNumber(value string) int {
 // foldTagText is the comparison form for tag text: fullwidth ASCII folded to
 // ASCII, case folded, whitespace collapsed.
 func foldTagText(value string) string {
-	var b strings.Builder
-	for _, r := range value {
-		if r >= 0xFF01 && r <= 0xFF5E {
-			r -= 0xFEE0
-		}
-		if r == 0x3000 {
-			r = ' '
-		}
-		b.WriteRune(r)
-	}
-	return strings.ToLower(strings.Join(strings.Fields(b.String()), " "))
+	folded := textnorm.Fold(value)
+	// Consumers that strip decorative punctuation (playlist match keys and
+	// NetEase alternate-title comparison) look for the single ellipsis rune.
+	// Fold expands it to three periods, so restore that spelling here.
+	return strings.ReplaceAll(folded, "...", "…")
 }
 
 func catalogTagSummary(view *catalogReleaseView) map[string]any {

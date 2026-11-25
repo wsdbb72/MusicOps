@@ -695,3 +695,15 @@ func TestPlaylistPresenceStopsAfterRequestCancellation(t *testing.T) {
 		t.Fatalf("canceled playlist request continued: %v", err)
 	}
 }
+
+func TestTrackerQueryNormalizesCompatibilityFormsAndTypography(t *testing.T) {
+	if got := boundedTrackerQuery("ＢＥＹＯＮＣＥ\u0301 — ＬＯＶＥ\u200b", "Love", "Beyoncé"); got != "BEYONCÉ - LOVE" {
+		t.Fatalf("query=%q", got)
+	}
+	if got := normalizeKey("ＡＣ／ＤＣ – Album…"); got != "ac dc album..." {
+		t.Fatalf("key=%q", got)
+	}
+	if got := libraryPathKey("１２３：ＡＢＣ"); got != "123 abc" {
+		t.Fatalf("path key=%q", got)
+	}
+}

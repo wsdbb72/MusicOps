@@ -466,10 +466,12 @@ func fallbackReviewKind(kind string) bool {
 	return kind == "token" || kind == "candidate" || kind == "interrupted"
 }
 
-// AbandonInterrupted cancels an interrupted process whose external effects
-// cannot be replayed and for which no streaming fallback is configured. The
-// task is cancelled without re-running it, then the job receives an explicit
-// skipped terminal state instead of remaining in review forever.
+// AbandonInterrupted cancels an interrupted task whose automatic recovery is
+// no longer safe or possible. A process is abandoned only when no streaming
+// fallback can absorb it; a search is abandoned only after either automatic
+// retry budget is exhausted. The task is cancelled without re-running it, then
+// the job receives an explicit skipped terminal state instead of remaining in
+// review forever.
 func (r *Repository) AbandonInterrupted(requestID, jobID string, nowNS int64, reason string) (Result, error) {
 	if !validID(jobID) || requestID == "" || len(requestID) > 128 || nowNS <= 0 || len(reason) > 4000 {
 		return Result{}, dataengine.ErrInvalidRequest
@@ -482,7 +484,20 @@ func (r *Repository) AbandonInterrupted(requestID, jobID string, nowNS int64, re
 		return Result{}, ErrNotFound
 	}
 	if job.Stage != "needs_review" || job.ReviewKind != "interrupted" || job.CancelRequested || job.Paused ||
-		task.State != "recovery_required" || task.CancelRequested || task.Command != cmdProcess {
+		task.State != "recovery_required" || task.CancelRequested {
+		return Result{}, fmt.Errorf("interrupted checkpoint changed: %w", ErrStale)
+	}
+	switch task.Command {
+	case cmdProcess:
+		// A process has no safe replay path; callers use this only after the
+		// token/fallback policy has proved that abandonment is required.
+	case cmdSearch:
+		// A read-only search is otherwise retryable. Do not let a stale or
+		// malicious caller skip it before the automatic budget is exhausted.
+		if job.RecoveryRetryCount < 3 && job.SearchRetryCount < 3 {
+			return Result{}, fmt.Errorf("interrupted search still has an automatic retry: %w", ErrStale)
+		}
+	default:
 		return Result{}, fmt.Errorf("interrupted checkpoint changed: %w", ErrStale)
 	}
 	extra, _ := json.Marshal(struct{ JobID, Action string }{job.ID, "abandon_interrupted"})

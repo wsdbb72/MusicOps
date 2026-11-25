@@ -1,6 +1,7 @@
 package workflow
 
 import (
+	"errors"
 	"fmt"
 	"testing"
 
@@ -363,6 +364,53 @@ func TestReviewInterruptedSearchCanRetry(t *testing.T) {
 	}
 	if _, err := repo.Review("review-interrupted-skip", "search:album1", ReviewDecision{Action: "skip"}, 5000); err == nil {
 		t.Fatal("an interrupted job cannot be skipped without reconciliation")
+	}
+}
+
+func TestAbandonInterruptedSearchAfterAutomaticBudget(t *testing.T) {
+	repo, tasks := fixture(t)
+	startPlaylist(t, repo)
+	token := begin(t, tasks, "album1", "identify")
+	if _, err := repo.Complete("handoff-abandon-search", token, handoff(3000)); err != nil {
+		t.Fatal(err)
+	}
+	token = begin(t, tasks, "search:album1", "identify")
+	if _, err := repo.Interrupt("interrupt-abandon-search-0", token, 4000, "检索已中断"); err != nil {
+		t.Fatal(err)
+	}
+
+	// Abandonment must not bypass the automatic recovery budget.
+	if _, err := repo.AbandonInterrupted("abandon-search-early", "search:album1", 4100, "too early"); !errors.Is(err, ErrStale) {
+		t.Fatalf("early abandon error = %v, want ErrStale", err)
+	}
+
+	for attempt := 1; attempt <= 3; attempt++ {
+		result, err := repo.RecoverInterrupted(fmt.Sprintf("recover-abandon-search-%d", attempt), "search:album1", int64(4100+attempt*200))
+		if err != nil || result.Job == nil || result.Job.RecoveryRetryCount != uint8(attempt) {
+			t.Fatalf("recovery %d: result=%+v err=%v", attempt, result.Job, err)
+		}
+		claim, claimErr := tasks.Claim(fmt.Sprintf("claim-abandon-search-%d", attempt), "identify", fmt.Sprintf("owner-abandon-search-%d", attempt), int64(4210+attempt*200))
+		if claimErr != nil || claim.Task == nil || claim.Task.ID != "search:album1" {
+			t.Fatalf("claim %d: %+v %v", attempt, claim, claimErr)
+		}
+		token = taskrepo.Token{ID: claim.Task.ID, Owner: claim.Task.Owner, Fence: claim.Task.Fence}
+		if _, beginErr := tasks.Begin(fmt.Sprintf("begin-abandon-search-%d", attempt), token, int64(4220+attempt*200)); beginErr != nil {
+			t.Fatalf("begin %d: %v", attempt, beginErr)
+		}
+		if _, err := repo.Interrupt(fmt.Sprintf("interrupt-abandon-search-%d", attempt), token, int64(4300+attempt*200), "检索再次中断"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := repo.RecoverInterrupted("recover-abandon-search-exhausted", "search:album1", 5000); !errors.Is(err, ErrStale) {
+		t.Fatalf("exhausted recovery error = %v, want ErrStale", err)
+	}
+	result, err := repo.AbandonInterrupted("abandon-search-exhausted", "search:album1", 5100, "自动恢复预算已用尽")
+	if err != nil || result.Job == nil || result.Job.Stage != "skipped" || result.Job.ReviewKind != "" {
+		t.Fatalf("job=%+v err=%v", result.Job, err)
+	}
+	task, err := tasks.Get("search:album1")
+	if err != nil || task == nil || task.State != "cancelled" {
+		t.Fatalf("task=%+v err=%v", task, err)
 	}
 }
 

@@ -204,12 +204,13 @@ const appJS = `(function () {
       html += newTaskCard() + pipelineBar() + batchBar();
     } else if (view === "queue") {
       html += '<p class="meta">队列只显示正在识别、检索、下载、校验或入库的任务，每 3 秒刷新。待核对的任务在「任务」里处理。</p>';
+      html += batchBar();
     }
-    if (view === "review") html += '<p><button type="button" id="review-ai-all">AI 核对全部</button></p>';
+    if (view === "review") html += '<p><button type="button" id="review-ai-all">AI 核对全部</button></p>' + batchBar();
     html += '<div class="cards">';
     rows.forEach(function (job) {
       var checked = selectedJobs[job.job_id] ? " checked" : "";
-      var box = (view === "tasks" || view === "queue") ? '<label><input type="checkbox" data-batch="' + escapeText(job.job_id) + '"' + checked + '> 批量</label>' : "";
+      var box = (view === "tasks" || view === "queue" || view === "review") ? '<label><input type="checkbox" data-batch="' + escapeText(job.job_id) + '"' + checked + '> 选择</label>' : "";
       var state = executionLabel(job.execution_state, job.paused, retryAt(job));
       var stage = (state ? " · " + escapeText(state) : "") + (view === "queue" ? ' · ' + escapeText(stageLabel(job.stage)) : "");
       html += '<article>' + box + '<button type="button" class="card-link" data-job="' + escapeText(job.job_id) + '"><h2>' + escapeText(job.label || "未命名") + '</h2><p class="meta">' + pill(job) + stage + '</p><p>' + escapeText(job.headline || "") + "</p></button></article>";
@@ -271,13 +272,34 @@ const appJS = `(function () {
     Object.keys(selectedJobs).forEach(function (id) { if (selectedJobs[id]) count++; });
     return count;
   }
+  function updateBatchCount() {
+    var bar = document.querySelector(".batch > span");
+    if (bar) bar.textContent = "已选 " + selectedCount() + " 个";
+  }
+  function setBatchSelection(mode) {
+    var byID = {};
+    jobs.forEach(function (job) { byID[job.job_id] = job; });
+    Object.keys(selectedJobs).forEach(function (id) { selectedJobs[id] = false; });
+    document.querySelectorAll("input[data-batch]").forEach(function (box) {
+      var id = box.getAttribute("data-batch");
+      var job = byID[id] || {};
+      var retryable = job.stage === "needs_review" || job.stage === "failed";
+      var selected = mode === "all" || (mode === "retryable" && retryable);
+      selectedJobs[id] = selected;
+      box.checked = selected;
+    });
+    updateBatchCount();
+  }
   function batchBar() {
     var count = selectedCount();
     return '<div class="batch"><span>已选 ' + count + ' 个</span>' +
-      '<button type="button" data-batch-action="pause">暂停</button>' +
-      '<button type="button" data-batch-action="resume">继续</button>' +
-      '<button type="button" data-batch-action="cancel">取消</button>' +
-      '<button type="button" data-batch-action="retry">重试</button></div>';
+      '<button type="button" data-batch-select="all">全选当前页</button>' +
+      '<button type="button" data-batch-select="retryable">选择可重试项</button>' +
+      '<button type="button" data-batch-select="none" class="quiet">清空</button>' +
+      '<button type="button" data-batch-action="resume">批量继续</button>' +
+      '<button type="button" data-batch-action="pause">批量暂停</button>' +
+      '<button type="button" data-batch-action="retry">批量重试</button>' +
+      '<button type="button" data-batch-action="cancel" class="danger">批量取消</button></div>';
   }
   async function batchAction(action) {
     var ids = Object.keys(selectedJobs).filter(function (id) { return selectedJobs[id]; });
@@ -1534,7 +1556,7 @@ const appJS = `(function () {
       '<label><input type="checkbox" id="auto-maintenance-upgrade"' + (auto.upgrade ? " checked" : "") + '> 音质升级</label>' +
       '<label><input type="checkbox" id="auto-maintenance-expand"' + (auto.expand ? " checked" : "") + '> 单曲补整专</label>' +
       '<label>周期（小时）<input type="text" id="auto-maintenance-hours" value="' + escapeText(auto.interval_hours || 6) + '"></label></div>' +
-      '<div class="action-row"><button type="button" id="save-auto-maintenance" class="primary">保存设置</button><button type="button" id="run-auto-maintenance">立即维护全库</button><button type="button" id="run-library-upgrade-now">升级全库音质</button><button type="button" id="run-library-scrape-now">重刮全库</button><button type="button" id="stop-auto-maintenance" class="quiet">停止</button></div><p id="auto-maintenance-result" class="meta"></p></article>';
+      '<div class="action-row"><button type="button" id="save-auto-maintenance" class="primary">保存设置</button><button type="button" id="run-auto-maintenance">立即维护全库</button><button type="button" id="run-library-upgrade-now">升级全库音质</button><button type="button" id="run-library-scrape-now">一键全库刮削（标签·歌手·专辑·封面·歌词）</button><button type="button" id="stop-auto-maintenance" class="quiet">停止</button></div><p id="auto-maintenance-result" class="meta"></p></article>';
     var duplicateHtml = "";
     if (duplicateRows.length) {
       duplicateRows.forEach(function (group) {
@@ -1564,9 +1586,9 @@ const appJS = `(function () {
       '<p><button type="button" id="lookup-sources">查其它来源</button></p><div id="sources-result" class="meta"></div>' +
       '<p><button type="button" id="backfill-lrc">补写同名 lrc</button> <button type="button" id="backfill-lrc-preview">先看会改多少</button></p>' +
       '<p id="backfill-lrc-result" class="meta">扫描整个音乐库：已有歌词标签但没有 .lrc 的补写，旧命名（xxx.flac.lrc）改成 xxx.lrc，已存在的同名 .lrc 不动。</p>' +
-      '<p class="meta">按专辑查询目录并写回标签；开启歌词封面后会逐首补齐。所选模式单次最多 200 首，含歌词封面时最多 30 首；全选全部使用后台任务。</p>' +
+      '<p class="meta">按专辑查询目录并补写歌名、歌手、专辑、音轨号和分类；全库模式同时补齐缺失封面与歌词。所选模式单次最多 200 首，含歌词封面时最多 30 首；全选全部使用后台任务。</p>' +
       '<label><input type="checkbox" id="scrape-artwork"> 同时补歌词与封面</label>' +
-      '<div class="action-row"><button type="button" id="scrape-preview">预演所选</button><button type="button" id="scrape-apply" class="primary">刮削所选</button><button type="button" id="scrape-whole-library">重刮全库</button></div></article>' +
+      '<div class="action-row"><button type="button" id="scrape-preview">预演所选</button><button type="button" id="scrape-apply" class="primary">刮削所选</button><button type="button" id="scrape-whole-library">全库补齐标签·封面·歌词</button></div></article>' +
       '<article><h2>合辑</h2><p class="meta">预览不会移动文件。合并只把名称里带“合辑”或 Various Artists 的文件夹移进音乐库的 Compilations。</p>' +
       '<p><button type="button" id="preview-compilations">预览合辑</button> <button type="button" id="merge-compilations">合并合辑</button></p><p id="compilation-result" class="meta"></p></article>' +
       '<article><h2>艺人目录与 NCM</h2><p class="meta">艺人目录把专辑文件夹整理成“艺人/专辑”。NCM 解密不改源文件。</p>' +
@@ -2601,6 +2623,8 @@ const appJS = `(function () {
   });
   list.addEventListener("click", function (event) {
     if (event.target.closest("#review-more") && !loading) { loadMoreReview(); return; }
+    var selectButton = event.target.closest("button[data-batch-select]");
+    if (selectButton) { setBatchSelection(selectButton.getAttribute("data-batch-select")); return; }
     var batchButton = event.target.closest("button[data-batch-action]");
     if (batchButton && !loading) { batchAction(batchButton.getAttribute("data-batch-action")); return; }
     var button = event.target.closest("button[data-job]");
@@ -2611,8 +2635,7 @@ const appJS = `(function () {
     var box = event.target.closest("input[data-batch]");
     if (!box) return;
     selectedJobs[box.getAttribute("data-batch")] = box.checked;
-    var bar = document.querySelector(".batch span");
-    if (bar) bar.textContent = "已选 " + selectedCount() + " 个";
+    updateBatchCount();
   });
   document.getElementById("back").addEventListener("click", function () {
     if (loading) return;

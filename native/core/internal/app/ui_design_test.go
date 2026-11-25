@@ -134,3 +134,37 @@ func TestTokenReviewUIReportsHeldAndAutomaticOutcomes(t *testing.T) {
 		}
 	}
 }
+
+func TestTaskQueueExposesBatchSelectionAndRetryControls(t *testing.T) {
+	for _, want := range []string{
+		`html += batchBar();`,
+		`data-batch-select="all"`,
+		`data-batch-select="retryable"`,
+		`data-batch-select="none"`,
+		`data-batch-action="resume">批量继续`,
+		`data-batch-action="retry">批量重试`,
+		`function setBatchSelection(mode)`,
+		`job.stage === "needs_review" || job.stage === "failed"`,
+		`view === "review") ? '<label><input type="checkbox" data-batch=`,
+		`id="review-ai-all">AI 核对全部</button></p>' + batchBar()`,
+	} {
+		if !strings.Contains(appJS, want) {
+			t.Fatal("missing queue batch behavior:", want)
+		}
+	}
+	if !strings.Contains(appCSS, `.batch button[data-batch-action=resume]`) || !strings.Contains(appCSS, `.batch button[data-batch-select]`) {
+		t.Fatal("batch controls need visible action styles")
+	}
+}
+
+func TestWholeLibraryScrapeNamesEveryMetadataScope(t *testing.T) {
+	for _, want := range []string{
+		`id="run-library-scrape-now">一键全库刮削（标签·歌手·专辑·封面·歌词）`,
+		`id="scrape-whole-library">全库补齐标签·封面·歌词`,
+		`/v1/library/scrape/whole`,
+	} {
+		if !strings.Contains(appJS, want) {
+			t.Fatal("missing whole-library scrape scope:", want)
+		}
+	}
+}

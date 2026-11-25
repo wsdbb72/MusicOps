@@ -173,6 +173,8 @@ article>h2:first-child{margin-top:0}
 .pill.fail{background:var(--danger-soft);color:var(--danger)}
 .batch{display:flex;flex-wrap:wrap;align-items:center;gap:var(--s-2);margin:0 0 var(--s-3);padding:var(--s-2) var(--s-3);border:1px solid var(--line);border-radius:var(--r-sm);background:var(--surface-2)}
 .batch>span{color:var(--fg-muted);font-size:var(--t-sm);margin-right:var(--s-1)}
+.batch button[data-batch-select]{background:var(--surface);color:var(--fg-muted)}
+.batch button[data-batch-action=resume],.batch button[data-batch-action=retry]{background:var(--accent-soft);border-color:color-mix(in srgb,var(--accent) 34%,var(--line));color:var(--accent)}
 
 /* ---------- detail ---------- */
 #detail{background:var(--surface);border:1px solid var(--line);border-radius:var(--r-lg);padding:var(--s-4) var(--s-5) var(--s-5)}

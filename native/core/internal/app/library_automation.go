@@ -1984,9 +1984,31 @@ func (a *App) enqueueMaintenanceWorkflowKey(ctx context.Context, scene string, t
 	if len(tracks) == 0 {
 		return false
 	}
+	if scene == "upgrade" {
+		// A damaged FLAC may still have a recoverable codec marker in its
+		// filename, but without artist, album and title there is no safe query.
+		// The scan error remains visible as a real corruption diagnosis; do not
+		// turn it into a new HTTP 422 failure on every maintenance pass.
+		for _, track := range tracks {
+			if strings.TrimSpace(track.Artist) == "" || strings.TrimSpace(track.Album) == "" || strings.TrimSpace(track.Title) == "" {
+				return false
+			}
+		}
+	}
 	paths := make([]string, 0, len(tracks))
 	for _, track := range tracks {
-		paths = append(paths, track.Path)
+		resolved, err := resolveInDir(a.libraryDir(), track.Path)
+		if err != nil {
+			// The scan cache can briefly outlive a file that dedupe, an
+			// external move or a repair already replaced. A stale row is not
+			// an upgrade failure; the next scan rebuilds its own identity.
+			return false
+		}
+		info, err := os.Stat(resolved)
+		if err != nil || info.IsDir() {
+			return false
+		}
+		paths = append(paths, resolved)
 	}
 	sort.Strings(paths)
 	key := scene + "|" + filepath.Clean(dir) + "|" + strings.Join(paths, "|")

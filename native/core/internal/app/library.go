@@ -796,6 +796,20 @@ func (a *App) duplicateMerge(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusConflict, map[string]any{"ok": false, "code": "MERGE_SUPPRESSED", "error": "这张专辑已设为不参与合并，先在字段锁里取消抑制"})
 		return
 	}
+	// An active or review-blocked workflow may still need any file in this
+	// group. Refuse the whole group before hash checks or tag rewrites; moving
+	// only after the workflow completes prevents a later stage from reporting
+	// a missing track.
+	if activePath, err := a.mergeActiveWorkflowPath(group); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "code": "LIBRARY_UNAVAILABLE", "error": "无法确认活动工作流是否仍引用这些文件"})
+		return
+	} else if activePath != "" {
+		writeJSON(w, http.StatusConflict, map[string]any{
+			"ok": false, "code": "MERGE_ACTIVE_WORKFLOW",
+			"error": "文件仍被活动工作流引用：" + filepath.Base(activePath) + "；工作流完成或取消后再合并",
+		})
+		return
+	}
 	// Moving a file that qBittorrent still holds breaks the torrent: the
 	// client keeps seeding a path that no longer exists. The check is before
 	// any hash work and before any move, and a client that is configured but
@@ -900,6 +914,127 @@ func (a *App) duplicateMerge(w http.ResponseWriter, r *http.Request) {
 	// quarantined copy above. Keep the immutable playlist index warm; each
 	// removed path is still re-verified and the keeper now answers the row.
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "merge_id": receipt.MergeID, "group_id": receipt.GroupID, "kept": receipt.Keep, "quarantined": receipt.Moved, "filled_fields": filled})
+}
+
+// mergeActiveWorkflowPath returns a losing file referenced by an active
+// workflow plan. The task payload is the durable source of the input path;
+// workflow links are followed so a completed search task under a live root
+// still protects the plan. Any storage error fails closed: skipping a dedupe
+// pass is safer than moving a file a task may need.
+func (a *App) mergeActiveWorkflowPath(group *duplicateGroup) (string, error) {
+	if a == nil || a.tasks == nil || group == nil || group.Keep == nil {
+		return "", nil
+	}
+	referenced, err := a.activeLibraryWorkflowPaths()
+	if err != nil {
+		return "", err
+	}
+	for _, file := range group.Files {
+		if file.RequestID == group.Keep.RequestID {
+			continue
+		}
+		full := a.libraryFilePath(file.LibraryDir, file.File)
+		if _, ok := referenced[libraryPathIdentity(full)]; ok {
+			return file.File, nil
+		}
+	}
+	return "", nil
+}
+
+func (a *App) activeLibraryWorkflowPaths() (map[string]struct{}, error) {
+	referenced := map[string]struct{}{}
+	if a == nil || a.tasks == nil {
+		return referenced, nil
+	}
+	taskIDs := []string{}
+	jobIDs := []string{}
+	queuedTask := map[string]bool{}
+	queuedJob := map[string]bool{}
+	addTask := func(id string) {
+		if id != "" && !queuedTask[id] {
+			queuedTask[id] = true
+			taskIDs = append(taskIDs, id)
+		}
+	}
+	addJob := func(id string) {
+		if id != "" && !queuedJob[id] {
+			queuedJob[id] = true
+			jobIDs = append(jobIDs, id)
+		}
+	}
+	for _, lane := range []string{"identify", "publish", "transcode", "aux", "download"} {
+		for _, state := range []string{"queued", "running", "paused", "blocked", "recovery_required"} {
+			var after []byte
+			for {
+				page, err := a.tasks.List(lane, state, after, 200)
+				if err != nil {
+					return nil, err
+				}
+				for _, task := range page.Tasks {
+					addTask(task.ID)
+					addJob(task.WorkflowJobID)
+				}
+				if len(page.Next) == 0 {
+					break
+				}
+				after = page.Next
+			}
+		}
+	}
+	for index := 0; index < len(jobIDs); index++ {
+		if a.flows == nil {
+			break
+		}
+		job, err := a.flows.Job(jobIDs[index])
+		if err != nil {
+			return nil, err
+		}
+		if job == nil {
+			continue
+		}
+		addTask(job.ActiveTaskID)
+		addTask(job.SearchJobID)
+		addTask(job.ProcessingJobID)
+		addJob(job.RootID)
+		addJob(job.ParentJobID)
+	}
+	for index := 0; index < len(taskIDs); index++ {
+		id := taskIDs[index]
+		raw, found, err := a.tasks.Data(id, "arguments", 0)
+		if err != nil {
+			return nil, err
+		}
+		if !found {
+			continue
+		}
+		var plan struct {
+			LibraryTracks []localWorkflowTrack `json:"library_tracks"`
+		}
+		if json.Unmarshal(raw, &plan) != nil {
+			continue
+		}
+		for _, track := range plan.LibraryTracks {
+			rawPath := strings.TrimSpace(track.Path)
+			if rawPath == "" {
+				continue
+			}
+			candidates := []string{rawPath}
+			if !filepath.IsAbs(rawPath) {
+				candidates = append(candidates, filepath.Join(a.libraryDir(), rawPath))
+			}
+			for _, candidate := range candidates {
+				referenced[libraryPathIdentity(candidate)] = struct{}{}
+			}
+		}
+	}
+	return referenced, nil
+}
+
+func libraryPathIdentity(path string) string {
+	if abs, err := filepath.Abs(filepath.Clean(path)); err == nil {
+		path = abs
+	}
+	return strings.ToLower(filepath.Clean(canonicalPath(path)))
 }
 
 // fillableTagFields are the fields a duplicate may contribute when the keeper

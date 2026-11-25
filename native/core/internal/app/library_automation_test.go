@@ -775,3 +775,37 @@ func TestIncompleteAlbumFollowupRunsOnlyExpansion(t *testing.T) {
 		t.Fatalf("partial-album settings = %+v", got)
 	}
 }
+
+func TestMaintenanceWorkflowSkipsVanishedSourceWithoutReportingFailure(t *testing.T) {
+	application := newApp(t)
+	missing := filepath.Join(application.libraryDir(), "already-moved.mp3")
+	if application.enqueueMaintenanceWorkflowKey(context.Background(), "upgrade", []localWorkflowTrack{{
+		Path: missing, Artist: "Artist", Album: "Album", Title: "Title", Codec: "mp3", Duration: 180,
+	}}, filepath.Dir(missing), "stale-scan") {
+		t.Fatal("missing maintenance source created a workflow")
+	}
+	_, report := application.libraryAutomation.snapshot()
+	if report.ErrorCount != 0 {
+		t.Fatalf("stale scan row became a user-visible failure: %+v", report.Errors)
+	}
+}
+
+func TestMaintenanceWorkflowSkipsCorruptRepairWithoutUsableIdentity(t *testing.T) {
+	application := newApp(t)
+	path := filepath.Join(application.libraryDir(), "broken.flac")
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte("not flac"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if application.enqueueMaintenanceWorkflowKey(context.Background(), "upgrade", []localWorkflowTrack{{
+		Path: path, Codec: "invalid", Duration: 1,
+	}}, filepath.Dir(path), "corrupt-repair-v2") {
+		t.Fatal("identity-less corrupt repair created a workflow")
+	}
+	_, report := application.libraryAutomation.snapshot()
+	if report.ErrorCount != 0 {
+		t.Fatalf("identity-less corrupt repair became a user-visible failure: %+v", report.Errors)
+	}
+}

@@ -234,6 +234,11 @@ func (a *App) libraryWorkflow(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "code": "INVALID_REQUEST"})
 		return
 	}
+	// Workflow creation and dedupe share this lock. The duplicate merge holds
+	// it across its path recheck and every move, so a filesystem path cannot be
+	// accepted by a new upgrade/expand task and quarantined moments later.
+	a.duplicateMu.Lock()
+	defer a.duplicateMu.Unlock()
 	switch body.Scene {
 	case "fill", "upgrade", "expand":
 	default:

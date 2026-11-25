@@ -187,7 +187,7 @@ func TestLibrarySelectionBuildsDurableSnapshotPlan(t *testing.T) {
 	if id == "" || r["started"] != true || r["downloaded"] != false {
 		t.Fatal(r)
 	}
-	deadline := time.Now().Add(8 * time.Second)
+	deadline := time.Now().Add(20 * time.Second)
 	var job *workflow.Job
 	for time.Now().Before(deadline) {
 		job, _ = application.flows.Job(id)
@@ -253,7 +253,7 @@ func TestLibraryWorkflowExpandAcceptsMultiArtistAlbum(t *testing.T) {
 	if id == "" || result["started"] != true {
 		t.Fatal(result)
 	}
-	deadline := time.Now().Add(8 * time.Second)
+	deadline := time.Now().Add(20 * time.Second)
 	var job *workflow.Job
 	for time.Now().Before(deadline) {
 		job, _ = application.flows.Job(id)

@@ -21,6 +21,7 @@ import (
 
 	"github.com/wsdbb72/MusicOps/native/core/internal/audiorelease"
 	"github.com/wsdbb72/MusicOps/native/core/internal/flactags"
+	"github.com/wsdbb72/MusicOps/native/core/internal/taskrepo"
 )
 
 // writeToneWAV builds a one-second 44.1kHz mono 16-bit PCM WAV at freq Hz.
@@ -1078,5 +1079,54 @@ func TestDuplicateMergeDoesNotRequireQBittorrentForStreamingImports(t *testing.T
 	}
 	if _, err := os.Stat(loserPath); !os.IsNotExist(err) {
 		t.Fatal("local duplicate was not quarantined", err)
+	}
+}
+
+func TestDuplicateMergeRefusesFileReferencedByActiveWorkflow(t *testing.T) {
+	application := newApp(t)
+	incoming := filepath.Join(application.Dir, "incoming")
+	writeToneWAV(t, filepath.Join(incoming, "active-a-source.wav"), 440)
+	writeFLACFromWAV(t, filepath.Join(incoming, "active-a-source.wav"), filepath.Join(incoming, "active-a.flac"))
+	writeToneWAV(t, filepath.Join(incoming, "active-b.wav"), 440)
+	first := releaseLibraryFile(t, application, "active-a.flac", "active-keep", "Artist", "Album", "Song", 1)
+	second := releaseLibraryFile(t, application, "active-b.wav", "active-loser", "Artist", "Album", "Song", 1)
+	groups := duplicateGroups(t, application)
+	if len(groups) != 1 || groups[0].State != "ready" || groups[0].Keep == nil {
+		t.Fatalf("duplicate group = %+v", groups)
+	}
+	group := groups[0]
+	loser := first
+	if group.Keep.RequestID == first.RequestID {
+		loser = second
+	}
+	loserPath := filepath.Join(application.Dir, "library-audio", loser.File)
+	raw, err := json.Marshal(SearchPlan{
+		Scene: "upgrade",
+		LibraryTracks: []localWorkflowTrack{{
+			Path: loserPath, Artist: "Artist", Album: "Album", Title: "Song", Codec: loser.Format, Duration: 1,
+		}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now()
+	if _, err := application.tasks.Enqueue("active-workflow-duplicate-guard", taskrepo.Spec{
+		ID: "active-workflow-duplicate-guard", Command: "fixture", Lane: "identify", Priority: 1,
+		CreatedNS: now.UnixNano(), NotBeforeNS: now.Add(time.Hour).UnixNano(),
+	}, raw); err != nil {
+		t.Fatal(err)
+	}
+	code, decoded := mediaPost(t, application, "/v1/library/duplicates/merge", map[string]any{"group_id": group.GroupID})
+	if code != http.StatusConflict || decoded["code"] != "MERGE_ACTIVE_WORKFLOW" {
+		t.Fatalf("merge code=%d body=%v", code, decoded)
+	}
+	if _, err := os.Stat(loserPath); err != nil {
+		t.Fatalf("active workflow input was moved: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(application.Dir, "library-audio", first.File)); err != nil {
+		t.Fatalf("keeper was moved: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(application.Dir, "library-audio", second.File)); err != nil {
+		t.Fatalf("duplicate was moved: %v", err)
 	}
 }

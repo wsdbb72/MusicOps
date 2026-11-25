@@ -828,13 +828,6 @@ func (index playlistLibraryIndex) hasPlaylistRow(row playlistTrack) bool {
 		if !neteaseAlternateTitleMatches(row.Title, titleTag) {
 			continue
 		}
-		artistMatches := playlistArtistTagMatches(row.Artist, artists)
-		if !artistMatches {
-			artistMatches = playlistArtistFallbackMatches(row.Artist, pathArtist)
-		}
-		if !artistMatches {
-			continue
-		}
 		if duration <= 0 {
 			continue
 		}
@@ -849,7 +842,38 @@ func (index playlistLibraryIndex) hasPlaylistRow(row playlistTrack) bool {
 			delta = -delta
 		}
 		if delta <= tolerance+truncatedMS {
-			return true
+			artistMatches := playlistArtistTagMatches(row.Artist, artists)
+			if !artistMatches {
+				artistMatches = playlistArtistFallbackMatches(row.Artist, pathArtist)
+			}
+			if artistMatches || albumMatches && playlistSuperCreditArtistMatches(row.Artist, artists, pathArtist) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// Charity singles and award compilations can credit dozens of performers while
+// a local release tag names only the few artists printed on that edition. Once
+// title, album and duration already agree, one exact shared credit is strong
+// enough for these unusually long credit lists. Short multi-artist credits keep
+// the stricter all-credited-artists rule.
+func playlistSuperCreditArtistMatches(expected string, actual []string, pathArtist string) bool {
+	want := flattenPlaylistArtists(splitPlaylistArtists(expected))
+	if len(want) < 5 {
+		return false
+	}
+	got := append([]string(nil), flattenPlaylistArtists(actual)...)
+	normalizedPath := strings.NewReplacer(
+		",", "\n", "，", "\n", "、", "\n", ";", "\n", "；", "\n", "&", "\n", "＆", "\n", " / ", "\n", "／", "\n",
+	).Replace(pathArtist)
+	got = append(got, flattenPlaylistArtists(splitPlaylistArtists(normalizedPath))...)
+	for _, expectedArtist := range want {
+		for _, actualArtist := range got {
+			if key := normalizeNeteaseArtist(expectedArtist); key != "" && key == normalizeNeteaseArtist(actualArtist) {
+				return true
+			}
 		}
 	}
 	return false

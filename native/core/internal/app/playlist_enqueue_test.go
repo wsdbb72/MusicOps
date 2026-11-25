@@ -618,6 +618,43 @@ func TestPlaylistPresenceMatchesCJKVariantTags(t *testing.T) {
 	}
 }
 
+func TestPlaylistPresenceAcceptsLongCreditListWithSharedArtist(t *testing.T) {
+	ffmpeg, err := exec.LookPath("ffmpeg")
+	if err != nil {
+		t.Skip("ffmpeg unavailable")
+	}
+	application := newApp(t)
+	library := t.TempDir()
+	taggedArtists := []string{"Lionel Richie", "Stevie Wonder", "Paul Simon"}
+	artistFolder := strings.Join(taggedArtists, ",")
+	path := filepath.Join(library, artistFolder, "We Are The World", artistFolder+" - We Are The World.mp3")
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	command := exec.Command(ffmpeg, "-nostdin", "-v", "error", "-y", "-f", "lavfi", "-i", "sine=frequency=440:duration=30",
+		"-metadata", "artist="+strings.Join(taggedArtists, "/"), "-metadata", "album=We Are The World", "-metadata", "title=We Are The World", path)
+	if output, err := command.CombinedOutput(); err != nil {
+		t.Fatalf("generate mp3: %v %s", err, output)
+	}
+	if added, err := audiorelease.IndexExisting(application.engine, audiorelease.Existing{
+		RequestID: "playlist-super-credit", RootID: "playlist-super-credit-root", Track: 1,
+		Path: path, Library: library, Format: "mp3", SourceName: "reindex", MetadataOnly: true,
+	}); err != nil || !added {
+		t.Fatalf("index super credit: added=%v err=%v", added, err)
+	}
+	application.invalidatePlaylistLibraryCache()
+	index := application.playlistLibrary()
+	credits := append(append([]string(nil), taggedArtists...), "Tina Turner", "Billy Joel", "Diana Ross", "Willie Nelson", "Bruce Springsteen")
+	row := playlistTrack{Artist: strings.Join(credits, " / "), Album: "We Are The World", Title: "We Are The World", Duration: "30", NeteaseSongID: 42}
+	if !index.hasPlaylistRow(row) {
+		t.Fatal("a long credit list with shared artists was reported missing despite title, album and duration matching")
+	}
+	row.Artist = "Artist A / Artist B / Artist C / Artist D / Artist E / Artist F"
+	if index.hasPlaylistRow(row) {
+		t.Fatal("a long credit list with no shared artist was accepted")
+	}
+}
+
 func TestPlaylistPresenceHotSlowCompilationKeepsUnicodeTrackIdentity(t *testing.T) {
 	application := newApp(t)
 	library := t.TempDir()

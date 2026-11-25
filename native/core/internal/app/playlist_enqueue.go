@@ -17,6 +17,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"os"
@@ -1281,6 +1282,40 @@ func playlistJobReusable(stage string) bool {
 	}
 }
 
+func playlistJobNeedsSupersede(job workflow.Job) bool {
+	return !job.CancelRequested && (job.Stage == "needs_review" || liveWorkflowStage(job.Stage))
+}
+
+// supersedePlaylistFamily cancels every live or review descendant of an old
+// playlist revision. A root may already be completed while its search child is
+// still queued or blocked; cancelling only the root would leave that child
+// running beside the replacement revision.
+func (a *App) supersedePlaylistFamily(root string) error {
+	family, err := a.flows.Family(root)
+	if err != nil {
+		return err
+	}
+	for _, job := range family {
+		if !playlistJobNeedsSupersede(job) {
+			continue
+		}
+		requestID := "supersede-" + job.ID + "-" + strconv.FormatUint(job.Revision, 10)
+		if _, err := a.flows.Control(requestID, job.ID, "cancel", a.now().UnixNano()); err != nil && !errors.Is(err, workflow.ErrStale) {
+			return err
+		}
+	}
+	family, err = a.flows.Family(root)
+	if err != nil {
+		return err
+	}
+	for _, job := range family {
+		if playlistJobNeedsSupersede(job) {
+			return fmt.Errorf("旧歌单任务 %s 未能安全取消", job.ID)
+		}
+	}
+	return nil
+}
+
 func (a *App) replacementPlaylistJobID(base string, revision uint64) (string, error) {
 	for attempt := int64(0); attempt < 64; attempt++ {
 		seed := fmt.Sprintf("%s/%d/%d/%d", base, revision, a.now().UnixNano(), attempt)
@@ -1331,12 +1366,8 @@ func (a *App) startPlaylistAlbumJob(ctx context.Context, client *musicbrainz.Cli
 		if !existing.CancelRequested && playlistJobReusable(existing.Stage) {
 			return baseJobID, nil
 		}
-		if existing.Stage == "needs_review" && !existing.CancelRequested {
-			// Re-adding a playlist must supersede the old review, not leave the
-			// same track in both the old review queue and a fresh replacement
-			// chain. Cancellation is durable and the scheduler gate keeps any
-			// already-claimed legacy task out of the new workflow.
-			_, _ = a.flows.Control("supersede-"+baseJobID+"-"+strconv.FormatUint(existing.Revision, 10), baseJobID, "cancel", a.now().UnixNano())
+		if err := a.supersedePlaylistFamily(baseJobID); err != nil {
+			return "", err
 		}
 		jobID, err = a.replacementPlaylistJobID(baseJobID, existing.Revision)
 		if err != nil {

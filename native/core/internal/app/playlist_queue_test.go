@@ -9,6 +9,9 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/wsdbb72/MusicOps/native/core/internal/workflow"
 )
 
 // "歌单入库" must create a job: saving the name list alone left the page
@@ -125,5 +128,42 @@ func TestPlaylistReenqueueReusesActiveAndReplacesTerminalJob(t *testing.T) {
 	job, err := application.flows.Job(replacement)
 	if err != nil || job == nil || job.Stage != "identifying" {
 		t.Fatal(job, err)
+	}
+}
+
+func TestPlaylistReenqueueCancelsLiveDescendantOfCompletedRoot(t *testing.T) {
+	application := newApp(t)
+	application.mu.Lock()
+	application.paused = true
+	application.mu.Unlock()
+	row := playlistTrack{Artist: "Artist", Album: "Album", Title: "Song", NeteaseSongID: 1, NeteaseAlbumID: 2}
+	first, err := application.startPlaylistAlbumJob(context.Background(), nil, "pl-netease-descendant", []string{"dicmusic"}, 0, row, true, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UnixNano()
+	token := claimAndBeginWorkflowTask(t, application, first, "identify", now+100)
+	if _, err := application.flows.Complete("handoff-"+first, token, workflow.Complete{
+		JobID: first, Edge: workflow.EdgeQueueSearch, TaskState: "completed", NowNS: now + 200,
+		Evidence: []workflow.EvidenceInput{{ID: "identity-" + first, Kind: "api", Source: "musicbrainz", SubjectID: "release-live-descendant", TracklistVerified: true, IdentityConfirmed: true, Payload: []byte("verified tracklist")}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	searchID := "search:" + first
+	token = claimAndBeginWorkflowTask(t, application, searchID, "identify", now+300)
+	if _, err := application.flows.Interrupt("interrupt-"+searchID, token, now+400, "search interrupted"); err != nil {
+		t.Fatal(err)
+	}
+
+	replacement, err := application.startPlaylistAlbumJob(context.Background(), nil, "pl-netease-descendant", []string{"dicmusic"}, 0, row, true, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if replacement == first {
+		t.Fatal("completed root with a live descendant was reused")
+	}
+	oldSearch, err := application.flows.Job(searchID)
+	if err != nil || oldSearch == nil || oldSearch.Stage != "cancelled" || !oldSearch.CancelRequested {
+		t.Fatalf("old descendant was not cancelled: job=%+v err=%v", oldSearch, err)
 	}
 }

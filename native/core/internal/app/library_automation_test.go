@@ -565,6 +565,31 @@ func TestAlbumExpansionSupportsPartialMultiTrackDirectory(t *testing.T) {
 	}
 }
 
+func TestLocalWorkflowAlbumArtistPreservesCompilationIdentity(t *testing.T) {
+	tracks := []localWorkflowTrack{
+		{Path: filepath.Join("Various Artists", "Shared Album", "01 First.flac"), Artist: "First Artist", AlbumArtist: "Various Artists", Album: "Shared Album"},
+		{Path: filepath.Join("Various Artists", "Shared Album", "02 Second.flac"), Artist: "Second Artist", AlbumArtist: "Various Artists", Album: "Shared Album"},
+	}
+	if got := localWorkflowAlbumArtist(tracks); got != "Various Artists" {
+		t.Fatalf("album artist=%q", got)
+	}
+
+	folderOnly := append([]localWorkflowTrack(nil), tracks...)
+	for i := range folderOnly {
+		folderOnly[i].AlbumArtist = ""
+	}
+	if got := localWorkflowAlbumArtist(folderOnly); got != "Various Artists" {
+		t.Fatalf("folder album artist=%q", got)
+	}
+
+	flat := append([]localWorkflowTrack(nil), folderOnly...)
+	flat[0].Path = "01 First.flac"
+	flat[1].Path = "02 Second.flac"
+	if got := localWorkflowAlbumArtist(flat); got != "First Artist" {
+		t.Fatalf("fallback track artist=%q", got)
+	}
+}
+
 func TestDuplicateScanWithUnchangedCacheProducesNoCheckpointUpdates(t *testing.T) {
 	application := newApp(t)
 	incoming := filepath.Join(application.Dir, "incoming")

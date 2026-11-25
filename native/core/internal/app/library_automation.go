@@ -1661,7 +1661,7 @@ func (a *App) albumNeedsExpansion(ctx context.Context, client *musicbrainz.Clien
 		requestTracks = append(requestTracks, catalogTrackRequest{Title: track.Title, Artists: []string{track.Artist}, Duration: &duration})
 	}
 	lookup, err := identifyCatalogLookup(ctx, client, a.engine, catalogIdentifyRequest{
-		Artist: tracks[0].Artist,
+		Artist: localWorkflowAlbumArtist(tracks),
 		Album:  tracks[0].Album,
 		Tracks: requestTracks,
 	}, catalogBudget, catalogTTL)
@@ -1681,6 +1681,23 @@ func (a *App) albumNeedsExpansion(ctx context.Context, client *musicbrainz.Clien
 		}
 	}
 	return true, nil
+}
+
+func localWorkflowAlbumArtist(tracks []localWorkflowTrack) string {
+	for _, track := range tracks {
+		if artist := strings.TrimSpace(track.AlbumArtist); artist != "" {
+			return artist
+		}
+	}
+	if len(tracks) == 0 {
+		return ""
+	}
+	if artist, _, _, ok := localWorkflowIdentityFromPath(tracks[0].Path); ok {
+		if artist = strings.TrimSpace(artist); artist != "" {
+			return artist
+		}
+	}
+	return strings.TrimSpace(tracks[0].Artist)
 }
 
 func (a *App) enqueueMaintenanceWorkflow(ctx context.Context, scene string, tracks []localWorkflowTrack, dir string) bool {

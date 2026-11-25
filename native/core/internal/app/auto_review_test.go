@@ -89,37 +89,42 @@ func TestAutoReviewMovesTokenHoldToDurableCooldown(t *testing.T) {
 	}
 }
 
-func TestCanResetInterruptedSearchOnlyForExhaustedSafeSearch(t *testing.T) {
-	job := workflow.Job{Stage: "needs_review", ReviewKind: "interrupted", RecoveryRetryCount: 3}
+func TestInterruptedSearchAutomaticBudgetIsBounded(t *testing.T) {
 	task := &taskrepo.Task{Spec: taskrepo.Spec{Command: workflow.CommandSearch}, State: "recovery_required"}
-	if !canResetInterruptedSearch(job, task) {
-		t.Fatal("exhausted read-only search was not resettable")
+	job := workflow.Job{Stage: "needs_review", ReviewKind: "interrupted", RecoveryRetryCount: 2, SearchRetryCount: 1}
+	if interruptedSearchAutomaticBudgetExhausted(job, task) {
+		t.Fatal("automatic budget ended before either limit")
+	}
+	job.RecoveryRetryCount = 3
+	if !interruptedSearchAutomaticBudgetExhausted(job, task) {
+		t.Fatal("exhausted recovery budget did not reach terminal policy")
+	}
+	job.RecoveryRetryCount = 0
+	job.SearchRetryCount = 3
+	if !interruptedSearchAutomaticBudgetExhausted(job, task) {
+		t.Fatal("exhausted search budget did not reach terminal policy")
 	}
 	unsafe := *task
 	unsafe.Spec.Command = workflow.CommandProcess
-	if canResetInterruptedSearch(job, &unsafe) {
-		t.Fatal("unsafe process recovery was allowed")
-	}
-	cancelled := *task
-	cancelled.CancelRequested = true
-	if canResetInterruptedSearch(job, &cancelled) {
-		t.Fatal("cancelled task was reset")
-	}
-	job.RecoveryRetryCount = 2
-	if canResetInterruptedSearch(job, task) {
-		t.Fatal("automatic budget was bypassed before exhaustion")
+	if interruptedSearchAutomaticBudgetExhausted(job, &unsafe) {
+		t.Fatal("unsafe process recovery was treated as bounded replay")
 	}
 }
 
 func TestInterruptedSearchRecoveryAlwaysHasTerminalOutcome(t *testing.T) {
 	task := &taskrepo.Task{Spec: taskrepo.Spec{Command: workflow.CommandSearch}, State: "recovery_required"}
-	job := workflow.Job{Stage: "needs_review", ReviewKind: "interrupted", SearchRetryCount: 1}
+	job := workflow.Job{Stage: "needs_review", ReviewKind: "interrupted", RecoveryRetryCount: 2, SearchRetryCount: 1}
 	if got := interruptedSearchRecoveryAction(job, task); got != "retry" {
 		t.Fatalf("early interrupted search action = %q", got)
 	}
+	job.RecoveryRetryCount = 3
+	if got := interruptedSearchRecoveryAction(job, task); got != "abandon" {
+		t.Fatalf("exhausted recovery action = %q", got)
+	}
+	job.RecoveryRetryCount = 0
 	job.SearchRetryCount = 3
 	if got := interruptedSearchRecoveryAction(job, task); got != "abandon" {
-		t.Fatalf("exhausted interrupted search action = %q", got)
+		t.Fatalf("exhausted search action = %q", got)
 	}
 	unsafe := *task
 	unsafe.Spec.Command = workflow.CommandProcess

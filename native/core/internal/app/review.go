@@ -570,19 +570,20 @@ func interruptedProcessConverges(job workflow.Job, task *taskrepo.Task) bool {
 		task.Command == workflow.CommandProcess && task.State == "recovery_required" && !task.CancelRequested
 }
 
-func canResetInterruptedSearch(job workflow.Job, task *taskrepo.Task) bool {
-	return job.ReviewKind == "interrupted" && job.RecoveryRetryCount >= 3 && !job.CancelRequested &&
-		task != nil && task.State == "recovery_required" && task.Command == workflow.CommandSearch && !task.CancelRequested
+func interruptedSearchAutomaticBudgetExhausted(job workflow.Job, task *taskrepo.Task) bool {
+	return job.ReviewKind == "interrupted" && (job.RecoveryRetryCount >= 3 || job.SearchRetryCount >= 3) &&
+		!job.CancelRequested && task != nil && task.State == "recovery_required" &&
+		task.Command == workflow.CommandSearch && !task.CancelRequested
 }
 
 func interruptedSearchRecoveryAction(job workflow.Job, task *taskrepo.Task) string {
 	if !interruptedReviewSafe(job, task) {
 		return ""
 	}
-	if canResetInterruptedSearch(job, task) || job.SearchRetryCount < 3 {
-		return "retry"
+	if interruptedSearchAutomaticBudgetExhausted(job, task) {
+		return "abandon"
 	}
-	return "abandon"
+	return "retry"
 }
 
 // interruptedReviewSafe identifies the interrupted paths that can be replayed

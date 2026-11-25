@@ -2,7 +2,7 @@ package app
 
 const appJS = `(function () {
   var titles = {tasks: "任务", queue: "队列", review: "核对", search: "搜索", sites: "站点", settings: "设置", library: "库", logs: "日志"};
-  var active = {identifying: true, searching: true, requesting: true, downloading: true, fallback: true, validating: true, publishing: true};
+  var active = {preparing: true, identifying: true, snapshotting: true, metadata: true, searching: true, requesting: true, downloading: true, fallback: true, validating: true, publishing: true, notifying: true};
   var view = "tasks";
   var jobs = [];
   var activeCount = 0, pipelinePaused = false, globalJobCounts = null, autoReviewStatus = null;
@@ -83,6 +83,23 @@ const appJS = `(function () {
     });
   }
   function roots() { return jobs.filter(function (job) { return !job.parent_job_id; }); }
+  function taskRows() {
+    var seen = {}, rows = [];
+    jobs.forEach(function (job) {
+      if (!job.parent_job_id || !active[job.stage]) return;
+      var root = job.root_id || job.job_id;
+      if (seen[root]) return;
+      seen[root] = true;
+      rows.push(job);
+    });
+    roots().forEach(function (job) {
+      var root = job.root_id || job.job_id;
+      if (seen[root]) return;
+      seen[root] = true;
+      rows.push(job);
+    });
+    return rows;
+  }
   function stageLabel(stage) {
     var names = {identifying: "识别", searching: "检索", requesting: "请求", downloading: "下载", fallback: "回退", validating: "校验", publishing: "入库", needs_review: "待核对", done: "完成", failed: "失败"};
     return names[stage] || stage || "";
@@ -99,7 +116,7 @@ const appJS = `(function () {
     return {running: running, queued: queued, review: review, failed: failed, finished: finished};
   }
   function visible() {
-    if (view === "tasks") return roots();
+    if (view === "tasks") return taskRows();
     if (view === "queue") return queueRows();
     if (view === "review") return jobs.filter(function (job) { return job.stage === "needs_review"; });
     return [];
@@ -2532,7 +2549,7 @@ const appJS = `(function () {
         logRows = logBody && Array.isArray(logBody.tasks) ? logBody.tasks : [];
         logEvents = logBody && Array.isArray(logBody.events) ? logBody.events : [];
       } else {
-        var jobsURL = view === "review" ? "/v1/jobs?review=1" : (view === "tasks" ? "/v1/jobs?roots=1&counts=1" : "/v1/jobs");
+        var jobsURL = view === "review" ? "/v1/jobs?review=1" : (view === "tasks" ? "/v1/jobs?roots=1&counts=1&live=1" : "/v1/jobs?live=1");
         var response = await fetch(jobsURL, {headers: {Accept: "application/json"}});
         var body = await response.json();
         jobs = body && Array.isArray(body.jobs) ? body.jobs : [];
@@ -2555,7 +2572,7 @@ const appJS = `(function () {
     setBusy(true);
     setStatus("info", "正在读取更多待核对");
     try {
-      var response = await fetch("/v1/jobs?" + (view === "tasks" ? "roots=1" : "review=1") + "&after=" + encodeURIComponent(jobsNext), {headers: {Accept: "application/json"}});
+      var response = await fetch("/v1/jobs?" + (view === "tasks" ? "roots=1&live=1" : "review=1") + "&after=" + encodeURIComponent(jobsNext), {headers: {Accept: "application/json"}});
       var body = await response.json();
       if (!response.ok || !body || !body.ok) { setStatus("fail", "没有读到更多任务。"); return; }
       (body.jobs || []).forEach(function (job) { jobs.push(job); });

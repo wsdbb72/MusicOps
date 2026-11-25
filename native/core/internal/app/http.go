@@ -14,6 +14,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -433,7 +434,10 @@ func classifyJobCounts(jobs []workflow.Job, active map[string]bool) map[string]i
 			state = rootReview
 		case "failed":
 			state = rootFailed
-		case "preparing", "identifying", "snapshotting", "metadata", "searching", "fallback", "requesting", "downloading", "validating", "publishing", "notifying":
+		default:
+			if !liveWorkflowStage(job.Stage) {
+				break
+			}
 			state = rootQueued
 			if job.ActiveTaskID != "" && active[job.ActiveTaskID] {
 				state = rootRunning
@@ -462,6 +466,61 @@ func classifyJobCounts(jobs []workflow.Job, active map[string]bool) map[string]i
 	return counts
 }
 
+func liveWorkflowStage(stage string) bool {
+	switch stage {
+	case "preparing", "identifying", "snapshotting", "metadata", "searching", "fallback", "requesting", "downloading", "validating", "publishing", "notifying":
+		return true
+	default:
+		return false
+	}
+}
+
+// liveWorkflowJobs reads the scheduler's small state indexes instead of
+// walking every historical workflow. A root index is intentionally ordered by
+// stable IDs, so a queued child can otherwise sit hundreds of pages away from
+// the root row and make a live job look invisible in the desktop UI.
+func (a *App) liveWorkflowJobs(limit int) ([]workflow.Job, error) {
+	if a == nil || a.flows == nil || a.tasks == nil || limit <= 0 {
+		return []workflow.Job{}, nil
+	}
+	seen := map[string]bool{}
+	jobs := make([]workflow.Job, 0, limit)
+	for _, lane := range []string{"identify", "publish", "transcode", "aux", "download"} {
+		for _, state := range []string{"running", "recovery_required", "queued", "paused"} {
+			var after []byte
+			for {
+				page, err := a.tasks.List(lane, state, after, 200)
+				if err != nil {
+					return nil, err
+				}
+				for _, task := range page.Tasks {
+					if task.WorkflowJobID == "" || seen[task.WorkflowJobID] {
+						continue
+					}
+					job, err := a.flows.Job(task.WorkflowJobID)
+					if err != nil {
+						return nil, err
+					}
+					if job == nil || !liveWorkflowStage(job.Stage) {
+						continue
+					}
+					seen[job.ID] = true
+					jobs = append(jobs, *job)
+				}
+				if len(page.Next) == 0 {
+					break
+				}
+				after = page.Next
+			}
+		}
+	}
+	sort.SliceStable(jobs, func(i, j int) bool { return jobs[i].UpdatedNS > jobs[j].UpdatedNS })
+	if len(jobs) > limit {
+		jobs = jobs[:limit]
+	}
+	return jobs, nil
+}
+
 func (a *App) jobs(w http.ResponseWriter, r *http.Request) {
 	var after []byte
 	if raw := r.URL.Query().Get("after"); raw != "" {
@@ -479,6 +538,7 @@ func (a *App) jobs(w http.ResponseWriter, r *http.Request) {
 	// job inside the page just returned.
 	reviewOnly := r.URL.Query().Get("review") == "1"
 	rootsOnly := r.URL.Query().Get("roots") == "1"
+	liveOnly := r.URL.Query().Get("live") == "1"
 	var counts map[string]int
 	countsMode := r.URL.Query().Get("counts")
 	if countsMode == "1" || countsMode == "only" {
@@ -500,35 +560,61 @@ func (a *App) jobs(w http.ResponseWriter, r *http.Request) {
 
 	collected := make([]workflow.Job, 0, 100)
 	next := ""
-	// A filtered scan can advance across many pages before finding a match.
-	// Avoid returning an empty page with a continuation cursor.
-	for scanned := 0; scanned < 2000 || len(collected) == 0; {
-		if r.Context().Err() != nil {
-			return
-		}
-		page, err := a.flows.List(after, 100)
+	if liveOnly && !reviewOnly && !rootsOnly {
+		live, err := a.liveWorkflowJobs(100)
 		if err != nil {
 			writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "code": "JOBS_UNAVAILABLE"})
 			return
 		}
-		if len(page.Jobs) == 0 {
-			next = ""
-			break
-		}
-		scanned += len(page.Jobs)
-		for _, job := range page.Jobs {
-			if (!reviewOnly || job.Stage == "needs_review") && (!rootsOnly || job.ParentJobID == "") {
-				collected = append(collected, job)
+		collected = append(collected, live...)
+	} else {
+		// A filtered scan can advance across many pages before finding a match.
+		// Avoid returning an empty page with a continuation cursor.
+		for scanned := 0; scanned < 2000 || len(collected) == 0; {
+			if r.Context().Err() != nil {
+				return
+			}
+			page, err := a.flows.List(after, 100)
+			if err != nil {
+				writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "code": "JOBS_UNAVAILABLE"})
+				return
+			}
+			if len(page.Jobs) == 0 {
+				next = ""
+				break
+			}
+			scanned += len(page.Jobs)
+			for _, job := range page.Jobs {
+				if (!reviewOnly || job.Stage == "needs_review") && (!rootsOnly || job.ParentJobID == "") {
+					collected = append(collected, job)
+				}
+			}
+			if len(page.Next) == 0 {
+				next = ""
+				break
+			}
+			after = page.Next
+			next = base64.RawURLEncoding.EncodeToString(page.Next)
+			if (!reviewOnly && !rootsOnly) || len(collected) >= 100 {
+				break
 			}
 		}
-		if len(page.Next) == 0 {
-			next = ""
-			break
-		}
-		after = page.Next
-		next = base64.RawURLEncoding.EncodeToString(page.Next)
-		if (!reviewOnly && !rootsOnly) || len(collected) >= 100 {
-			break
+		if liveOnly {
+			live, err := a.liveWorkflowJobs(100)
+			if err != nil {
+				writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "code": "JOBS_UNAVAILABLE"})
+				return
+			}
+			seen := map[string]bool{}
+			for _, job := range collected {
+				seen[job.ID] = true
+			}
+			for _, job := range live {
+				if !seen[job.ID] {
+					collected = append(collected, job)
+					seen[job.ID] = true
+				}
+			}
 		}
 	}
 	jobs := make([]jobView, 0, len(collected))

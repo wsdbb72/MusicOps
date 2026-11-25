@@ -1,9 +1,11 @@
 package app
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"testing"
+	"time"
 
 	"github.com/wsdbb72/MusicOps/native/core/internal/workflow"
 )
@@ -71,6 +73,56 @@ func TestJobsRejectsAMalformedCursor(t *testing.T) {
 	recorder := getAuth(t, application, "/v1/jobs?review=1&after=@@@")
 	if recorder.Code != http.StatusBadRequest {
 		t.Fatal(recorder.Code, recorder.Body.String())
+	}
+}
+
+func TestJobsLiveFilterIncludesAQueuedWorkflowDescendant(t *testing.T) {
+	application := newApp(t)
+	if err := application.runner.Stop(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UnixNano()
+	rootID := "live-descendant-root"
+	plan, err := json.Marshal(SearchPlan{RootJobID: rootID, Query: "Artist Album", ExpectedTitle: "Album", ExpectedArtist: "Artist", Scene: "expand"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := application.flows.Start("start-"+rootID, workflow.Start{
+		JobID: rootID, BatchID: "pl-netease-live-filter", Scene: "expand", Stage: "identifying", Label: "Artist - Album", Payload: plan, NowNS: now,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	token := claimAndBeginWorkflowTask(t, application, rootID, "identify", now+100)
+	if _, err := application.flows.Complete("handoff-"+rootID, token, workflow.Complete{
+		JobID: rootID, Edge: workflow.EdgeQueueSearch, TaskState: "completed", NowNS: now + 200,
+		Evidence: []workflow.EvidenceInput{{ID: "identity-" + rootID, Kind: "api", Source: "musicbrainz", SubjectID: "release-live", TracklistVerified: true, IdentityConfirmed: true, Payload: []byte("verified tracklist")}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, path := range []string{"/v1/jobs?live=1", "/v1/jobs?roots=1&live=1"} {
+		recorder := getAuth(t, application, path)
+		if recorder.Code != http.StatusOK {
+			t.Fatal(path, recorder.Code, recorder.Body.String())
+		}
+		var decoded struct {
+			Jobs []jobView `json:"jobs"`
+		}
+		if err := json.Unmarshal(recorder.Body.Bytes(), &decoded); err != nil {
+			t.Fatal(err)
+		}
+		found := false
+		for _, job := range decoded.Jobs {
+			if job.ID == "search:"+rootID {
+				found = true
+				if job.ParentID != rootID || job.Stage != "searching" {
+					t.Fatalf("live descendant was flattened incorrectly: %+v", job)
+				}
+			}
+		}
+		if !found {
+			t.Fatalf("%s hid the queued descendant: %+v", path, decoded.Jobs)
+		}
 	}
 }
 

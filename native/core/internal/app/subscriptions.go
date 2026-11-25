@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/wsdbb72/MusicOps/native/core/internal/textnorm"
 	"github.com/wsdbb72/MusicOps/native/core/internal/workflow"
 )
 
@@ -344,6 +345,7 @@ func (a *App) runSubscriptionCheck(playlistID string, manual bool) (map[string]a
 	}
 	library := a.playlistLibrary()
 	groups := map[string][]playlistTrack{}
+	groupLabels := map[string]string{}
 	order := []string{}
 	queuedKeys := map[string]bool{}
 	newTracks, missingTracks := 0, 0
@@ -366,29 +368,28 @@ func (a *App) runSubscriptionCheck(playlistID string, manual bool) (map[string]a
 			continue
 		}
 		queuedKeys[key] = true
-		group := track.Album
-		if group == "" {
-			group = track.Artist + " - " + track.Title
-		}
-		if _, ok := groups[group]; !ok {
+		groupKey, groupLabel := subscriptionTrackGroup(track)
+		if _, ok := groups[groupKey]; !ok {
 			if len(order) >= playlistSubscriptionAlbumBatch {
 				continue
 			}
-			order = append(order, group)
+			order = append(order, groupKey)
+			groupLabels[groupKey] = groupLabel
 		}
 		if seenTrack {
 			missingTracks++
 		} else {
 			newTracks++
 		}
-		groups[group] = append(groups[group], track)
+		groups[groupKey] = append(groups[groupKey], track)
 	}
 	library.commitPresenceSnapshots()
 	jobIDs := []string{}
 	queuedTracks := 0
-	for index, album := range order {
-		members := groups[album]
-		jobID := subscriptionJobID(playlistID, album, a.now(), index)
+	for index, groupKey := range order {
+		members := groups[groupKey]
+		album := groupLabels[groupKey]
+		jobID := subscriptionJobID(playlistID, album+"\x00"+groupKey, a.now(), index)
 		if err := a.queueSubscriptionAlbum(jobID, playlistID, album, members); err != nil {
 			row.LastResult = "排队未完成：" + err.Error()
 			_ = a.updateStoredSubscription(row)
@@ -583,6 +584,26 @@ func trackKeys(tracks []playlistTrack) []string {
 	return keys
 }
 
+func subscriptionTrackGroup(track playlistTrack) (key, label string) {
+	album := strings.TrimSpace(track.Album)
+	artist := strings.TrimSpace(track.Artist)
+	title := strings.TrimSpace(track.Title)
+	if track.NeteaseAlbumID > 0 {
+		label = album
+		if label == "" {
+			label = artist + " - " + title
+		}
+		return fmt.Sprintf("netease-album:%d", track.NeteaseAlbumID), label
+	}
+	if album != "" && artist != "" {
+		return "album\x00" + textnorm.Fold(album) + "\x00" + textnorm.Fold(artist), artist + " — " + album
+	}
+	label = album
+	if label == "" {
+		label = artist + " - " + title
+	}
+	return "track\x00" + textnorm.Fold(artist) + "\x00" + textnorm.Fold(album) + "\x00" + textnorm.Fold(title), label
+}
 func subscriptionJobID(playlistID, album string, now time.Time, index int) string {
 	sum := 0
 	for _, r := range album {

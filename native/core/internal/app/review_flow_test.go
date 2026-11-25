@@ -127,6 +127,22 @@ func TestAIReviewRetriesAZeroSpendTokenHoldWithoutCallingTheModel(t *testing.T) 
 	}
 }
 
+func TestMetadataAIRecoveryStopsMixedIdentityLoop(t *testing.T) {
+	mixed := workflow.Job{ReviewKind: "metadata", TaskType: "identification", ErrorClass: "IDENTITY_UNCONFIRMED", SourceTrackCount: 2}
+	if got := metadataAIRecoveryAction(mixed); got != "skip" {
+		t.Fatalf("mixed unconfirmed identity action=%q, want skip", got)
+	}
+	single := mixed
+	single.SourceTrackCount = 1
+	if got := metadataAIRecoveryAction(single); got != "retry" {
+		t.Fatalf("single identity action=%q, want retry", got)
+	}
+	transient := mixed
+	transient.ErrorClass = "TRANSIENT_ERROR"
+	if got := metadataAIRecoveryAction(transient); got != "retry" {
+		t.Fatalf("transient action=%q, want retry", got)
+	}
+}
 func claimAndBeginWorkflowTask(t *testing.T, application *App, id, lane string, now int64) taskrepo.Token {
 	t.Helper()
 	// Open starts the workers before a test can set the pipeline pause flag.

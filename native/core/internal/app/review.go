@@ -260,6 +260,13 @@ func (a *App) reviewJob(w http.ResponseWriter, r *http.Request) {
 	a.writeReviewResult(w, result, err, body.Action)
 }
 
+func metadataAIRecoveryAction(job workflow.Job) string {
+	if job.ReviewKind == "metadata" && job.TaskType == "identification" &&
+		job.ErrorClass == "IDENTITY_UNCONFIRMED" && job.SourceTrackCount > 1 {
+		return "skip"
+	}
+	return "retry"
+}
 func (a *App) reviewWithAI(w http.ResponseWriter, r *http.Request, id, requestID string, nowNS int64) {
 	inspection, err := a.flows.Inspect(id)
 	if err == nil && inspection.Job.TaskType == "search" && inspection.Job.Stage == "completed" && inspection.Job.ProcessingJobID != "" {
@@ -311,8 +318,13 @@ func (a *App) reviewWithAI(w http.ResponseWriter, r *http.Request, id, requestID
 			return
 		}
 		// Metadata and identification jobs do not have a tracker candidate to
-		// compare. Use the original identity and source policy to replay them.
-		result, retryErr := a.flows.Review(requestID, id, workflow.ReviewDecision{Action: "retry"}, nowNS)
+		// compare. A transient identity lookup can be replayed. A multi-track
+		// group whose identity is still unconfirmed is not safe to retry
+		// forever: it commonly combines unrelated albums with the same title.
+		// End that group so the source subscription can rebuild it with album
+		// IDs or artist-aware grouping.
+		action := metadataAIRecoveryAction(inspection.Job)
+		result, retryErr := a.flows.Review(requestID, id, workflow.ReviewDecision{Action: action}, nowNS)
 		a.writeReviewResult(w, result, retryErr, "ai")
 		return
 	}

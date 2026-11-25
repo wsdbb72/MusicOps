@@ -29,13 +29,17 @@ func TestReconcileQueuedSupersededKeepsOnlyCurrentWorkflowTask(t *testing.T) {
 	}
 	create("create-orphan-queued", "stale-orphan-search", "missing-job")
 	create("create-duplicate-queued", "stale-duplicate-search", "search:album1")
+	currentBefore, err := tasks.Get("search:album1")
+	if err != nil || currentBefore == nil {
+		t.Fatalf("read current task: %+v %v", currentBefore, err)
+	}
 
 	count, err := repo.ReconcileQueuedSuperseded("queued-reconcile", 4000)
 	if err != nil || count != 2 {
 		t.Fatalf("reconciled=%d err=%v", count, err)
 	}
 	current, err := tasks.Get("search:album1")
-	if err != nil || current == nil || current.State != "queued" || current.CancelRequested {
+	if err != nil || current == nil || current.State != "queued" || current.CancelRequested || current.Revision != currentBefore.Revision {
 		t.Fatalf("current task was changed: %+v %v", current, err)
 	}
 	for _, id := range []string{"stale-orphan-search", "stale-duplicate-search"} {

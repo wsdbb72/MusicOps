@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/wsdbb72/MusicOps/native/core/internal/dataengine"
 	"github.com/wsdbb72/MusicOps/native/core/internal/vault"
@@ -210,6 +211,33 @@ func TestMaybeMigratePythonFixture(t *testing.T) {
 	}
 }
 
+func TestMaybeMigrateUsesSourceFingerprintBeforeReadingSQLite(t *testing.T) {
+	profile := makeLegacyProfile(t)
+	fresh, err := MaybeMigrate(profile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sqlite := filepath.Join(profile, "state", "musicops.sqlite")
+	info, err := os.Stat(sqlite)
+	if err != nil {
+		t.Fatal(err)
+	}
+	corrupt := make([]byte, info.Size())
+	if err := os.WriteFile(sqlite, corrupt, info.Mode().Perm()); err != nil {
+		t.Fatal(err)
+	}
+	stamp := time.Unix(0, fresh.SourceModTimeNS)
+	if err := os.Chtimes(sqlite, stamp, stamp); err != nil {
+		t.Fatal(err)
+	}
+	replayed, err := MaybeMigrate(profile)
+	if err != nil {
+		t.Fatalf("matching source fingerprint did not take the fast path: %v", err)
+	}
+	if len(replayed.Skipped) != 1 || replayed.Skipped[0] != "already migrated" || replayed.SourceSize != fresh.SourceSize || replayed.SourceModTimeNS != fresh.SourceModTimeNS {
+		t.Fatalf("fast-path receipt = %+v", replayed)
+	}
+}
 func TestMaybeMigrateDoesNotOverwriteGoSettings(t *testing.T) {
 	profile := makeLegacyProfile(t)
 	// Seed Go settings first, as a user who already changed them would have.

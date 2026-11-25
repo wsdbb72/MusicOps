@@ -104,6 +104,9 @@ func (a *App) recoverOrphanedTasks(currentOwner string, log StartupLogger) {
 // review. These rows never crossed Begin, so cancelling the task is side-effect
 // free and does not change the current workflow job.
 func (a *App) reconcileSupersededQueuedTasks(log StartupLogger) {
+	if log != nil {
+		log("task_recovery", "checking queued tasks against current workflow stages")
+	}
 	prefix := "startup-queued-" + strconv.FormatInt(a.now().UnixNano(), 10)
 	count, err := a.flows.ReconcileQueuedSuperseded(prefix, a.now().UnixNano())
 	if err != nil && log != nil {
@@ -111,6 +114,8 @@ func (a *App) reconcileSupersededQueuedTasks(log StartupLogger) {
 	}
 	if count > 0 && log != nil {
 		log("task_recovery", "cancelled "+strconv.Itoa(count)+" superseded queued task(s)")
+	} else if err == nil && log != nil {
+		log("task_recovery", "queued reconciliation finished; no stale rows")
 	}
 }
 

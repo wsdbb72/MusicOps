@@ -29,10 +29,29 @@ func (r *Repository) ReconcileQueuedSuperseded(requestPrefix string, nowNS int64
 			if err != nil {
 				return reconciled, err
 			}
-			for _, task := range page.Tasks {
-				if task.WorkflowJobID == "" {
-					continue
+			candidates := make([]taskrepo.Task, 0)
+			if err := r.engine.View(func(v *dataengine.View) error {
+				for _, task := range page.Tasks {
+					if task.WorkflowJobID == "" {
+						continue
+					}
+					live, _, readErr := readJob(v, task.WorkflowJobID)
+					if readErr != nil {
+						return readErr
+					}
+					if live != nil && queuedTaskStillCurrent(v, *live, &task) {
+						continue
+					}
+					candidates = append(candidates, task)
 				}
+				return nil
+			}); err != nil {
+				return reconciled, err
+			}
+			// Most queued rows are current. Only the small superseded subset
+			// needs a read-write CAS, so a large healthy backlog no longer
+			// serializes hundreds of no-op commits during startup.
+			for _, task := range candidates {
 				requestID := requestPrefix + "-" + digestBytes([]byte(task.ID + "/" + strconv.FormatUint(task.Revision, 10)))[:32]
 				result, err := r.discardQueuedSuperseded(requestID, task, nowNS)
 				if errors.Is(err, ErrStale) {

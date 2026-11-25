@@ -32,6 +32,8 @@ type Report struct {
 	Profile          string    `json:"profile"`
 	ConfigVersion    int       `json:"config_version"`
 	MapperGeneration int       `json:"mapper_generation"`
+	SourceSize       int64     `json:"source_size,omitempty"`
+	SourceModTimeNS  int64     `json:"source_mtime_ns,omitempty"`
 	Mapped           []string  `json:"mapped"`
 	VaultRefs        []string  `json:"vault_refs"`
 	Skipped          []string  `json:"skipped"`
@@ -162,9 +164,27 @@ func MaybeMigrate(profile string) (*Report, error) {
 		Mapped: []string{}, VaultRefs: []string{}, Skipped: []string{}, Notes: []string{},
 	}
 	sqlitePath := filepath.Join(abs, "state", "musicops.sqlite")
-	if _, err := os.Stat(sqlitePath); errors.Is(err, os.ErrNotExist) {
+	sourceInfo, err := os.Stat(sqlitePath)
+	if errors.Is(err, os.ErrNotExist) {
 		report.Skipped = []string{"no python profile"}
 		return report, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	report.SourceSize = sourceInfo.Size()
+	report.SourceModTimeNS = sourceInfo.ModTime().UnixNano()
+	receiptPath := filepath.Join(abs, "state", "migration-report.json")
+	if raw, err := os.ReadFile(receiptPath); err == nil {
+		var old Report
+		if err := json.Unmarshal(raw, &old); err == nil &&
+			old.ConfigVersion != 0 && old.MapperGeneration >= mapperGeneration &&
+			old.SourceSize == report.SourceSize && old.SourceModTimeNS == report.SourceModTimeNS {
+			report.ConfigVersion = old.ConfigVersion
+			report.MapperGeneration = old.MapperGeneration
+			report.Skipped = []string{"already migrated"}
+			return report, nil
+		}
 	}
 	cfg, err := readPythonConfig(sqlitePath)
 	if err != nil {
@@ -172,14 +192,6 @@ func MaybeMigrate(profile string) (*Report, error) {
 	}
 	report.ConfigVersion = cfg.Version
 	report.MapperGeneration = mapperGeneration
-	receiptPath := filepath.Join(abs, "state", "migration-report.json")
-	if raw, err := os.ReadFile(receiptPath); err == nil {
-		var old Report
-		if err := json.Unmarshal(raw, &old); err == nil && old.ConfigVersion == cfg.Version && cfg.Version != 0 && old.MapperGeneration >= mapperGeneration {
-			report.Skipped = []string{"already migrated"}
-			return report, nil
-		}
-	}
 	// Vault references are names only. Values are never read: reading
 	// them would leak credentials into the report and logs.
 	v, err := vault.Open(abs)

@@ -30,16 +30,18 @@ const eventsKey = "app/migration/events"
 
 // Report is the live-migration receipt.
 type Report struct {
-	SourceSHA256 string   `json:"source_sha256"`
-	Library      int      `json:"library"`
-	Jobs         int      `json:"jobs"`
-	Tokens       int      `json:"tokens"`
-	Events       int      `json:"events"`
-	LibraryKeys  []string `json:"library_keys"`
-	JobIDs       []string `json:"job_ids"`
-	TokenIDs     []string `json:"token_ids"`
-	Replayed     bool     `json:"replayed"`
-	Notes        []string `json:"notes"`
+	SourceSHA256    string   `json:"source_sha256"`
+	SourceSize      int64    `json:"source_size,omitempty"`
+	SourceModTimeNS int64    `json:"source_mtime_ns,omitempty"`
+	Library         int      `json:"library"`
+	Jobs            int      `json:"jobs"`
+	Tokens          int      `json:"tokens"`
+	Events          int      `json:"events"`
+	LibraryKeys     []string `json:"library_keys"`
+	JobIDs          []string `json:"job_ids"`
+	TokenIDs        []string `json:"token_ids"`
+	Replayed        bool     `json:"replayed"`
+	Notes           []string `json:"notes"`
 }
 
 type libraryKey struct {
@@ -60,10 +62,20 @@ func Activate(engine *dataengine.Engine, profile string, flows *workflow.Reposit
 		return Report{}, dataengine.ErrInvalidRequest
 	}
 	sqlitePath := filepath.Join(profile, "state", "musicops.sqlite")
-	if _, err := os.Stat(sqlitePath); errors.Is(err, os.ErrNotExist) {
+	sourceInfo, err := os.Stat(sqlitePath)
+	if errors.Is(err, os.ErrNotExist) {
 		return Report{Notes: []string{"没有旧版数据库"}}, nil
-	} else if err != nil {
+	}
+	if err != nil {
 		return Report{}, err
+	}
+	sourceSize := sourceInfo.Size()
+	sourceModTimeNS := sourceInfo.ModTime().UnixNano()
+	if old, ok, readErr := readReceipt(engine); readErr != nil {
+		return Report{}, readErr
+	} else if ok && old.SourceSHA256 != "" && old.SourceSize == sourceSize && old.SourceModTimeNS == sourceModTimeNS {
+		old.Replayed = true
+		return old.Report, nil
 	}
 	sum, err := fileSHA(sqlitePath)
 	if err != nil {
@@ -72,6 +84,32 @@ func Activate(engine *dataengine.Engine, profile string, flows *workflow.Reposit
 	if old, ok, err := readReceipt(engine); err != nil {
 		return Report{}, err
 	} else if ok && old.SourceSHA256 == sum {
+		if old.SourceSize != sourceSize || old.SourceModTimeNS != sourceModTimeNS {
+			old.SourceSize = sourceSize
+			old.SourceModTimeNS = sourceModTimeNS
+			var raw []byte
+			var found bool
+			if err := engine.View(func(v *dataengine.View) error {
+				var viewErr error
+				raw, found, viewErr = v.Get([]byte(receiptKey))
+				return viewErr
+			}); err != nil {
+				return Report{}, err
+			}
+			if !found {
+				return Report{}, errors.New("迁移回执在指纹更新时消失")
+			}
+			encoded, marshalErr := json.Marshal(old)
+			if marshalErr != nil {
+				return Report{}, marshalErr
+			}
+			if _, casErr := engine.CompareAndSwap(
+				[]dataengine.Condition{{Key: []byte(receiptKey), Value: raw}},
+				[]dataengine.Mutation{{Key: []byte(receiptKey), Value: encoded}},
+			); casErr != nil {
+				return Report{}, casErr
+			}
+		}
 		old.Replayed = true
 		return old.Report, nil
 	}
@@ -87,7 +125,7 @@ func Activate(engine *dataengine.Engine, profile string, flows *workflow.Reposit
 	}
 	defer cleanup()
 	libraryRoot, _ := libraryDir(db)
-	report := Report{SourceSHA256: sum, Notes: []string{"音乐文件保持原路径，没有复制或改写", "旧库归档仍保留，回退时不会删除"}}
+	report := Report{SourceSHA256: sum, SourceSize: sourceSize, SourceModTimeNS: sourceModTimeNS, Notes: []string{"音乐文件保持原路径，没有复制或改写", "旧库归档仍保留，回退时不会删除"}}
 	var files []libraryKey
 	files, report.Library, err = importLibrary(engine, db, libraryRoot)
 	if err != nil {

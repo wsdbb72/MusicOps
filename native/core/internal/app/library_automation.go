@@ -23,6 +23,8 @@ import (
 
 var libraryAutomationSettingsKey = []byte("app/settings/library-automation")
 var libraryAutomationScanKey = []byte("app/library/automation-scan-cache")
+var libraryDuplicateCacheKey = []byte("app/library/duplicate-fingerprint-cache-v1")
+var libraryAlbumAuditKey = []byte("app/library/album-audit-cache-v1")
 
 type automationWorkflowPriorityKey struct{}
 
@@ -34,12 +36,18 @@ const (
 	libraryAutomationScanWorkers    = 8
 	duplicateFingerprintWorkers     = 8
 	libraryAutomationCheckpoint     = 20_000
-	libraryAutomationScanVersion    = 3
+	libraryAutomationScanVersion    = 4
 	libraryAutomationStallTimeout   = 45 * time.Minute
 	libraryAutomationScrapeSlice    = 45 * time.Minute
+	libraryAutomationArtworkSlice   = 30 * time.Minute
+	libraryAutomationDedupeSlice    = 15 * time.Minute
 	libraryAutomationArtworkWorkers = 6
 	libraryAutomationPolicyVersion  = 3
 	libraryAutomationSkippedRetry   = 24 * time.Hour
+	libraryAlbumAuditTTL            = 30 * 24 * time.Hour
+	libraryAutomationAlbumChecks    = 200
+	libraryArtworkValidationTTL     = 7 * 24 * time.Hour
+	libraryArtworkRefreshTTL        = 30 * 24 * time.Hour
 )
 
 type libraryAutomationSettings struct {
@@ -92,6 +100,59 @@ func (a *App) saveLibraryAutomationScanCache(doc libraryAutomationScanDocument) 
 	return a.casSaveJSON(libraryAutomationScanKey, raw)
 }
 
+func (a *App) loadLibraryDuplicateCache(root string) libraryAutomationScanDocument {
+	empty := libraryAutomationScanDocument{Version: libraryAutomationScanVersion, Root: filepath.Clean(root), Files: map[string]cachedLibraryScan{}}
+	doc := libraryAutomationScanDocument{}
+	found, err := a.loadJSONSetting(libraryDuplicateCacheKey, &doc)
+	if err == nil && found && doc.Files != nil && doc.Version == libraryAutomationScanVersion && strings.EqualFold(filepath.Clean(doc.Root), empty.Root) {
+		return doc
+	}
+	// Migrate fingerprints from the old shared document once. Keeping dedupe
+	// on its own key removes the scrape/dedupe last-writer-wins race.
+	legacy := libraryAutomationScanDocument{}
+	if found, err := a.loadJSONSetting(libraryAutomationScanKey, &legacy); err == nil && found &&
+		legacy.Version >= 3 && strings.EqualFold(filepath.Clean(legacy.Root), empty.Root) {
+		for key, entry := range legacy.Files {
+			if entry.Duplicate != nil {
+				empty.Files[key] = entry
+			}
+		}
+	}
+	return empty
+}
+
+func (a *App) saveLibraryDuplicateCache(doc libraryAutomationScanDocument) error {
+	if doc.Files == nil {
+		doc.Files = map[string]cachedLibraryScan{}
+	}
+	raw, err := json.Marshal(doc)
+	if err != nil {
+		return err
+	}
+	return a.casSaveJSON(libraryDuplicateCacheKey, raw)
+}
+
+func (a *App) loadLibraryAlbumAudit(root string) libraryAlbumAuditDocument {
+	empty := libraryAlbumAuditDocument{Version: 1, Root: filepath.Clean(root), Albums: map[string]libraryAlbumAuditRecord{}}
+	doc := libraryAlbumAuditDocument{}
+	found, err := a.loadJSONSetting(libraryAlbumAuditKey, &doc)
+	if err != nil || !found || doc.Version != 1 || doc.Albums == nil || !strings.EqualFold(filepath.Clean(doc.Root), empty.Root) {
+		return empty
+	}
+	return doc
+}
+
+func (a *App) saveLibraryAlbumAudit(doc libraryAlbumAuditDocument) error {
+	if doc.Albums == nil {
+		doc.Albums = map[string]libraryAlbumAuditRecord{}
+	}
+	raw, err := json.Marshal(doc)
+	if err != nil {
+		return err
+	}
+	return a.casSaveJSON(libraryAlbumAuditKey, raw)
+}
+
 func (a *App) saveLibraryAutomationSettings(in libraryAutomationSettings) (libraryAutomationSettings, error) {
 	if in.IntervalHours < 1 || in.IntervalHours > 168 {
 		in.IntervalHours = 6
@@ -108,18 +169,22 @@ func (a *App) saveLibraryAutomationSettings(in libraryAutomationSettings) (libra
 }
 
 type cachedLibraryScan struct {
-	Size          int64                       `json:"size"`
-	ModNS         int64                       `json:"mod_ns"`
-	NeedsCatalog  bool                        `json:"needs_catalog"`
-	NeedsArtwork  bool                        `json:"needs_artwork"`
-	Codec         string                      `json:"codec,omitempty"`
-	Duration      float64                     `json:"duration,omitempty"`
-	Artist        string                      `json:"artist,omitempty"`
-	AlbumArtist   string                      `json:"album_artist,omitempty"`
-	Album         string                      `json:"album,omitempty"`
-	Title         string                      `json:"title,omitempty"`
-	Duplicate     *cachedDuplicateFingerprint `json:"duplicate,omitempty"`
-	DuplicateOnly bool                        `json:"duplicate_only,omitempty"`
+	Size             int64                       `json:"size"`
+	ModNS            int64                       `json:"mod_ns"`
+	NeedsCatalog     bool                        `json:"needs_catalog"`
+	NeedsArtwork     bool                        `json:"needs_artwork"`
+	Codec            string                      `json:"codec,omitempty"`
+	Duration         float64                     `json:"duration,omitempty"`
+	Artist           string                      `json:"artist,omitempty"`
+	AlbumArtist      string                      `json:"album_artist,omitempty"`
+	Album            string                      `json:"album,omitempty"`
+	Title            string                      `json:"title,omitempty"`
+	ArtworkSize      int64                       `json:"artwork_size,omitempty"`
+	ArtworkModNS     int64                       `json:"artwork_mod_ns,omitempty"`
+	ArtworkCheckedNS int64                       `json:"artwork_checked_ns,omitempty"`
+	ArtworkValid     bool                        `json:"artwork_valid,omitempty"`
+	Duplicate        *cachedDuplicateFingerprint `json:"duplicate,omitempty"`
+	DuplicateOnly    bool                        `json:"duplicate_only,omitempty"`
 }
 
 // cachedDuplicateFingerprint stores the expensive decode result for an
@@ -147,6 +212,20 @@ type libraryAutomationScanDocument struct {
 	Version int                          `json:"version"`
 	Root    string                       `json:"root"`
 	Files   map[string]cachedLibraryScan `json:"files"`
+}
+
+type libraryAlbumAuditRecord struct {
+	ExpectedTracks int    `json:"expected_tracks"`
+	LocalFiles     int    `json:"local_files"`
+	Expandable     bool   `json:"expandable"`
+	Signature      string `json:"signature"`
+	CheckedNS      int64  `json:"checked_ns"`
+}
+
+type libraryAlbumAuditDocument struct {
+	Version int                                `json:"version"`
+	Root    string                             `json:"root"`
+	Albums  map[string]libraryAlbumAuditRecord `json:"albums"`
 }
 
 type libraryAutomationReport struct {
@@ -474,6 +553,13 @@ func (a *App) runLibraryAutomationPass(ctx context.Context, settings libraryAuto
 	if info, err := os.Stat(root); err != nil || !info.IsDir() {
 		return fmt.Errorf("音乐库目录不可用")
 	}
+	// Persist a separately migrated dedupe cache before the metadata scan can
+	// rewrite the legacy shared document under the new scan-cache version.
+	if duplicates := a.loadLibraryDuplicateCache(root); len(duplicates.Files) > 0 {
+		if err := a.saveLibraryDuplicateCache(duplicates); err != nil {
+			state.addError(fmt.Errorf("迁移去重指纹缓存失败: %w", err))
+		}
+	}
 
 	state.setPhase("reindex")
 	state.touch("reindex", "正在读取现有索引")
@@ -585,16 +671,22 @@ func scanAutomationFile(ctx context.Context, input libraryAutomationScanInput) l
 		result.err = fmt.Errorf("%s: 文件状态读取失败: %w", filepath.Base(input.path), err)
 		return result
 	}
-	if input.hasCache && !input.cached.DuplicateOnly && input.cached.Size == info.Size() && input.cached.ModNS == info.ModTime().UnixNano() {
+	cacheAudioMatch := input.hasCache && !input.cached.DuplicateOnly && input.cached.Size == info.Size() && input.cached.ModNS == info.ModTime().UnixNano()
+	if cacheAudioMatch && cachedArtworkFresh(input.path, input.cached, time.Now()) {
 		result.entry = input.cached
 		result.ok = true
 		result.reused = true
 		return result
 	}
 	entry := cachedLibraryScan{Size: info.Size(), ModNS: info.ModTime().UnixNano()}
-	if input.hasCache && input.cached.Size == info.Size() && input.cached.ModNS == info.ModTime().UnixNano() && input.cached.Duplicate != nil {
+	if cacheAudioMatch {
+		entry = input.cached
+		entry.Size = info.Size()
+		entry.ModNS = info.ModTime().UnixNano()
+	} else if input.hasCache && input.cached.Duplicate != nil {
 		entry.Duplicate = input.cached.Duplicate
 	}
+	refreshArtwork := cacheAudioMatch && artworkRefreshDue(input.cached, time.Now())
 	if strings.EqualFold(filepath.Ext(input.path), ".flac") {
 		tags, readErr := readFLACTagsPrefix(input.path)
 		if readErr != nil {
@@ -627,6 +719,10 @@ func scanAutomationFile(ctx context.Context, input libraryAutomationScanInput) l
 		entry.Album = genericInfo.Album
 		entry.Title = genericInfo.Title
 	}
+	if refreshArtwork && !entry.NeedsArtwork {
+		entry.NeedsArtwork = true
+	}
+	recordArtworkValidation(&entry, input.path, time.Now())
 	result.entry = entry
 	result.ok = true
 	return result
@@ -784,16 +880,16 @@ func (a *App) runAutomatedScrape(ctx context.Context, root string, paths []strin
 	})
 	state.touch("scrape", fmt.Sprintf("扫描完成：待补标签 %d，待补歌词封面 %d", candidateCount, artworkCount))
 
-	scrapeDeadline := time.Now().Add(libraryAutomationScrapeSlice)
-	scrapeSliceExpired := false
-	sliceExpired := func() bool {
-		if scrapeSliceExpired || time.Now().Before(scrapeDeadline) {
-			return scrapeSliceExpired
+	catalogDeadline := time.Now().Add(libraryAutomationScrapeSlice)
+	catalogSliceExpired := false
+	catalogExpired := func() bool {
+		if catalogSliceExpired || time.Now().Before(catalogDeadline) {
+			return catalogSliceExpired
 		}
-		scrapeSliceExpired = true
+		catalogSliceExpired = true
 		state.update(func(report *libraryAutomationReport) {
 			report.Backlog = true
-			report.Note = "本轮刮削已达到安全时间片，下一轮自动继续；去重和音质升级不会被长期阻塞"
+			report.Note = "本轮标签刮削已达到独立安全时间片，下一轮自动继续；歌词封面、去重、升级与补全会继续获得执行时间"
 		})
 		return true
 	}
@@ -820,7 +916,7 @@ func (a *App) runAutomatedScrape(ctx context.Context, root string, paths []strin
 	}
 	sort.Strings(dirs)
 	for _, dir := range dirs {
-		if ctx.Err() != nil || catalogPaused || sliceExpired() {
+		if ctx.Err() != nil || catalogPaused || catalogExpired() {
 			break
 		}
 		eligible := make([]string, 0, len(catalogByDir[dir]))
@@ -832,7 +928,7 @@ func (a *App) runAutomatedScrape(ctx context.Context, root string, paths []strin
 			}
 		}
 		for start := 0; start < len(eligible); start += scrapeBatchMaxFiles {
-			if ctx.Err() != nil || sliceExpired() {
+			if ctx.Err() != nil || catalogExpired() {
 				break
 			}
 			end := start + scrapeBatchMaxFiles
@@ -868,7 +964,7 @@ func (a *App) runAutomatedScrape(ctx context.Context, root string, paths []strin
 	}
 	sort.Strings(genericDirs)
 	for _, dir := range genericDirs {
-		if ctx.Err() != nil || catalogPaused || sliceExpired() {
+		if ctx.Err() != nil || catalogPaused || catalogExpired() {
 			break
 		}
 		eligible := make([]string, 0, len(genericByDir[dir]))
@@ -880,7 +976,7 @@ func (a *App) runAutomatedScrape(ctx context.Context, root string, paths []strin
 			}
 		}
 		for start := 0; start < len(eligible); start += scrapeBatchMaxFiles {
-			if ctx.Err() != nil || sliceExpired() {
+			if ctx.Err() != nil || catalogExpired() {
 				break
 			}
 			end := start + scrapeBatchMaxFiles
@@ -912,7 +1008,20 @@ func (a *App) runAutomatedScrape(ctx context.Context, root string, paths []strin
 	state.update(func(report *libraryAutomationReport) { report.ScrapeSkipped = skipped })
 
 	artworkProcessed, artworkSkipped, artworkFailed, artworkWritten := 0, 0, 0, 0
-	if ctx.Err() == nil && !sliceExpired() {
+	if ctx.Err() == nil {
+		artworkDeadline := time.Now().Add(libraryAutomationArtworkSlice)
+		artworkSliceExpired := false
+		artworkExpired := func() bool {
+			if artworkSliceExpired || time.Now().Before(artworkDeadline) {
+				return artworkSliceExpired
+			}
+			artworkSliceExpired = true
+			state.update(func(report *libraryAutomationReport) {
+				report.Backlog = true
+				report.Note = "本轮歌词封面已达到独立安全时间片，下一轮自动继续；标签刮削、去重、升级与补全会继续获得执行时间"
+			})
+			return true
+		}
 		jobs := make(chan string)
 		workCtx, stopArtwork := context.WithCancel(ctx)
 		defer stopArtwork()
@@ -981,7 +1090,7 @@ func (a *App) runAutomatedScrape(ctx context.Context, root string, paths []strin
 		}
 	feedArtwork:
 		for _, path := range artworkDirect {
-			if ctx.Err() != nil || sliceExpired() || retryAfterNS.Load() > 0 {
+			if ctx.Err() != nil || artworkExpired() || retryAfterNS.Load() > 0 {
 				break
 			}
 			if !state.claimAttempt("artwork-other|"+path, time.Now()) {
@@ -1238,8 +1347,7 @@ func maintenanceMissingSidecars(path string) bool {
 		return true
 	}
 	cover := strings.TrimSuffix(path, filepath.Ext(path)) + ".jpg"
-	_, err := os.Stat(cover)
-	return os.IsNotExist(err)
+	return !validCoverSidecar(cover)
 }
 
 func maintenanceMissingArtwork(path string, tags *flactags.Tags) bool {
@@ -1249,13 +1357,69 @@ func maintenanceMissingArtwork(path string, tags *flactags.Tags) bool {
 	if !hasLyricsSidecar(path) {
 		return true
 	}
+	sidecar := strings.TrimSuffix(path, filepath.Ext(path)) + ".jpg"
+	if _, err := os.Stat(sidecar); err == nil {
+		return !validCoverSidecar(sidecar)
+	}
 	if !tags.HasFrontCover {
-		sidecar := strings.TrimSuffix(path, filepath.Ext(path)) + ".jpg"
-		if _, err := os.Stat(sidecar); os.IsNotExist(err) {
-			return true
-		}
+		return true
 	}
 	return false
+}
+
+// validCoverBytes fully decodes an image before it is accepted into a user's
+// library. Header-only checks miss truncated JPEGs and half-written covers.
+func validCoverBytes(raw []byte) bool {
+	return imageBytes(raw)
+}
+
+func validCoverSidecar(path string) bool {
+	info, err := os.Stat(path)
+	if err != nil || !info.Mode().IsRegular() || info.Size() <= 0 || info.Size() > 10_000_000 {
+		return false
+	}
+	raw, err := os.ReadFile(path)
+	return err == nil && validCoverBytes(raw)
+}
+
+func artworkSidecarInfo(trackPath string) (size, modNS int64, exists bool) {
+	info, err := os.Stat(strings.TrimSuffix(trackPath, filepath.Ext(trackPath)) + ".jpg")
+	if err != nil || !info.Mode().IsRegular() {
+		return 0, 0, false
+	}
+	return info.Size(), info.ModTime().UnixNano(), true
+}
+
+func cachedArtworkFresh(path string, entry cachedLibraryScan, now time.Time) bool {
+	if entry.ArtworkCheckedNS <= 0 {
+		return false
+	}
+	age := now.UnixNano() - entry.ArtworkCheckedNS
+	if age < 0 || age >= int64(libraryArtworkValidationTTL) {
+		return false
+	}
+	size, modNS, exists := artworkSidecarInfo(path)
+	if exists {
+		return entry.ArtworkSize == size && entry.ArtworkModNS == modNS
+	}
+	return entry.ArtworkSize == 0 && entry.ArtworkModNS == 0 && !entry.NeedsArtwork
+}
+
+func artworkRefreshDue(entry cachedLibraryScan, now time.Time) bool {
+	if entry.ArtworkCheckedNS <= 0 {
+		return false
+	}
+	age := now.UnixNano() - entry.ArtworkCheckedNS
+	return age >= 0 && age >= int64(libraryArtworkRefreshTTL)
+}
+
+func recordArtworkValidation(entry *cachedLibraryScan, path string, now time.Time) {
+	if entry == nil {
+		return
+	}
+	entry.ArtworkSize, entry.ArtworkModNS, _ = artworkSidecarInfo(path)
+	entry.ArtworkCheckedNS = now.UnixNano()
+	entry.ArtworkValid = !entry.NeedsArtwork
 }
 
 func automationTrackIdentity(path string) (artist, album, title string, err error) {
@@ -1373,14 +1537,16 @@ func (a *App) runAutomatedDeduplication(ctx context.Context) bool {
 	state := a.libraryAutomation
 	state.touch("dedupe", "正在扫描重复项")
 	root := a.libraryDir()
-	cache := a.loadLibraryAutomationScanCache(root)
+	cache := a.loadLibraryDuplicateCache(root)
 	checkpoint := func(updates map[string]cachedDuplicateFingerprint) {
 		mergeDuplicateFingerprintCache(&cache, updates)
-		if err := a.saveLibraryAutomationScanCache(cache); err != nil {
+		if err := a.saveLibraryDuplicateCache(cache); err != nil {
 			state.addError(fmt.Errorf("重复扫描缓存检查点保存失败: %w", err))
 		}
 	}
-	groups, _, truncated, updates, err := a.scanDuplicatesWithOptions(ctx, 0, root, cache.Files, func(checked, total int, current string) {
+	scanCtx, cancel := context.WithTimeout(ctx, libraryAutomationDedupeSlice)
+	defer cancel()
+	groups, _, truncated, updates, err := a.scanDuplicatesWithOptions(scanCtx, 0, root, cache.Files, func(checked, total int, current string) {
 		state.update(func(report *libraryAutomationReport) {
 			report.DuplicateCandidates = total
 			report.DuplicateChecked = checked
@@ -1392,10 +1558,14 @@ func (a *App) runAutomatedDeduplication(ctx context.Context) bool {
 		state.touch("dedupe", fmt.Sprintf("正在比对重复项 %d/%d · %s", checked, total, label))
 	}, checkpoint)
 	mergeDuplicateFingerprintCache(&cache, updates)
-	if err := a.saveLibraryAutomationScanCache(cache); err != nil {
+	if err := a.saveLibraryDuplicateCache(cache); err != nil {
 		state.addError(fmt.Errorf("重复扫描缓存保存失败: %w", err))
 	}
 	if err != nil {
+		if errors.Is(err, context.DeadlineExceeded) && ctx.Err() == nil {
+			state.touch("dedupe", "本轮去重指纹已达到独立安全时间片，下一轮从持久缓存继续")
+			return true
+		}
 		state.addError(fmt.Errorf("重复扫描失败: %w", err))
 		return true
 	}
@@ -1537,10 +1707,15 @@ func (a *App) enqueueIncompleteAlbumExpansion(ctx context.Context, byDir map[str
 		if state != nil {
 			state.touch("partial_album_followup", dir)
 		}
-		if a.enqueueMaintenanceWorkflow(ctx, "expand", tracks, dir) {
-			jobs++
-			if state != nil {
-				state.update(func(report *libraryAutomationReport) { report.ExpandJobs++ })
+		for _, albumTracks := range groupWorkflowTracksByAlbum(tracks) {
+			if ctx.Err() != nil || jobs >= libraryAutomationMaxJobs {
+				break
+			}
+			if a.enqueueMaintenanceWorkflow(ctx, "expand", albumTracks, dir) {
+				jobs++
+				if state != nil {
+					state.update(func(report *libraryAutomationReport) { report.ExpandJobs++ })
+				}
 			}
 		}
 	}
@@ -1553,6 +1728,10 @@ func (a *App) enqueueLibraryMaintenanceWorkflows(ctx context.Context, byDir map[
 	state := a.libraryAutomation
 	root := a.libraryDir()
 	cache := a.loadLibraryAutomationScanCache(root)
+	audit := a.loadLibraryAlbumAudit(root)
+	auditDirty := false
+	albumChecks := 0
+	nowNS := a.now().UnixNano()
 	dirs := make([]string, 0, len(byDir))
 	for dir := range byDir {
 		dirs = append(dirs, dir)
@@ -1600,26 +1779,104 @@ func (a *App) enqueueLibraryMaintenanceWorkflows(ctx context.Context, byDir map[
 				}
 			}
 		}
-		if settings.Expand && jobs < libraryAutomationMaxJobs && localAlbumNeedsCatalogCheck(tracks) {
-			expand, checkErr := a.albumNeedsExpansion(ctx, catalogClient, tracks)
-			if checkErr != nil {
-				state.addError(fmt.Errorf("%s: 整专补全核查失败: %w", filepath.Base(dir), checkErr))
-				state.update(func(report *libraryAutomationReport) {
-					report.Backlog = true
-					if delay, backoff := catalogBackoffDelay(checkErr); backoff {
-						report.RetryAfterSec = int(delay / time.Second)
-						report.Note = fmt.Sprintf("目录服务暂不可用，%d 分钟后继续核查整专", (int(delay/time.Second)+59)/60)
+		if settings.Expand && jobs < libraryAutomationMaxJobs {
+			for _, albumTracks := range groupWorkflowTracksByAlbum(tracks) {
+				if ctx.Err() != nil || jobs >= libraryAutomationMaxJobs {
+					break
+				}
+				auditKey := albumAuditIdentity(dir, albumTracks)
+				signature := albumWorkflowSignature(albumTracks)
+				record, known := audit.Albums[auditKey]
+				age := nowNS - record.CheckedNS
+				fresh := known && record.Signature == signature && record.CheckedNS > 0 && age >= 0 && age < int64(libraryAlbumAuditTTL)
+				expand := false
+				if fresh {
+					expand = record.Expandable && record.ExpectedTracks > len(albumTracks)
+				} else {
+					if albumChecks >= libraryAutomationAlbumChecks {
+						state.update(func(report *libraryAutomationReport) { report.Backlog = true })
+						continue
 					}
-				})
-			} else if expand && a.enqueueMaintenanceWorkflow(ctx, "expand", tracks, dir) {
-				jobs++
-				state.update(func(report *libraryAutomationReport) { report.ExpandJobs++ })
+					var checkErr error
+					var expected int
+					expand, expected, checkErr = a.albumExpansionState(ctx, catalogClient, albumTracks)
+					if checkErr != nil {
+						state.addError(fmt.Errorf("%s / %s: 整专补全核查失败: %w", filepath.Base(dir), albumTracks[0].Album, checkErr))
+						state.update(func(report *libraryAutomationReport) {
+							report.Backlog = true
+							if delay, backoff := catalogBackoffDelay(checkErr); backoff {
+								report.RetryAfterSec = int(delay / time.Second)
+								report.Note = fmt.Sprintf("目录服务暂不可用，%d 分钟后继续核查整专", (int(delay/time.Second)+59)/60)
+							}
+						})
+						if delay, backoff := catalogBackoffDelay(checkErr); backoff && delay >= time.Minute {
+							break
+						}
+						continue
+					}
+					albumChecks++
+					audit.Albums[auditKey] = libraryAlbumAuditRecord{
+						ExpectedTracks: expected, LocalFiles: len(albumTracks), Expandable: expand,
+						Signature: signature, CheckedNS: nowNS,
+					}
+					auditDirty = true
+				}
+				if expand && a.enqueueMaintenanceWorkflow(ctx, "expand", albumTracks, dir) {
+					jobs++
+					state.update(func(report *libraryAutomationReport) { report.ExpandJobs++ })
+				}
 			}
 		}
 	}
 	if jobs >= libraryAutomationMaxJobs {
 		state.update(func(report *libraryAutomationReport) { report.Backlog = true })
 	}
+	if auditDirty {
+		if err := a.saveLibraryAlbumAudit(audit); err != nil {
+			state.addError(fmt.Errorf("专辑核查缓存保存失败: %w", err))
+			state.update(func(report *libraryAutomationReport) { report.Backlog = true })
+		}
+	}
+}
+
+// groupWorkflowTracksByAlbum keeps mixed-album directories valid for the
+// expansion endpoint. Album artist is retained as the grouping identity while
+// every track keeps its own artist credit.
+func groupWorkflowTracksByAlbum(tracks []localWorkflowTrack) [][]localWorkflowTrack {
+	groups := map[string][]localWorkflowTrack{}
+	for _, track := range tracks {
+		key := normalizeKey(track.Album)
+		groups[key] = append(groups[key], track)
+	}
+	keys := make([]string, 0, len(groups))
+	for key := range groups {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	out := make([][]localWorkflowTrack, 0, len(keys))
+	for _, key := range keys {
+		group := groups[key]
+		sort.SliceStable(group, func(i, j int) bool { return group[i].Path < group[j].Path })
+		out = append(out, group)
+	}
+	return out
+}
+
+func albumAuditIdentity(dir string, tracks []localWorkflowTrack) string {
+	if len(tracks) == 0 {
+		return ""
+	}
+	albumArtist := localWorkflowAlbumArtist(tracks)
+	return filepath.Clean(dir) + "\x00" + normalizeKey(tracks[0].Album) + "\x00" + normalizeKey(albumArtist)
+}
+
+func albumWorkflowSignature(tracks []localWorkflowTrack) string {
+	parts := make([]string, 0, len(tracks))
+	for _, track := range tracks {
+		parts = append(parts, filepath.Clean(track.Path)+"\x00"+track.Artist+"\x00"+track.AlbumArtist+"\x00"+track.Album+"\x00"+track.Title)
+	}
+	sort.Strings(parts)
+	return libraryFileID(strings.Join(parts, "\x01"))
 }
 
 // localAlbumNeedsCatalogCheck bounds catalogue lookups to small albums and
@@ -1652,8 +1909,13 @@ func localAlbumNeedsCatalogCheck(tracks []localWorkflowTrack) bool {
 // tracks are missing. Only a confirmed local track on a release with at least
 // two catalogue tracks is safe enough to expand automatically.
 func (a *App) albumNeedsExpansion(ctx context.Context, client *musicbrainz.Client, tracks []localWorkflowTrack) (bool, error) {
+	expand, _, err := a.albumExpansionState(ctx, client, tracks)
+	return expand, err
+}
+
+func (a *App) albumExpansionState(ctx context.Context, client *musicbrainz.Client, tracks []localWorkflowTrack) (bool, int, error) {
 	if len(tracks) == 0 {
-		return false, nil
+		return false, 0, nil
 	}
 	requestTracks := make([]catalogTrackRequest, 0, len(tracks))
 	for _, track := range tracks {
@@ -1666,21 +1928,24 @@ func (a *App) albumNeedsExpansion(ctx context.Context, client *musicbrainz.Clien
 		Tracks: requestTracks,
 	}, catalogBudget, catalogTTL)
 	if err != nil {
-		return false, err
+		return false, 0, err
 	}
 	view := lookup.MusicBrainz
-	if view == nil || view.TrackCount <= len(tracks) {
-		return false, nil
+	if view == nil {
+		return false, 0, nil
+	}
+	if view.TrackCount <= len(tracks) {
+		return false, view.TrackCount, nil
 	}
 	if len(lookup.Results) != len(tracks) {
-		return false, nil
+		return false, view.TrackCount, nil
 	}
 	for _, result := range lookup.Results {
 		if !result.IdentityConfirmed {
-			return false, nil
+			return false, view.TrackCount, nil
 		}
 	}
-	return true, nil
+	return true, view.TrackCount, nil
 }
 
 func localWorkflowAlbumArtist(tracks []localWorkflowTrack) string {

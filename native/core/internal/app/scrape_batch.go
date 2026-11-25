@@ -116,10 +116,9 @@ func (a *App) writeScrapeArtworkSidecars(path string, data scrapeArtworkData, ov
 	}
 	coverPath := strings.TrimSuffix(path, filepath.Ext(path)) + ".jpg"
 	wantLyrics := strings.TrimSpace(data.Lyrics) != "" && (overwrite || !hasLyricsSidecar(path))
-	wantCover := len(data.Cover) > 0
+	wantCover := validCoverBytes(data.Cover)
 	if wantCover {
-		_, statErr := os.Stat(coverPath)
-		wantCover = overwrite || os.IsNotExist(statErr)
+		wantCover = overwrite || !validCoverSidecar(coverPath)
 	}
 	if !wantLyrics && !wantCover {
 		return false, false, nil

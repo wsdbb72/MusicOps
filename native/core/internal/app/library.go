@@ -91,7 +91,7 @@ func (a *App) duplicateScan(w http.ResponseWriter, r *http.Request) {
 	a.duplicateScanMu.Lock()
 	defer a.duplicateScanMu.Unlock()
 	root := a.libraryDir()
-	cache := a.loadLibraryAutomationScanCache(root)
+	cache := a.loadLibraryDuplicateCache(root)
 	groups, method, truncated, updates, err := a.scanDuplicatesWithOptions(r.Context(), 1000, root, cache.Files, nil, nil)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "code": "LIBRARY_UNAVAILABLE"})
@@ -99,7 +99,7 @@ func (a *App) duplicateScan(w http.ResponseWriter, r *http.Request) {
 	}
 	cacheWarning := ""
 	mergeDuplicateFingerprintCache(&cache, updates)
-	if saveErr := a.saveLibraryAutomationScanCache(cache); saveErr != nil {
+	if saveErr := a.saveLibraryDuplicateCache(cache); saveErr != nil {
 		cacheWarning = "重复项已扫描，但结果缓存保存失败：" + scrub(saveErr.Error())
 	}
 	// Suppressed albums are hidden from the scan but still reachable by id:

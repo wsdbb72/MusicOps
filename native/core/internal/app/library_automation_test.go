@@ -272,6 +272,7 @@ func TestLibraryAutomationReusesUnchangedScanCache(t *testing.T) {
 	cache := libraryAutomationScanDocument{Version: libraryAutomationScanVersion, Root: library, Files: map[string]cachedLibraryScan{
 		"Artist/Album/cached.mp3": {
 			Size: info.Size(), ModNS: info.ModTime().UnixNano(), NeedsCatalog: false, NeedsArtwork: false,
+			ArtworkCheckedNS: time.Now().UnixNano(), ArtworkValid: true,
 		},
 	}}
 	if err := application.saveLibraryAutomationScanCache(cache); err != nil {
@@ -460,7 +461,7 @@ func TestLibraryAutomationPersistsAndRestoresDuplicateFingerprintCache(t *testin
 		t.Fatal(err)
 	}
 	root := application.libraryDir()
-	cache := application.loadLibraryAutomationScanCache(root)
+	cache := application.loadLibraryDuplicateCache(root)
 	if len(cache.Files) < 2 {
 		t.Fatalf("expected fingerprints for both duplicates: %+v", cache.Files)
 	}
@@ -481,6 +482,138 @@ func TestLibraryAutomationPersistsAndRestoresDuplicateFingerprintCache(t *testin
 	}
 	if restored != 1 {
 		t.Fatalf("expected one surviving file, restored=%d", restored)
+	}
+}
+
+func TestAutomationRepairsInvalidExistingCover(t *testing.T) {
+	application := newApp(t)
+	_, full := writeScrapeFLAC(t, application, "invalid-cover.flac", 2, flactags.Tags{
+		Title: "Song", Artists: []string{"Artist"}, AlbumArtist: "Artist", Album: "Album", TrackNumber: 1,
+		Date: "2026", Genre: "Pop",
+	})
+	if err := writeLyricsSidecar(full, "[00:01.00]lyrics"); err != nil {
+		t.Fatal(err)
+	}
+	cover := strings.TrimSuffix(full, filepath.Ext(full)) + ".jpg"
+	valid := jpegBody()
+	if err := os.WriteFile(cover, valid[:len(valid)/2], 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if !maintenanceMissingSidecars(full) {
+		t.Fatal("truncated sidecar was treated as valid artwork")
+	}
+	if !maintenanceMissingArtwork(full, &flactags.Tags{HasFrontCover: true}) {
+		t.Fatal("invalid sidecar was hidden by an embedded cover marker")
+	}
+	if err := os.WriteFile(cover, valid, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if maintenanceMissingSidecars(full) {
+		t.Fatal("fully decodable sidecar was still marked missing")
+	}
+	if maintenanceMissingArtwork(full, &flactags.Tags{HasFrontCover: true}) {
+		t.Fatal("valid sidecar was still marked missing")
+	}
+}
+
+func TestGroupWorkflowTracksSeparatesMixedAlbums(t *testing.T) {
+	tracks := []localWorkflowTrack{
+		{Path: "comp/01.flac", Artist: "Artist A", AlbumArtist: "Various", Album: "Album A"},
+		{Path: "comp/02.flac", Artist: "Artist B", AlbumArtist: "Various", Album: "Album B"},
+		{Path: "comp/03.flac", Artist: "Artist C", AlbumArtist: "Different Album Artist", Album: "Album A"},
+	}
+	groups := groupWorkflowTracksByAlbum(tracks)
+	if len(groups) != 2 || len(groups[0]) != 2 || len(groups[1]) != 1 {
+		t.Fatalf("groups=%+v", groups)
+	}
+	if groups[0][0].Artist == groups[0][1].Artist {
+		t.Fatal("per-track artists were collapsed")
+	}
+}
+
+func TestCachedArtworkInvalidatedWhenSidecarChanges(t *testing.T) {
+	root := t.TempDir()
+	track := filepath.Join(root, "track.flac")
+	if err := os.WriteFile(track, []byte("audio"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cover := strings.TrimSuffix(track, filepath.Ext(track)) + ".jpg"
+	valid := jpegBody()
+	if err := os.WriteFile(cover, valid, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now()
+	entry := cachedLibraryScan{NeedsArtwork: false}
+	recordArtworkValidation(&entry, track, now)
+	if !cachedArtworkFresh(track, entry, now.Add(time.Minute)) {
+		t.Fatal("unchanged valid artwork was not cached")
+	}
+	if err := os.WriteFile(cover, valid[:len(valid)/2], 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if cachedArtworkFresh(track, entry, now.Add(time.Minute)) {
+		t.Fatal("changed/truncated artwork reused the old validation")
+	}
+}
+
+func TestCachedArtworkRequestsPeriodicRefresh(t *testing.T) {
+	now := time.Now()
+	entry := cachedLibraryScan{ArtworkCheckedNS: now.Add(-libraryArtworkRefreshTTL - time.Minute).UnixNano(), ArtworkValid: true}
+	if !artworkRefreshDue(entry, now) {
+		t.Fatal("valid artwork was never scheduled for identity refresh")
+	}
+}
+
+func TestAutomationMigratesDuplicateCacheBeforeMetadataScan(t *testing.T) {
+	application := newApp(t)
+	library := t.TempDir()
+	post(t, application, "/v1/settings/library", map[string]any{"library_dir": library})
+	legacy := libraryAutomationScanDocument{
+		Version: 3, Root: library,
+		Files: map[string]cachedLibraryScan{
+			"Artist/Album/01.flac": {Duplicate: &cachedDuplicateFingerprint{FileSize: 42, FileModNS: 7, FileSHA256: "ordered"}},
+		},
+	}
+	if err := application.saveLibraryAutomationScanCache(legacy); err != nil {
+		t.Fatal(err)
+	}
+	if err := application.runLibraryAutomationPass(context.Background(), libraryAutomationSettings{Enabled: true, IntervalHours: 6}); err != nil {
+		t.Fatal(err)
+	}
+	cache := application.loadLibraryDuplicateCache(library)
+	if cache.Files["Artist/Album/01.flac"].Duplicate == nil {
+		t.Fatalf("dedupe cache was lost before metadata scan: %+v", cache)
+	}
+}
+
+func TestDuplicateCacheMigratesLegacyScanDocument(t *testing.T) {
+	application := newApp(t)
+	root := t.TempDir()
+	legacy := libraryAutomationScanDocument{
+		Version: 3, Root: root,
+		Files: map[string]cachedLibraryScan{
+			"Artist/Album/01.flac": {Duplicate: &cachedDuplicateFingerprint{FileSize: 42, FileModNS: 7, FileSHA256: "abc"}},
+		},
+	}
+	if err := application.saveLibraryAutomationScanCache(legacy); err != nil {
+		t.Fatal(err)
+	}
+	cache := application.loadLibraryDuplicateCache(root)
+	entry, ok := cache.Files["Artist/Album/01.flac"]
+	if !ok || entry.Duplicate == nil || entry.Duplicate.FileSHA256 != "abc" {
+		t.Fatalf("legacy duplicate fingerprint was not migrated: %+v", cache)
+	}
+}
+
+func TestAlbumAuditSignatureChangesWhenAlbumFilesChange(t *testing.T) {
+	base := []localWorkflowTrack{
+		{Path: "album/01.flac", Artist: "Artist", AlbumArtist: "Album Artist", Album: "Album", Title: "One"},
+		{Path: "album/02.flac", Artist: "Artist", AlbumArtist: "Album Artist", Album: "Album", Title: "Two"},
+	}
+	first := albumWorkflowSignature(base)
+	extended := append(append([]localWorkflowTrack(nil), base...), localWorkflowTrack{Path: "album/03.flac", Artist: "Artist", AlbumArtist: "Album Artist", Album: "Album", Title: "Three"})
+	if albumWorkflowSignature(extended) == first {
+		t.Fatal("adding an album track did not invalidate the catalogue audit")
 	}
 }
 

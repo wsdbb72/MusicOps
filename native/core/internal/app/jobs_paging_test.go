@@ -44,10 +44,25 @@ func TestJobsReviewFilterReturnsOnlyReviewWork(t *testing.T) {
 	if len(decoded.Jobs) != 3 {
 		t.Fatal(decoded.Jobs)
 	}
+	var doneFamily map[string]any
 	for _, job := range decoded.Jobs {
 		if job["stage"] != "needs_review" {
 			t.Fatal(job)
 		}
+		if job["job_id"] == "review-done" {
+			doneFamily = job
+		}
+	}
+	if doneFamily == nil {
+		t.Fatal("completed root with a review child is missing from the review page")
+	}
+	reviewIDs, _ := doneFamily["review_job_ids"].([]any)
+	if len(reviewIDs) != 1 || reviewIDs[0] != "search:review-done" {
+		t.Fatalf("review page did not expose the actionable child: %#v", doneFamily)
+	}
+	rootStatus, _ := doneFamily["root_status"].(map[string]any)
+	if rootStatus == nil || rootStatus["job_id"] != "search:review-done" {
+		t.Fatalf("review summary did not point at the actionable child: %#v", doneFamily)
 	}
 	if decoded.Next != "" {
 		t.Fatal("a single short page must not offer a cursor:", decoded.Next)

@@ -473,9 +473,14 @@ func (a *App) reviewWorkflowJobs(after []byte, limit int) ([]jobView, string, er
 			return nil, "", err
 		}
 		familyViews := make([]jobView, 0, len(family))
+		reviewJobIDs := []string{}
 		for _, job := range family {
 			entry := a.publicJobWithResult(job)
-			entry.AIReviewEligible = a.aiReviewEligible(job)
+			eligible := a.aiReviewEligible(job)
+			entry.AIReviewEligible = eligible
+			if eligible {
+				reviewJobIDs = append(reviewJobIDs, job.ID)
+			}
 			if task, taskErr := a.tasks.Get(job.ActiveTaskID); taskErr == nil && task != nil {
 				entry.ExecutionState = task.State
 			}
@@ -504,9 +509,8 @@ func (a *App) reviewWorkflowJobs(after []byte, limit int) ([]jobView, string, er
 		if summary.Result != nil {
 			entry.Result = summary.Result
 		}
-		for _, member := range familyViews {
-			entry.AIReviewEligible = entry.AIReviewEligible || member.AIReviewEligible
-		}
+		entry.ReviewJobIDs = reviewJobIDs
+		entry.AIReviewEligible = len(reviewJobIDs) > 0
 		out = append(out, entry)
 		if len(out) >= limit {
 			next = base64.RawURLEncoding.EncodeToString(workflow.ListCursor(*rootJob))

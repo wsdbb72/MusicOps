@@ -90,28 +90,42 @@ func (a *App) fetchPlaylist(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	complete := !remote.Truncated && !remote.Preview
+	remoteTrackCount := len(remote.Tracks)
+	canonical := remote
+	canonicalReused := false
 	slug := ""
 	if body.Save || body.Subscribe || body.Enqueue {
 		slug = playlistSlug(body.Platform + "-" + body.PlaylistID)
 	}
-	// A truncated response and a public embed preview are not canonical
-	// playlists. Writing either over the saved file loses tracks and lets a
-	// later task treat a short preview as the complete collection.
+	// A partial remote response must not overwrite a complete saved list. It
+	// can still drive the same ingestion task from that list: blocking behind
+	// a permanently truncated public response is less useful than preserving
+	// the canonical rows we already have and retrying the remote refresh later.
+	if !complete && slug != "" {
+		tracks, savedName, readErr := a.readSavedPlaylist(slug)
+		if readErr == nil && len(tracks) > 0 && len(tracks) > remoteTrackCount {
+			canonical.Tracks = tracks
+			if savedName != "" {
+				canonical.Name = savedName
+			}
+			canonicalReused = true
+		}
+	}
 	if complete && (body.Save || body.Subscribe || body.Enqueue) {
 		if err = a.writeSavedPlaylist(slug, remote.Name, remote.Tracks); err != nil {
 			writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "code": "PLAYLIST_UNAVAILABLE", "downloaded": false})
 			return
 		}
 	}
-	if complete && body.Subscribe && slug != "" {
-		if err = a.rememberRemoteSubscription(slug, remote); err != nil {
+	if (complete || canonicalReused) && body.Subscribe && slug != "" {
+		if err = a.rememberRemoteSubscription(slug, canonical); err != nil {
 			writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "code": "SUBSCRIPTION_UNAVAILABLE", "downloaded": false})
 			return
 		}
 	}
 	jobID := ""
-	if complete && body.Enqueue && slug != "" {
-		jobID, err = a.startPlaylistJob(slug, remote, body.Mode)
+	if (complete || canonicalReused) && body.Enqueue && slug != "" {
+		jobID, err = a.startPlaylistJob(slug, canonical, body.Mode)
 		if err != nil {
 			writeJSON(w, http.StatusBadGateway, map[string]any{"ok": false, "code": "PLAYLIST_JOB_UNAVAILABLE", "error": "歌单已读取，但没有创建任务：" + err.Error()})
 			return
@@ -119,16 +133,22 @@ func (a *App) fetchPlaylist(w http.ResponseWriter, r *http.Request) {
 	}
 	note := "只读取了公开曲目名单。没有下载音频，也没有写入音乐库。"
 	if jobID != "" {
-		note = "已创建歌单入库任务（" + jobID + "），共 " + strconv.Itoa(len(remote.Tracks)) + " 首；任务在识别阶段，不会立刻下载。"
+		note = "已创建歌单入库任务（" + jobID + "），共 " + strconv.Itoa(len(canonical.Tracks)) + " 首；任务在识别阶段，不会立刻下载。"
 	}
-	if remote.Preview {
+	if canonicalReused {
+		note = "远端只返回 " + strconv.Itoa(remoteTrackCount) + " 首可能不完整的名单；已复用本地完整的 " + strconv.Itoa(len(canonical.Tracks)) + " 首名单。"
+		if jobID != "" {
+			note += "已创建歌单入库任务（" + jobID + "）。"
+		}
+	} else if remote.Preview {
 		note = "只读取了公开嵌入清单，不保证完整。没有下载音频，也没有写入音乐库。"
 	} else if remote.Truncated {
-		note = "这份名单可能不完整。没有下载音频，也没有写入音乐库。"
+		note = "这份名单可能不完整，且没有可复用的完整本地名单。没有下载音频，也没有写入音乐库。"
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"ok": true, "platform": remote.Platform, "playlist_id": slug, "remote_id": remote.ID,
-		"name": remote.Name, "track_count": len(remote.Tracks), "truncated": remote.Truncated,
+		"name": canonical.Name, "track_count": len(canonical.Tracks), "remote_track_count": remoteTrackCount,
+		"canonical_reused": canonicalReused, "truncated": remote.Truncated,
 		"preview": remote.Preview, "downloaded": false, "imported": false, "note": note, "job_id": jobID,
 	})
 }

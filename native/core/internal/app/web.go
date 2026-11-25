@@ -130,6 +130,22 @@ const appJS = `(function () {
     if (Number(retryAfterNS || 0) > Date.now()) return retryLabel(retryAfterNS);
     return ({queued:"排队中", running:"运行中", paused:"已暂停", failed:"已失败", cancelled:"已取消", blocked:"待核对", recovery_required:"已中断", completed:"已完成"})[state] || "";
   }
+  function reviewJobIDs(job) {
+    if (!job) return [];
+    if (Array.isArray(job.review_job_ids) && job.review_job_ids.length) {
+      return job.review_job_ids.filter(Boolean);
+    }
+    if (!job.ai_review_eligible) return [];
+    return [(job.root_status && job.root_status.job_id) || job.job_id].filter(Boolean);
+  }
+  function actionJobIDs(job, action) {
+    if (!job) return [];
+    if (view === "review" && action === "retry") {
+      var reviews = reviewJobIDs(job);
+      if (reviews.length) return reviews;
+    }
+    return [(job.root_status && job.root_status.job_id) || job.job_id].filter(Boolean);
+  }
   async function reviewAllAI() {
     if (loading) return;
     setBusy(true);
@@ -141,7 +157,7 @@ const appJS = `(function () {
         var response = await fetch("/v1/jobs?review=1&after=" + encodeURIComponent(cursor));
         if (!response.ok) throw new Error("读取待核对任务失败");
         var page = await response.json();
-        (page.jobs || []).forEach(function(job) { if (job.ai_review_eligible) ids.add(job.job_id); });
+        (page.jobs || []).forEach(function(job) { reviewJobIDs(job).forEach(function(id) { ids.add(id); }); });
         cursor = page.next || "";
       } while (cursor);
       for (var id of ids) {
@@ -302,24 +318,39 @@ const appJS = `(function () {
       '<button type="button" data-batch-action="cancel" class="danger">批量取消</button></div>';
   }
   async function batchAction(action) {
-    var ids = Object.keys(selectedJobs).filter(function (id) { return selectedJobs[id]; });
+    var selectedRoots = Object.keys(selectedJobs).filter(function (id) { return selectedJobs[id]; });
+    var byID = {};
+    jobs.forEach(function (job) { byID[job.job_id] = job; });
+    var ids = [];
+    var seen = {};
+    selectedRoots.forEach(function (rootID) {
+      actionJobIDs(byID[rootID] || {job_id: rootID}, action).forEach(function (id) {
+        if (!seen[id]) { seen[id] = true; ids.push(id); }
+      });
+    });
     if (!ids.length) { setStatus("fail", "先勾选要批量操作的任务。"); return; }
     if (loading) return;
     if ((action === "cancel" || action === "retry") && !window.confirm(action === "cancel" ? "取消选中的 " + ids.length + " 个任务吗？取消后未开始的阶段不会继续。" : "重试选中的 " + ids.length + " 个任务吗？")) return;
     setBusy(true);
     setStatus("info", "正在批量处理");
     try {
-      var response = await fetch("/v1/jobs/batch", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({job_ids: ids, action: action})});
-      var body = await response.json();
-      if (!response.ok || !body || !body.ok) {
-        setStatus("fail", "批量操作失败。" + (body && body.code ? "（" + body.code + "）" : ""));
-        return;
+      var succeeded = 0, failedCount = 0, failed = [];
+      for (var start = 0; start < ids.length; start += 50) {
+        var chunk = ids.slice(start, start + 50);
+        setStatus("info", "正在批量处理 " + Math.min(start + chunk.length, ids.length) + " / " + ids.length);
+        var response = await fetch("/v1/jobs/batch", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({job_ids: chunk, action: action})});
+        var body = await response.json();
+        if (!response.ok || !body || !body.ok) {
+          setStatus("fail", "批量操作失败。" + (body && body.code ? "（" + body.code + "）" : ""));
+          return;
+        }
+        succeeded += Number(body.succeeded || 0);
+        failedCount += Number(body.failed || 0);
+        (body.results || []).forEach(function (item) { if (!item.ok) failed.push(item.job_id + "：" + (item.code || "失败")); });
       }
-      var failed = [];
-      (body.results || []).forEach(function (item) { if (!item.ok) failed.push(item.job_id + "：" + (item.code || "失败")); });
       Object.keys(selectedJobs).forEach(function (id) { selectedJobs[id] = false; });
-      if (failed.length) await reloadThen("review", "批量完成：成功 " + body.succeeded + " 个，失败 " + body.failed + " 个。" + failed.join("；"));
-      else await reloadThen("ok", "批量完成：成功 " + body.succeeded + " 个。");
+      if (failedCount) await reloadThen("review", "批量完成：成功 " + succeeded + " 个，失败 " + failedCount + " 个。" + failed.slice(0, 8).join("；") + (failed.length > 8 ? "；另有 " + (failed.length - 8) + " 项" : ""));
+      else await reloadThen("ok", "批量完成：成功 " + succeeded + " 个。");
     } catch (err) {
       setStatus("fail", "批量操作中断。");
     } finally {

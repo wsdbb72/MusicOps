@@ -121,7 +121,7 @@ func TestPlaylistFetchInfersPlatformFromAQQShareLink(t *testing.T) {
 	}
 }
 
-func TestIncompletePlaylistNeverOverwritesTheSavedListOrQueues(t *testing.T) {
+func TestIncompletePlaylistPreservesAndReusesTheCompleteSavedList(t *testing.T) {
 	server := incompleteQQPlaylistServer(t)
 	defer server.Close()
 
@@ -143,11 +143,12 @@ func TestIncompletePlaylistNeverOverwritesTheSavedListOrQueues(t *testing.T) {
 		"platform": "qqmusic", "playlist_id": "123", "base_url": server.URL,
 		"save": true, "subscribe": true, "enqueue": true,
 	})
-	if fetched["truncated"] != true || fetched["track_count"] != float64(1) || fetched["job_id"] != "" {
+	jobID, _ := fetched["job_id"].(string)
+	if fetched["truncated"] != true || fetched["track_count"] != float64(2) || fetched["remote_track_count"] != float64(1) || fetched["canonical_reused"] != true || jobID == "" {
 		t.Fatal(fetched)
 	}
 	note, _ := fetched["note"].(string)
-	if !contains(note, "可能不完整") {
+	if !contains(note, "已复用本地完整的 2 首名单") || !contains(note, "已创建歌单入库任务") {
 		t.Fatal(fetched)
 	}
 	after, err := os.ReadFile(path)
@@ -157,16 +158,42 @@ func TestIncompletePlaylistNeverOverwritesTheSavedListOrQueues(t *testing.T) {
 	if string(after) != string(before) {
 		t.Fatalf("incomplete fetch overwrote saved playlist:\n%s", after)
 	}
+	attached := getAuth(t, application, "/v1/jobs/"+jobID+"/playlist")
+	if attached.Code != http.StatusOK || !contains(attached.Body.String(), `"track_count":2`) {
+		t.Fatal(attached.Code, attached.Body.String())
+	}
 	subscriptions, err := application.loadSubscriptions()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(subscriptions) != 0 {
-		t.Fatalf("incomplete fetch created a subscription: %+v", subscriptions)
+	if len(subscriptions) != 1 || subscriptions[0].Platform != "qqmusic" || subscriptions[0].RemoteID != "123" {
+		t.Fatalf("incomplete fetch did not preserve monitoring from the canonical file: %+v", subscriptions)
 	}
 }
 
-func TestIncompleteSubscriptionRefreshPreservesTheCanonicalFileAndSeen(t *testing.T) {
+func TestIncompletePlaylistRequiresALargerCanonicalSnapshot(t *testing.T) {
+	server := incompleteQQPlaylistServer(t)
+	defer server.Close()
+
+	application := newApp(t)
+	slug := "qqmusic-123"
+	if err := application.writeSavedPlaylist(slug, "不完整本地名单", []playlistTrack{
+		{Artist: "甲", Album: "完整专辑", Title: "第一首", Duration: "200"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	fetched := post(t, application, "/v1/playlists/fetch", map[string]any{
+		"platform": "qqmusic", "playlist_id": "123", "base_url": server.URL,
+		"save": true, "enqueue": true,
+	})
+	if fetched["truncated"] != true || fetched["canonical_reused"] != false || fetched["job_id"] != "" || fetched["track_count"] != float64(1) {
+		t.Fatal(fetched)
+	}
+	if note, _ := fetched["note"].(string); !contains(note, "没有可复用的完整本地名单") {
+		t.Fatal(fetched)
+	}
+}
+func TestIncompleteSubscriptionRefreshQueuesFromTheCanonicalFile(t *testing.T) {
 	server := incompleteQQPlaylistServer(t)
 	defer server.Close()
 
@@ -193,11 +220,11 @@ func TestIncompleteSubscriptionRefreshPreservesTheCanonicalFileAndSeen(t *testin
 		t.Fatal(err)
 	}
 	checked := post(t, application, "/v1/subscriptions/check", map[string]any{"playlist_id": slug})
-	if checked["preserved"] != true || checked["truncated"] != true || checked["queued"] != float64(0) || checked["remote_track_count"] != float64(1) {
+	if checked["preserved"] != true || checked["truncated"] != true || checked["queued"] != float64(2) || checked["remote_track_count"] != float64(1) || checked["local_track_count"] != float64(2) {
 		t.Fatal(checked)
 	}
 	message, _ := checked["message"].(string)
-	if !contains(message, "已保留本地完整名单") {
+	if !contains(message, "已沿用本地完整名单（2 首）核对") {
 		t.Fatal(checked)
 	}
 	after, err := os.ReadFile(path)
@@ -211,8 +238,8 @@ func TestIncompleteSubscriptionRefreshPreservesTheCanonicalFileAndSeen(t *testin
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(rows) != 1 || len(rows[0].Seen) != 1 || rows[0].Seen[0] != "existing-key" || rows[0].LastChecked != lastChecked {
-		t.Fatalf("subscription state changed after truncated refresh: %+v", rows)
+	if len(rows) != 1 || rows[0].LastChecked == lastChecked || len(rows[0].Seen) < 2 {
+		t.Fatalf("subscription state did not advance from the canonical file: %+v", rows)
 	}
 }
 

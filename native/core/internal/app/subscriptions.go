@@ -279,31 +279,52 @@ func (a *App) runSubscriptionCheck(playlistID string, manual bool) (map[string]a
 	a.mu.Unlock()
 
 	var tracks []playlistTrack
+	preservedFromLocal := false
+	remoteTruncated, remotePreview := false, false
+	remoteTrackCount := 0
+	incompleteNotice := ""
 	if row.Platform != "" && row.RemoteID != "" {
 		remote, remoteErr := a.fetchRemotePlaylist(context.Background(), row.Platform, row.RemoteID, a.playlistBase(row.Platform))
 		if remoteErr != nil {
 			return nil, remoteErr
 		}
+		remoteTruncated, remotePreview = remote.Truncated, remote.Preview
+		remoteTrackCount = len(remote.Tracks)
 		if remote.Truncated || remote.Preview {
+			// Preserve a canonical saved list while continuing the useful
+			// subscription work. The truncated response is only a refresh
+			// failure; it must not block every later queue pass forever.
+			localTracks, _, readErr := a.readSavedPlaylist(playlistID)
+			if readErr != nil || len(localTracks) == 0 || len(localTracks) <= len(remote.Tracks) {
+				kind := "截断"
+				if remote.Preview {
+					kind = "预览"
+				}
+				now := a.now()
+				row.LastResult = fmt.Sprintf("远端刷新只返回%s名单（%d 首），且没有可复用的完整本地名单；稍后重试", kind, len(remote.Tracks))
+				row.NextCheck = now.Add(playlistSubscriptionIncompleteRetry).UTC().Format(time.RFC3339)
+				if updateErr := a.updateStoredSubscription(row); updateErr != nil {
+					return nil, updateErr
+				}
+				return map[string]any{
+					"ok": true, "subscription": row, "queued": 0, "job_ids": []string{},
+					"downloaded": false, "preserved": false, "truncated": remote.Truncated,
+					"preview": remote.Preview, "remote_track_count": len(remote.Tracks), "local_track_count": 0,
+					"message": row.LastResult,
+				}, nil
+			}
+			tracks = localTracks
+			preservedFromLocal = true
 			kind := "截断"
 			if remote.Preview {
 				kind = "预览"
 			}
-			now := a.now()
-			row.LastResult = fmt.Sprintf("远端刷新只返回%s名单（%d 首），已保留本地完整名单和核对记录；稍后重试", kind, len(remote.Tracks))
-			row.NextCheck = now.Add(playlistSubscriptionIncompleteRetry).UTC().Format(time.RFC3339)
-			if updateErr := a.updateStoredSubscription(row); updateErr != nil {
-				return nil, updateErr
+			incompleteNotice = fmt.Sprintf("远端只返回%s名单（%d 首），已沿用本地完整名单（%d 首）核对", kind, remoteTrackCount, len(tracks))
+		} else {
+			tracks = remote.Tracks
+			if writeErr := a.writeSavedPlaylist(playlistID, remote.Name, tracks); writeErr != nil {
+				return nil, writeErr
 			}
-			return map[string]any{
-				"ok": true, "subscription": row, "queued": 0, "job_ids": []string{},
-				"downloaded": false, "preserved": true, "truncated": remote.Truncated,
-				"preview": remote.Preview, "remote_track_count": len(remote.Tracks), "message": row.LastResult,
-			}, nil
-		}
-		tracks = remote.Tracks
-		if writeErr := a.writeSavedPlaylist(playlistID, remote.Name, tracks); writeErr != nil {
-			return nil, writeErr
 		}
 	} else {
 		var readErr error
@@ -332,7 +353,17 @@ func (a *App) runSubscriptionCheck(playlistID string, manual bool) (map[string]a
 		if err := a.updateStoredSubscription(row); err != nil {
 			return nil, err
 		}
-		return map[string]any{"ok": true, "subscription": row, "queued": 0, "job_ids": []string{}, "downloaded": false, "message": row.LastResult}, nil
+		if incompleteNotice != "" {
+			row.LastResult = incompleteNotice + "；" + row.LastResult
+			if err := a.updateStoredSubscription(row); err != nil {
+				return nil, err
+			}
+		}
+		return map[string]any{
+			"ok": true, "subscription": row, "queued": 0, "job_ids": []string{}, "downloaded": false,
+			"preserved": preservedFromLocal, "truncated": remoteTruncated, "preview": remotePreview,
+			"remote_track_count": remoteTrackCount, "local_track_count": len(tracks), "message": row.LastResult,
+		}, nil
 	}
 	retrySeenMissing := manual
 	if !manual {
@@ -416,10 +447,17 @@ func (a *App) runSubscriptionCheck(playlistID string, manual bool) (map[string]a
 	if queuedTracks == 0 {
 		row.LastResult = "没有需要重新排队的曲目"
 	}
+	if incompleteNotice != "" {
+		row.LastResult = incompleteNotice + "；" + row.LastResult
+	}
 	if err := a.updateStoredSubscription(row); err != nil {
 		return nil, err
 	}
-	return map[string]any{"ok": true, "subscription": row, "queued": queuedTracks, "job_ids": jobIDs, "downloaded": false, "message": row.LastResult}, nil
+	return map[string]any{
+		"ok": true, "subscription": row, "queued": queuedTracks, "job_ids": jobIDs, "downloaded": false,
+		"preserved": preservedFromLocal, "truncated": remoteTruncated, "preview": remotePreview,
+		"remote_track_count": remoteTrackCount, "local_track_count": len(tracks), "message": row.LastResult,
+	}, nil
 }
 
 func (a *App) queueSubscriptionAlbum(jobID, playlistID, album string, tracks []playlistTrack) error {

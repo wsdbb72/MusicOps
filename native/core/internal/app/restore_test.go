@@ -404,6 +404,9 @@ func TestRestoredControlsAreInThePage(t *testing.T) {
 	if !bytes.Contains([]byte(appJS), []byte("/v1/jobs?review=1")) {
 		t.Fatal("the review view does not ask the server for review work")
 	}
+	if !bytes.Contains([]byte(appJS), []byte("review_job_ids")) || !bytes.Contains([]byte(appJS), []byte("actionJobIDs")) || !bytes.Contains([]byte(appJS), []byte("start += 50")) {
+		t.Fatal("review batch actions do not target the actionable child job")
+	}
 }
 
 func xlsxSheet(t *testing.T) []byte {

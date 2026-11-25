@@ -302,7 +302,7 @@ func (a *App) savePlaylist(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "code": "PLAYLIST_UNAVAILABLE"})
 		return
 	}
-	if err := os.WriteFile(filepath.Join(dir, slug+".m3u"), data, 0o644); err != nil {
+	if err := replaceFileAtomically(filepath.Join(dir, slug+".m3u"), data, 0o644); err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "code": "PLAYLIST_UNAVAILABLE"})
 		return
 	}

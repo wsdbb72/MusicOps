@@ -564,6 +564,29 @@ func TestCachedArtworkRequestsPeriodicRefresh(t *testing.T) {
 	}
 }
 
+func TestPeriodicArtworkRefreshOverwritesValidSidecar(t *testing.T) {
+	application := newApp(t)
+	server, _ := lrcAPIFake(t, "[00:01.00]refreshed lyrics", append(jpegBody(), []byte("\\nrefreshed")...), "", "")
+	saveLyricsService(t, application, server.URL, "", "")
+	_, full := writeScrapeFLAC(t, application, "refresh-cover.flac", 2, flactags.Tags{
+		Title: "Song", Artists: []string{"Artist"}, AlbumArtist: "Artist", Album: "Album", TrackNumber: 1,
+		Date: "2026", Genre: "Pop",
+	})
+	cover := strings.TrimSuffix(full, filepath.Ext(full)) + ".jpg"
+	if err := os.WriteFile(cover, jpegBody(), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	before, _ := os.ReadFile(cover)
+	wrote, err := application.writeAutomationArtworkMode(context.Background(), full, true)
+	if err != nil || !wrote {
+		t.Fatalf("wrote=%v err=%v", wrote, err)
+	}
+	after, _ := os.ReadFile(cover)
+	if bytes.Equal(before, after) {
+		t.Fatal("valid cover was not replaced during periodic identity refresh")
+	}
+}
+
 func TestAutomationMigratesDuplicateCacheBeforeMetadataScan(t *testing.T) {
 	application := newApp(t)
 	library := t.TempDir()

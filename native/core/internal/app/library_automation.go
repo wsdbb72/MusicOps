@@ -183,6 +183,7 @@ type cachedLibraryScan struct {
 	ArtworkModNS     int64                       `json:"artwork_mod_ns,omitempty"`
 	ArtworkCheckedNS int64                       `json:"artwork_checked_ns,omitempty"`
 	ArtworkValid     bool                        `json:"artwork_valid,omitempty"`
+	ArtworkRefresh   bool                        `json:"artwork_refresh,omitempty"`
 	Duplicate        *cachedDuplicateFingerprint `json:"duplicate,omitempty"`
 	DuplicateOnly    bool                        `json:"duplicate_only,omitempty"`
 }
@@ -722,6 +723,7 @@ func scanAutomationFile(ctx context.Context, input libraryAutomationScanInput) l
 	if refreshArtwork && !entry.NeedsArtwork {
 		entry.NeedsArtwork = true
 	}
+	entry.ArtworkRefresh = refreshArtwork
 	recordArtworkValidation(&entry, input.path, time.Now())
 	result.entry = entry
 	result.ok = true
@@ -854,6 +856,7 @@ func (a *App) runAutomatedScrape(ctx context.Context, root string, paths []strin
 	catalogByDir := map[string][]string{}
 	genericByDir := map[string][]string{}
 	artworkDirect := []string{}
+	artworkOverwrite := map[string]bool{}
 	candidateCount := 0
 	artworkCount := 0
 	for _, input := range inputs {
@@ -871,6 +874,7 @@ func (a *App) runAutomatedScrape(ctx context.Context, root string, paths []strin
 		}
 		if entry.NeedsArtwork {
 			artworkDirect = append(artworkDirect, input.path)
+			artworkOverwrite[input.path] = entry.ArtworkRefresh
 			artworkCount++
 		}
 	}
@@ -1057,7 +1061,7 @@ func (a *App) runAutomatedScrape(ctx context.Context, root string, paths []strin
 						if !ok {
 							return
 						}
-						wrote, err := a.writeAutomationArtwork(workCtx, path)
+						wrote, err := a.writeAutomationArtworkMode(workCtx, path, artworkOverwrite[path])
 						if wrote {
 							otherWritten.Add(1)
 						} else if err != nil {
@@ -1456,6 +1460,10 @@ func automationTrackIdentity(path string) (artist, album, title string, err erro
 }
 
 func (a *App) writeAutomationArtwork(ctx context.Context, path string) (bool, error) {
+	return a.writeAutomationArtworkMode(ctx, path, false)
+}
+
+func (a *App) writeAutomationArtworkMode(ctx context.Context, path string, overwrite bool) (bool, error) {
 	artist, album, title, err := automationTrackIdentity(path)
 	if err != nil {
 		return false, err
@@ -1466,7 +1474,7 @@ func (a *App) writeAutomationArtwork(ctx context.Context, path string) (bool, er
 	if fetchErr != nil {
 		return false, fetchErr
 	}
-	wroteLyrics, wroteCover, writeErr := a.writeScrapeArtworkSidecars(path, scrapeArtworkData{Lyrics: lyrics, Cover: cover}, false)
+	wroteLyrics, wroteCover, writeErr := a.writeScrapeArtworkSidecars(path, scrapeArtworkData{Lyrics: lyrics, Cover: cover}, overwrite)
 	return wroteLyrics || wroteCover, writeErr
 }
 

@@ -18,6 +18,7 @@ import (
 
 const (
 	playlistSubscriptionMissingCooldown = 7 * 24 * time.Hour
+	playlistSubscriptionIncompleteRetry = 30 * time.Minute
 	playlistSubscriptionAlbumBatch      = 100
 )
 
@@ -281,6 +282,23 @@ func (a *App) runSubscriptionCheck(playlistID string, manual bool) (map[string]a
 		remote, remoteErr := a.fetchRemotePlaylist(context.Background(), row.Platform, row.RemoteID, a.playlistBase(row.Platform))
 		if remoteErr != nil {
 			return nil, remoteErr
+		}
+		if remote.Truncated || remote.Preview {
+			kind := "截断"
+			if remote.Preview {
+				kind = "预览"
+			}
+			now := a.now()
+			row.LastResult = fmt.Sprintf("远端刷新只返回%s名单（%d 首），已保留本地完整名单和核对记录；稍后重试", kind, len(remote.Tracks))
+			row.NextCheck = now.Add(playlistSubscriptionIncompleteRetry).UTC().Format(time.RFC3339)
+			if updateErr := a.updateStoredSubscription(row); updateErr != nil {
+				return nil, updateErr
+			}
+			return map[string]any{
+				"ok": true, "subscription": row, "queued": 0, "job_ids": []string{},
+				"downloaded": false, "preserved": true, "truncated": remote.Truncated,
+				"preview": remote.Preview, "remote_track_count": len(remote.Tracks), "message": row.LastResult,
+			}, nil
 		}
 		tracks = remote.Tracks
 		if writeErr := a.writeSavedPlaylist(playlistID, remote.Name, tracks); writeErr != nil {

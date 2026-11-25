@@ -523,8 +523,16 @@ func (a *App) fetchPaged(ctx context.Context, spec remotePlatform, platform, ori
 			name = partName
 		}
 		tracks = append(tracks, part...)
-		if total <= len(tracks) || len(part) == 0 {
+		if total <= len(tracks) {
 			truncated = false
+			break
+		}
+		if len(part) == 0 {
+			// The provider declared more tracks but returned no next page.
+			// That is an incomplete list even when it stopped before the
+			// pagination cap; treating it as complete would overwrite a full
+			// saved playlist with the short prefix.
+			truncated = true
 			break
 		}
 		truncated = page == 19

@@ -625,6 +625,9 @@ func listLibraryAudio(root string) ([]string, map[string][]string, error) {
 	byDir := map[string][]string{}
 	err := filepath.WalkDir(root, func(path string, entry os.DirEntry, walkErr error) error {
 		if walkErr != nil {
+			if skipLibraryWalkError(root, path, walkErr) {
+				return nil
+			}
 			return walkErr
 		}
 		if entry.IsDir() {

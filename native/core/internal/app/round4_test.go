@@ -118,6 +118,9 @@ func TestSpotifyWithoutTokenReadsThePublicEmbed(t *testing.T) {
 	if fetched["downloaded"] != false || fetched["imported"] != false || fetched["preview"] != true || fetched["track_count"] != float64(1) || !strings.Contains(note, "公开嵌入") || !strings.Contains(note, "不保证完整") {
 		t.Fatal(fetched)
 	}
+	if fetched["job_id"] != nil && fetched["job_id"] != "" {
+		t.Fatal("a preview playlist must not create a download task")
+	}
 }
 
 func TestEmbeddedCoverModeSkipsTheSidecar(t *testing.T) {

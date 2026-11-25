@@ -89,29 +89,28 @@ func (a *App) fetchPlaylist(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadGateway, map[string]any{"ok": false, "code": "PLAYLIST_UNAVAILABLE", "error": err.Error(), "downloaded": false})
 		return
 	}
+	complete := !remote.Truncated && !remote.Preview
 	slug := ""
-	if body.Save || body.Subscribe {
+	if body.Save || body.Subscribe || body.Enqueue {
 		slug = playlistSlug(body.Platform + "-" + body.PlaylistID)
+	}
+	// A truncated response and a public embed preview are not canonical
+	// playlists. Writing either over the saved file loses tracks and lets a
+	// later task treat a short preview as the complete collection.
+	if complete && (body.Save || body.Subscribe || body.Enqueue) {
 		if err = a.writeSavedPlaylist(slug, remote.Name, remote.Tracks); err != nil {
 			writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "code": "PLAYLIST_UNAVAILABLE", "downloaded": false})
 			return
 		}
 	}
-	if body.Subscribe && slug != "" {
+	if complete && body.Subscribe && slug != "" {
 		if err = a.rememberRemoteSubscription(slug, remote); err != nil {
 			writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "code": "SUBSCRIPTION_UNAVAILABLE", "downloaded": false})
 			return
 		}
 	}
 	jobID := ""
-	if body.Enqueue {
-		if slug == "" {
-			slug = playlistSlug(body.Platform + "-" + body.PlaylistID)
-			if err = a.writeSavedPlaylist(slug, remote.Name, remote.Tracks); err != nil {
-				writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "code": "PLAYLIST_UNAVAILABLE", "downloaded": false})
-				return
-			}
-		}
+	if complete && body.Enqueue && slug != "" {
 		jobID, err = a.startPlaylistJob(slug, remote, body.Mode)
 		if err != nil {
 			writeJSON(w, http.StatusBadGateway, map[string]any{"ok": false, "code": "PLAYLIST_JOB_UNAVAILABLE", "error": "歌单已读取，但没有创建任务：" + err.Error()})
@@ -402,7 +401,7 @@ func (a *App) writeSavedPlaylist(slug, name string, tracks []playlistTrack) erro
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return err
 	}
-	return os.WriteFile(filepath.Join(dir, slug+".m3u"), encodeM3U(name, tracks), 0o644)
+	return replaceFileAtomically(filepath.Join(dir, slug+".m3u"), encodeM3U(name, tracks), 0o644)
 }
 
 // startPlaylistJob turns a fetched playlist into one workflow job. The job

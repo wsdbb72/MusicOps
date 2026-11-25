@@ -3,6 +3,7 @@ package app
 import (
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"sync/atomic"
 	"testing"
 )
@@ -118,4 +119,114 @@ func TestPlaylistFetchInfersPlatformFromAQQShareLink(t *testing.T) {
 	if mismatch.Code != http.StatusBadRequest {
 		t.Fatal(mismatch.Code, mismatch.Body.String())
 	}
+}
+
+func TestIncompletePlaylistNeverOverwritesTheSavedListOrQueues(t *testing.T) {
+	server := incompleteQQPlaylistServer(t)
+	defer server.Close()
+
+	application := newApp(t)
+	slug := "qqmusic-123"
+	complete := []playlistTrack{
+		{Artist: "甲", Album: "完整专辑", Title: "第一首", Duration: "200"},
+		{Artist: "乙", Album: "完整专辑", Title: "第二首", Duration: "180"},
+	}
+	if err := application.writeSavedPlaylist(slug, "完整歌单", complete); err != nil {
+		t.Fatal(err)
+	}
+	path := application.savedPlaylistsDir() + string(os.PathSeparator) + slug + ".m3u"
+	before, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fetched := post(t, application, "/v1/playlists/fetch", map[string]any{
+		"platform": "qqmusic", "playlist_id": "123", "base_url": server.URL,
+		"save": true, "subscribe": true, "enqueue": true,
+	})
+	if fetched["truncated"] != true || fetched["track_count"] != float64(1) || fetched["job_id"] != "" {
+		t.Fatal(fetched)
+	}
+	note, _ := fetched["note"].(string)
+	if !contains(note, "可能不完整") {
+		t.Fatal(fetched)
+	}
+	after, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(after) != string(before) {
+		t.Fatalf("incomplete fetch overwrote saved playlist:\n%s", after)
+	}
+	subscriptions, err := application.loadSubscriptions()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(subscriptions) != 0 {
+		t.Fatalf("incomplete fetch created a subscription: %+v", subscriptions)
+	}
+}
+
+func TestIncompleteSubscriptionRefreshPreservesTheCanonicalFileAndSeen(t *testing.T) {
+	server := incompleteQQPlaylistServer(t)
+	defer server.Close()
+
+	application := newApp(t)
+	application.playlistBases = map[string]string{"qqmusic": server.URL}
+	slug := "qqmusic-123"
+	complete := []playlistTrack{
+		{Artist: "甲", Album: "完整专辑", Title: "第一首", Duration: "200"},
+		{Artist: "乙", Album: "完整专辑", Title: "第二首", Duration: "180"},
+	}
+	if err := application.writeSavedPlaylist(slug, "完整歌单", complete); err != nil {
+		t.Fatal(err)
+	}
+	path := application.savedPlaylistsDir() + string(os.PathSeparator) + slug + ".m3u"
+	before, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lastChecked := "2026-01-01T00:00:00Z"
+	if err := application.storeSubscriptions([]playlistSubscription{{
+		PlaylistID: slug, Name: "完整歌单", IntervalHours: 6, Platform: "qqmusic", RemoteID: "123",
+		Seen: []string{"existing-key"}, LastChecked: lastChecked,
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	checked := post(t, application, "/v1/subscriptions/check", map[string]any{"playlist_id": slug})
+	if checked["preserved"] != true || checked["truncated"] != true || checked["queued"] != float64(0) || checked["remote_track_count"] != float64(1) {
+		t.Fatal(checked)
+	}
+	message, _ := checked["message"].(string)
+	if !contains(message, "已保留本地完整名单") {
+		t.Fatal(checked)
+	}
+	after, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(after) != string(before) {
+		t.Fatalf("truncated refresh overwrote saved playlist:\n%s", after)
+	}
+	rows, err := application.loadSubscriptions()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 1 || len(rows[0].Seen) != 1 || rows[0].Seen[0] != "existing-key" || rows[0].LastChecked != lastChecked {
+		t.Fatalf("subscription state changed after truncated refresh: %+v", rows)
+	}
+}
+
+func incompleteQQPlaylistServer(t *testing.T) *httptest.Server {
+	t.Helper()
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/qzone/fcg-bin/fcg_ucc_getcdinfo_byids_cp.fcg" || r.URL.Query().Get("disstid") != "123" {
+			http.NotFound(w, r)
+			return
+		}
+		songList := `[{"name":"第一首","singer":[{"name":"甲"}],"albumname":"完整专辑","interval":200}]`
+		if r.URL.Query().Get("song_begin") != "0" {
+			songList = `[]`
+		}
+		_, _ = w.Write([]byte(`{"code":0,"cdlist":[{"disstid":123,"dissname":"完整歌单","songnum":2,"songlist":` + songList + `}]}`))
+	}))
 }

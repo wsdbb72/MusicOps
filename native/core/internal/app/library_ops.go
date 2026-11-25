@@ -96,6 +96,9 @@ func (a *App) indexLibraryTreeWithProgress(ctx context.Context, root string, pro
 			return err
 		}
 		if walkErr != nil {
+			if skipLibraryWalkError(root, path, walkErr) {
+				return nil
+			}
 			return walkErr
 		}
 		if entry.IsDir() {
@@ -156,6 +159,16 @@ func (a *App) indexLibraryTreeWithProgress(ctx context.Context, root string, pro
 		a.invalidatePlaylistLibraryCache()
 	}
 	return added, kept, pruned, err
+}
+
+// skipLibraryWalkError keeps optional/system directories such as a root-owned
+// thumbnail cache from aborting an otherwise healthy 75k-track library scan.
+// Vanishing files are also transient, not proof that the whole root is invalid.
+func skipLibraryWalkError(root, path string, err error) bool {
+	if filepath.Clean(path) == filepath.Clean(root) {
+		return false
+	}
+	return errors.Is(err, fs.ErrPermission) || errors.Is(err, fs.ErrNotExist)
 }
 
 func (a *App) libraryGaps(w http.ResponseWriter, _ *http.Request) {

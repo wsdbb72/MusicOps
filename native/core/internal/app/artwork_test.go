@@ -89,6 +89,30 @@ func TestImageValidationRejectsTruncatedCover(t *testing.T) {
 	}
 }
 
+func TestArtworkKeepsLyricsWhenCoverEndpointReturnsText(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/lyrics":
+			_, _ = w.Write([]byte("[00:01.00]hello"))
+		case "/cover":
+			_, _ = w.Write([]byte("no image for this recording; the service returned a text placeholder instead"))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(server.Close)
+	application := newApp(t)
+	saveLyricsService(t, application, server.URL, "", "")
+
+	lyrics, cover, err := application.fetchArtwork("", "", "Artist", "Album", "Song")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if lyrics != "[00:01.00]hello" || len(cover) != 0 {
+		t.Fatalf("lyrics=%q cover_bytes=%d", lyrics, len(cover))
+	}
+}
+
 // The saved service is used without typing an address, and the saved
 // authorization value goes with it: that is the whole point of configuring it
 // once in the settings page.

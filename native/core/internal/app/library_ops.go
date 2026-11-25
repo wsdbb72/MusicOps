@@ -1202,10 +1202,11 @@ func (a *App) fetchArtworkContext(ctx context.Context, lyricsBase, coverBase, ar
 		if err != nil {
 			return "", nil, err
 		}
-		if found {
-			if !imageBytes(body) {
-				return "", nil, errors.New("cover is not an image")
-			}
+		// A missing cover is often represented by an HTML or text placeholder.
+		// Keep the valid lyrics, omit the unusable cover, and reserve service
+		// errors for actual HTTP/network failures so one absent image cannot
+		// flood the whole-library maintenance report.
+		if found && imageBytes(body) {
 			cover = body
 		}
 	}

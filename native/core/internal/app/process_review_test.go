@@ -1,6 +1,7 @@
 package app
 
 import (
+	"encoding/json"
 	"net/http"
 	"strconv"
 	"testing"
@@ -55,5 +56,33 @@ func TestProcessCandidateReviewRetriesAreBounded(t *testing.T) {
 				t.Fatalf("terminal job=%+v task=%+v", inspection.Job, inspection.Task)
 			}
 		})
+	}
+}
+
+func TestReviewListReturnsRootWhenOnlyChildNeedsReview(t *testing.T) {
+	application, rootID, processID := seedProcessReviewJob(t, true, "candidate", "detail")
+	response := getAuth(t, application, "/v1/jobs?review=1")
+	if response.Code != http.StatusOK {
+		t.Fatalf("code=%d body=%s", response.Code, response.Body.String())
+	}
+	var body struct {
+		Jobs []struct {
+			ID         string `json:"job_id"`
+			Stage      string `json:"stage"`
+			ReviewKind string `json:"review_kind"`
+			RootStatus *struct {
+				JobID string `json:"job_id"`
+				Stage string `json:"stage"`
+			} `json:"root_status"`
+		} `json:"jobs"`
+	}
+	if err := json.Unmarshal(response.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if len(body.Jobs) != 1 || body.Jobs[0].ID != rootID || body.Jobs[0].Stage != "needs_review" || body.Jobs[0].ReviewKind != "candidate" {
+		t.Fatalf("jobs=%+v root=%s process=%s", body.Jobs, rootID, processID)
+	}
+	if body.Jobs[0].RootStatus == nil || body.Jobs[0].RootStatus.JobID != processID || body.Jobs[0].RootStatus.Stage != "needs_review" {
+		t.Fatalf("root status=%+v process=%s", body.Jobs[0].RootStatus, processID)
 	}
 }

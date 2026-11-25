@@ -388,7 +388,7 @@ func acceptsGzip(header string) bool {
 // scheduler; active workflow stages that are waiting for a future retry or a
 // free lane are counted separately as "queued". This distinction prevents a
 // large retry backlog from looking like hundreds of concurrent workers.
-func (a *App) jobCounts() (map[string]int, error) {
+func (a *App) workflowJobsSnapshot() ([]workflow.Job, error) {
 	jobs := []workflow.Job{}
 	var cursor []byte
 	for {
@@ -402,6 +402,14 @@ func (a *App) jobCounts() (map[string]int, error) {
 		}
 		cursor = page.Next
 	}
+	return jobs, nil
+}
+
+func (a *App) jobCounts() (map[string]int, error) {
+	jobs, err := a.workflowJobsSnapshot()
+	if err != nil {
+		return nil, err
+	}
 	active := map[string]bool{}
 	if a.runner != nil {
 		for taskID := range a.runner.Health().Active {
@@ -409,6 +417,103 @@ func (a *App) jobCounts() (map[string]int, error) {
 		}
 	}
 	return classifyJobCounts(jobs, active), nil
+}
+
+// reviewWorkflowJobs returns root records whose durable family contains a
+// needs_review child. The counter already classifies roots this way, so a
+// direct stage filter in the list endpoint made the count and the visible
+// review list disagree.
+func (a *App) reviewWorkflowJobs(after []byte, limit int) ([]jobView, string, error) {
+	if limit < 1 {
+		limit = 100
+	}
+	jobs, err := a.workflowJobsSnapshot()
+	if err != nil {
+		return nil, "", err
+	}
+	roots := map[string]*workflow.Job{}
+	reviews := map[string]workflow.Job{}
+	order := []string{}
+	for i := range jobs {
+		job := &jobs[i]
+		root := job.RootID
+		if root == "" {
+			root = job.ID
+		}
+		if _, ok := roots[root]; !ok {
+			roots[root] = nil
+			order = append(order, root)
+		}
+		if job.ID == root {
+			roots[root] = job
+		}
+		if job.Stage == "needs_review" {
+			if current, ok := reviews[root]; !ok || job.UpdatedNS >= current.UpdatedNS {
+				reviews[root] = *job
+			}
+		}
+	}
+	out := make([]jobView, 0, limit)
+	next := ""
+	for _, root := range order {
+		review, ok := reviews[root]
+		if !ok {
+			continue
+		}
+		rootJob := roots[root]
+		if rootJob == nil {
+			rootJob = &review
+		}
+		cursor := workflow.ListCursor(*rootJob)
+		if len(after) > 0 && bytes.Compare(cursor, after) <= 0 {
+			continue
+		}
+		family, err := a.flows.Family(root)
+		if err != nil {
+			return nil, "", err
+		}
+		familyViews := make([]jobView, 0, len(family))
+		for _, job := range family {
+			entry := a.publicJobWithResult(job)
+			entry.AIReviewEligible = a.aiReviewEligible(job)
+			if task, taskErr := a.tasks.Get(job.ActiveTaskID); taskErr == nil && task != nil {
+				entry.ExecutionState = task.State
+			}
+			familyViews = append(familyViews, entry)
+		}
+		familyViews = presentJobs(familyViews)
+		published, publishErr := audiorelease.PublishedRoots(a.engine, []string{root})
+		if publishErr != nil {
+			return nil, "", publishErr
+		}
+		familyViews = markReleased(familyViews, published)
+		summary := summarizeRootJobs(familyViews)
+		entry := a.publicJobWithResult(*rootJob)
+		entry.RootStatus = &summary
+		entry.Stage = summary.Stage
+		entry.ExecutionState = summary.ExecutionState
+		entry.Progress = summary.Progress
+		entry.Headline = summary.Headline
+		entry.Message = summary.Message
+		entry.ReviewKind = summary.ReviewKind
+		entry.ErrorClass = summary.ErrorClass
+		entry.Paused = summary.Paused
+		entry.CancelRequested = summary.CancelRequested
+		entry.Downloaded = summary.Downloaded
+		entry.LibraryPublished = summary.LibraryPublished
+		if summary.Result != nil {
+			entry.Result = summary.Result
+		}
+		for _, member := range familyViews {
+			entry.AIReviewEligible = entry.AIReviewEligible || member.AIReviewEligible
+		}
+		out = append(out, entry)
+		if len(out) >= limit {
+			next = base64.RawURLEncoding.EncodeToString(workflow.ListCursor(*rootJob))
+			break
+		}
+	}
+	return out, next, nil
 }
 
 type rootJobState uint8
@@ -560,6 +665,28 @@ func (a *App) jobs(w http.ResponseWriter, r *http.Request) {
 
 	collected := make([]workflow.Job, 0, 100)
 	next := ""
+	if reviewOnly {
+		jobs, next, err := a.reviewWorkflowJobs(after, 100)
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "code": "JOBS_UNAVAILABLE"})
+			return
+		}
+		activeCount := 0
+		if a.runner != nil {
+			activeCount = len(a.runner.Health().Active)
+		}
+		downloaded, published := false, false
+		for _, job := range jobs {
+			downloaded = downloaded || job.Downloaded
+			published = published || job.LibraryPublished
+		}
+		writeJSON(w, http.StatusOK, map[string]any{
+			"ok": true, "jobs": jobs, "next": next, "counts": counts, "active_count": activeCount,
+			"pipeline_paused": a.pipelinePaused(), "auto_review": a.autoReviewHealth(),
+			"downloaded": downloaded, "library_published": published, "production_verified": false, "python": false,
+		})
+		return
+	}
 	if liveOnly && !reviewOnly && !rootsOnly {
 		live, err := a.liveWorkflowJobs(100)
 		if err != nil {

@@ -293,6 +293,35 @@ func TestEnqueueGroupsRowsByAlbum(t *testing.T) {
 	}
 }
 
+func TestEnqueueCompletesMissingTargetAlbumWhenRecordingExistsElsewhere(t *testing.T) {
+	application := newApp(t)
+	library := t.TempDir()
+	indexPlaylistTestFile(t, application, library,
+		"Compilation/Artist A - Song One.flac",
+		"Artist A", "Compilation", "Song One")
+	application.invalidatePlaylistLibraryCache()
+	index := application.playlistLibrary()
+	if !index.hasTrack("Artist A", "Compilation", "Song One") {
+		t.Fatal("test recording was not indexed")
+	}
+	if index.hasAlbum("Artist A", "Single Album") || !index.needsAlbumCompletion("Artist A", "Single Album", "Song One") {
+		t.Fatal("the absent target album was reported complete")
+	}
+	catalog := httptest.NewServer(http.NotFoundHandler())
+	defer catalog.Close()
+	report, err := application.enqueuePlaylistTracks(context.Background(), "pl-album-elsewhere",
+		[]playlistTrack{{
+			Artist: "Artist A", Album: "Single Album", Title: "Song One",
+			NeteaseSongID: 12, NeteaseAlbumID: 34,
+		}}, []int{0}, playlistEnqueueOptions{AlbumCompletion: true, CatalogBaseURL: catalog.URL})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(report.Created) != 1 || report.Albums != 1 || len(report.Skipped) != 0 {
+		t.Fatalf("a recording in another release suppressed its missing target album: %+v", report)
+	}
+}
+
 func TestHotSlowCompilationAlbumsFoldToSingleTitleAndArtist(t *testing.T) {
 	for _, input := range []string{"最新热歌慢摇19", "最新热歌慢摇 101", "最新热歌慢摇１１４", "最新热歌慢摇"} {
 		plan := SearchPlan{ExpectedTitle: input}

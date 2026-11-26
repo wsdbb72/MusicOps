@@ -40,3 +40,20 @@ func TestSubscriptionMissingAlbumIdentityDoesNotMixTracks(t *testing.T) {
 		t.Fatalf("unknown artist and no album id shared a group: %q", firstKey)
 	}
 }
+
+func TestSubscriptionRequiresTargetAlbumCompletionWhenTrackExistsElsewhere(t *testing.T) {
+	application := newApp(t)
+	library := t.TempDir()
+	indexPlaylistTestFile(t, application, library,
+		"Compilation/Artist A - Song One.flac",
+		"Artist A", "Compilation", "Song One")
+	application.invalidatePlaylistLibraryCache()
+	index := application.playlistLibrary()
+	track := playlistTrack{Artist: "Artist A", Album: "Single Album", Title: "Song One", Duration: "200", NeteaseSongID: 12}
+	if !index.hasPlaylistRow(track) {
+		t.Fatal("test recording is not present in the compilation")
+	}
+	if !playlistTrackNeedsSubscription(index, track) {
+		t.Fatal("a recording in another release hid the missing target album from the subscription")
+	}
+}

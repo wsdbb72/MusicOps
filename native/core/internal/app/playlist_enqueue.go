@@ -1200,6 +1200,51 @@ func (index *playlistLibraryIndex) commitPresenceSnapshots() {
 	}
 }
 
+// hasAlbum reports whether the requested album already exists as a verified
+// library release. hasAlbumGap alone cannot answer this: it is false both for
+// a complete album and for an album that is entirely absent. Album completion
+// must distinguish those states so a recording that happens to exist in a
+// compilation does not suppress the requested album.
+func (index playlistLibraryIndex) hasAlbum(artist, album string) bool {
+	artist, album = strings.TrimSpace(artist), strings.TrimSpace(album)
+	if artist == "" || album == "" {
+		return false
+	}
+	key := [2]string{libraryPathKey(artist), libraryPathKey(album)}
+	for _, id := range index.albums[key] {
+		if index.isUnchanged(id) {
+			return true
+		}
+	}
+	// Embedded tags and sanitized filesystem names can still identify an album
+	// even when the path components do not form the normal artist/album pair.
+	for _, id := range index.albumMembers[playlistMatchKey(album)] {
+		if !index.isUnchanged(id) {
+			continue
+		}
+		path, found, err := audiorelease.PathFor(index.engine, id)
+		if err != nil || !found {
+			continue
+		}
+		artists, albumTag, _ := index.trackTags(path)
+		if !playlistAlbumTagMatches(album, albumTag) {
+			continue
+		}
+		pathArtist, _, _ := trackPathOf(path)
+		if playlistArtistTagMatches(artist, artists) || playlistArtistFallbackMatches(artist, pathArtist) {
+			return true
+		}
+	}
+	return false
+}
+
+func (index playlistLibraryIndex) needsAlbumCompletion(artist, album, title string) bool {
+	if !index.hasTrack(artist, album, title) {
+		return true
+	}
+	return index.hasAlbum(artist, album) && index.hasAlbumGap(artist, album)
+}
+
 // Only an explicit total in a local file is evidence that a folder has gaps.
 func (index playlistLibraryIndex) hasAlbumGap(artist, album string) bool {
 	key := [2]string{libraryPathKey(artist), libraryPathKey(album)}
@@ -1289,7 +1334,11 @@ func (a *App) enqueuePlaylistTracks(ctx context.Context, playlistJobID string, r
 		report.Tracks++
 		album := normalizePlaylistAlbumTitle(row.Album)
 		albumCompletion := opts.AlbumCompletion && album != "" && !isHotSlowCompilationAlbum(album)
-		if present[index] && (!albumCompletion || !library.hasAlbumGap(artist, album)) {
+		// A recording can already exist in a compilation or another release
+		// while the playlist's target album is missing. Album completion is a
+		// separate requirement: only skip the row when that target album is
+		// present and has no known missing tracks.
+		if present[index] && (!albumCompletion || !library.needsAlbumCompletion(artist, album, title)) {
 			report.Skipped = append(report.Skipped, artist+" - "+title)
 			continue
 		}
@@ -1576,13 +1625,17 @@ func (a *App) playlistTracksView(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	type rowView struct {
-		Index   int    `json:"index"`
-		Artist  string `json:"artist"`
-		Title   string `json:"title"`
-		Album   string `json:"album,omitempty"`
-		Present bool   `json:"present"`
+		Index                 int    `json:"index"`
+		Artist                string `json:"artist"`
+		Title                 string `json:"title"`
+		Album                 string `json:"album,omitempty"`
+		Present               bool   `json:"present"`
+		AlbumPresent          bool   `json:"album_present"`
+		AlbumIncomplete       bool   `json:"album_incomplete"`
+		AlbumCompletionNeeded bool   `json:"album_completion_needed"`
 	}
 	out := make([]rowView, 0, len(rows))
+	library := a.playlistLibrary()
 	present, presenceErr := a.playlistPresence(r.Context(), rows)
 	if presenceErr != nil {
 		if r.Context().Err() == nil {
@@ -1591,7 +1644,17 @@ func (a *App) playlistTracksView(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	for i, row := range rows {
-		out = append(out, rowView{Index: i, Artist: row.Artist, Title: row.Title, Album: row.Album, Present: present[i]})
+		albumPresent, albumIncomplete, completionNeeded := true, false, !present[i]
+		album := normalizePlaylistAlbumTitle(row.Album)
+		if album != "" && !isHotSlowCompilationAlbum(album) {
+			albumPresent = library.hasAlbum(row.Artist, album) || library.hasTrack(row.Artist, album, row.Title)
+			albumIncomplete = albumPresent && library.hasAlbumGap(row.Artist, album)
+			completionNeeded = library.needsAlbumCompletion(row.Artist, album, row.Title)
+		}
+		out = append(out, rowView{
+			Index: i, Artist: row.Artist, Title: row.Title, Album: row.Album, Present: present[i],
+			AlbumPresent: albumPresent, AlbumIncomplete: albumIncomplete, AlbumCompletionNeeded: completionNeeded,
+		})
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "name": name, "tracks": out, "total": len(out)})
 }

@@ -382,7 +382,7 @@ func (a *App) runSubscriptionCheck(playlistID string, manual bool) (map[string]a
 	newTracks, missingTracks := 0, 0
 	for _, track := range tracks {
 		key := trackKey(track)
-		if library.hasPlaylistRow(track) {
+		if !playlistTrackNeedsSubscription(library, track) {
 			delete(row.RetryMissing, key)
 			continue
 		}
@@ -458,6 +458,14 @@ func (a *App) runSubscriptionCheck(playlistID string, manual bool) (map[string]a
 		"preserved": preservedFromLocal, "truncated": remoteTruncated, "preview": remotePreview,
 		"remote_track_count": remoteTrackCount, "local_track_count": len(tracks), "message": row.LastResult,
 	}, nil
+}
+
+func playlistTrackNeedsSubscription(library playlistLibraryIndex, track playlistTrack) bool {
+	if !library.hasPlaylistRow(track) {
+		return true
+	}
+	album := normalizePlaylistAlbumTitle(track.Album)
+	return library.needsAlbumCompletion(track.Artist, album, track.Title)
 }
 
 func (a *App) queueSubscriptionAlbum(jobID, playlistID, album string, tracks []playlistTrack) error {

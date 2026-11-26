@@ -1393,6 +1393,9 @@ const appJS = `(function () {
   }
   // A playlist is a list; the album is the unit the pipeline works in, so the
   // server groups the selection by album and skips what the library has.
+  function playlistNeedsWork(row) {
+    return typeof row.album_completion_needed === "boolean" ? row.album_completion_needed : !row.present;
+  }
   async function showPlaylistTracks(jobID) {
     var box = document.getElementById("playlist-pick");
     if (!box) return;
@@ -1404,15 +1407,25 @@ const appJS = `(function () {
     }
     var rows = body.tracks || [];
     var present = rows.filter(function (row) { return row.present; }).length;
-    var html = '<p class="meta">' + escapeText(body.name || "") + "：共 " + rows.length + " 首，库里已有 " + present + " 首（标「已有」的不会重复下载）。" +
+    var needsWork = rows.filter(playlistNeedsWork).length;
+    var missingAlbums = rows.filter(function (row) { return row.present && row.album_completion_needed && !row.album_present; }).length;
+    var incompleteAlbums = rows.filter(function (row) { return row.present && row.album_incomplete; }).length;
+    var html = '<p class="meta">' + escapeText(body.name || "") + "：共 " + rows.length + " 首，曲目已在库 " + present + " 首；按目标专辑补全仍需处理 " + needsWork + " 首" +
+      (missingAlbums || incompleteAlbums ? "（目标专辑缺失 " + missingAlbums + "，目标专辑缺轨 " + incompleteAlbums + "）" : "") + "。" +
       (rows.length > 500 ? " 列表只列出前 500 首，整张入库请用「全部入库」。" : "") + "</p>" +
       '<p><button type="button" id="pick-all">全选</button> <button type="button" id="pick-none">全不选</button> <button type="button" id="pick-apply" class="primary">入库选中</button></p>' +
       '<div class="pick-list">';
     rows.slice(0, 500).forEach(function (row) {
-      html += '<label class="pick-row"><input type="checkbox" data-pick="' + row.index + '"' + (row.present ? "" : " checked") + "> " +
+      var needs = playlistNeedsWork(row);
+      var state = "";
+      if (row.present && row.album_incomplete) state = ' <span class="meta">曲目已有，目标专辑缺轨</span>';
+      else if (row.present && needs && !row.album_present) state = ' <span class="meta">曲目已有，目标专辑待补全</span>';
+      else if (row.present) state = ' <span class="meta">已有</span>';
+      else state = ' <span class="meta">待入库</span>';
+      html += '<label class="pick-row"><input type="checkbox" data-pick="' + row.index + '"' + (needs ? " checked" : "") + "> " +
         escapeText(row.artist || "") + " - " + escapeText(row.title || "") +
         (row.album ? ' <span class="meta">' + escapeText(row.album) + "</span>" : "") +
-        (row.present ? ' <span class="meta">已有</span>' : "") + "</label>";
+        state + "</label>";
     });
     box.innerHTML = html + "</div>";
     var setAll = function (checked) { box.querySelectorAll("input[data-pick]").forEach(function (input) { input.checked = checked; }); };

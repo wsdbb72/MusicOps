@@ -376,8 +376,11 @@ func TestDuplicateMergeAndRestoreRoundTrip(t *testing.T) {
 	}
 	// Restore brings the loser back byte-identical, with its sidecar.
 	code, decoded = mediaPost(t, application, "/v1/library/duplicates/restore", map[string]any{"merge_id": mergeID})
-	if code != http.StatusOK {
+	if code != http.StatusOK || decoded["records_recovered"] != float64(1) {
 		t.Fatal(code, decoded)
+	}
+	if _, err := audiorelease.Verify(application.engine, loser.RequestID); err != nil {
+		t.Fatal("restored loser release record did not verify", err)
 	}
 	restored, err := os.ReadFile(loserPath)
 	if err != nil {

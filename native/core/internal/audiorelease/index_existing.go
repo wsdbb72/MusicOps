@@ -68,17 +68,19 @@ func IndexExisting(engine *dataengine.Engine, item Existing) (bool, error) {
 		}
 	} else {
 		file, err := os.Open(item.Path)
-		if err == nil {
-			hash := sha256.New()
-			_, copyErr := io.Copy(hash, file)
-			_ = file.Close()
-			if copyErr != nil {
-				return false, copyErr
-			}
-			sum = hex.EncodeToString(hash.Sum(nil))
-		} else if !os.IsNotExist(err) {
+		if err != nil {
 			return false, err
 		}
+		hash := sha256.New()
+		_, copyErr := io.Copy(hash, file)
+		closeErr := file.Close()
+		if copyErr != nil {
+			return false, copyErr
+		}
+		if closeErr != nil {
+			return false, closeErr
+		}
+		sum = hex.EncodeToString(hash.Sum(nil))
 	}
 	rec := record{
 		RequestID: item.RequestID, RootID: item.RootID, Path: item.Path, SHA256: sum,
@@ -98,6 +100,20 @@ func IndexExisting(engine *dataengine.Engine, item Existing) (bool, error) {
 		ok, err := indexRecordAt(engine, item.RequestID, item.Path, key, encoded)
 		if err != nil || ok {
 			return ok, err
+		}
+		// A verified or metadata row may already cover this exact path under
+		// another request id. Adding a second row for the same file would make
+		// the duplicate scanner see the file as its own duplicate.
+		if mapping, found, readErr := readRaw(engine, key); readErr != nil {
+			return false, readErr
+		} else if found {
+			var current record
+			if json.Unmarshal(mapping, &current) != nil {
+				return false, ErrConflict
+			}
+			if current.Path == item.Path {
+				return false, nil
+			}
 		}
 		if _, found, err := readRelease(engine, item.RequestID); err != nil || found {
 			return false, err
@@ -172,6 +188,11 @@ func indexRecordAt(engine *dataengine.Engine, requestID, path string, key, encod
 		// version replacement. Two unnumbered files in one folder share a
 		// track number but are separate recordings and must keep separate keys.
 		if !sameLogicalStem(current.Path, path) {
+			return false, nil
+		}
+		// A verified digest is a durable publish receipt, not disposable
+		// metadata. Only wav-convert index rows may yield their slot.
+		if current.SHA256 != "" && current.SourceName != "wav-convert" {
 			return false, nil
 		}
 		if current.IndexedStat == nil && current.SourceName != "wav-convert" {
@@ -501,6 +522,11 @@ func pruneMissingIndexed(engine *dataengine.Engine, root string, isPresent func(
 			for _, item := range page.Items {
 				var rec record
 				if json.Unmarshal(item.Value, &rec) != nil || rec.RequestID == "" {
+					continue
+				}
+				// Verified releases keep their missing path and history; only
+				// metadata rows or replaceable wav-convert rows are pruned.
+				if rec.SHA256 != "" && rec.SourceName != "wav-convert" {
 					continue
 				}
 				if rec.IndexedStat == nil && rec.SourceName != "wav-convert" {

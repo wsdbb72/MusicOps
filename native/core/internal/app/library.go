@@ -54,6 +54,8 @@ import (
 // duplicateFile is one library file inside a duplicate group.
 type duplicateFile struct {
 	RequestID      string  `json:"request_id"`
+	RootID         string  `json:"root_id,omitempty"`
+	Track          int     `json:"track,omitempty"`
 	File           string  `json:"file"`
 	Format         string  `json:"format"`
 	Codec          string  `json:"codec"`
@@ -72,6 +74,8 @@ type duplicateFile struct {
 	// LibraryDir is the absolute library root the file was published
 	// under, empty for records written before it was stored.
 	LibraryDir   string   `json:"library_dir,omitempty"`
+	Origin       string   `json:"origin,omitempty"`
+	SourceName   string   `json:"source_name,omitempty"`
 	PlaylistKeys []string `json:"playlist_keys,omitempty"`
 }
 
@@ -494,10 +498,11 @@ func (a *App) fingerprintDuplicateFile(ctx context.Context, entry audiorelease.E
 	}
 	audioInfo, probeErr := probeDuplicateAudio(ctx, full, entry.Format)
 	file := duplicateFile{
-		RequestID: entry.RequestID, File: entry.File, Format: strings.ToLower(entry.Format),
+		RequestID: entry.RequestID, RootID: entry.RootID, Track: entry.Track, File: entry.File, Format: strings.ToLower(entry.Format),
 		Codec: audioInfo.Codec, SHA256: fileSHA, SampleRate: audioInfo.SampleRate, Channels: audioInfo.Channels,
 		BitsPerSample: audioInfo.BitsPerSample, BitRate: audioInfo.BitRate, Duration: audioInfo.Duration,
 		Lossless: losslessAudioCodec(audioInfo.Codec), LibraryDir: entry.LibraryDir, TorrentManaged: entry.TorrentManaged,
+		Origin: entry.Origin, SourceName: entry.SourceName,
 	}
 	if strings.EqualFold(file.Format, "flac") {
 		if tags, err := readFLACTagsPrefix(full); err == nil && isLossyFLACProvenance(firstTagValue(tags.Raw, "COMMENT")) {
@@ -536,12 +541,13 @@ func (a *App) fingerprintDuplicateFile(ctx context.Context, entry audiorelease.E
 
 func duplicateFileFromFingerprint(entry audiorelease.Entry, fingerprint cachedDuplicateFingerprint) duplicateFile {
 	return duplicateFile{
-		RequestID: entry.RequestID, File: entry.File, Format: strings.ToLower(entry.Format),
+		RequestID: entry.RequestID, RootID: entry.RootID, Track: entry.Track, File: entry.File, Format: strings.ToLower(entry.Format),
 		Codec: fingerprint.Codec, SHA256: fingerprint.FileSHA256, PCMSHA256: fingerprint.PCMSHA256,
 		SampleRate: fingerprint.SampleRate, Channels: fingerprint.Channels,
 		BitsPerSample: fingerprint.BitsPerSample, BitRate: fingerprint.BitRate,
 		Duration: fingerprint.Duration, Lossless: fingerprint.Lossless, Valid: fingerprint.Valid,
 		ProbeError: fingerprint.ProbeError, LibraryDir: entry.LibraryDir, TorrentManaged: entry.TorrentManaged,
+		Origin: entry.Origin, SourceName: entry.SourceName,
 	}
 }
 
@@ -742,6 +748,11 @@ type mergeReceipt struct {
 // mergeMove is one quarantined file (audio or its sidecar).
 type mergeMove struct {
 	RequestID  string `json:"request_id,omitempty"`
+	RootID     string `json:"root_id,omitempty"`
+	Track      int    `json:"track,omitempty"`
+	Format     string `json:"format,omitempty"`
+	Origin     string `json:"origin,omitempty"`
+	SourceName string `json:"source_name,omitempty"`
 	From       string `json:"from"`
 	Quarantine string `json:"quarantine"`
 	SHA256     string `json:"sha256"`
@@ -1211,7 +1222,7 @@ func (a *App) quarantineFile(receipt *mergeReceipt, file duplicateFile, quaranti
 		return err
 	}
 	movedAudio = true
-	receipt.Moved = append(receipt.Moved, mergeMove{RequestID: file.RequestID, From: from, Quarantine: dest, SHA256: file.SHA256})
+	receipt.Moved = append(receipt.Moved, mergeMove{RequestID: file.RequestID, RootID: file.RootID, Track: file.Track, Format: file.Format, Origin: file.Origin, SourceName: file.SourceName, From: from, Quarantine: dest, SHA256: file.SHA256})
 	// The sidecar travels with its audio file; a missing sidecar is fine.
 	// Both spellings are moved: the standard "<track>.lrc" this build writes
 	// and the older "<track>.flac.lrc" an earlier build left behind.
@@ -1378,7 +1389,15 @@ func (a *App) duplicateRestore(w http.ResponseWriter, r *http.Request) {
 	}
 	if receipt.Restored {
 		a.invalidatePlaylistLibraryCache()
-		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "replayed": true, "merge_id": receipt.MergeID, "restored": receipt.Moved})
+		recovered, recoveryErrors := a.recoverRestoredMergeRecords(receipt.Moved)
+		if len(recoveryErrors) > 0 {
+			writeJSON(w, http.StatusServiceUnavailable, map[string]any{
+				"ok": false, "replayed": true, "merge_id": receipt.MergeID,
+				"restored": receipt.Moved, "records_recovered": recovered, "recovery_errors": recoveryErrors,
+			})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "replayed": true, "merge_id": receipt.MergeID, "restored": receipt.Moved, "records_recovered": recovered})
 		return
 	}
 	// Verify every quarantined file first; restore nothing until all check out.
@@ -1446,7 +1465,48 @@ func (a *App) duplicateRestore(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	a.invalidatePlaylistLibraryCache()
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "merge_id": receipt.MergeID, "restored": restored})
+	recovered, recoveryErrors := a.recoverRestoredMergeRecords(restored)
+	if len(recoveryErrors) > 0 {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{
+			"ok": false, "merge_id": receipt.MergeID, "restored": restored,
+			"records_recovered": recovered, "recovery_errors": recoveryErrors,
+		})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "merge_id": receipt.MergeID, "restored": restored, "records_recovered": recovered})
+}
+
+// recoverRestoredMergeRecords restores the catalogue identity carried by a
+// merge receipt after its files return to the library. It never synthesizes an
+// identity for legacy receipts; the publish verifier can still recover those
+// from its own deterministic receipt when the task is retried.
+func (a *App) recoverRestoredMergeRecords(moves []mergeMove) (int, []string) {
+	library := a.libraryDir()
+	recovered := 0
+	seen := map[string]bool{}
+	errorsOut := []string{}
+	decoder := audiorelease.SystemDecoder()
+	for _, move := range moves {
+		if move.Sidecar || move.RequestID == "" || move.RootID == "" || move.Track < 1 || move.Track > 999 || seen[move.RequestID] {
+			continue
+		}
+		seen[move.RequestID] = true
+		if !insideDir(library, move.From) {
+			errorsOut = append(errorsOut, move.RequestID+"：恢复文件不在音乐库内")
+			continue
+		}
+		_, err := audiorelease.RecoverPublished(context.Background(), a.engine, audiorelease.RecoverInput{
+			RequestID: move.RequestID, RootID: move.RootID, Track: move.Track,
+			SHA256: move.SHA256, Format: move.Format, Origin: move.Origin,
+			SourceName: move.SourceName, Library: library, Decoder: decoder,
+		})
+		if err != nil {
+			errorsOut = append(errorsOut, move.RequestID+"："+scrub(err.Error()))
+			continue
+		}
+		recovered++
+	}
+	return recovered, errorsOut
 }
 
 // ---------------------------------------------------------------------------

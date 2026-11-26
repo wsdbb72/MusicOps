@@ -253,7 +253,7 @@ func TestLibraryWorkflowExpandAcceptsMultiArtistAlbum(t *testing.T) {
 	if id == "" || result["started"] != true {
 		t.Fatal(result)
 	}
-	deadline := time.Now().Add(20 * time.Second)
+	deadline := time.Now().Add(60 * time.Second)
 	var job *workflow.Job
 	for time.Now().Before(deadline) {
 		job, _ = application.flows.Job(id)

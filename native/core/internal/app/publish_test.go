@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/wsdbb72/MusicOps/native/core/internal/audiorelease"
+	"github.com/wsdbb72/MusicOps/native/core/internal/dataengine"
 )
 
 func startSearchJob(t *testing.T, application *App, jobID string) {
@@ -228,5 +229,60 @@ func TestPublishReceiptRequestIDIncludesMissingTracks(t *testing.T) {
 	}
 	if complete == firstMissing || firstMissing == secondMissing {
 		t.Fatalf("request ids did not include missing tracks: %q %q %q", complete, firstMissing, secondMissing)
+	}
+}
+
+func TestPublishRecoversPrunedRecordAfterFileRestore(t *testing.T) {
+	application := newApp(t)
+	startSearchJob(t, application, "pub-recover")
+	ingested := ingestTrack(t, application, "pub-recover", 1, 96)
+	path, found, err := audiorelease.PathFor(application.engine, ingested.RequestID)
+	if err != nil || !found {
+		t.Fatal(path, found, err)
+	}
+	// Reproduce the legacy damaged state directly: the file still exists,
+	// but both catalogue keys were removed by the old index-prune bug.
+	for _, key := range []string{
+		"library/audio/" + ingested.RequestID,
+		"library/album-audio/" + ingested.RootID + "/1",
+	} {
+		var raw []byte
+		if err := application.engine.View(func(v *dataengine.View) error {
+			value, ok, err := v.Get([]byte(key))
+			if err == nil && ok {
+				raw = append([]byte(nil), value...)
+			}
+			return err
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if len(raw) == 0 {
+			t.Fatalf("catalogue key missing before simulation: %s", key)
+		}
+		ok, err := application.engine.CompareAndSwap(
+			[]dataengine.Condition{{Key: []byte(key), Value: raw}},
+			[]dataengine.Mutation{{Key: []byte(key), Delete: true}},
+		)
+		if err != nil || !ok {
+			t.Fatal(ok, err)
+		}
+	}
+	if _, found, err := audiorelease.PathFor(application.engine, ingested.RequestID); err != nil || found {
+		t.Fatal("legacy damaged receipt was not removed", found, err)
+	}
+	posted := postCode(t, application, "/v1/audio/publish", map[string]any{
+		"job_id": "pub-recover",
+		"receipts": []map[string]any{{
+			"track_id": "1", "request_id": ingested.RequestID, "sha256": ingested.SHA256,
+			"format": ingested.Format, "origin": ingested.Origin, "source_name": ingested.SourceName,
+			"decode_state": ingested.DecodeState,
+		}},
+	})
+	if posted.Code != http.StatusOK {
+		t.Fatal(posted.Code, posted.Body.String())
+	}
+	waitJob(t, application, "pub-recover", "completed")
+	if _, err := audiorelease.Verify(application.engine, ingested.RequestID); err != nil {
+		t.Fatal("recovered receipt did not verify", err)
 	}
 }

@@ -1,6 +1,7 @@
 package audiorelease
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -230,5 +231,112 @@ func TestAPEToWAVConversionReplacesTheSameLogicalTrack(t *testing.T) {
 	entries, err := ListIndexed(engine)
 	if err != nil || len(entries) != 1 || entries[0].RequestID != "lib-wav-result" || entries[0].Format != "wav" {
 		t.Fatal(entries, err)
+	}
+}
+
+func TestPruneMissingIndexedKeepsVerifiedReleaseReceipt(t *testing.T) {
+	engine, incoming, library := openRelease(t)
+	writeSource(t, incoming, "song.wav", wav(104))
+	released, err := Release(context.Background(), engine, sample(incoming, library, "song.wav"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	path, found, err := PathFor(engine, released.RequestID)
+	if err != nil || !found {
+		t.Fatal(path, found, err)
+	}
+	hold := filepath.Join(t.TempDir(), "song.wav")
+	if err := os.Rename(path, hold); err != nil {
+		t.Fatal(err)
+	}
+	pruned, err := PruneMissingIndexed(engine, library)
+	if err != nil || pruned != 0 {
+		t.Fatalf("verified release was pruned: pruned=%d err=%v", pruned, err)
+	}
+	if _, found, err := PathFor(engine, released.RequestID); err != nil || !found {
+		t.Fatal("verified receipt disappeared", found, err)
+	}
+	if _, err := Verify(engine, released.RequestID); err == nil {
+		t.Fatal("missing verified file was reported as present")
+	}
+	if err := os.Rename(hold, path); err != nil {
+		t.Fatal(err)
+	}
+	recovered, err := RecoverPublished(context.Background(), engine, RecoverInput{
+		RequestID: released.RequestID, RootID: released.RootID, Track: 1,
+		SHA256: released.SHA256, Format: released.Format, Origin: released.Origin,
+		SourceName: released.SourceName, Library: library,
+	})
+	if err != nil || recovered.SHA256 != released.SHA256 {
+		t.Fatal(recovered, err)
+	}
+}
+
+func TestMetadataIndexDoesNotOverwriteVerifiedRelease(t *testing.T) {
+	engine, incoming, library := openRelease(t)
+	writeSource(t, incoming, "song.wav", wav(112))
+	released, err := Release(context.Background(), engine, sample(incoming, library, "song.wav"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	metadataPath := filepath.Join(library, "Artist", "Album", "01 Title.mp3")
+	if err := os.WriteFile(metadataPath, []byte("metadata"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	added, err := IndexExisting(engine, Existing{
+		RequestID: "lib-metadata-protect", RootID: released.RootID, Track: 1,
+		Path: metadataPath, Library: library, Format: "mp3", SourceName: "reindex", MetadataOnly: true,
+	})
+	if err != nil || !added {
+		t.Fatal(added, err)
+	}
+	if _, err := Verify(engine, released.RequestID); err != nil {
+		t.Fatal("metadata index displaced verified release", err)
+	}
+}
+
+func TestMetadataIndexDoesNotDuplicateVerifiedPhysicalPath(t *testing.T) {
+	engine, incoming, library := openRelease(t)
+	writeSource(t, incoming, "song.wav", wav(128))
+	released, err := Release(context.Background(), engine, sample(incoming, library, "song.wav"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	path, found, err := PathFor(engine, released.RequestID)
+	if err != nil || !found {
+		t.Fatal(path, found, err)
+	}
+	added, err := IndexExisting(engine, Existing{
+		RequestID: "lib-same-path", RootID: released.RootID, Track: 1,
+		Path: path, Library: library, Format: released.Format, SourceName: "reindex", MetadataOnly: true,
+	})
+	if err != nil || added {
+		t.Fatalf("same physical path was added twice: added=%v err=%v", added, err)
+	}
+	entries, err := ListIndexed(engine)
+	if err != nil || len(entries) != 1 || entries[0].RequestID != released.RequestID {
+		t.Fatal(entries, err)
+	}
+	if _, err := Verify(engine, released.RequestID); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestIndexExistingRejectsMissingNonMetadataFile(t *testing.T) {
+	engine, err := dataengine.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer engine.Close()
+	library := t.TempDir()
+	missing := filepath.Join(library, "missing.flac")
+	if _, err := IndexExisting(engine, Existing{
+		RequestID: "lib-missing", RootID: "root-missing", Track: 1,
+		Path: missing, Library: library, Format: "flac",
+	}); !os.IsNotExist(err) {
+		t.Fatalf("missing file error = %v", err)
+	}
+	if _, found, err := PathFor(engine, "lib-missing"); err != nil || found {
+		t.Fatal("missing file was indexed", found, err)
 	}
 }

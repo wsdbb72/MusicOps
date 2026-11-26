@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -1007,5 +1008,135 @@ func TestFolderArtistCanGroupCompilationTracks(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(library, "Artist", "最新热歌慢摇")); !os.IsNotExist(err) {
 		t.Fatal("track artist folder was used instead of the compilation artist")
+	}
+}
+
+func TestRecoverPublishedAdoptsMovedFileAndReplays(t *testing.T) {
+	engine, _, library := openRelease(t)
+	path := filepath.Join(library, "Artist", "Album", "01 Title.wav")
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, wav(72), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	sum := sha256.Sum256(wav(72))
+	digest := hex.EncodeToString(sum[:])
+	input := RecoverInput{
+		RequestID: "recover-1", RootID: "root-recover", Track: 1,
+		SHA256: digest, Format: "wav", Origin: "local_import", SourceName: filepath.Base(path), Library: library,
+	}
+	got, err := RecoverPublished(context.Background(), engine, input)
+	if err != nil || !got.Verified || !got.LibraryPublished || got.SHA256 != digest || got.Replayed {
+		t.Fatal(got, err)
+	}
+	if _, err := Verify(engine, input.RequestID); err != nil {
+		t.Fatal(err)
+	}
+	again, err := RecoverPublished(context.Background(), engine, input)
+	if err != nil || again.Replayed || again.SHA256 != digest {
+		t.Fatal(again, err)
+	}
+}
+
+func TestRecoverPublishedRejectsAmbiguousOrMismatchedFiles(t *testing.T) {
+	engine, _, library := openRelease(t)
+	body := wav(80)
+	sum := sha256.Sum256(body)
+	digest := hex.EncodeToString(sum[:])
+	for _, folder := range []string{"Artist/One", "Artist/Two"} {
+		path := filepath.Join(library, filepath.FromSlash(folder), "01 Title.wav")
+		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, body, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	input := RecoverInput{
+		RequestID: "recover-ambiguous", RootID: "root-ambiguous", Track: 1,
+		SHA256: digest, Format: "wav", SourceName: "01 Title.wav", Library: library,
+	}
+	if _, err := RecoverPublished(context.Background(), engine, input); !errors.Is(err, ErrConflict) {
+		t.Fatalf("ambiguous recovery error = %v", err)
+	}
+	// A filename hint must not hide a same-digest copy under another name.
+	copyPath := filepath.Join(library, "Artist", "Two", "01 Title.wav")
+	if err := os.Rename(copyPath, filepath.Join(filepath.Dir(copyPath), "99 Copy.wav")); err != nil {
+		t.Fatal(err)
+	}
+	input.SourceName = filepath.Base(filepath.Join(library, "Artist", "One", "01 Title.wav"))
+	if _, err := RecoverPublished(context.Background(), engine, input); !errors.Is(err, ErrConflict) {
+		t.Fatalf("hinted recovery accepted duplicate bytes: %v", err)
+	}
+	if entries, err := List(engine); err != nil || len(entries) != 0 {
+		t.Fatal(entries, err)
+	}
+	input.RequestID, input.RootID, input.SHA256 = "recover-missing", "root-missing", strings.Repeat("0", 64)
+	if _, err := RecoverPublished(context.Background(), engine, input); !errors.Is(err, ErrMissing) {
+		t.Fatalf("mismatched recovery error = %v", err)
+	}
+}
+
+func TestRecoverPublishedRelocatesAStaleSurvivingRecord(t *testing.T) {
+	engine, incoming, library := openRelease(t)
+	writeSource(t, incoming, "song.wav", wav(88))
+	released, err := Release(context.Background(), engine, sample(incoming, library, "song.wav"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldPath, found, err := PathFor(engine, released.RequestID)
+	if err != nil || !found {
+		t.Fatal(oldPath, found, err)
+	}
+	newPath := filepath.Join(library, "Artist", "Album", "01 Title (restored).wav")
+	if err := os.Rename(oldPath, newPath); err != nil {
+		t.Fatal(err)
+	}
+	recovered, err := RecoverPublished(context.Background(), engine, RecoverInput{
+		RequestID: released.RequestID, RootID: released.RootID, Track: 1,
+		SHA256: released.SHA256, Format: released.Format, Origin: released.Origin,
+		SourceName: filepath.Base(newPath), Library: library,
+	})
+	if err != nil || recovered.SHA256 != released.SHA256 {
+		t.Fatal(recovered, err)
+	}
+	path, found, err := PathFor(engine, released.RequestID)
+	if err != nil || !found || path != newPath {
+		t.Fatal(path, found, err)
+	}
+}
+
+func TestRecoverPublishedUsesAlternateSlotWhenMetadataOwnsPrimary(t *testing.T) {
+	engine, _, library := openRelease(t)
+	body := wav(120)
+	target := filepath.Join(library, "Artist", "Album", "01 Title.wav")
+	metadata := filepath.Join(library, "Artist", "Album", "01 Title.mp3")
+	if err := os.MkdirAll(filepath.Dir(target), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(target, body, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(metadata, []byte("metadata"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	root := "root-slot"
+	if added, err := IndexExisting(engine, Existing{
+		RequestID: "lib-primary", RootID: root, Track: 1,
+		Path: metadata, Library: library, Format: "mp3", SourceName: "reindex", MetadataOnly: true,
+	}); err != nil || !added {
+		t.Fatal(added, err)
+	}
+	sum := sha256.Sum256(body)
+	recovered, err := RecoverPublished(context.Background(), engine, RecoverInput{
+		RequestID: "recover-alternate", RootID: root, Track: 1,
+		SHA256: hex.EncodeToString(sum[:]), Format: "wav", SourceName: filepath.Base(target), Library: library,
+	})
+	if err != nil || recovered.SHA256 != hex.EncodeToString(sum[:]) {
+		t.Fatal(recovered, err)
+	}
+	if _, err := Verify(engine, "recover-alternate"); err != nil {
+		t.Fatal("alternate recovered slot did not verify", err)
 	}
 }

@@ -199,6 +199,15 @@ func refreshedRecord(raw []byte, target pathDigest) ([]byte, bool, error) {
 }
 
 func pathKey(path string) string {
+	if absolute, err := filepath.Abs(filepath.Clean(path)); err == nil {
+		path = absolute
+	}
+	// Windows temporary directories and caller-supplied library paths can use
+	// 8.3 aliases or a symlinked parent. Resolve them before comparing so a
+	// normal tag write cannot silently miss every receipt for the same file.
+	if resolved, err := filepath.EvalSymlinks(path); err == nil {
+		path = resolved
+	}
 	path = filepath.Clean(path)
 	if runtime.GOOS == "windows" {
 		return strings.ToLower(path)

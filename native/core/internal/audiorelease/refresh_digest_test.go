@@ -52,6 +52,35 @@ func TestRefreshPathDigestsUpdatesEveryReceiptForOnePath(t *testing.T) {
 	}
 }
 
+func TestRefreshPathDigestsMatchesAliasedLibraryPath(t *testing.T) {
+	engine, _, library := openRelease(t)
+	folder := filepath.Join(library, "Artist", "Album")
+	if err := os.MkdirAll(folder, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	aliasRoot := filepath.Join(filepath.Dir(library), "library-alias")
+	if err := os.Symlink(library, aliasRoot); err != nil {
+		t.Skipf("symlink unavailable: %v", err)
+	}
+	realPath := filepath.Join(folder, "01 Title.wav")
+	if err := os.WriteFile(realPath, wav(16), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	aliasPath := filepath.Join(aliasRoot, "Artist", "Album", "01 Title.wav")
+	if added, err := IndexExisting(engine, Existing{RequestID: "alias-receipt", RootID: "alias-root", Track: 1, Path: aliasPath, Library: library, Format: "wav"}); err != nil || !added {
+		t.Fatalf("index aliased path added=%v err=%v", added, err)
+	}
+	if err := os.WriteFile(realPath, wav(64), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if updated, err := RefreshPathDigests(engine, []string{realPath}); err != nil || updated == 0 {
+		t.Fatalf("updated=%d err=%v", updated, err)
+	}
+	if _, err := Verify(engine, "alias-receipt"); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestRefreshPathDigestsIgnoresUnpublishedFiles(t *testing.T) {
 	engine, incoming, _ := openRelease(t)
 	path := filepath.Join(incoming, "unpublished.wav")

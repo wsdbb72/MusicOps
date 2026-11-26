@@ -165,7 +165,7 @@ func (a *App) scanDuplicatesWithOptions(ctx context.Context, limit int, root str
 	byRecording := map[string][]audiorelease.Entry{}
 	seenPhysicalFiles := map[string]bool{}
 	for _, entry := range entries {
-		if !entry.FilePresent {
+		if !entry.FilePresent || entry.AliasOfRequestID != "" {
 			continue
 		}
 		physical := libraryPathIdentity(a.libraryFilePath(entry.LibraryDir, entry.File))

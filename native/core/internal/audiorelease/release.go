@@ -846,6 +846,9 @@ func VerifyReceipt(engine *dataengine.Engine, requestID, expected, format string
 const maxAliasDepth = 32
 
 func resolveAliasChain(engine *dataengine.Engine, rec record) ([]record, error) {
+	if rec.State != "published" || !rec.Verified || !rec.LibraryPublished {
+		return nil, ErrConflict
+	}
 	chain := []record{rec}
 	seen := map[string]bool{rec.RequestID: true}
 	for rec.AliasOfRequestID != "" {
@@ -949,17 +952,18 @@ func Albums(engine *dataengine.Engine) (map[string]bool, error) {
 
 // Entry is one verified library record, as the operations library view shows it.
 type Entry struct {
-	RequestID      string `json:"request_id"`
-	RootID         string `json:"root_id"`
-	Track          int    `json:"track"`
-	File           string `json:"file"`
-	Format         string `json:"format"`
-	DecodeState    string `json:"decode_state"`
-	SHA256         string `json:"sha256"`
-	Origin         string `json:"origin"`
-	SourceName     string `json:"source_name"`
-	TorrentManaged bool   `json:"torrent_managed,omitempty"`
-	FilePresent    bool   `json:"file_present"`
+	RequestID        string `json:"request_id"`
+	RootID           string `json:"root_id"`
+	Track            int    `json:"track"`
+	File             string `json:"file"`
+	Format           string `json:"format"`
+	DecodeState      string `json:"decode_state"`
+	SHA256           string `json:"sha256"`
+	Origin           string `json:"origin"`
+	SourceName       string `json:"source_name"`
+	AliasOfRequestID string `json:"alias_of_request_id,omitempty"`
+	TorrentManaged   bool   `json:"torrent_managed,omitempty"`
+	FilePresent      bool   `json:"file_present"`
 	// LibraryDir is the absolute library root the file was published
 	// under, empty for records written before it was stored. Library
 	// maintenance resolves File against it.
@@ -1067,7 +1071,8 @@ func list(engine *dataengine.Engine, checkPresence bool) ([]Entry, error) {
 				RequestID: rec.RequestID, RootID: rec.RootID, Track: track,
 				File: libraryFileFor(fileRecord.Path, fileRecord.Library), Format: fileRecord.Format, DecodeState: fileRecord.DecodeState,
 				SHA256: fileRecord.SHA256, Origin: rec.Origin, SourceName: rec.SourceName, TorrentManaged: rec.TorrentManaged,
-				FilePresent: present, LibraryDir: fileRecord.Library, fullPath: fileRecord.Path, metadataChanged: metadataChanged,
+				AliasOfRequestID: rec.AliasOfRequestID,
+				FilePresent:      present, LibraryDir: fileRecord.Library, fullPath: fileRecord.Path, metadataChanged: metadataChanged,
 			}
 			if fileRecord.IndexedStat != nil {
 				entry.indexedSize = fileRecord.IndexedStat.Size

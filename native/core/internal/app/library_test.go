@@ -436,6 +436,72 @@ func TestDuplicateMergeAndRestoreRoundTrip(t *testing.T) {
 	}
 }
 
+func TestDuplicateRemergeUsesCanonicalKeeperAndRestoresAliasChain(t *testing.T) {
+	application := newApp(t)
+	incoming := filepath.Join(application.Dir, "incoming")
+	source := filepath.Join(incoming, "chain-source.wav")
+	writeToneWAV(t, source, 440)
+	writeFLACFromWAV(t, source, filepath.Join(incoming, "chain-keeper.flac"))
+	loser := releaseLibraryFile(t, application, "chain-source.wav", "chain-b", "Artist", "Album", "Song", 1)
+	keeper := releaseLibraryFile(t, application, "chain-keeper.flac", "chain-k", "Artist", "Album", "Song", 1)
+
+	groups := duplicateGroups(t, application)
+	if len(groups) != 1 || groups[0].Keep == nil || groups[0].Keep.RequestID != keeper.RequestID {
+		t.Fatalf("first keeper = %+v", groups)
+	}
+	code, decoded := mediaPost(t, application, "/v1/library/duplicates/merge", map[string]any{"group_id": groups[0].GroupID})
+	if code != http.StatusOK {
+		t.Fatal(code, decoded)
+	}
+	firstMerge, _ := decoded["merge_id"].(string)
+	if firstMerge == "" {
+		t.Fatal(decoded)
+	}
+
+	writeHighResFLAC(t, source, filepath.Join(incoming, "chain-final.flac"))
+	final := releaseLibraryFile(t, application, "chain-final.flac", "chain-l", "Artist", "Album", "Artist - Song", 1)
+	groups = duplicateGroups(t, application)
+	if len(groups) != 1 || groups[0].Keep == nil || groups[0].Keep.RequestID != final.RequestID {
+		t.Fatalf("second keeper = %+v", groups)
+	}
+	code, decoded = mediaPost(t, application, "/v1/library/duplicates/merge", map[string]any{"group_id": groups[0].GroupID})
+	if code != http.StatusOK || decoded["aliases_linked"] != float64(1) {
+		t.Fatal(code, decoded)
+	}
+	secondMerge, _ := decoded["merge_id"].(string)
+	if secondMerge == "" {
+		t.Fatal(decoded)
+	}
+	finalPath, found, err := audiorelease.PathFor(application.engine, keeper.RequestID)
+	if err != nil || !found {
+		t.Fatal(finalPath, found, err)
+	}
+	aliasPath, found, err := audiorelease.PathFor(application.engine, loser.RequestID)
+	if err != nil || !found || aliasPath != finalPath {
+		t.Fatal(aliasPath, finalPath, found, err)
+	}
+	if verified, err := audiorelease.Verify(application.engine, loser.RequestID); err != nil || verified.SHA256 != final.SHA256 {
+		t.Fatal(verified, err)
+	}
+
+	code, decoded = mediaPost(t, application, "/v1/library/duplicates/restore", map[string]any{"merge_id": secondMerge})
+	if code != http.StatusOK {
+		t.Fatal(code, decoded)
+	}
+	restoredMiddle, found, err := audiorelease.PathFor(application.engine, loser.RequestID)
+	if err != nil || !found || restoredMiddle == finalPath {
+		t.Fatal(restoredMiddle, found, err)
+	}
+	code, decoded = mediaPost(t, application, "/v1/library/duplicates/restore", map[string]any{"merge_id": firstMerge})
+	if code != http.StatusOK {
+		t.Fatal(code, decoded)
+	}
+	restoredOriginal, found, err := audiorelease.PathFor(application.engine, loser.RequestID)
+	if err != nil || !found || restoredOriginal != filepath.Join(application.Dir, "library-audio", filepath.FromSlash(loser.File)) {
+		t.Fatal(restoredOriginal, found, err)
+	}
+}
+
 func TestDuplicateMergeRefusesReviewGroup(t *testing.T) {
 	application := newApp(t)
 	incoming := filepath.Join(application.Dir, "incoming")

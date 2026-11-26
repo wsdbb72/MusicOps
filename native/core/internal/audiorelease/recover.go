@@ -238,6 +238,36 @@ func writeRecoveredRelease(engine *dataengine.Engine, requestID string, key, enc
 }
 
 func validateRecoveryCandidate(ctx context.Context, path, expected, format string, decoder Decoder) (string, string, error) {
+	info, err := os.Lstat(path)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return "", "", fmt.Errorf("%w: recovery candidate disappeared", ErrMissing)
+		}
+		return "", "", err
+	}
+	if !info.Mode().IsRegular() || info.Size() <= 0 {
+		return "", "", ErrRejected
+	}
+	if info.Size() > MaxStagedAudioBytes {
+		format = strings.ToLower(strings.TrimSpace(format))
+		if format == "" || !supportedIndexFormat(format) ||
+			!strings.EqualFold(strings.TrimPrefix(filepath.Ext(path), "."), format) {
+			return "", "", fmt.Errorf("%w: large indexed candidate needs a supported explicit format", ErrRejected)
+		}
+		decodeState := "structural"
+		if decoder != nil {
+			if err := decoder(ctx, path); err != nil {
+				return "", "", fmt.Errorf("%w: audio decode failed: %v", ErrRejected, err)
+			}
+			decodeState = "decoded"
+		} else if format == "flac" {
+			return "", "", ErrTool
+		}
+		if err := sameFile(path, expected); err != nil {
+			return "", "", fmt.Errorf("%w: recovery candidate changed before catalogue commit", ErrConflict)
+		}
+		return format, decodeState, nil
+	}
 	body, err := readRecoveryAudio(path, MaxStagedAudioBytes)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
@@ -361,15 +391,14 @@ func scanRecoveryFiles(ctx context.Context, library, digest, format string, incl
 			format == "" && ext != "flac" && ext != "wav" {
 			return nil
 		}
-		body, err := readRecoveryAudio(path, MaxStagedAudioBytes)
+		candidateDigest, err := recoveryFileDigest(path)
 		if err != nil {
 			if errors.Is(err, os.ErrNotExist) || errors.Is(err, fs.ErrPermission) || errors.Is(err, dataengine.ErrInvalidRequest) {
 				return nil
 			}
 			return err
 		}
-		sum := sha256.Sum256(body)
-		if hex.EncodeToString(sum[:]) != digest {
+		if candidateDigest != digest {
 			return nil
 		}
 		if match != "" {
@@ -385,6 +414,34 @@ func scanRecoveryFiles(ctx context.Context, library, digest, format string, incl
 		return "", fmt.Errorf("%w: no library file matches digest %s", ErrMissing, digest)
 	}
 	return match, nil
+}
+
+func recoveryFileDigest(path string) (string, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return "", err
+	}
+	defer file.Close()
+	before, err := file.Stat()
+	if err != nil {
+		return "", err
+	}
+	if !before.Mode().IsRegular() || before.Size() <= 0 {
+		return "", dataengine.ErrInvalidRequest
+	}
+	hash := sha256.New()
+	written, err := io.Copy(hash, file)
+	if err != nil {
+		return "", err
+	}
+	after, err := file.Stat()
+	if err != nil {
+		return "", err
+	}
+	if written != before.Size() || after.Size() != before.Size() || !after.ModTime().Equal(before.ModTime()) || !os.SameFile(before, after) {
+		return "", fmt.Errorf("%w: recovery candidate changed while hashing", ErrConflict)
+	}
+	return hex.EncodeToString(hash.Sum(nil)), nil
 }
 
 func readRecoveryAudio(path string, limit int) ([]byte, error) {

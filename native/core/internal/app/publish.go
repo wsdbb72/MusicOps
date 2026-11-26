@@ -80,14 +80,14 @@ func (a *App) publish(ctx context.Context, execution *scheduler.Execution, paylo
 	if len(receipt.Receipts) > 0 {
 		return a.publishReceipts(ctx, execution, receipt)
 	}
-	verified, err := audiorelease.Verify(a.engine, receipt.RequestID)
+	verified, err := audiorelease.VerifyReceipt(a.engine, receipt.RequestID, receipt.SHA256, receipt.Format)
 	if errors.Is(err, audiorelease.ErrMissing) {
 		verified, err = a.recoverPublishReceipt(ctx, receipt.RootID, receipt.RequestID, receipt.SHA256, receipt.Format, receipt.Origin, receipt.SourceName, receipt.Path)
 	}
 	if err != nil {
 		return a.failPublish(execution, receipt, "VERIFY_FAILED", fmt.Sprintf("library record did not verify (request_id=%s): %v", receipt.RequestID, err))
 	}
-	if verified.RootID != receipt.RootID || verified.SHA256 != receipt.SHA256 || (receipt.Format != "" && verified.Format != receipt.Format) {
+	if verified.RootID != receipt.RootID {
 		return a.failPublish(execution, receipt, "VERIFY_FAILED", "library record does not match the release receipt")
 	}
 	evidence, err := json.Marshal(verified)
@@ -152,14 +152,14 @@ func (a *App) publishReceipts(ctx context.Context, execution *scheduler.Executio
 		if item.RequestID == "" || item.SHA256 == "" {
 			return a.failPublish(execution, receipt, "INVALID_PAYLOAD", "publish task has a receipt without request id or digest")
 		}
-		record, err := audiorelease.Verify(a.engine, item.RequestID)
+		record, err := audiorelease.VerifyReceipt(a.engine, item.RequestID, item.SHA256, item.Format)
 		if errors.Is(err, audiorelease.ErrMissing) {
 			record, err = a.recoverPublishReceipt(ctx, receipt.RootID, item.RequestID, item.SHA256, item.Format, item.Origin, item.SourceName, item.Path)
 		}
 		if err != nil {
 			return a.failPublish(execution, receipt, "VERIFY_FAILED", fmt.Sprintf("library record did not verify (request_id=%s): %v", item.RequestID, err))
 		}
-		if record.RootID != receipt.RootID || record.SHA256 != item.SHA256 || (item.Format != "" && record.Format != item.Format) {
+		if record.RootID != receipt.RootID {
 			return a.failPublish(execution, receipt, "VERIFY_FAILED", "library record does not match the release receipt")
 		}
 		verified = append(verified, record)

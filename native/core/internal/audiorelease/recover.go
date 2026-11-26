@@ -68,8 +68,21 @@ func RecoverPublished(ctx context.Context, engine *dataengine.Engine, input Reco
 	if rec, found, err := readRelease(engine, input.RequestID); err != nil {
 		return empty, err
 	} else if found {
-		if rec.RootID != input.RootID || rec.SHA256 != expected || format != "" && rec.Format != format {
+		aliasRestore := rec.AliasedFrom != nil && rec.AliasedFrom.SHA256 == expected &&
+			(format == "" || rec.AliasedFrom.Format == format)
+		if rec.RootID != input.RootID || !aliasRestore && (rec.SHA256 != expected || format != "" && rec.Format != format) {
 			return empty, fmt.Errorf("%w: existing release does not match the receipt", ErrConflict)
+		}
+		if aliasRestore {
+			path, findErr := findRecoveryFile(ctx, library, expected, format, input.Track, input.SourceName, input.PathHint)
+			if findErr != nil {
+				return empty, findErr
+			}
+			actualFormat, decodeState, validateErr := validateRecoveryCandidate(ctx, path, expected, format, input.Decoder)
+			if validateErr != nil {
+				return empty, validateErr
+			}
+			return restoreAliasedRelease(engine, input.RequestID, path, expected, actualFormat, decodeState, library)
 		}
 		if verified, verifyErr := Verify(engine, input.RequestID); verifyErr == nil {
 			return verified, nil
@@ -150,6 +163,67 @@ func RecoverPublished(ctx context.Context, engine *dataengine.Engine, input Reco
 	return resultFrom(rec, false, false), nil
 }
 
+func restoreAliasedRelease(engine *dataengine.Engine, requestID, path, expected, format, decodeState, library string) (Result, error) {
+	raw, found, err := readRaw(engine, releaseKey(requestID))
+	if err != nil || !found {
+		return Result{}, err
+	}
+	var rec record
+	if json.Unmarshal(raw, &rec) != nil || rec.AliasedFrom == nil || rec.AliasedFrom.SHA256 != expected {
+		return Result{}, ErrConflict
+	}
+	snapshot, err := indexedStatForPath(path)
+	if err != nil {
+		return Result{}, err
+	}
+	original := *rec.AliasedFrom
+	updated := rec
+	updated.Path = path
+	updated.SHA256 = expected
+	updated.Format = format
+	updated.DecodeState = decodeState
+	updated.Library = library
+	updated.IndexedStat = snapshot
+	if original.Origin != "" {
+		updated.Origin = original.Origin
+	}
+	if original.SourceName != "" {
+		updated.SourceName = original.SourceName
+	}
+	updated.AliasedFrom = nil
+	updated.AliasOfRequestID = ""
+	encoded, err := json.Marshal(updated)
+	if err != nil {
+		return Result{}, err
+	}
+	conditions := []dataengine.Condition{{Key: releaseKey(requestID), Value: raw}}
+	mutations := []dataengine.Mutation{{Key: releaseKey(requestID), Value: encoded}}
+	keys, err := albumKeysFor(engine, rec.RootID)
+	if err != nil {
+		return Result{}, err
+	}
+	for _, key := range keys {
+		keyRaw, ok, readErr := readRaw(engine, key)
+		if readErr != nil || !ok {
+			continue
+		}
+		var keyed record
+		if json.Unmarshal(keyRaw, &keyed) != nil || keyed.RequestID != requestID {
+			continue
+		}
+		conditions = append(conditions, dataengine.Condition{Key: key, Value: keyRaw})
+		mutations = append(mutations, dataengine.Mutation{Key: key, Value: encoded})
+	}
+	ok, err := engine.CompareAndSwap(conditions, mutations)
+	if err != nil {
+		return Result{}, err
+	}
+	if !ok {
+		return Result{}, ErrConflict
+	}
+	return Verify(engine, requestID)
+}
+
 func writeRecoveredRelease(engine *dataengine.Engine, requestID string, key, encoded []byte) (bool, error) {
 	return engine.CompareAndSwap(
 		[]dataengine.Condition{
@@ -203,14 +277,23 @@ func findRecoveryFile(ctx context.Context, library, digest, format string, track
 		if err != nil || !inside(library, path) {
 			return "", dataengine.ErrInvalidRequest
 		}
-		info, err := os.Lstat(path)
-		if err != nil || !info.Mode().IsRegular() {
-			return "", fmt.Errorf("%w: recorded recovery path is unavailable", ErrMissing)
+		realLibrary, rootErr := filepath.EvalSymlinks(library)
+		realPath, pathErr := filepath.EvalSymlinks(path)
+		if rootErr == nil && pathErr == nil && !inside(realLibrary, realPath) {
+			return "", dataengine.ErrInvalidRequest
 		}
-		if _, _, err := validateRecoveryCandidate(ctx, path, digest, format, nil); err != nil && !errors.Is(err, ErrTool) {
-			return "", err
+		// A path hint narrows recovery but is not authoritative: a dedupe or
+		// maintenance move can leave the old receipt path behind. Accept the
+		// exact candidate only when its bytes and container are valid; otherwise
+		// continue with the unique-digest scan below. Escaping the library is
+		// still rejected immediately.
+		if rootErr == nil && pathErr == nil {
+			if info, statErr := os.Lstat(realPath); statErr == nil && info.Mode().IsRegular() {
+				if _, _, validateErr := validateRecoveryCandidate(ctx, realPath, digest, format, nil); validateErr == nil || errors.Is(validateErr, ErrTool) {
+					return realPath, nil
+				}
+			}
 		}
-		return path, nil
 	}
 	hint := filepath.Base(strings.TrimSpace(sourceName))
 	trackPrefix := fmt.Sprintf("%02d ", track)

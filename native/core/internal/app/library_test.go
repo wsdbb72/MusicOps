@@ -327,6 +327,9 @@ func TestDuplicateMergeAndRestoreRoundTrip(t *testing.T) {
 	if kept == "" {
 		t.Fatal(decoded)
 	}
+	if decoded["aliases_linked"] != float64(1) {
+		t.Fatalf("loser publication was not linked to keeper: %v", decoded)
+	}
 	// Exactly one of the two files stays; the other is quarantined,
 	// never deleted.
 	quarantine := filesWithExtension(t, filepath.Join(application.Dir, "quarantine", mergeID), ".wav")
@@ -345,7 +348,8 @@ func TestDuplicateMergeAndRestoreRoundTrip(t *testing.T) {
 	if !bytes.Equal(quarantined, loserBytes) {
 		t.Fatal("quarantined bytes are not the loser audio")
 	}
-	// Exactly one of the two files stays in the library.
+	// Exactly one physical file stays in the library, but both publication
+	// identities remain usable by pointing at that keeper.
 	entries, err := audiorelease.List(application.engine)
 	if err != nil {
 		t.Fatal(err)
@@ -354,15 +358,36 @@ func TestDuplicateMergeAndRestoreRoundTrip(t *testing.T) {
 	for _, entry := range entries {
 		present[entry.RequestID] = entry.FilePresent
 	}
-	staying := 0
-	for _, id := range []string{keep.RequestID, loser.RequestID} {
-		if present[id] {
-			staying++
-		}
+	if !present[keep.RequestID] || !present[loser.RequestID] {
+		t.Fatal("dedupe keeper did not preserve both publication identities", present)
 	}
-	if staying != 1 {
-		t.Fatal("expected exactly one file to stay in the library", present)
+	keeperPath := filepath.Join(application.Dir, "library-audio", filepath.FromSlash(kept))
+	loserPublishedPath, found, err := audiorelease.PathFor(application.engine, loser.RequestID)
+	if err != nil || !found || loserPublishedPath != keeperPath {
+		t.Fatal(loserPublishedPath, found, err)
 	}
+	if _, err := audiorelease.Verify(application.engine, loser.RequestID); err != nil {
+		t.Fatal("linked loser publication did not verify against keeper", err)
+	}
+	if again := duplicateGroups(t, application); len(again) != 0 {
+		t.Fatalf("aliased publications were scanned as duplicate physical files: %#v", again)
+	}
+	// A playlist publish task created before the merge carries the quarantined
+	// file digest. It must still converge against the keeper alias instead of
+	// failing with a digest mismatch.
+	startSearchJob(t, application, loser.RootID)
+	posted := postCode(t, application, "/v1/audio/publish", map[string]any{
+		"job_id": loser.RootID,
+		"receipts": []map[string]any{{
+			"track_id": "1", "request_id": loser.RequestID, "path": loserPath, "sha256": loser.SHA256,
+			"format": loser.Format, "origin": loser.Origin, "source_name": loser.SourceName,
+			"decode_state": loser.DecodeState,
+		}},
+	})
+	if posted.Code != http.StatusOK {
+		t.Fatal(posted.Code, posted.Body.String())
+	}
+	waitJob(t, application, loser.RootID, "completed")
 	if _, err := os.Stat(quarantine[0] + ".lrc"); err != nil {
 		t.Fatal("sidecar did not travel into quarantine", err)
 	}
@@ -381,6 +406,10 @@ func TestDuplicateMergeAndRestoreRoundTrip(t *testing.T) {
 	}
 	if _, err := audiorelease.Verify(application.engine, loser.RequestID); err != nil {
 		t.Fatal("restored loser release record did not verify", err)
+	}
+	restoredPath, found, err := audiorelease.PathFor(application.engine, loser.RequestID)
+	if err != nil || !found || restoredPath != loserPath {
+		t.Fatal(restoredPath, found, err)
 	}
 	restored, err := os.ReadFile(loserPath)
 	if err != nil {
@@ -992,8 +1021,9 @@ func TestDuplicateMergeKeepsWarmPlaylistPresence(t *testing.T) {
 	incoming := filepath.Join(application.Dir, "incoming")
 	writeToneWAV(t, filepath.Join(incoming, "same-a.wav"), 440)
 	writeToneWAV(t, filepath.Join(incoming, "same-b.wav"), 440)
+	writeFLACFromWAV(t, filepath.Join(incoming, "same-b.wav"), filepath.Join(incoming, "same-b.flac"))
 	releaseLibraryFile(t, application, "same-a.wav", "same-a", "Artist", "Album", "Song", 1)
-	releaseLibraryFile(t, application, "same-b.wav", "same-b", "Artist", "Album", "Song", 1)
+	releaseLibraryFile(t, application, "same-b.flac", "same-b", "Artist", "Album", "Song", 1)
 	playlistDir := application.savedPlaylistsDir()
 	if err := os.MkdirAll(playlistDir, 0o700); err != nil {
 		t.Fatal(err)

@@ -163,10 +163,16 @@ func (a *App) scanDuplicatesWithOptions(ctx context.Context, limit int, root str
 	// title. Version words such as live, remix, instrumental, demo and TV size
 	// remain part of the title, so those releases never collapse together.
 	byRecording := map[string][]audiorelease.Entry{}
+	seenPhysicalFiles := map[string]bool{}
 	for _, entry := range entries {
 		if !entry.FilePresent {
 			continue
 		}
+		physical := libraryPathIdentity(a.libraryFilePath(entry.LibraryDir, entry.File))
+		if physical == "" || seenPhysicalFiles[physical] {
+			continue
+		}
+		seenPhysicalFiles[physical] = true
 		artist, album := splitLibraryTail(entry.File)
 		title := duplicateRecordingTitle(entry.File, artist)
 		if artist == "" || album == "" || title == "" {
@@ -861,6 +867,40 @@ func (a *App) duplicateMerge(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	receipt := mergeReceipt{MergeID: mergeID, GroupID: group.GroupID, Keep: group.Keep.File, CreatedNS: a.now().UnixNano()}
+	// A losing duplicate may still be the published file for its own playlist
+	// root. Link that root to the keeper before the merge is committed, so the
+	// quarantine move and every affected release record change atomically.
+	aliasConditions := []dataengine.Condition{}
+	aliasMutations := []dataengine.Mutation{}
+	aliasesLinked := 0
+	keeperLibrary := strings.TrimSpace(group.Keep.LibraryDir)
+	if keeperLibrary == "" {
+		keeperLibrary = a.libraryDir()
+	}
+	keeperPath := a.libraryFilePath(group.Keep.LibraryDir, group.Keep.File)
+	for _, file := range group.Files {
+		if file.RequestID == group.Keep.RequestID || file.RequestID == "" || file.RootID == "" || file.Track < 1 {
+			continue
+		}
+		batch, linkErr := audiorelease.PrepareDedupeAlias(a.engine, audiorelease.DedupeAliasInput{
+			Context: r.Context(), RequestID: file.RequestID, RootID: file.RootID, Track: file.Track,
+			KeeperRequestID: group.Keep.RequestID, KeeperPath: keeperPath,
+			Library: filepath.Clean(keeperLibrary), Decoder: audiorelease.SystemDecoder(),
+		})
+		if linkErr != nil {
+			writeJSON(w, http.StatusUnprocessableEntity, map[string]any{
+				"ok": false, "code": "MERGE_RECORD_LINK_FAILED",
+				"error": "无法把重复曲目的发布记录安全迁移到保留版本：" + scrub(linkErr.Error()),
+			})
+			return
+		}
+		if !batch.Linked {
+			continue
+		}
+		aliasesLinked++
+		aliasConditions = append(aliasConditions, batch.Conditions...)
+		aliasMutations = append(aliasMutations, batch.Mutations...)
+	}
 	for _, file := range group.Files {
 		if file.RequestID == group.Keep.RequestID {
 			continue
@@ -898,10 +938,9 @@ func (a *App) duplicateMerge(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "code": "LIBRARY_UNAVAILABLE"})
 		return
 	}
-	ok, err := a.engine.CompareAndSwap(
-		[]dataengine.Condition{{Key: mergeReceiptKey(mergeID), Absent: true}},
-		[]dataengine.Mutation{{Key: mergeReceiptKey(mergeID), Value: encoded}},
-	)
+	conditions := append([]dataengine.Condition{{Key: mergeReceiptKey(mergeID), Absent: true}}, aliasConditions...)
+	mutations := append([]dataengine.Mutation{{Key: mergeReceiptKey(mergeID), Value: encoded}}, aliasMutations...)
+	ok, err := a.engine.CompareAndSwap(conditions, mutations)
 	if err != nil {
 		_ = rollbackMergeMoves(receipt.Moved)
 		cleanupMergeQuarantine(receipt.Moved, quarantineRoot)
@@ -924,7 +963,7 @@ func (a *App) duplicateMerge(w http.ResponseWriter, r *http.Request) {
 	// The keeper is proven to satisfy the same playlist bindings as every
 	// quarantined copy above. Keep the immutable playlist index warm; each
 	// removed path is still re-verified and the keeper now answers the row.
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "merge_id": receipt.MergeID, "group_id": receipt.GroupID, "kept": receipt.Keep, "quarantined": receipt.Moved, "filled_fields": filled})
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "merge_id": receipt.MergeID, "group_id": receipt.GroupID, "kept": receipt.Keep, "quarantined": receipt.Moved, "filled_fields": filled, "aliases_linked": aliasesLinked})
 }
 
 // mergeActiveWorkflowPath returns a losing file referenced by an active

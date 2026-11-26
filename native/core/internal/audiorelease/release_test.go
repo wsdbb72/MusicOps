@@ -621,6 +621,26 @@ func TestSourceRemovedAfterPublishReturnsReceipt(t *testing.T) {
 	}
 }
 
+func TestReleaseMapsMissingCommittedTargetToErrMissing(t *testing.T) {
+	engine, incoming, library := openRelease(t)
+	writeSource(t, incoming, "song.wav", wav(20))
+	req := sample(incoming, library, "song.wav")
+	released, err := Release(context.Background(), engine, req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	path, found, err := PathFor(engine, released.RequestID)
+	if err != nil || !found {
+		t.Fatal(path, found, err)
+	}
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Release(context.Background(), engine, req); !errors.Is(err, ErrMissing) {
+		t.Fatalf("missing committed target error = %v", err)
+	}
+}
+
 func TestVerifyChecksLibraryFile(t *testing.T) {
 	engine, incoming, library := openRelease(t)
 	writeSource(t, incoming, "song.wav", wav(16))
@@ -639,8 +659,75 @@ func TestVerifyChecksLibraryFile(t *testing.T) {
 	if err := os.Remove(filepath.Join(library, "Artist", "Album", "01 Title.wav")); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := Verify(engine, "rel-1"); err == nil {
-		t.Fatal("corrupt library verified")
+	if _, err := Verify(engine, "rel-1"); !errors.Is(err, ErrMissing) {
+		t.Fatalf("missing library file error = %v", err)
+	}
+}
+
+func TestVerifyReceiptAcceptsDedupeAlias(t *testing.T) {
+	engine, incoming, library := openRelease(t)
+	writeSource(t, incoming, "keeper.wav", wav(24))
+	keeper, err := Release(context.Background(), engine, sample(incoming, library, "keeper.wav"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeSource(t, incoming, "loser.wav", wav(32))
+	loserReq := sample(incoming, library, "loser.wav")
+	loserReq.RequestID, loserReq.RootID = "rel-2", "root-2"
+	loserReq.Album, loserReq.Title = "Album Two", "Title Two"
+	loser, err := Release(context.Background(), engine, loserReq)
+	if err != nil {
+		t.Fatal(err)
+	}
+	keeperPath, found, err := PathFor(engine, keeper.RequestID)
+	if err != nil || !found {
+		t.Fatal(keeperPath, found, err)
+	}
+	batch, err := PrepareDedupeAlias(engine, DedupeAliasInput{
+		Context: context.Background(), RequestID: loser.RequestID, RootID: loser.RootID, Track: 1,
+		KeeperRequestID: keeper.RequestID, KeeperPath: keeperPath, Library: library,
+	})
+	if err != nil || !batch.Linked {
+		t.Fatal(batch, err)
+	}
+	if ok, err := engine.CompareAndSwap(batch.Conditions, batch.Mutations); err != nil || !ok {
+		t.Fatal(ok, err)
+	}
+	current, err := Verify(engine, loser.RequestID)
+	if err != nil || current.SHA256 != keeper.SHA256 {
+		t.Fatal(current, err)
+	}
+	matched, err := VerifyReceipt(engine, loser.RequestID, loser.SHA256, loser.Format)
+	if err != nil || matched.SHA256 != keeper.SHA256 {
+		t.Fatal(matched, err)
+	}
+	if _, err := VerifyReceipt(engine, loser.RequestID, strings.Repeat("0", 64), loser.Format); !errors.Is(err, ErrConflict) {
+		t.Fatalf("unrelated receipt digest error = %v", err)
+	}
+	if _, err := VerifyReceipt(engine, loser.RequestID, "", "flac"); !errors.Is(err, ErrConflict) {
+		t.Fatalf("receipt format mismatch error = %v", err)
+	}
+	if _, err := VerifyReceipt(engine, loser.RequestID, "", ""); !errors.Is(err, ErrConflict) {
+		t.Fatalf("missing receipt digest error = %v", err)
+	}
+}
+
+func TestPrepareDedupeAliasRejectsSamePhysicalPublication(t *testing.T) {
+	engine, incoming, library := openRelease(t)
+	writeSource(t, incoming, "song.wav", wav(28))
+	released, err := Release(context.Background(), engine, sample(incoming, library, "song.wav"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	path, found, err := PathFor(engine, released.RequestID)
+	if err != nil || !found {
+		t.Fatal(path, found, err)
+	}
+	if _, err := PrepareDedupeAlias(engine, DedupeAliasInput{
+		Context: context.Background(), RequestID: released.RequestID, RootID: released.RootID, Track: 1,
+		KeeperRequestID: "other", KeeperPath: path, Library: library,
+	}); !errors.Is(err, ErrConflict) {
+		t.Fatalf("self alias error = %v", err)
 	}
 }
 
@@ -1066,8 +1153,16 @@ func TestRecoverPublishedRejectsAmbiguousOrMismatchedFiles(t *testing.T) {
 		t.Fatal(err)
 	}
 	input.SourceName = filepath.Base(filepath.Join(library, "Artist", "One", "01 Title.wav"))
+	stalePath := filepath.Join(library, "Artist", "Stale", "01 Title.wav")
+	if err := os.MkdirAll(filepath.Dir(stalePath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(stalePath, wav(84), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	input.PathHint = stalePath
 	if _, err := RecoverPublished(context.Background(), engine, input); !errors.Is(err, ErrConflict) {
-		t.Fatalf("hinted recovery accepted duplicate bytes: %v", err)
+		t.Fatalf("stale hint bypassed duplicate detection: %v", err)
 	}
 	if entries, err := List(engine); err != nil || len(entries) != 0 {
 		t.Fatal(entries, err)
@@ -1105,14 +1200,80 @@ func TestRecoverPublishedUsesExactPathHint(t *testing.T) {
 	if err != nil || !found || path != target {
 		t.Fatal(path, found, err)
 	}
-	input.RequestID, input.RootID = "recover-missing-path", "root-missing-path"
-	input.PathHint = filepath.Join(library, "Artist", "Album", "99 Missing.wav")
-	if _, err := RecoverPublished(context.Background(), engine, input); !errors.Is(err, ErrMissing) {
-		t.Fatalf("missing path hint error = %v", err)
+	// The exact hint disambiguates duplicate bytes. Once it disappears, a fresh
+	// receipt with the same digest must safely fall back to the unique copy.
+	if err := os.Remove(target); err != nil {
+		t.Fatal(err)
 	}
+	input.RequestID, input.RootID = "recover-missing-path", "root-missing-path"
+	if _, err := RecoverPublished(context.Background(), engine, input); err != nil {
+		t.Fatalf("stale path hint did not fall back: %v", err)
+	}
+	if path, found, err := PathFor(engine, input.RequestID); err != nil || !found || path != copyPath {
+		t.Fatal(path, found, err)
+	}
+	input.RequestID, input.RootID = "recover-outside-path", "root-outside-path"
 	input.PathHint = filepath.Join(t.TempDir(), "outside.wav")
 	if _, err := RecoverPublished(context.Background(), engine, input); !errors.Is(err, dataengine.ErrInvalidRequest) {
 		t.Fatalf("outside path hint error = %v", err)
+	}
+}
+
+func TestRecoverPublishedFallsBackWhenPathHintHasDifferentBytes(t *testing.T) {
+	engine, _, library := openRelease(t)
+	body := wav(112)
+	sum := sha256.Sum256(body)
+	digest := hex.EncodeToString(sum[:])
+	stalePath := filepath.Join(library, "Artist", "Album", "01 Title.wav")
+	movedPath := filepath.Join(library, "Restored", "Album", "01 Title.wav")
+	for path, contents := range map[string][]byte{
+		stalePath: wav(116),
+		movedPath: body,
+	} {
+		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, contents, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	input := RecoverInput{
+		RequestID: "recover-stale-hint", RootID: "root-stale-hint", Track: 1,
+		SHA256: digest, Format: "wav", PathHint: stalePath, Library: library,
+	}
+	got, err := RecoverPublished(context.Background(), engine, input)
+	if err != nil || got.SHA256 != digest {
+		t.Fatal(got, err)
+	}
+	path, found, err := PathFor(engine, input.RequestID)
+	if err != nil || !found || path != movedPath {
+		t.Fatal(path, found, err)
+	}
+}
+
+func TestRecoverPublishedRejectsPathHintThroughEscapingSymlink(t *testing.T) {
+	engine, _, library := openRelease(t)
+	body := wav(124)
+	sum := sha256.Sum256(body)
+	outside := t.TempDir()
+	outsideFile := filepath.Join(outside, "outside.wav")
+	if err := os.WriteFile(outsideFile, body, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(library, "linked")
+	if err := os.Symlink(outside, link); err != nil {
+		t.Skipf("directory symlinks are unavailable: %v", err)
+	}
+	input := RecoverInput{
+		RequestID: "recover-symlink", RootID: "root-symlink", Track: 1,
+		SHA256: hex.EncodeToString(sum[:]), Format: "wav",
+		PathHint: filepath.Join(link, "outside.wav"), Library: library,
+	}
+	if _, err := RecoverPublished(context.Background(), engine, input); !errors.Is(err, dataengine.ErrInvalidRequest) {
+		t.Fatalf("escaping symlink path error = %v", err)
+	}
+	if _, found, err := PathFor(engine, input.RequestID); err != nil || found {
+		t.Fatal("escaping symlink path was published", found, err)
 	}
 }
 
@@ -1130,6 +1291,9 @@ func TestRecoverPublishedRelocatesAStaleSurvivingRecord(t *testing.T) {
 	newPath := filepath.Join(library, "Artist", "Album", "01 Title (restored).wav")
 	if err := os.Rename(oldPath, newPath); err != nil {
 		t.Fatal(err)
+	}
+	if _, err := Verify(engine, released.RequestID); !errors.Is(err, ErrMissing) {
+		t.Fatalf("moved published file error = %v", err)
 	}
 	recovered, err := RecoverPublished(context.Background(), engine, RecoverInput{
 		RequestID: released.RequestID, RootID: released.RootID, Track: 1,

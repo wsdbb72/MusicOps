@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -284,5 +285,41 @@ func TestPublishRecoversPrunedRecordAfterFileRestore(t *testing.T) {
 	waitJob(t, application, "pub-recover", "completed")
 	if _, err := audiorelease.Verify(application.engine, ingested.RequestID); err != nil {
 		t.Fatal("recovered receipt did not verify", err)
+	}
+}
+
+func TestPublishRecoversExistingRecordAfterPublishedFileMoves(t *testing.T) {
+	application := newApp(t)
+	startSearchJob(t, application, "pub-moved")
+	ingested := ingestTrack(t, application, "pub-moved", 1, 112)
+	oldPath, found, err := audiorelease.PathFor(application.engine, ingested.RequestID)
+	if err != nil || !found {
+		t.Fatal(oldPath, found, err)
+	}
+	newPath := filepath.Join(filepath.Dir(oldPath), "01 Title (restored).wav")
+	if err := os.Rename(oldPath, newPath); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := audiorelease.Verify(application.engine, ingested.RequestID); !errors.Is(err, audiorelease.ErrMissing) {
+		t.Fatalf("moved file verification error = %v", err)
+	}
+	posted := postCode(t, application, "/v1/audio/publish", map[string]any{
+		"job_id": "pub-moved",
+		"receipts": []map[string]any{{
+			"track_id": "1", "request_id": ingested.RequestID, "path": oldPath, "sha256": ingested.SHA256,
+			"format": ingested.Format, "origin": ingested.Origin, "source_name": ingested.SourceName,
+			"decode_state": ingested.DecodeState,
+		}},
+	})
+	if posted.Code != http.StatusOK {
+		t.Fatal(posted.Code, posted.Body.String())
+	}
+	waitJob(t, application, "pub-moved", "completed")
+	path, found, err := audiorelease.PathFor(application.engine, ingested.RequestID)
+	if err != nil || !found || path != newPath {
+		t.Fatal(path, found, err)
+	}
+	if _, err := audiorelease.Verify(application.engine, ingested.RequestID); err != nil {
+		t.Fatal("moved receipt did not verify", err)
 	}
 }

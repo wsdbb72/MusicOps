@@ -133,6 +133,21 @@ type record struct {
 	Downloaded     bool         `json:"downloaded"`
 	TorrentManaged bool         `json:"torrent_managed,omitempty"`
 	IndexedStat    *indexedStat `json:"indexed_stat,omitempty"`
+	// AliasedFrom preserves the publication moved into duplicate quarantine.
+	// A later merge restore uses it to put the original request identity back
+	// on the restored path.
+	AliasedFrom      *aliasOrigin `json:"aliased_from,omitempty"`
+	AliasOfRequestID string       `json:"alias_of_request_id,omitempty"`
+}
+
+type aliasOrigin struct {
+	Path        string `json:"path"`
+	SHA256      string `json:"sha256"`
+	Format      string `json:"format"`
+	DecodeState string `json:"decode_state"`
+	Origin      string `json:"origin,omitempty"`
+	SourceName  string `json:"source_name,omitempty"`
+	Library     string `json:"library,omitempty"`
 }
 
 // Release verifies the incoming file and publishes a copy. The source stays in place.
@@ -179,7 +194,10 @@ func Release(ctx context.Context, engine *dataengine.Engine, input Request) (Res
 		defer unlock()
 		// Only a target that still matches the committed digest proves the
 		// replacement completed. Preserve a backup when the disk is inconsistent.
-		if sameFile(existing.Path, existing.SHA256) != nil {
+		if verifyErr := sameFile(existing.Path, existing.SHA256); verifyErr != nil {
+			if errors.Is(verifyErr, os.ErrNotExist) {
+				return empty, fmt.Errorf("%w: committed release target no longer exists: %v", ErrMissing, verifyErr)
+			}
 			return empty, fmt.Errorf("%w: committed release target no longer matches its record", ErrConflict)
 		}
 		_ = os.Remove(replacementBackupPath(existing.Path, input.RequestID))
@@ -752,7 +770,48 @@ func Verify(engine *dataengine.Engine, requestID string) (Result, error) {
 		return Result{}, ErrConflict
 	}
 	if err := sameFile(rec.Path, rec.SHA256); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return Result{}, fmt.Errorf("%w: recorded path no longer exists: %v", ErrMissing, err)
+		}
 		return Result{}, err
+	}
+	return resultFrom(rec, false, false), nil
+}
+
+// VerifyReceipt verifies the current published file and accepts either its
+// current digest or the original digest retained by a dedupe alias. This keeps
+// an older playlist or publish receipt valid after duplicate maintenance points
+// that logical release at a higher-quality keeper.
+func VerifyReceipt(engine *dataengine.Engine, requestID, expected, format string) (Result, error) {
+	rec, found, err := readRelease(engine, requestID)
+	if err != nil {
+		return Result{}, err
+	}
+	if !found {
+		return Result{}, ErrMissing
+	}
+	if rec.State != "published" || !rec.Verified || !rec.LibraryPublished {
+		return Result{}, ErrConflict
+	}
+	if err := sameFile(rec.Path, rec.SHA256); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return Result{}, fmt.Errorf("%w: recorded path no longer exists: %v", ErrMissing, err)
+		}
+		return Result{}, err
+	}
+	expected = strings.ToLower(strings.TrimSpace(expected))
+	format = strings.ToLower(strings.TrimSpace(format))
+	if len(expected) != sha256.Size*2 {
+		return Result{}, fmt.Errorf("%w: release receipt digest is missing or malformed", ErrConflict)
+	}
+	if _, err := hex.DecodeString(expected); err != nil {
+		return Result{}, fmt.Errorf("%w: release receipt digest is malformed", ErrConflict)
+	}
+	currentMatches := rec.SHA256 == expected && (format == "" || rec.Format == format)
+	aliasMatches := rec.AliasedFrom != nil &&
+		rec.AliasedFrom.SHA256 == expected && (format == "" || rec.AliasedFrom.Format == format)
+	if !currentMatches && !aliasMatches {
+		return Result{}, fmt.Errorf("%w: published record does not match the release receipt", ErrConflict)
 	}
 	return resultFrom(rec, false, false), nil
 }
@@ -1048,6 +1107,9 @@ func replay(rec record, source string) (Result, error) {
 		return Result{}, ErrConflict
 	}
 	if err := sameFile(rec.Path, rec.SHA256); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return Result{}, fmt.Errorf("%w: recorded path no longer exists: %v", ErrMissing, err)
+		}
 		return Result{}, err
 	}
 	preserved := sameFile(source, rec.SHA256) == nil

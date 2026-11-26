@@ -2030,6 +2030,41 @@ func (a *App) enqueueMaintenanceWorkflowKey(ctx context.Context, scene string, t
 		return false
 	}
 	if status < 200 || status >= 300 {
+		var failure struct {
+			Code  string `json:"code"`
+			Error string `json:"error"`
+		}
+		_ = json.Unmarshal(raw, &failure)
+		if status == http.StatusBadRequest && failure.Code == "INVALID_REQUEST" {
+			// Recheck the exact sources that were just submitted. If one moved
+			// after the preflight stat, the scan cache is stale rather than the
+			// maintenance run having failed.
+			stale := false
+			for _, path := range paths {
+				resolved, resolveErr := resolveInDir(a.libraryDir(), path)
+				if resolveErr != nil {
+					stale = true
+					break
+				}
+				info, statErr := os.Stat(resolved)
+				if statErr != nil || info.IsDir() {
+					stale = true
+					break
+				}
+			}
+			if stale {
+				return false
+			}
+		}
+		if scene == "upgrade" && failure.Code == "QUALITY_NOT_PROVEN" && len(tracks) == 1 {
+			// The scan snapshot can become stale while an earlier transcode
+			// replaces a lossy source with lossless audio. Re-probe the current
+			// bytes and treat that as a completed/no-op upgrade rather than a
+			// repeated user-visible maintenance failure.
+			if current, probeErr := probeLocalWorkflowTrackForRepair(ctx, paths[0]); probeErr == nil && !isLossyUpgradeSource(current.Codec) {
+				return false
+			}
+		}
 		a.libraryAutomation.addError(fmt.Errorf("自动%s任务创建失败: HTTP %d %s", scene, status, strings.TrimSpace(string(raw))))
 		return false
 	}

@@ -809,3 +809,20 @@ func TestMaintenanceWorkflowSkipsCorruptRepairWithoutUsableIdentity(t *testing.T
 		t.Fatalf("identity-less corrupt repair became a user-visible failure: %+v", report.Errors)
 	}
 }
+
+func TestMaintenanceWorkflowTreatsStaleLossyCandidateAsCompletedUpgrade(t *testing.T) {
+	application := newApp(t)
+	source := filepath.Join(application.libraryDir(), "Artist", "Album", "source.wav")
+	target := filepath.Join(application.libraryDir(), "Artist", "Album", "01 Song.flac")
+	writeToneWAV(t, source, 523)
+	writeFLACFromWAV(t, source, target)
+	if application.enqueueMaintenanceWorkflowKey(context.Background(), "upgrade", []localWorkflowTrack{{
+		Path: target, Artist: "Artist", Album: "Album", Title: "Song", Codec: "mp3", Duration: 1,
+	}}, filepath.Dir(target), "corrupt-repair-v2") {
+		t.Fatal("already-lossless stale candidate created an upgrade")
+	}
+	_, report := application.libraryAutomation.snapshot()
+	if report.ErrorCount != 0 {
+		t.Fatalf("completed lossless transition became a maintenance failure: %+v", report.Errors)
+	}
+}

@@ -22,6 +22,7 @@ import (
 type publishReceipt struct {
 	TrackID     string                `json:"track_id"`
 	RequestID   string                `json:"request_id"`
+	Path        string                `json:"path,omitempty"`
 	SHA256      string                `json:"sha256"`
 	Format      string                `json:"format"`
 	Origin      string                `json:"origin"`
@@ -44,6 +45,7 @@ type publishPayload struct {
 	Format        string           `json:"format"`
 	Origin        string           `json:"origin"`
 	SourceName    string           `json:"source_name"`
+	Path          string           `json:"path,omitempty"`
 	DecodeState   string           `json:"decode_state"`
 	SourceURL     string           `json:"source_url,omitempty"`
 	Artist        string           `json:"artist,omitempty"`
@@ -80,7 +82,7 @@ func (a *App) publish(ctx context.Context, execution *scheduler.Execution, paylo
 	}
 	verified, err := audiorelease.Verify(a.engine, receipt.RequestID)
 	if errors.Is(err, audiorelease.ErrMissing) {
-		verified, err = a.recoverPublishReceipt(ctx, receipt.RootID, receipt.RequestID, receipt.SHA256, receipt.Format, receipt.Origin, receipt.SourceName)
+		verified, err = a.recoverPublishReceipt(ctx, receipt.RootID, receipt.RequestID, receipt.SHA256, receipt.Format, receipt.Origin, receipt.SourceName, receipt.Path)
 	}
 	if err != nil {
 		return a.failPublish(execution, receipt, "VERIFY_FAILED", fmt.Sprintf("library record did not verify (request_id=%s): %v", receipt.RequestID, err))
@@ -152,7 +154,7 @@ func (a *App) publishReceipts(ctx context.Context, execution *scheduler.Executio
 		}
 		record, err := audiorelease.Verify(a.engine, item.RequestID)
 		if errors.Is(err, audiorelease.ErrMissing) {
-			record, err = a.recoverPublishReceipt(ctx, receipt.RootID, item.RequestID, item.SHA256, item.Format, item.Origin, item.SourceName)
+			record, err = a.recoverPublishReceipt(ctx, receipt.RootID, item.RequestID, item.SHA256, item.Format, item.Origin, item.SourceName, item.Path)
 		}
 		if err != nil {
 			return a.failPublish(execution, receipt, "VERIFY_FAILED", fmt.Sprintf("library record did not verify (request_id=%s): %v", item.RequestID, err))
@@ -222,14 +224,14 @@ func (a *App) publishReceipts(ctx context.Context, execution *scheduler.Executio
 // recoverPublishReceipt reconstructs a receipt that was pruned after a file
 // move, but only when the deterministic receipt identity, digest, decoder and
 // library occurrence all agree. A normal verification failure is never hidden.
-func (a *App) recoverPublishReceipt(ctx context.Context, rootID, requestID, digest, format, origin, sourceName string) (audiorelease.Result, error) {
+func (a *App) recoverPublishReceipt(ctx context.Context, rootID, requestID, digest, format, origin, sourceName, pathHint string) (audiorelease.Result, error) {
 	track, ok := audiorelease.RecoveryTrackFromRequestID(rootID, requestID)
 	if !ok {
 		return audiorelease.Result{RequestID: requestID, RootID: rootID}, fmt.Errorf("%w: receipt identity cannot be recovered safely", audiorelease.ErrMissing)
 	}
 	return audiorelease.RecoverPublished(ctx, a.engine, audiorelease.RecoverInput{
 		RequestID: requestID, RootID: rootID, Track: track, SHA256: digest,
-		Format: format, Origin: origin, SourceName: sourceName,
+		Format: format, Origin: origin, SourceName: sourceName, PathHint: pathHint,
 		Library: a.libraryDir(), Decoder: audiorelease.SystemDecoder(),
 	})
 }

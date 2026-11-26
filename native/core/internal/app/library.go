@@ -1498,7 +1498,7 @@ func (a *App) recoverRestoredMergeRecords(moves []mergeMove) (int, []string) {
 		_, err := audiorelease.RecoverPublished(context.Background(), a.engine, audiorelease.RecoverInput{
 			RequestID: move.RequestID, RootID: move.RootID, Track: move.Track,
 			SHA256: move.SHA256, Format: move.Format, Origin: move.Origin,
-			SourceName: move.SourceName, Library: library, Decoder: decoder,
+			SourceName: move.SourceName, PathHint: move.From, Library: library, Decoder: decoder,
 		})
 		if err != nil {
 			errorsOut = append(errorsOut, move.RequestID+"："+scrub(err.Error()))

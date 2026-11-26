@@ -1651,15 +1651,13 @@ func (a *App) ingestDownload(ctx context.Context, plan downloadPlan, meta qbitto
 			return nil, downloadError(class, "入库失败："+filepath.Base(f.Path))
 		}
 		a.invalidatePlaylistLibraryCache()
-		if scrape != nil && scrape.lyrics != "" {
-			path, found, err := audiorelease.PathFor(a.engine, result.RequestID)
-			if err != nil || !found {
-				return nil, downloadError("SCRAPE_FAILED", "未找到入库文件来写歌词")
-			}
-			if !hasLyricsSidecar(path) {
-				if err := writeLyricsSidecar(path, scrape.lyrics); err != nil {
-					return nil, downloadError("SCRAPE_FAILED", "歌词侧车写入失败")
-				}
+		publishedPath, pathFound, pathErr := audiorelease.PathFor(a.engine, result.RequestID)
+		if pathErr != nil || !pathFound {
+			return nil, downloadError("INGEST_FAILED", "已发布音频，但无法确认最终入库路径")
+		}
+		if scrape != nil && scrape.lyrics != "" && !hasLyricsSidecar(publishedPath) {
+			if err := writeLyricsSidecar(publishedPath, scrape.lyrics); err != nil {
+				return nil, downloadError("SCRAPE_FAILED", "歌词侧车写入失败")
 			}
 		}
 		for _, cached := range []string{copiedName, incomingName} {
@@ -1668,7 +1666,7 @@ func (a *App) ingestDownload(ctx context.Context, plan downloadPlan, meta qbitto
 			}
 		}
 		receipts = append(receipts, publishReceipt{
-			TrackID: strconv.Itoa(position), RequestID: result.RequestID, SHA256: result.SHA256,
+			TrackID: strconv.Itoa(position), RequestID: result.RequestID, Path: publishedPath, SHA256: result.SHA256,
 			Format: result.Format, Origin: result.Origin, SourceName: result.SourceName,
 			DecodeState: result.DecodeState, Scrape: scrape,
 		})

@@ -1236,12 +1236,17 @@ func (a *App) releaseAudio(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	a.invalidatePlaylistLibraryCache()
+	publishedPath, pathFound, pathErr := audiorelease.PathFor(a.engine, result.RequestID)
+	if pathErr != nil || !pathFound {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "code": "LIBRARY_UNAVAILABLE", "downloaded": false, "library_published": true, "production_verified": false})
+		return
+	}
 	// The ingest is committed; now record it on the workflow and move the job
 	// to publishing. The request id is deterministic per (root, track), so a
 	// retried call replays the release and replays this record instead of
 	// queuing a second publish task.
 	receipt, err := json.Marshal(publishPayload{
-		RootID: root, TrackID: strconv.Itoa(body.Track), RequestID: result.RequestID,
+		RootID: root, TrackID: strconv.Itoa(body.Track), RequestID: result.RequestID, Path: publishedPath,
 		SHA256: result.SHA256, Format: result.Format, Origin: result.Origin,
 		SourceName: result.SourceName, DecodeState: result.DecodeState,
 	})

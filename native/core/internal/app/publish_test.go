@@ -273,7 +273,7 @@ func TestPublishRecoversPrunedRecordAfterFileRestore(t *testing.T) {
 	posted := postCode(t, application, "/v1/audio/publish", map[string]any{
 		"job_id": "pub-recover",
 		"receipts": []map[string]any{{
-			"track_id": "1", "request_id": ingested.RequestID, "sha256": ingested.SHA256,
+			"track_id": "1", "request_id": ingested.RequestID, "path": path, "sha256": ingested.SHA256,
 			"format": ingested.Format, "origin": ingested.Origin, "source_name": ingested.SourceName,
 			"decode_state": ingested.DecodeState,
 		}},

@@ -1078,6 +1078,44 @@ func TestRecoverPublishedRejectsAmbiguousOrMismatchedFiles(t *testing.T) {
 	}
 }
 
+func TestRecoverPublishedUsesExactPathHint(t *testing.T) {
+	engine, _, library := openRelease(t)
+	body := wav(96)
+	sum := sha256.Sum256(body)
+	digest := hex.EncodeToString(sum[:])
+	target := filepath.Join(library, "Artist", "Album", "01 Title.wav")
+	copyPath := filepath.Join(library, "Other", "Album", "01 Title.wav")
+	for _, path := range []string{target, copyPath} {
+		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, body, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	input := RecoverInput{
+		RequestID: "recover-path", RootID: "root-path", Track: 1,
+		SHA256: digest, Format: "wav", PathHint: target, Library: library,
+	}
+	got, err := RecoverPublished(context.Background(), engine, input)
+	if err != nil || got.SHA256 != digest {
+		t.Fatal(got, err)
+	}
+	path, found, err := PathFor(engine, input.RequestID)
+	if err != nil || !found || path != target {
+		t.Fatal(path, found, err)
+	}
+	input.RequestID, input.RootID = "recover-missing-path", "root-missing-path"
+	input.PathHint = filepath.Join(library, "Artist", "Album", "99 Missing.wav")
+	if _, err := RecoverPublished(context.Background(), engine, input); !errors.Is(err, ErrMissing) {
+		t.Fatalf("missing path hint error = %v", err)
+	}
+	input.PathHint = filepath.Join(t.TempDir(), "outside.wav")
+	if _, err := RecoverPublished(context.Background(), engine, input); !errors.Is(err, dataengine.ErrInvalidRequest) {
+		t.Fatalf("outside path hint error = %v", err)
+	}
+}
+
 func TestRecoverPublishedRelocatesAStaleSurvivingRecord(t *testing.T) {
 	engine, incoming, library := openRelease(t)
 	writeSource(t, incoming, "song.wav", wav(88))

@@ -30,6 +30,7 @@ type RecoverInput struct {
 	Format     string
 	Origin     string
 	SourceName string
+	PathHint   string
 	Library    string
 	Decoder    Decoder
 }
@@ -76,7 +77,7 @@ func RecoverPublished(ctx context.Context, engine *dataengine.Engine, input Reco
 		// A move can leave the catalogue pointing at the old path while the
 		// unique bytes already exist back in the library. Relocate only after the
 		// same strict digest/decoder scan used for a missing receipt.
-		path, findErr := findRecoveryFile(ctx, library, expected, format, input.Track, input.SourceName)
+		path, findErr := findRecoveryFile(ctx, library, expected, format, input.Track, input.SourceName, input.PathHint)
 		if findErr != nil {
 			return empty, findErr
 		}
@@ -89,7 +90,7 @@ func RecoverPublished(ctx context.Context, engine *dataengine.Engine, input Reco
 		return Verify(engine, input.RequestID)
 	}
 
-	path, err := findRecoveryFile(ctx, library, expected, format, input.Track, input.SourceName)
+	path, err := findRecoveryFile(ctx, library, expected, format, input.Track, input.SourceName, input.PathHint)
 	if err != nil {
 		return empty, err
 	}
@@ -196,7 +197,21 @@ func validateRecoveryCandidate(ctx context.Context, path, expected, format strin
 	return actualFormat, decodeState, nil
 }
 
-func findRecoveryFile(ctx context.Context, library, digest, format string, track int, sourceName string) (string, error) {
+func findRecoveryFile(ctx context.Context, library, digest, format string, track int, sourceName, pathHint string) (string, error) {
+	if strings.TrimSpace(pathHint) != "" {
+		path, err := filepath.Abs(filepath.Clean(strings.TrimSpace(pathHint)))
+		if err != nil || !inside(library, path) {
+			return "", dataengine.ErrInvalidRequest
+		}
+		info, err := os.Lstat(path)
+		if err != nil || !info.Mode().IsRegular() {
+			return "", fmt.Errorf("%w: recorded recovery path is unavailable", ErrMissing)
+		}
+		if _, _, err := validateRecoveryCandidate(ctx, path, digest, format, nil); err != nil && !errors.Is(err, ErrTool) {
+			return "", err
+		}
+		return path, nil
+	}
 	hint := filepath.Base(strings.TrimSpace(sourceName))
 	trackPrefix := fmt.Sprintf("%02d ", track)
 	if hint != "." && hint != string(filepath.Separator) {

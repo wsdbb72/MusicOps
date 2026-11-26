@@ -85,8 +85,8 @@ func TestLibrarySelectionSupportsPageAndWholeLibrary(t *testing.T) {
 	for _, want := range []string{
 		`id="library-select-page"`, `id="library-select-all"`, `id="library-clear-selection"`,
 		`function setLibrarySelectionAll(selected)`, `librarySelectAll = false`,
-		`/v1/library/upgrade/whole`, `/v1/library/scrape/whole`,
-		`id="run-library-upgrade-now"`, `id="auto-maintenance-status"`,
+		`/v1/library/upgrade/whole`, `/v1/library/expand/whole`, `/v1/library/scrape/whole`,
+		`id="run-library-upgrade-now"`, `id="run-library-expand-now"`, `id="auto-maintenance-status"`,
 		`running ? 3000 : 10000`,
 	} {
 		if !strings.Contains(appJS, want) {
@@ -160,7 +160,7 @@ func TestTaskQueueExposesBatchSelectionAndRetryControls(t *testing.T) {
 func TestWholeLibraryScrapeNamesEveryMetadataScope(t *testing.T) {
 	for _, want := range []string{
 		`id="run-library-scrape-now">一键全库刮削（标签·歌手·专辑·封面·歌词）`,
-		`id="scrape-whole-library">全库补齐标签·封面·歌词`,
+		`id="scrape-whole-library">全库补齐标签·封面·歌词`, `id="apply-artist-folders" class="primary">一键补全歌手目录`,
 		`/v1/library/scrape/whole`,
 	} {
 		if !strings.Contains(appJS, want) {

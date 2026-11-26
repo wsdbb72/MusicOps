@@ -1550,7 +1550,7 @@ const appJS = `(function () {
     clearTimeout(libraryRunTimer);
     var statusBox = document.getElementById("auto-maintenance-status");
     var runBadge = document.querySelector(".automation-card .run-state");
-    document.querySelectorAll("#run-auto-maintenance, #run-library-upgrade-now, #run-library-scrape-now").forEach(function (button) { button.disabled = !!running; });
+    document.querySelectorAll("#run-auto-maintenance, #run-library-upgrade-now, #run-library-expand-now, #run-library-scrape-now").forEach(function (button) { button.disabled = !!running; });
     var stop = document.getElementById("stop-auto-maintenance");
     if (stop) stop.disabled = !running;
     if (!statusBox) return;
@@ -1587,7 +1587,7 @@ const appJS = `(function () {
       '<label><input type="checkbox" id="auto-maintenance-upgrade"' + (auto.upgrade ? " checked" : "") + '> 音质升级</label>' +
       '<label><input type="checkbox" id="auto-maintenance-expand"' + (auto.expand ? " checked" : "") + '> 单曲补整专</label>' +
       '<label>周期（小时）<input type="text" id="auto-maintenance-hours" value="' + escapeText(auto.interval_hours || 6) + '"></label></div>' +
-      '<div class="action-row"><button type="button" id="save-auto-maintenance" class="primary">保存设置</button><button type="button" id="run-auto-maintenance">立即维护全库</button><button type="button" id="run-library-upgrade-now">升级全库音质</button><button type="button" id="run-library-scrape-now">一键全库刮削（标签·歌手·专辑·封面·歌词）</button><button type="button" id="stop-auto-maintenance" class="quiet">停止</button></div><p id="auto-maintenance-result" class="meta"></p></article>';
+      '<div class="action-row"><button type="button" id="save-auto-maintenance" class="primary">保存设置</button><button type="button" id="run-auto-maintenance">立即维护全库</button><button type="button" id="run-library-upgrade-now">一键升级全库音质</button><button type="button" id="run-library-expand-now">一键补齐单曲所属专辑</button><button type="button" id="run-library-scrape-now">一键全库刮削（标签·歌手·专辑·封面·歌词）</button><button type="button" id="stop-auto-maintenance" class="quiet">停止</button></div><p id="auto-maintenance-result" class="meta"></p></article>';
     var duplicateHtml = "";
     if (duplicateRows.length) {
       duplicateRows.forEach(function (group) {
@@ -1623,7 +1623,7 @@ const appJS = `(function () {
       '<article><h2>合辑</h2><p class="meta">预览不会移动文件。合并只把名称里带“合辑”或 Various Artists 的文件夹移进音乐库的 Compilations。</p>' +
       '<p><button type="button" id="preview-compilations">预览合辑</button> <button type="button" id="merge-compilations">合并合辑</button></p><p id="compilation-result" class="meta"></p></article>' +
       '<article><h2>艺人目录与 NCM</h2><p class="meta">艺人目录把专辑文件夹整理成“艺人/专辑”。NCM 解密不改源文件。</p>' +
-      '<p><button type="button" id="plan-artist-folders">查看艺人目录</button> <button type="button" id="apply-artist-folders">整理艺人目录</button></p>' +
+      '<p><button type="button" id="plan-artist-folders">查看艺人目录</button> <button type="button" id="apply-artist-folders" class="primary">一键补全歌手目录</button></p>' +
       '<label>NCM 路径<input type="text" id="ncm-source" placeholder="库内 .ncm 路径"></label><p><button type="button" id="decrypt-ncm">解密 NCM</button></p><p id="library-tools-result" class="meta"></p></article>' +
       '<article><h2>重复歌曲</h2><p class="meta">同一专辑的同一录音按真实编码、位深、采样率和码率比较，保留可完整解码的最高音质版本；不同版本、母带或声道不会合并。旧文件进入可恢复隔离区。</p>' +
       '<p><button type="button" id="scan-duplicates" class="primary">扫描重复</button></p>' + duplicateHtml +
@@ -1677,6 +1677,8 @@ const appJS = `(function () {
     if (runScrape) runScrape.addEventListener("click", runWholeLibraryScrape);
     var runUpgrade = document.getElementById("run-library-upgrade-now");
     if (runUpgrade) runUpgrade.addEventListener("click", runWholeLibraryUpgrade);
+    var runExpand = document.getElementById("run-library-expand-now");
+    if (runExpand) runExpand.addEventListener("click", runWholeLibraryExpansion);
     var wholeScrape = document.getElementById("scrape-whole-library");
     if (wholeScrape) wholeScrape.addEventListener("click", runWholeLibraryScrape);
     var stopAuto = document.getElementById("stop-auto-maintenance");
@@ -2048,6 +2050,22 @@ const appJS = `(function () {
     } catch (err) {
       if (result) result.textContent = "启动失败：" + err.message;
       setStatus("fail", "全库音质升级没有启动。" + err.message);
+    }
+  }
+  async function runWholeLibraryExpansion() {
+    var result = document.getElementById("auto-maintenance-result");
+    setStatus("info", "正在启动全库单曲补整专…");
+    try {
+      var response = await fetch("/v1/library/expand/whole", {method:"POST", headers:{"Content-Type":"application/json", Accept:"application/json"}, body:"{}"});
+      var body = await response.json();
+      if (!response.ok || !body.ok) throw new Error(body.error || body.code || "没有启动");
+      var message = body.started ? "全库整专补全已启动；会先核对目录是否确认多曲目，再只排入确实缺轨的专辑。" : "已有维护正在运行，未重复启动。";
+      if (result) result.textContent = message;
+      setStatus(body.started ? "ok" : "review", message);
+      await load(true);
+    } catch (err) {
+      if (result) result.textContent = "启动失败：" + err.message;
+      setStatus("fail", "全库整专补全没有启动。" + err.message);
     }
   }
   async function stopLibraryAutomationNow() {

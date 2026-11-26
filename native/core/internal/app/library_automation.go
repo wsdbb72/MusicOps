@@ -503,6 +503,17 @@ func (a *App) startLibraryScrapeRun(reason string) bool {
 	return a.startLibraryAutomationRunWithSettings(reason, settings)
 }
 
+func (a *App) startLibraryExpansionRun(reason string) bool {
+	settings, err := a.loadLibraryAutomationSettings()
+	if err != nil {
+		return false
+	}
+	settings.Scrape = false
+	settings.Dedupe = false
+	settings.Upgrade = false
+	settings.Expand = true
+	return a.startLibraryAutomationRunWithSettings(reason, settings)
+}
 func (a *App) startLibraryUpgradeRun(reason string) bool {
 	settings, err := a.loadLibraryAutomationSettings()
 	if err != nil {
@@ -2167,6 +2178,15 @@ func (a *App) runLibraryScrapeHandler(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusAccepted, map[string]any{"ok": true, "started": true, "running": running, "report": report})
 }
 
+func (a *App) runLibraryExpansionHandler(w http.ResponseWriter, r *http.Request) {
+	if !a.startLibraryExpansionRun("whole-library-expand") {
+		running, report := a.libraryAutomation.snapshot()
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "started": false, "running": running, "report": report})
+		return
+	}
+	running, report := a.libraryAutomation.snapshot()
+	writeJSON(w, http.StatusAccepted, map[string]any{"ok": true, "started": true, "running": running, "report": report})
+}
 func (a *App) runLibraryUpgradeHandler(w http.ResponseWriter, r *http.Request) {
 	if !a.startLibraryUpgradeRun("whole-library-upgrade") {
 		running, report := a.libraryAutomation.snapshot()

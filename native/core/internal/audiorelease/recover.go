@@ -51,7 +51,7 @@ func RecoverPublished(ctx context.Context, engine *dataengine.Engine, input Reco
 		return empty, dataengine.ErrInvalidRequest
 	}
 	format := strings.ToLower(strings.TrimSpace(input.Format))
-	if format != "" && format != "flac" && format != "wav" {
+	if format != "" && !supportedIndexFormat(format) {
 		return empty, dataengine.ErrInvalidRequest
 	}
 	library, err := filepath.Abs(input.Library)
@@ -68,7 +68,7 @@ func RecoverPublished(ctx context.Context, engine *dataengine.Engine, input Reco
 	if rec, found, err := readRelease(engine, input.RequestID); err != nil {
 		return empty, err
 	} else if found {
-		aliasRestore := rec.AliasedFrom != nil && rec.AliasedFrom.SHA256 == expected &&
+		aliasRestore := rec.AliasedFrom != nil && (rec.AliasedFrom.SHA256 == expected || rec.AliasedFrom.SHA256 == "") &&
 			(format == "" || rec.AliasedFrom.Format == format)
 		if rec.RootID != input.RootID || !aliasRestore && (rec.SHA256 != expected || format != "" && rec.Format != format) {
 			return empty, fmt.Errorf("%w: existing release does not match the receipt", ErrConflict)
@@ -169,7 +169,7 @@ func restoreAliasedRelease(engine *dataengine.Engine, requestID, path, expected,
 		return Result{}, err
 	}
 	var rec record
-	if json.Unmarshal(raw, &rec) != nil || rec.AliasedFrom == nil || rec.AliasedFrom.SHA256 != expected {
+	if json.Unmarshal(raw, &rec) != nil || rec.AliasedFrom == nil || (rec.AliasedFrom.SHA256 != expected && rec.AliasedFrom.SHA256 != "") {
 		return Result{}, ErrConflict
 	}
 	snapshot, err := indexedStatForPath(path)
@@ -250,6 +250,10 @@ func validateRecoveryCandidate(ctx context.Context, path, expected, format strin
 		return "", "", fmt.Errorf("%w: recovery candidate changed after discovery", ErrConflict)
 	}
 	actualFormat, reason := classifyLimited(filepath.Base(path), body, MaxStagedAudioBytes)
+	if reason != "" && format != "" && supportedIndexFormat(format) &&
+		strings.EqualFold(strings.TrimPrefix(filepath.Ext(path), "."), format) {
+		actualFormat, reason = format, ""
+	}
 	if reason != "" || format != "" && actualFormat != format {
 		if reason == "" {
 			reason = "format_mismatch"
@@ -288,9 +292,9 @@ func findRecoveryFile(ctx context.Context, library, digest, format string, track
 		// continue with the unique-digest scan below. Escaping the library is
 		// still rejected immediately.
 		if rootErr == nil && pathErr == nil {
-			if info, statErr := os.Lstat(realPath); statErr == nil && info.Mode().IsRegular() {
-				if _, _, validateErr := validateRecoveryCandidate(ctx, realPath, digest, format, nil); validateErr == nil || errors.Is(validateErr, ErrTool) {
-					return realPath, nil
+			if info, statErr := os.Lstat(path); statErr == nil && info.Mode().IsRegular() {
+				if _, _, validateErr := validateRecoveryCandidate(ctx, path, digest, format, nil); validateErr == nil || errors.Is(validateErr, ErrTool) {
+					return path, nil
 				}
 			}
 		}
@@ -353,7 +357,7 @@ func scanRecoveryFiles(ctx context.Context, library, digest, format string, incl
 			}
 		}
 		ext := strings.ToLower(strings.TrimPrefix(filepath.Ext(name), "."))
-		if format == "flac" && ext != "flac" || format == "wav" && ext != "wav" ||
+		if format != "" && (!supportedIndexFormat(format) || ext != format) ||
 			format == "" && ext != "flac" && ext != "wav" {
 			return nil
 		}

@@ -646,7 +646,11 @@ func PathFor(engine *dataengine.Engine, requestID string) (string, bool, error) 
 	if json.Unmarshal(raw, &rec) != nil || rec.Path == "" {
 		return "", false, ErrConflict
 	}
-	return rec.Path, true, nil
+	chain, err := resolveAliasChain(engine, rec)
+	if err != nil {
+		return "", false, err
+	}
+	return chain[len(chain)-1].Path, true, nil
 }
 
 // RefreshDigest re-hashes the published file and stores the new digest. It
@@ -766,16 +770,23 @@ func Verify(engine *dataengine.Engine, requestID string) (Result, error) {
 	if !found {
 		return Result{}, ErrMissing
 	}
-	if rec.State != "published" || !rec.Verified || !rec.LibraryPublished {
+	chain, err := resolveAliasChain(engine, rec)
+	if err != nil {
+		return Result{}, err
+	}
+	final := chain[len(chain)-1]
+	if final.State != "published" || !final.Verified || !final.LibraryPublished {
 		return Result{}, ErrConflict
 	}
-	if err := sameFile(rec.Path, rec.SHA256); err != nil {
+	if err := sameFile(final.Path, final.SHA256); err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return Result{}, fmt.Errorf("%w: recorded path no longer exists: %v", ErrMissing, err)
 		}
 		return Result{}, err
 	}
-	return resultFrom(rec, false, false), nil
+	result := resultFrom(final, false, false)
+	result.RequestID, result.RootID = rec.RequestID, rec.RootID
+	return result, nil
 }
 
 // VerifyReceipt verifies the current published file and accepts either its
@@ -790,10 +801,15 @@ func VerifyReceipt(engine *dataengine.Engine, requestID, expected, format string
 	if !found {
 		return Result{}, ErrMissing
 	}
-	if rec.State != "published" || !rec.Verified || !rec.LibraryPublished {
+	chain, err := resolveAliasChain(engine, rec)
+	if err != nil {
+		return Result{}, err
+	}
+	final := chain[len(chain)-1]
+	if final.State != "published" || !final.Verified || !final.LibraryPublished {
 		return Result{}, ErrConflict
 	}
-	if err := sameFile(rec.Path, rec.SHA256); err != nil {
+	if err := sameFile(final.Path, final.SHA256); err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return Result{}, fmt.Errorf("%w: recorded path no longer exists: %v", ErrMissing, err)
 		}
@@ -807,13 +823,54 @@ func VerifyReceipt(engine *dataengine.Engine, requestID, expected, format string
 	if _, err := hex.DecodeString(expected); err != nil {
 		return Result{}, fmt.Errorf("%w: release receipt digest is malformed", ErrConflict)
 	}
-	currentMatches := rec.SHA256 == expected && (format == "" || rec.Format == format)
-	aliasMatches := rec.AliasedFrom != nil &&
-		rec.AliasedFrom.SHA256 == expected && (format == "" || rec.AliasedFrom.Format == format)
-	if !currentMatches && !aliasMatches {
+	matched := false
+	for _, item := range chain {
+		if item.SHA256 == expected && (format == "" || item.Format == format) {
+			matched = true
+			break
+		}
+		if item.AliasedFrom != nil && item.AliasedFrom.SHA256 == expected &&
+			(format == "" || item.AliasedFrom.Format == format) {
+			matched = true
+			break
+		}
+	}
+	if !matched {
 		return Result{}, fmt.Errorf("%w: published record does not match the release receipt", ErrConflict)
 	}
-	return resultFrom(rec, false, false), nil
+	result := resultFrom(final, false, false)
+	result.RequestID, result.RootID = rec.RequestID, rec.RootID
+	return result, nil
+}
+
+const maxAliasDepth = 32
+
+func resolveAliasChain(engine *dataengine.Engine, rec record) ([]record, error) {
+	chain := []record{rec}
+	seen := map[string]bool{rec.RequestID: true}
+	for rec.AliasOfRequestID != "" {
+		if len(chain) >= maxAliasDepth {
+			return nil, fmt.Errorf("%w: duplicate alias chain is too deep", ErrConflict)
+		}
+		nextID := strings.TrimSpace(rec.AliasOfRequestID)
+		if nextID == "" || seen[nextID] {
+			return nil, fmt.Errorf("%w: duplicate alias chain contains a cycle", ErrConflict)
+		}
+		seen[nextID] = true
+		next, found, err := readRelease(engine, nextID)
+		if err != nil {
+			return nil, err
+		}
+		if !found {
+			return nil, fmt.Errorf("%w: duplicate alias target %s is unavailable", ErrMissing, nextID)
+		}
+		if next.State != "published" || !next.Verified || !next.LibraryPublished {
+			return nil, ErrConflict
+		}
+		chain = append(chain, next)
+		rec = next
+	}
+	return chain, nil
 }
 
 // Albums returns root ids whose verified audio is in the library.
@@ -989,22 +1046,32 @@ func list(engine *dataengine.Engine, checkPresence bool) ([]Entry, error) {
 			if root != rec.RootID {
 				continue
 			}
-			present, metadataChanged := true, false
-			if checkPresence {
-				info, statErr := os.Stat(rec.Path)
+			fileRecord := rec
+			resolved := true
+			if rec.AliasOfRequestID != "" {
+				chain, resolveErr := resolveAliasChain(engine, rec)
+				if resolveErr != nil {
+					resolved = false
+				} else {
+					fileRecord = chain[len(chain)-1]
+				}
+			}
+			present, metadataChanged := resolved, false
+			if checkPresence && resolved {
+				info, statErr := os.Stat(fileRecord.Path)
 				present = statErr == nil
-				metadataChanged = present && info.Mode().IsRegular() && rec.SHA256 == "" &&
-					(rec.IndexedStat == nil || rec.IndexedStat.Size != info.Size() || rec.IndexedStat.ModifiedNS != info.ModTime().UnixNano())
+				metadataChanged = present && info.Mode().IsRegular() && fileRecord.SHA256 == "" &&
+					(fileRecord.IndexedStat == nil || fileRecord.IndexedStat.Size != info.Size() || fileRecord.IndexedStat.ModifiedNS != info.ModTime().UnixNano())
 			}
 			entry := Entry{
 				RequestID: rec.RequestID, RootID: rec.RootID, Track: track,
-				File: libraryFileFor(rec.Path, rec.Library), Format: rec.Format, DecodeState: rec.DecodeState,
-				SHA256: rec.SHA256, Origin: rec.Origin, SourceName: rec.SourceName, TorrentManaged: rec.TorrentManaged,
-				FilePresent: present, LibraryDir: rec.Library, fullPath: rec.Path, metadataChanged: metadataChanged,
+				File: libraryFileFor(fileRecord.Path, fileRecord.Library), Format: fileRecord.Format, DecodeState: fileRecord.DecodeState,
+				SHA256: fileRecord.SHA256, Origin: rec.Origin, SourceName: rec.SourceName, TorrentManaged: rec.TorrentManaged,
+				FilePresent: present, LibraryDir: fileRecord.Library, fullPath: fileRecord.Path, metadataChanged: metadataChanged,
 			}
-			if rec.IndexedStat != nil {
-				entry.indexedSize = rec.IndexedStat.Size
-				entry.indexedModifiedNS = rec.IndexedStat.ModifiedNS
+			if fileRecord.IndexedStat != nil {
+				entry.indexedSize = fileRecord.IndexedStat.Size
+				entry.indexedModifiedNS = fileRecord.IndexedStat.ModifiedNS
 				entry.hasIndexedStat = true
 			}
 			entries = append(entries, entry)

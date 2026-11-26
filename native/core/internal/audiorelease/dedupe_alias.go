@@ -23,6 +23,8 @@ type DedupeAliasInput struct {
 	Track           int
 	KeeperRequestID string
 	KeeperPath      string
+	KeeperSHA256    string
+	KeeperFormat    string
 	Library         string
 	Decoder         Decoder
 }
@@ -73,24 +75,43 @@ func PrepareDedupeAlias(engine *dataengine.Engine, input DedupeAliasInput) (Dedu
 	if !inside(realLibrary, realKeeper) {
 		return empty, dataengine.ErrInvalidRequest
 	}
-	info, err := os.Lstat(realKeeper)
+	info, err := os.Lstat(keeper)
 	if err != nil || !info.Mode().IsRegular() {
 		return empty, fmt.Errorf("%w: dedupe keeper is not a regular file", ErrMissing)
 	}
 	if originalInfo, statErr := os.Lstat(rec.Path); statErr == nil && os.SameFile(originalInfo, info) {
 		return empty, fmt.Errorf("%w: dedupe keeper cannot alias the same physical publication", ErrConflict)
 	}
-	body, err := readRecoveryAudio(realKeeper, MaxStagedAudioBytes)
+	format := strings.ToLower(strings.TrimSpace(input.KeeperFormat))
+	if format == "" {
+		format = strings.ToLower(strings.TrimPrefix(filepath.Ext(keeper), "."))
+	}
+	if !supportedIndexFormat(format) {
+		return empty, fmt.Errorf("%w: dedupe keeper format %q is unsupported", dataengine.ErrInvalidRequest, format)
+	}
+	digest := strings.ToLower(strings.TrimSpace(input.KeeperSHA256))
+	if digest == "" {
+		body, readErr := readRecoveryAudio(keeper, MaxStagedAudioBytes)
+		if readErr != nil {
+			return empty, readErr
+		}
+		sum := sha256.Sum256(body)
+		digest = hex.EncodeToString(sum[:])
+	}
+	if len(digest) != sha256.Size*2 {
+		return empty, dataengine.ErrInvalidRequest
+	}
+	if _, err := hex.DecodeString(digest); err != nil {
+		return empty, dataengine.ErrInvalidRequest
+	}
+	if err := sameFile(keeper, digest); err != nil {
+		return empty, fmt.Errorf("%w: dedupe keeper changed before catalogue commit", ErrConflict)
+	}
+	actualFormat, decodeState, err := validateRecoveryCandidate(input.Context, keeper, digest, format, input.Decoder)
 	if err != nil {
 		return empty, err
 	}
-	sum := sha256.Sum256(body)
-	digest := hex.EncodeToString(sum[:])
-	actualFormat, decodeState, err := validateRecoveryCandidate(input.Context, realKeeper, digest, "", input.Decoder)
-	if err != nil {
-		return empty, err
-	}
-	snapshot, err := indexedStatForPath(realKeeper)
+	snapshot, err := indexedStatForPath(keeper)
 	if err != nil {
 		return empty, err
 	}
@@ -102,11 +123,11 @@ func PrepareDedupeAlias(engine *dataengine.Engine, input DedupeAliasInput) (Dedu
 			Origin: rec.Origin, SourceName: rec.SourceName, Library: rec.Library,
 		}
 	}
-	updated.Path = realKeeper
+	updated.Path = keeper
 	updated.SHA256 = digest
 	updated.Format = actualFormat
 	updated.DecodeState = decodeState
-	updated.Library = realLibrary
+	updated.Library = library
 	updated.IndexedStat = snapshot
 	updated.AliasOfRequestID = strings.TrimSpace(input.KeeperRequestID)
 	if rec.Path == updated.Path && rec.SHA256 == updated.SHA256 && rec.AliasOfRequestID == updated.AliasOfRequestID {

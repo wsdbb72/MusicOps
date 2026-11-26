@@ -878,6 +878,13 @@ func (a *App) duplicateMerge(w http.ResponseWriter, r *http.Request) {
 		keeperLibrary = a.libraryDir()
 	}
 	keeperPath := a.libraryFilePath(group.Keep.LibraryDir, group.Keep.File)
+	keeperDigest, err := hashFile(keeperPath)
+	if err != nil || keeperDigest == "" {
+		writeJSON(w, http.StatusUnprocessableEntity, map[string]any{
+			"ok": false, "code": "MERGE_RECORD_LINK_FAILED", "error": "无法重新校验保留版本，文件没有移动",
+		})
+		return
+	}
 	for _, file := range group.Files {
 		if file.RequestID == group.Keep.RequestID || file.RequestID == "" || file.RootID == "" || file.Track < 1 {
 			continue
@@ -885,6 +892,7 @@ func (a *App) duplicateMerge(w http.ResponseWriter, r *http.Request) {
 		batch, linkErr := audiorelease.PrepareDedupeAlias(a.engine, audiorelease.DedupeAliasInput{
 			Context: r.Context(), RequestID: file.RequestID, RootID: file.RootID, Track: file.Track,
 			KeeperRequestID: group.Keep.RequestID, KeeperPath: keeperPath,
+			KeeperSHA256: keeperDigest, KeeperFormat: group.Keep.Format,
 			Library: filepath.Clean(keeperLibrary), Decoder: audiorelease.SystemDecoder(),
 		})
 		if linkErr != nil {

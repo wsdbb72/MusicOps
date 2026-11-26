@@ -712,6 +712,88 @@ func TestVerifyReceiptAcceptsDedupeAlias(t *testing.T) {
 	}
 }
 
+func TestVerifyAndPathForFollowChainedDedupeAliases(t *testing.T) {
+	engine, incoming, library := openRelease(t)
+	writeSource(t, incoming, "a.wav", wav(24))
+	aReq := sample(incoming, library, "a.wav")
+	aReq.RequestID, aReq.RootID, aReq.Album, aReq.Title = "rel-a", "root-a", "Album A", "Title A"
+	a, err := Release(context.Background(), engine, aReq)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeSource(t, incoming, "b.wav", wav(28))
+	bReq := sample(incoming, library, "b.wav")
+	bReq.RequestID, bReq.RootID, bReq.Album, bReq.Title = "rel-b", "root-b", "Album B", "Title B"
+	b, err := Release(context.Background(), engine, bReq)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeSource(t, incoming, "c.wav", wav(32))
+	cReq := sample(incoming, library, "c.wav")
+	cReq.RequestID, cReq.RootID, cReq.Album, cReq.Title = "rel-c", "root-c", "Album C", "Title C"
+	c, err := Release(context.Background(), engine, cReq)
+	if err != nil {
+		t.Fatal(err)
+	}
+	aPath, found, err := PathFor(engine, a.RequestID)
+	if err != nil || !found {
+		t.Fatal(aPath, found, err)
+	}
+	bPath, found, err := PathFor(engine, b.RequestID)
+	if err != nil || !found {
+		t.Fatal(bPath, found, err)
+	}
+	cPath, found, err := PathFor(engine, c.RequestID)
+	if err != nil || !found {
+		t.Fatal(cPath, found, err)
+	}
+	link := func(input DedupeAliasInput) {
+		t.Helper()
+		input.Context = context.Background()
+		input.Decoder = SystemDecoder()
+		batch, linkErr := PrepareDedupeAlias(engine, input)
+		if linkErr != nil || !batch.Linked {
+			t.Fatal(batch, linkErr)
+		}
+		if ok, swapErr := engine.CompareAndSwap(batch.Conditions, batch.Mutations); swapErr != nil || !ok {
+			t.Fatal(ok, swapErr)
+		}
+	}
+	link(DedupeAliasInput{RequestID: b.RequestID, RootID: b.RootID, Track: 1, KeeperRequestID: a.RequestID, KeeperPath: aPath, Library: library})
+	link(DedupeAliasInput{RequestID: a.RequestID, RootID: a.RootID, Track: 1, KeeperRequestID: c.RequestID, KeeperPath: cPath, Library: library})
+	if err := os.Remove(aPath); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(bPath); err != nil {
+		t.Fatal(err)
+	}
+	verified, err := Verify(engine, b.RequestID)
+	if err != nil || verified.RequestID != b.RequestID || verified.SHA256 != c.SHA256 {
+		t.Fatal(verified, err)
+	}
+	resolved, found, err := PathFor(engine, b.RequestID)
+	if err != nil || !found || resolved != cPath {
+		t.Fatal(resolved, found, err)
+	}
+	matched, err := VerifyReceipt(engine, b.RequestID, b.SHA256, b.Format)
+	if err != nil || matched.SHA256 != c.SHA256 {
+		t.Fatal(matched, err)
+	}
+	entries, err := List(engine)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, entry := range entries {
+		if entry.RequestID == b.RequestID {
+			if !entry.FilePresent || entry.File != libraryFileFor(cPath, library) || entry.SHA256 != c.SHA256 {
+				t.Fatal(entry)
+			}
+			return
+		}
+	}
+	t.Fatal("aliased entry was not listed")
+}
+
 func TestPrepareDedupeAliasRejectsSamePhysicalPublication(t *testing.T) {
 	engine, incoming, library := openRelease(t)
 	writeSource(t, incoming, "song.wav", wav(28))
@@ -728,6 +810,61 @@ func TestPrepareDedupeAliasRejectsSamePhysicalPublication(t *testing.T) {
 		KeeperRequestID: "other", KeeperPath: path, Library: library,
 	}); !errors.Is(err, ErrConflict) {
 		t.Fatalf("self alias error = %v", err)
+	}
+}
+
+func TestDedupeAliasSupportsMetadataIndexedMP3AndRestore(t *testing.T) {
+	engine, _, library := openRelease(t)
+	loserPath := filepath.Join(library, "Artist", "Album", "01 Lossy.mp3")
+	keeperPath := filepath.Join(library, "Artist", "Album", "01 Better.mp3")
+	if err := os.MkdirAll(filepath.Dir(loserPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	loserBody := []byte("ID3\x04\x00\x00\x00\x00\x00\x00lossy metadata index")
+	keeperBody := []byte("ID3\x04\x00\x00\x00\x00\x00\x00best metadata index")
+	if err := os.WriteFile(loserPath, loserBody, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(keeperPath, keeperBody, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	added, err := IndexExisting(engine, Existing{
+		RequestID: "meta-lossy", RootID: "meta-root", Track: 1,
+		Path: loserPath, Library: library, Format: "mp3", SourceName: "indexed.mp3", MetadataOnly: true,
+	})
+	if err != nil || !added {
+		t.Fatal(added, err)
+	}
+	keeperSum := sha256.Sum256(keeperBody)
+	keeperDigest := hex.EncodeToString(keeperSum[:])
+	batch, err := PrepareDedupeAlias(engine, DedupeAliasInput{
+		Context: context.Background(), RequestID: "meta-lossy", RootID: "meta-root", Track: 1,
+		KeeperRequestID: "meta-keeper", KeeperPath: keeperPath, KeeperSHA256: keeperDigest,
+		KeeperFormat: "mp3", Library: library,
+	})
+	if err != nil || !batch.Linked {
+		t.Fatal(batch, err)
+	}
+	if ok, swapErr := engine.CompareAndSwap(batch.Conditions, batch.Mutations); swapErr != nil || !ok {
+		t.Fatal(ok, swapErr)
+	}
+	if err := os.Remove(loserPath); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(loserPath, loserBody, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	loserSum := sha256.Sum256(loserBody)
+	restored, err := RecoverPublished(context.Background(), engine, RecoverInput{
+		RequestID: "meta-lossy", RootID: "meta-root", Track: 1,
+		SHA256: hex.EncodeToString(loserSum[:]), Format: "mp3", PathHint: loserPath, Library: library,
+	})
+	if err != nil || restored.Format != "mp3" || restored.SHA256 != hex.EncodeToString(loserSum[:]) {
+		t.Fatal(restored, err)
+	}
+	path, found, err := PathFor(engine, "meta-lossy")
+	if err != nil || !found || path != loserPath {
+		t.Fatal(path, found, err)
 	}
 }
 

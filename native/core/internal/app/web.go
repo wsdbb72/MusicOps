@@ -364,7 +364,7 @@ const appJS = `(function () {
       return;
     }
     setStatus("", "");
-    var html = '<div class="cards"><article><h2>默认站点</h2><p class="meta">检索请求里没有指定站点时，用这里的选择；每次检索也可以自己指定。</p>';
+    var html = '<div class="cards"><article><h2>全局允许站点</h2><p class="meta">这里是四站的全局允许列表，会同时约束新任务和已经排队的旧任务。全部取消并保存后，不会再用四站检索、读取详情或下载种子；网易云等流媒体回退不受影响。</p>';
     siteRows.forEach(function (site) {
       html += '<label><input type="checkbox" data-site="' + escapeText(site.name) + '"' + (site.enabled ? " checked" : "") + "> " + escapeText(site.name) + "（" + escapeText(site.host || "") + "）</label><br>";
     });
@@ -398,7 +398,7 @@ const appJS = `(function () {
   function renderSearch() {
     setStatus("", "");
     var html = '<div class="cards"><article><form id="search-form"><h2>提交搜索</h2>' +
-      '<p class="meta">只读检索已启用的站点；是否下载由核对结果和身份证据决定，这里不直接下载。</p>' +
+      '<p class="meta">只读检索全局允许的四站；任务自己的站点选择不能绕过全局允许列表。流媒体回退由设置页单独控制。</p>' +
       '<label>检索关键词<input type="text" id="search-query" required></label>' +
       '<label>期望标题<input type="text" id="search-title" required></label>' +
       '<label>期望艺人<input type="text" id="search-artist"></label>' +
@@ -406,7 +406,7 @@ const appJS = `(function () {
       '<label>来源曲目 ID（歌单场景，逗号分隔）<input type="text" id="search-tracks"></label>' +
       '<label>已存歌单（歌单场景：回退时读该歌单文件）<select id="search-playlist"><option value="">不使用已存歌单</option>' + playlistRows.map(function (row) { return '<option value="' + escapeText(row.id) + '">' + escapeText((row.name || row.id) + "（" + row.track_count + " 首）") + "</option>"; }).join("") + '</select></label>' +
       '<label>流媒体回退<select id="search-streaming"><option value="">跟随设置</option><option value="true">开</option><option value="false">关</option></select></label>' +
-      '<fieldset><legend>检索站点（都不选则用站点页的默认选择）</legend><span id="search-sites"></span></fieldset>' +
+      '<fieldset><legend>检索站点（始终与站点页的全局允许列表取交集；都不选则使用全局允许列表）</legend><span id="search-sites"></span></fieldset>' +
       '<fieldset><legend>身份证据（来自目录的才算确认；AI 或合成结果不能确认身份）</legend>' +
       '<label>证据来源<select id="search-identity-kind"><option value="catalog">目录</option><option value="api">接口</option><option value="website">网站</option></select></label>' +
       '<label>来源名称<input type="text" id="search-identity-source" placeholder="如 musicbrainz" value="musicbrainz"></label>' +

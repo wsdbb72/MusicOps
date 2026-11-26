@@ -856,6 +856,16 @@ func (a *App) download(ctx context.Context, execution *scheduler.Execution, payl
 		// review instead of inventing a transition.
 		return scheduler.Outcome{}, errors.New("download task ran while the job is in stage " + job.Stage)
 	}
+	// A receipt may have been queued before the global tracker allowlist was
+	// cleared. Re-check at the download boundary so the qBittorrent handoff
+	// cannot revive a four-site download that is no longer allowed.
+	if !a.siteEnabledForPlan(SearchPlan{EnabledSites: []string{plan.Site}}, plan.Site) {
+		message := plan.Site + " 已被全局允许列表停用；未向 qBittorrent 添加该种子"
+		if outcome, done, fallbackErr := a.fallbackDownloadToStreaming(execution, task.WorkflowJobID, message); done || fallbackErr != nil {
+			return outcome, fallbackErr
+		}
+		return a.failDownload(execution, "SITE_DISABLED", message)
+	}
 	receipt, err := a.torrentReceipt(plan.JobID, plan.Site, plan.ResourceID)
 	if err != nil {
 		return a.failDownload(execution, "RECEIPT_MISSING", "种子收据已不在证据中，无法下载")

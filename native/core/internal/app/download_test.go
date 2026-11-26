@@ -526,6 +526,26 @@ func TestDownloadRejectsTorrentBeforeAddWhenCacheWouldOverflow(t *testing.T) {
 		t.Fatal("torrent was added after the cache quota rejected its declared size")
 	}
 }
+
+func TestDownloadRefusesTrackerDisabledAfterReceiptWasQueued(t *testing.T) {
+	wav1, wav2 := pcmWAV(100), pcmWAV(200)
+	torrent := buildTestTorrent(t, []testTorrentFile{{"01.wav", wav1}, {"02.wav", wav2}})
+	application := newApp(t)
+	job := candidateJob(t, application, "album-site-disabled", torrent)
+	post(t, application, "/v1/sites", map[string]any{"enabled_sites": []string{}})
+	fake := newFakeQBT(t, map[string][]byte{"album/01.wav": wav1, "album/02.wav": wav2}, 0)
+	if recorder := postDownload(t, application, job.ID, downloadBody(fake.url(), "secret-pass")); recorder.Code != http.StatusAccepted {
+		t.Fatal(recorder.Code, recorder.Body.String())
+	}
+	failed := waitJob(t, application, job.ID, "failed")
+	if failed.ErrorClass != "SITE_DISABLED" {
+		t.Fatal(failed)
+	}
+	if fake.addCallsCount() != 0 {
+		t.Fatal("globally disabled tracker receipt was added to qBittorrent")
+	}
+}
+
 func TestDownloadTimeoutResumesWithoutAddingTwice(t *testing.T) {
 	wav1, wav2 := pcmWAV(100), pcmWAV(200)
 	torrent := buildTestTorrent(t, []testTorrentFile{{"01.wav", wav1}, {"02.wav", wav2}})

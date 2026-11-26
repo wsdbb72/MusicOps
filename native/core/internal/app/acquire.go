@@ -22,6 +22,8 @@ import (
 	"github.com/wsdbb72/MusicOps/native/core/internal/workflow"
 )
 
+var errTrackerGloballyDisabled = errors.New("tracker site is globally disabled")
+
 type candidateUnavailable struct {
 	message string
 	class   string
@@ -66,6 +68,25 @@ func acquireCandidateOrder(plan SearchPlan) []AcquireCandidate {
 	add(selected)
 	for _, candidate := range all {
 		add(candidate)
+	}
+	return out
+}
+
+// allowedAcquireCandidateOrder applies the current global allowlist again at
+// the acquisition boundary. Persisted plans and ranked candidates can outlive
+// a site-settings change, so filtering only during search would let an old job
+// continue to read site details or download an already selected torrent.
+func (a *App) allowedAcquireCandidateOrder(plan SearchPlan) []AcquireCandidate {
+	allowed := make(map[string]bool)
+	for _, site := range a.effectiveEnabledSites(plan) {
+		allowed[site] = true
+	}
+	candidates := acquireCandidateOrder(plan)
+	out := make([]AcquireCandidate, 0, len(candidates))
+	for _, candidate := range candidates {
+		if allowed[candidate.Site] {
+			out = append(out, candidate)
+		}
 	}
 	return out
 }
@@ -139,8 +160,11 @@ func (a *App) acquire(ctx context.Context, execution *scheduler.Execution, paylo
 			}
 		}
 	}
-	candidates := acquireCandidateOrder(plan)
+	candidates := a.allowedAcquireCandidateOrder(plan)
 	if len(candidates) == 0 {
+		if tokenReviewFallbackUsable(*job, plan) {
+			return a.acquireFallback(ctx, execution, held, *job, plan)
+		}
 		return a.finishAcquire(held, *job, "candidate", "没有唯一候选，不能获取；尚未下载、尚未入库", "", nil)
 	}
 	failures := make([]candidateUnavailable, 0, len(candidates))
@@ -175,6 +199,9 @@ func (a *App) acquireCandidate(ctx context.Context, execution *scheduler.Executi
 	if !ok || site == "" || site != plan.SelectedSite || resource == "" {
 		return scheduler.Outcome{}, unavailableCandidate("候选标识无效，未向站点请求", "")
 	}
+	if !a.siteEnabledForPlan(plan, site) {
+		return scheduler.Outcome{}, unavailableCandidate("站点已被全局允许列表停用，未向站点请求", "site_disabled")
+	}
 	if a.cookieFor(plan.RootJobID, site) == "" {
 		if tokenledger.IsTokenSite(site) {
 			return scheduler.Outcome{}, unavailableTokenCandidate("没有可用的登录状态，未向站点请求", "auth")
@@ -198,6 +225,9 @@ func (a *App) acquireCandidate(ctx context.Context, execution *scheduler.Executi
 	strictFL := site == "dicmusic" || site == "orpheus"
 	if decision.Personal || decision.Global {
 		receipt, err := a.fetchTorrent(ctx, execution, plan, site, resource, false)
+		if errors.Is(err, errTrackerGloballyDisabled) {
+			return scheduler.Outcome{}, unavailableCandidate("站点已被全局允许列表停用，未读取种子", "site_disabled")
+		}
 		if err != nil {
 			return scheduler.Outcome{}, unavailableCandidate(candidateFailureMessage("种子响应不是有效元信息，未使用令牌", err), "PARSE_ERROR")
 		}
@@ -355,10 +385,22 @@ func (a *App) acquireWithToken(ctx context.Context, execution *scheduler.Executi
 		}
 		return scheduler.Outcome{}, unavailableTokenCandidate("站点限制了账号读取，未发令牌请求", class)
 	}
+	if !a.siteEnabledForPlan(plan, site) {
+		if _, releaseErr := a.ledger.Advance(a.now(), site, tokenRequestID, tokenledger.StateReleased, "global-site-disabled"); releaseErr != nil {
+			return scheduler.Outcome{}, releaseErr
+		}
+		return scheduler.Outcome{}, unavailableTokenCandidate("站点已被全局允许列表停用，未发令牌请求", "site_disabled")
+	}
 	if _, err = a.ledger.Advance(a.now(), site, tokenRequestID, tokenledger.StateRequesting, ""); err != nil {
 		return scheduler.Outcome{}, err
 	}
 	receipt, fetchErr := a.fetchTorrent(ctx, execution, plan, site, resource, true)
+	if errors.Is(fetchErr, errTrackerGloballyDisabled) {
+		if _, releaseErr := a.ledger.Advance(a.now(), site, tokenRequestID, tokenledger.StateReleased, "global-site-disabled-before-fetch"); releaseErr != nil {
+			return scheduler.Outcome{}, releaseErr
+		}
+		return scheduler.Outcome{}, unavailableTokenCandidate("站点已被全局允许列表停用，未读取种子", "site_disabled")
+	}
 	var receiptPtr *torrentfetch.Receipt
 	if fetchErr == nil {
 		receipt.TokenRequestID = tokenRequestID
@@ -670,6 +712,9 @@ func recheckDelay(raw string) time.Duration {
 }
 
 func (a *App) fetchTorrent(ctx context.Context, execution *scheduler.Execution, plan SearchPlan, site, resource string, useToken bool) (torrentfetch.Receipt, error) {
+	if !a.siteEnabledForPlan(plan, site) {
+		return torrentfetch.Receipt{}, errTrackerGloballyDisabled
+	}
 	phase := "fetch_" + strings.ReplaceAll(site, ".", "_")
 	if err := execution.Checkpoint(ctx, phase, 0, site); err != nil {
 		return torrentfetch.Receipt{}, err

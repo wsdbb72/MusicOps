@@ -397,3 +397,53 @@ func dirContains(t *testing.T, dir, needle string) bool {
 	})
 	return found
 }
+
+func TestEffectiveEnabledSitesHonorsGlobalDisableAndIntersection(t *testing.T) {
+	application := newApp(t)
+	legacy := SearchPlan{
+		SelectedSite:        "open.cd",
+		SelectedCandidateID: "open.cd:1",
+		AcquireCandidates:   []AcquireCandidate{{Site: "open.cd", CandidateID: "open.cd:1"}},
+	}
+	if got := application.effectiveEnabledSites(legacy); len(got) != 1 || got[0] != "open.cd" {
+		t.Fatalf("legacy candidate site without saved settings = %v", got)
+	}
+	if got := application.effectiveEnabledSites(SearchPlan{EnabledSites: []string{"open.cd"}}); len(got) != 1 || got[0] != "open.cd" {
+		t.Fatalf("explicit plan without saved settings = %v", got)
+	}
+	post(t, application, "/v1/sites", map[string]any{"enabled_sites": []string{"open.cd"}})
+	if got := application.effectiveEnabledSites(SearchPlan{EnabledSites: []string{"open.cd", "dicmusic"}}); len(got) != 1 || got[0] != "open.cd" {
+		t.Fatalf("saved/plan intersection = %v", got)
+	}
+	candidates := application.allowedAcquireCandidateOrder(SearchPlan{
+		EnabledSites:        []string{"open.cd", "dicmusic"},
+		SelectedSite:        "dicmusic",
+		SelectedCandidateID: "dicmusic:9",
+		AcquireCandidates: []AcquireCandidate{
+			{Site: "open.cd", CandidateID: "open.cd:1"},
+			{Site: "dicmusic", CandidateID: "dicmusic:9"},
+		},
+	})
+	if len(candidates) != 1 || candidates[0].Site != "open.cd" {
+		t.Fatalf("acquisition did not honor the saved/plan intersection: %v", candidates)
+	}
+	post(t, application, "/v1/sites", map[string]any{"enabled_sites": []string{}})
+	if got := application.effectiveEnabledSites(SearchPlan{EnabledSites: []string{"open.cd", "dicmusic"}}); len(got) != 0 {
+		t.Fatalf("global empty allowlist did not override an old plan: %v", got)
+	}
+	if application.siteEnabledForPlan(SearchPlan{EnabledSites: []string{"open.cd"}}, "open.cd") {
+		t.Fatal("global empty allowlist did not block an old persisted site")
+	}
+	if got := application.allowedAcquireCandidateOrder(SearchPlan{
+		EnabledSites:        []string{"open.cd"},
+		SelectedSite:        "open.cd",
+		SelectedCandidateID: "open.cd:1",
+	}); len(got) != 0 {
+		t.Fatalf("old persisted candidate survived global disable: %v", got)
+	}
+	if _, err := application.fetchTorrent(context.Background(), nil, SearchPlan{
+		RootJobID: "global-disable-fetch", EnabledSites: []string{"open.cd"}, Synthetic: true,
+	}, "open.cd", "1", false); err != errTrackerGloballyDisabled {
+		t.Fatalf("torrent fetch crossed the global disable: %v", err)
+	}
+}

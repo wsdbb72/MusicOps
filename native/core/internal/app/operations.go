@@ -13,13 +13,12 @@ import (
 	"github.com/wsdbb72/MusicOps/native/core/internal/trackersearch"
 )
 
-// siteSettingsKey is the persisted default site selection. A search that does
-// not name any sites uses these; an explicit list, including an empty one,
-// always wins over the saved default.
+// siteSettingsKey is the persisted global allowlist for tracker sites. A saved
+// empty list disables all four sites for both new and previously persisted
+// jobs; a non-empty list is intersected with each job's original selection.
 var siteSettingsKey = []byte("app/settings/sites")
 
-// siteSettings is the persisted default: which of the four tracker sites a
-// search uses when the request does not name any.
+// siteSettings is the persisted global allowlist for the four tracker sites.
 type siteSettings struct {
 	EnabledSites []string `json:"enabled_sites"`
 	UpdatedNS    int64    `json:"updated_ns"`
@@ -58,20 +57,61 @@ func (a *App) loadSiteSettings() (siteSettings, error) {
 	return out, nil
 }
 
-// effectiveEnabledSites resolves the sites a job may search. The plan carries
-// a snapshot taken when the job was created; an empty snapshot means "use the
-// site page's default selection", which is also what the search form says. A
-// job created before any site was enabled therefore starts searching the
-// sites enabled now instead of reporting every one as DISABLED forever.
+// effectiveEnabledSites resolves the sites a job may search or acquire. A
+// saved empty allowlist is authoritative and fails closed even for old jobs.
+// Before settings have ever been saved, an explicit plan snapshot or the
+// sites in an older job's persisted candidates are honoured for compatibility;
+// otherwise the current settings apply.
 func (a *App) effectiveEnabledSites(plan SearchPlan) []string {
-	if len(plan.EnabledSites) > 0 {
-		return plan.EnabledSites
-	}
 	settings, err := a.loadSiteSettings()
 	if err != nil {
 		return nil
 	}
-	return settings.EnabledSites
+	if len(plan.EnabledSites) > 0 && settings.UpdatedNS == 0 {
+		return plan.EnabledSites
+	}
+	if len(plan.EnabledSites) == 0 && settings.UpdatedNS == 0 {
+		return sitesFromAcquirePlan(plan)
+	}
+	if len(plan.EnabledSites) == 0 {
+		return settings.EnabledSites
+	}
+	allowed := make(map[string]bool, len(settings.EnabledSites))
+	for _, site := range settings.EnabledSites {
+		allowed[site] = true
+	}
+	out := make([]string, 0, len(plan.EnabledSites))
+	for _, site := range plan.EnabledSites {
+		if allowed[site] {
+			out = append(out, site)
+		}
+	}
+	return out
+}
+
+func sitesFromAcquirePlan(plan SearchPlan) []string {
+	seen := map[string]bool{}
+	out := make([]string, 0, len(plan.AcquireCandidates)+1)
+	add := func(site string) {
+		if site != "" && !seen[site] {
+			seen[site] = true
+			out = append(out, site)
+		}
+	}
+	add(plan.SelectedSite)
+	for _, candidate := range plan.AcquireCandidates {
+		add(candidate.Site)
+	}
+	return out
+}
+
+func (a *App) siteEnabledForPlan(plan SearchPlan, site string) bool {
+	for _, enabled := range a.effectiveEnabledSites(plan) {
+		if enabled == site {
+			return true
+		}
+	}
+	return false
 }
 
 func (a *App) saveSiteSettings(in siteSettings) (siteSettings, error) {
@@ -117,9 +157,9 @@ func siteViews(settings siteSettings) []map[string]any {
 	return views
 }
 
-// sites returns the four tracker sites with the saved default selection. No
-// settings saved yet means none enabled, which matches what a search does
-// when the request names no sites.
+// sites returns the four tracker sites with the saved global allowlist. No
+// settings saved yet means none enabled, which matches a search that names no
+// sites and has no explicit CLI compatibility snapshot.
 func (a *App) sites(w http.ResponseWriter, r *http.Request) {
 	settings, err := a.loadSiteSettings()
 	if err != nil {
@@ -129,8 +169,8 @@ func (a *App) sites(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "sites": siteViews(settings), "count": len(settings.EnabledSites)})
 }
 
-// saveSites replaces the saved default site selection. An empty list is a
-// real choice: it disables every site by default.
+// saveSites replaces the global site allowlist. An empty list is a real choice:
+// it disables every site, including candidates and receipts from older jobs.
 func (a *App) saveSites(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		EnabledSites []string `json:"enabled_sites"`

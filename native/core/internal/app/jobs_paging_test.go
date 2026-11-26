@@ -154,7 +154,7 @@ func TestClassifyJobCountsSeparatesWorkersFromRetryBacklog(t *testing.T) {
 		{ID: "failed-search", RootID: "failed-root", ParentJobID: "failed-root", Stage: "failed", ActiveTaskID: "failed-task"},
 		{ID: "done-root", RootID: "done-root", Stage: "completed"},
 	}
-	counts := classifyJobCounts(jobs, map[string]bool{"run-task": true})
+	counts := classifyJobCounts(jobs, map[string]bool{"run-task": true}, map[string]bool{})
 	want := map[string]int{"total": 5, "running": 1, "executing": 1, "queued": 1, "review": 1, "failed": 1, "finished": 1}
 	for key, value := range want {
 		if counts[key] != value {
@@ -211,5 +211,16 @@ func TestRootSummarySurfacesFailedTaskUnderCompletedJob(t *testing.T) {
 	}
 	if summary.Result == nil || summary.Result.State != "failed" || !strings.Contains(summary.Headline, "file missing") {
 		t.Fatalf("failed task diagnostic was lost: %+v", summary)
+	}
+}
+
+func TestClassifyJobCountsIncludesFailedTaskUnderCompletedJob(t *testing.T) {
+	jobs := []workflow.Job{
+		{ID: "failed-task-root", RootID: "failed-task-root", Stage: "completed", ActiveTaskID: "stage:failed-task-root:publishing"},
+		{ID: "finished-root", RootID: "finished-root", Stage: "completed"},
+	}
+	counts := classifyJobCounts(jobs, map[string]bool{}, map[string]bool{"stage:failed-task-root:publishing": true})
+	if counts["failed"] != 1 || counts["finished"] != 1 || counts["total"] != 2 {
+		t.Fatalf("failed active task under completed root was not counted: %+v", counts)
 	}
 }

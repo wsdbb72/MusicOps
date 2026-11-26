@@ -416,7 +416,39 @@ func (a *App) jobCounts() (map[string]int, error) {
 			active[taskID] = true
 		}
 	}
-	return classifyJobCounts(jobs, active), nil
+	failed, err := a.failedTaskIDs()
+	if err != nil {
+		return nil, err
+	}
+	return classifyJobCounts(jobs, active, failed), nil
+}
+
+// failedTaskIDs is deliberately limited to the failure indexes. A multi-track
+// workflow can complete its root after one child task failed; walking every
+// task on each counts refresh would be wasteful, while the few failed rows are
+// exactly the terminal state needed to keep the root counters honest.
+func (a *App) failedTaskIDs() (map[string]bool, error) {
+	failed := map[string]bool{}
+	if a == nil || a.tasks == nil {
+		return failed, nil
+	}
+	for _, lane := range []string{"identify", "publish", "transcode", "aux", "download"} {
+		var after []byte
+		for {
+			page, err := a.tasks.List(lane, "failed", after, 200)
+			if err != nil {
+				return nil, err
+			}
+			for _, task := range page.Tasks {
+				failed[task.ID] = true
+			}
+			if len(page.Next) == 0 {
+				break
+			}
+			after = page.Next
+		}
+	}
+	return failed, nil
 }
 
 // reviewWorkflowJobs returns root records whose durable family contains a
@@ -530,7 +562,7 @@ const (
 	rootRunning
 )
 
-func classifyJobCounts(jobs []workflow.Job, active map[string]bool) map[string]int {
+func classifyJobCounts(jobs []workflow.Job, active, failedTasks map[string]bool) map[string]int {
 	states := map[string]rootJobState{}
 	for _, job := range jobs {
 		root := job.RootID
@@ -538,6 +570,9 @@ func classifyJobCounts(jobs []workflow.Job, active map[string]bool) map[string]i
 			root = job.ID
 		}
 		state := rootFinished
+		if job.Stage == "completed" && job.ActiveTaskID != "" && failedTasks[job.ActiveTaskID] {
+			state = rootFailed
+		}
 		switch job.Stage {
 		case "needs_review":
 			state = rootReview

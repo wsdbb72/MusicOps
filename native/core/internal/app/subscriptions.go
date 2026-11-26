@@ -38,6 +38,7 @@ type playlistSubscription struct {
 	Paused          bool              `json:"paused"`
 	Seen            []string          `json:"seen"`
 	RetryMissing    map[string]string `json:"retry_missing,omitempty"`
+	AlbumRetry      map[string]string `json:"album_completion_retry,omitempty"`
 	Platform        string            `json:"platform,omitempty"`
 	RemoteID        string            `json:"remote_id,omitempty"`
 	LastChecked     string            `json:"last_checked,omitempty"`
@@ -374,24 +375,38 @@ func (a *App) runSubscriptionCheck(playlistID string, manual bool) (map[string]a
 	if row.RetryMissing == nil {
 		row.RetryMissing = map[string]string{}
 	}
+	if row.AlbumRetry == nil {
+		row.AlbumRetry = map[string]string{}
+	}
 	library := a.playlistLibrary()
 	groups := map[string][]playlistTrack{}
 	groupLabels := map[string]string{}
 	order := []string{}
 	queuedKeys := map[string]bool{}
+	albumPending := map[string]bool{}
 	newTracks, missingTracks := 0, 0
 	for _, track := range tracks {
 		key := trackKey(track)
-		if !playlistTrackNeedsSubscription(library, track) {
+		present := library.hasPlaylistRow(track)
+		needsSubscription := !present || library.needsAlbumCompletion(track.Artist, normalizePlaylistAlbumTitle(track.Album), track.Title)
+		if !needsSubscription {
 			delete(row.RetryMissing, key)
+			delete(row.AlbumRetry, key)
 			continue
 		}
+		albumNeedsCompletion := present
 		seenTrack := seen[key]
-		if seenTrack {
+		if seenTrack && !albumNeedsCompletion {
 			if !retrySeenMissing {
 				continue
 			}
 			if retryAt, err := time.Parse(time.RFC3339, row.RetryMissing[key]); err == nil && now.Before(retryAt) {
+				continue
+			}
+		}
+		if albumNeedsCompletion {
+			albumPending[key] = true
+			if retryAt, err := time.Parse(time.RFC3339, row.AlbumRetry[key]); err == nil && now.Before(retryAt) {
 				continue
 			}
 		}
@@ -435,6 +450,11 @@ func (a *App) runSubscriptionCheck(playlistID string, manual bool) (map[string]a
 			}
 			seen[key] = true
 			row.RetryMissing[key] = now.Add(playlistSubscriptionMissingCooldown).UTC().Format(time.RFC3339)
+			if albumPending[key] {
+				row.AlbumRetry[key] = now.Add(playlistSubscriptionMissingCooldown).UTC().Format(time.RFC3339)
+			} else {
+				delete(row.AlbumRetry, key)
+			}
 		}
 		sort.Strings(row.Seen)
 		row.LastResult = fmt.Sprintf("已为 %d 首新增曲目和 %d 首仍未入库的已见曲目创建任务；尚未下载、尚未入库", newTracks, missingTracks)

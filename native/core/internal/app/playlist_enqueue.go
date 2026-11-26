@@ -100,6 +100,7 @@ type playlistLibraryIndex struct {
 	albums           map[[2]string][]string
 	titleCandidates  map[string][]string
 	albumMembers     map[string][]string
+	albumTailMembers map[string][]string
 	verified         map[string]bool
 	tagTitles        map[[2]string]map[string]bool
 	compilationTags  map[string]map[[2]string]bool
@@ -582,7 +583,7 @@ func (a *App) playlistLibrary() playlistLibraryIndex {
 func (index playlistLibraryIndex) presenceWorker() playlistLibraryIndex {
 	return playlistLibraryIndex{
 		engine: index.engine, tracks: index.tracks, albums: index.albums,
-		titleCandidates: index.titleCandidates, albumMembers: index.albumMembers,
+		titleCandidates: index.titleCandidates, albumMembers: index.albumMembers, albumTailMembers: index.albumTailMembers,
 		verified: map[string]bool{}, tagTitles: map[[2]string]map[string]bool{},
 		compilationTags: map[string]map[[2]string]bool{}, albumGaps: map[[2]string]bool{},
 		records: index.records, pendingSnapshots: map[string]audiorelease.VerifiedPresence{},
@@ -691,7 +692,7 @@ func (a *App) invalidatePlaylistLibraryCache() {
 	a.playlistEntriesMu.Unlock()
 }
 func indexPlaylistLibrary(engine *dataengine.Engine, entries []audiorelease.Entry) playlistLibraryIndex {
-	index := playlistLibraryIndex{engine: engine, tracks: map[[3]string][]string{}, albums: map[[2]string][]string{}, titleCandidates: map[string][]string{}, albumMembers: map[string][]string{}, verified: map[string]bool{}, tagTitles: map[[2]string]map[string]bool{}, compilationTags: map[string]map[[2]string]bool{}, albumGaps: map[[2]string]bool{}, records: map[string]audiorelease.Entry{}, pendingSnapshots: map[string]audiorelease.VerifiedPresence{}, presence: newPlaylistPresenceCache(), metadata: newPlaylistMetadataCache()}
+	index := playlistLibraryIndex{engine: engine, tracks: map[[3]string][]string{}, albums: map[[2]string][]string{}, titleCandidates: map[string][]string{}, albumMembers: map[string][]string{}, albumTailMembers: map[string][]string{}, verified: map[string]bool{}, tagTitles: map[[2]string]map[string]bool{}, compilationTags: map[string]map[[2]string]bool{}, albumGaps: map[[2]string]bool{}, records: map[string]audiorelease.Entry{}, pendingSnapshots: map[string]audiorelease.VerifiedPresence{}, presence: newPlaylistPresenceCache(), metadata: newPlaylistMetadataCache()}
 	for _, entry := range entries {
 		if !entry.FilePresent {
 			continue
@@ -708,6 +709,12 @@ func indexPlaylistLibrary(engine *dataengine.Engine, entries []audiorelease.Entr
 			albumKey := [2]string{artist, album}
 			index.albums[albumKey] = append(index.albums[albumKey], entry.RequestID)
 			index.albumMembers[album] = append(index.albumMembers[album], entry.RequestID)
+			if _, tail, ok := strings.Cut(rawAlbum, " - "); ok {
+				tail = playlistMatchKey(tail)
+				if tail != "" && tail != album {
+					index.albumTailMembers[tail] = append(index.albumTailMembers[tail], entry.RequestID)
+				}
+			}
 		}
 	}
 	return index
@@ -1218,7 +1225,14 @@ func (index playlistLibraryIndex) hasAlbum(artist, album string) bool {
 	}
 	// Embedded tags and sanitized filesystem names can still identify an album
 	// even when the path components do not form the normal artist/album pair.
-	for _, id := range index.albumMembers[playlistMatchKey(album)] {
+	candidates := append([]string(nil), index.albumMembers[playlistMatchKey(album)]...)
+	candidates = append(candidates, index.albumTailMembers[playlistMatchKey(album)]...)
+	seen := map[string]bool{}
+	for _, id := range candidates {
+		if seen[id] {
+			continue
+		}
+		seen[id] = true
 		if !index.isUnchanged(id) {
 			continue
 		}
@@ -1239,10 +1253,10 @@ func (index playlistLibraryIndex) hasAlbum(artist, album string) bool {
 }
 
 func (index playlistLibraryIndex) needsAlbumCompletion(artist, album, title string) bool {
-	if !index.hasTrack(artist, album, title) {
+	if !index.hasAlbum(artist, album) || !index.hasTrack(artist, album, title) {
 		return true
 	}
-	return index.hasAlbum(artist, album) && index.hasAlbumGap(artist, album)
+	return index.hasAlbumGap(artist, album)
 }
 
 // Only an explicit total in a local file is evidence that a folder has gaps.
@@ -1647,7 +1661,7 @@ func (a *App) playlistTracksView(w http.ResponseWriter, r *http.Request) {
 		albumPresent, albumIncomplete, completionNeeded := true, false, !present[i]
 		album := normalizePlaylistAlbumTitle(row.Album)
 		if album != "" && !isHotSlowCompilationAlbum(album) {
-			albumPresent = library.hasAlbum(row.Artist, album) || library.hasTrack(row.Artist, album, row.Title)
+			albumPresent = library.hasAlbum(row.Artist, album)
 			albumIncomplete = albumPresent && library.hasAlbumGap(row.Artist, album)
 			completionNeeded = library.needsAlbumCompletion(row.Artist, album, row.Title)
 		}

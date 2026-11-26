@@ -152,6 +152,37 @@ func TestSubscriptionRetriesSeenTrackThatIsStillMissing(t *testing.T) {
 	}
 }
 
+func TestSubscriptionQueuesMissingTargetAlbumWhenSongExistsElsewhere(t *testing.T) {
+	application := newApp(t)
+	library := t.TempDir()
+	if response := post(t, application, "/v1/settings/library", map[string]any{"library_dir": library}); response["ok"] != true {
+		t.Fatal(response)
+	}
+	indexPlaylistTestFile(t, application, library,
+		"Compilation/Artist A - Song One.flac",
+		"Artist A", "Compilation", "Song One")
+	application.invalidatePlaylistLibraryCache()
+	content := "#PLAYLIST:Album target\n#MUSICOPS-ALBUM:Single Album\n#EXTINF:200,Artist A - Song One\n.\n"
+	if saved := post(t, application, "/v1/playlists", map[string]any{"name": "Album target", "content": content}); saved["ok"] != true {
+		t.Fatal(saved)
+	}
+	if subscribed := post(t, application, "/v1/subscriptions", map[string]any{"playlist_id": "album-target", "interval_hours": 6, "include_existing": true}); subscribed["ok"] != true {
+		t.Fatal(subscribed)
+	}
+	checked := post(t, application, "/v1/subscriptions/check", map[string]any{"playlist_id": "album-target"})
+	if checked["queued"] != float64(1) {
+		t.Fatalf("the target album was suppressed by a recording in another release: %+v", checked)
+	}
+	ids := checked["job_ids"].([]any)
+	if len(ids) != 1 {
+		t.Fatal(checked)
+	}
+	job, err := application.flows.Job(ids[0].(string))
+	if err != nil || job == nil || job.SourceTrackCount != 1 || !strings.Contains(job.Label, "Single Album") {
+		t.Fatalf("job=%+v err=%v", job, err)
+	}
+}
+
 func TestSubscriptionNeteaseJobCarriesConfirmedSourceIdentity(t *testing.T) {
 	application := newApp(t)
 	jobID := "sub-netease-590536461-test"

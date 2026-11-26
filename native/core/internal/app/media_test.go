@@ -367,6 +367,45 @@ func TestFLACTagsReadWriteEndpoint(t *testing.T) {
 	}
 }
 
+func TestFLACTagWriteRefreshesEveryPublishedReceipt(t *testing.T) {
+	application := newApp(t)
+	library := application.libraryDir()
+	folder := filepath.Join(library, "Artist", "Album")
+	if err := os.MkdirAll(folder, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	full := filepath.Join(folder, "01 Shared.flac")
+	if err := os.WriteFile(full, flacWithDuration(t, 240.25), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := flactags.Write(full, flactags.Tags{Title: "Shared", Artists: []string{"Artist"}, Album: "Album", TrackNumber: 1}); err != nil {
+		t.Fatal(err)
+	}
+	for _, item := range []audiorelease.Existing{
+		{RequestID: "tags-primary", RootID: "tags-root-one", Track: 1, Path: full, Library: library, Format: "flac"},
+		{RequestID: "tags-alias", RootID: "tags-root-two", Track: 1, Path: full, Library: library, Format: "flac"},
+	} {
+		if added, err := audiorelease.IndexExisting(application.engine, item); err != nil || !added {
+			t.Fatalf("index %s added=%v err=%v", item.RequestID, added, err)
+		}
+	}
+	rel, err := filepath.Rel(application.Dir, full)
+	if err != nil {
+		t.Fatal(err)
+	}
+	code, decoded := mediaPost(t, application, "/v1/library/tags", map[string]any{
+		"path": filepath.ToSlash(rel), "tags": map[string]any{"genre": "Alternative"},
+	})
+	if code != http.StatusOK {
+		t.Fatal(code, decoded)
+	}
+	for _, requestID := range []string{"tags-primary", "tags-alias"} {
+		if _, err := audiorelease.Verify(application.engine, requestID); err != nil {
+			t.Fatalf("verify %s after tag write: %v", requestID, err)
+		}
+	}
+}
+
 func TestFLACTagsRejects(t *testing.T) {
 	application := newApp(t)
 	incoming := filepath.Join(application.Dir, "incoming")

@@ -158,7 +158,13 @@ func localWorkflowTitleFromPath(path string) string {
 
 func isLossyFLACProvenance(comment string) bool {
 	comment = strings.ToLower(comment)
-	return strings.Contains(comment, "musicops source=") && strings.Contains(comment, "-lossy")
+	if strings.Contains(comment, "musicops source=") && strings.Contains(comment, "-lossy") {
+		return true
+	}
+	// Early native/manual fallback imports used a human-readable marker.
+	// Keep those files upgrade-eligible instead of permanently treating the
+	// FLAC container as proof that its PCM came from a lossless source.
+	return strings.Contains(comment, "lossy source:")
 }
 func isLossyUpgradeSource(codec string) bool {
 	switch strings.ToLower(strings.TrimSpace(codec)) {

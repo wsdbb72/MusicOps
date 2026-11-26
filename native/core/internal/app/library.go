@@ -1172,7 +1172,7 @@ func (a *App) fillMissingTags(group *duplicateGroup) ([]string, error) {
 	}
 	// The write changed the bytes: the library record must carry the new
 	// digest or the next duplicate scan reports the file as changed.
-	if _, err := audiorelease.RefreshDigest(a.engine, group.Keep.RequestID); err != nil {
+	if _, err := audiorelease.RefreshPathDigests(a.engine, []string{keeperPath}); err != nil {
 		return nil, err
 	}
 	return filled, nil

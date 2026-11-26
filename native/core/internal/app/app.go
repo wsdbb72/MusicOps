@@ -71,6 +71,11 @@ type App struct {
 	// neteaseBases replaces the NetEase API origin in tests, the same seam as
 	// playlistBases. Production leaves it nil.
 	neteaseBases map[string]string
+	// JOOX's public track endpoint is the engine fallback when its rendered
+	// card exists but the bundled bridge returns no URL. The two fields are
+	// test seams; production leaves them empty and uses jooxTrackAPIBase.
+	jooxAPIBaseURL string
+	jooxHTTPClient *http.Client
 	// missingAlbumFollowup is a test seam for the publish path's immediate
 	// incomplete-album expansion. Production leaves it nil and uses the real
 	// durable maintenance workflow queue.

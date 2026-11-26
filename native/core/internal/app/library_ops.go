@@ -71,17 +71,31 @@ func (a *App) indexLibraryTreeWithProgress(ctx context.Context, root string, pro
 	seenPaths := map[string]bool{}
 	presentPaths := map[string]bool{}
 	byID := make(map[string]audiorelease.Entry, len(existing))
+	byPath := make(map[string][]audiorelease.Entry, len(existing))
 	for _, entry := range existing {
 		seen[entry.RequestID] = true
 		byID[entry.RequestID] = entry
 		if entry.FilePresent {
 			path := filepath.Clean(a.entryFilePath(entry))
-			seenPaths[strings.ToLower(path)] = true
+			key := strings.ToLower(path)
+			seenPaths[key] = true
+			byPath[key] = append(byPath[key], entry)
 		}
 	}
 	const indexBatchSize = 128
 	checked := 0
 	batch := make([]audiorelease.Existing, 0, indexBatchSize)
+	digestBatch := make([]string, 0, indexBatchSize)
+	flushDigestBatch := func() error {
+		if len(digestBatch) == 0 {
+			return nil
+		}
+		if _, err := audiorelease.RefreshPathDigests(a.engine, digestBatch); err != nil {
+			return err
+		}
+		digestBatch = digestBatch[:0]
+		return nil
+	}
 	flush := func() error {
 		wrote, err := audiorelease.IndexSnapshots(a.engine, batch)
 		if err != nil {
@@ -123,15 +137,33 @@ func (a *App) indexLibraryTreeWithProgress(ctx context.Context, root string, pro
 		}
 		track := trackNumberFromName(filepath.Base(path))
 		requestID := libraryFileID(abs)
+		currentInfo, infoErr := entry.Info()
+		if infoErr != nil {
+			return infoErr
+		}
 		metadataChanged := false
 		if prior, ok := byID[requestID]; ok && prior.SHA256 == "" {
-			info, infoErr := entry.Info()
-			if infoErr != nil {
-				return infoErr
-			}
-			metadataChanged = !prior.IndexedStatMatches(info.Size(), info.ModTime().UnixNano())
+			metadataChanged = !prior.IndexedStatMatches(currentInfo.Size(), currentInfo.ModTime().UnixNano())
 		}
-		if !metadataChanged && (seen[requestID] || seenPaths[strings.ToLower(abs)]) {
+		pathKey := strings.ToLower(filepath.Clean(abs))
+		digestChanged := false
+		for _, prior := range byPath[pathKey] {
+			if prior.SHA256 != "" && prior.HasIndexedStat() && !prior.IndexedStatMatches(currentInfo.Size(), currentInfo.ModTime().UnixNano()) {
+				digestChanged = true
+				break
+			}
+		}
+		if digestChanged {
+			digestBatch = append(digestBatch, abs)
+			if len(digestBatch) == indexBatchSize {
+				if err := flushDigestBatch(); err != nil {
+					return err
+				}
+			}
+			kept++
+			return nil
+		}
+		if !metadataChanged && (seen[requestID] || seenPaths[pathKey]) {
 			kept++
 			return nil
 		}
@@ -146,6 +178,9 @@ func (a *App) indexLibraryTreeWithProgress(ctx context.Context, root string, pro
 	})
 	if err == nil {
 		err = flush()
+	}
+	if err == nil {
+		err = flushDigestBatch()
 	}
 	if err == nil && progress != nil {
 		progress(checked, "正在清理已不存在的索引")
@@ -619,6 +654,11 @@ func (a *App) completeMetadata(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 		}
+	}
+	if err := a.refreshPublishedDigests(path); err != nil {
+		restored, resultErr := rollback(err)
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "code": "RELEASE_REFRESH_FAILED", "written": false, "restored": restored, "error": resultErr.Error()})
+		return
 	}
 	_ = os.Remove(backup)
 	_ = commitFileSnapshots(sidecars)

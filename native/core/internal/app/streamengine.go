@@ -200,6 +200,27 @@ func streamFailureStopsCandidateWalk(class string) bool {
 
 func (a *App) stageConfiguredStreamSong(ctx context.Context, base, source string, plan SearchPlan, song streamSong, token string) (string, string, string) {
 	body, status, err := a.streamDownload(ctx, base, &song, token)
+	if strings.EqualFold(source, "joox") && (err != nil || !isKnownAudio(body)) {
+		engineErr := err
+		if directBody, directClass, directErr := a.fetchJOOXAudio(ctx, song.ID); directErr == nil {
+			body, status, err = directBody, "", nil
+		} else {
+			if engineErr != nil {
+				err = engineErr
+			} else {
+				err = errors.New("engine returned invalid audio")
+			}
+			if status == "" {
+				status = downloadpolicy.ClassNoResult
+			}
+			if directClass == downloadpolicy.ClassAuth || directClass == downloadpolicy.ClassRateLimited {
+				// Account and rate-limit answers are authoritative even when
+				// the engine's bridge failed first. Transient failures of the
+				// optional direct path do not stop the remaining candidates.
+				status = preferStreamFailure(status, directClass)
+			}
+		}
+	}
 	if err != nil {
 		if status == downloadpolicy.ClassAuth {
 			return "", source + " 需要用户自己的账号，没有绕过访问控制", downloadpolicy.ClassAuth

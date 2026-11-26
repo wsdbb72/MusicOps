@@ -68,6 +68,15 @@ func TestUpgradeDoesNotTreatContainerChangeAsImprovement(t *testing.T) {
 	}
 }
 
+func TestLossyFLACProvenanceAlsoRecognizesLegacyMarker(t *testing.T) {
+	if !isLossyFLACProvenance("Lossy source: Gequbao/Kuwo MP3 128 kbps; stored at 30 kHz") {
+		t.Fatal("legacy lossy marker was not recognized")
+	}
+	if isLossyFLACProvenance("MusicOps source=joox-lossless") {
+		t.Fatal("lossless provenance was marked lossy")
+	}
+}
+
 func TestLossyNeteaseFLACContainerRemainsUpgradeEligible(t *testing.T) {
 	ffmpeg, err := exec.LookPath("ffmpeg")
 	if err != nil {

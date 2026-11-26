@@ -445,7 +445,7 @@ func (a *App) scrapeLibrary(w http.ResponseWriter, r *http.Request) {
 			// One backup covers both writes: tags first, then the embedded
 			// cover, so a failed cover leaves the original file in place.
 			backup := ""
-			if cover != nil || lyricsText != "" {
+			if len(updates) > 0 || cover != nil || lyricsText != "" {
 				if backup, err = backupFile(entry.full); err != nil {
 					result.Status, result.Code, result.Note = "failed", "TAG_UNAVAILABLE", "备份失败，文件没有改"
 					continue
@@ -461,6 +461,7 @@ func (a *App) scrapeLibrary(w http.ResponseWriter, r *http.Request) {
 			}
 			sidecars, snapshotErr := snapshotFiles(sidecarPaths...)
 			if snapshotErr != nil {
+
 				if backup != "" {
 					_ = os.Remove(backup)
 				}
@@ -535,6 +536,12 @@ func (a *App) scrapeLibrary(w http.ResponseWriter, r *http.Request) {
 				}
 				result.Cover = true
 				coverWritten++
+			}
+			if len(updates) > 0 || cover != nil {
+				if err := a.refreshPublishedDigests(entry.full); err != nil {
+					fail("RELEASE_REFRESH_FAILED", err)
+					continue
+				}
 			}
 			if backup != "" {
 				_ = os.Remove(backup)

@@ -277,6 +277,14 @@ func streamInfoView(info flactags.StreamInfo) map[string]any {
 	}
 }
 
+func (a *App) refreshPublishedDigests(paths ...string) error {
+	if len(paths) == 0 {
+		return nil
+	}
+	_, err := audiorelease.RefreshPathDigests(a.engine, paths)
+	return err
+}
+
 func (a *App) saveLibraryTags(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		Path string                     `json:"path"`
@@ -296,15 +304,29 @@ func (a *App) saveLibraryTags(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "code": "INVALID_REQUEST", "error": err.Error()})
 		return
 	}
+	backup, err := backupFile(path)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "code": "TAG_UNAVAILABLE"})
+		return
+	}
+	fail := func(status int, code string, cause error) {
+		restored, resultErr := restoreBackupOnFailure(path, backup, cause)
+		writeJSON(w, status, map[string]any{"ok": false, "code": code, "restored": restored, "error": resultErr.Error()})
+	}
 	if err := writeFLACTags(path, updates); err != nil {
-		writeTagError(w, err)
+		fail(http.StatusUnprocessableEntity, "TAG_WRITE_FAILED", err)
 		return
 	}
 	tags, err := flactags.ReadFile(path)
 	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "code": "TAG_READ_FAILED"})
+		fail(http.StatusInternalServerError, "TAG_READ_FAILED", err)
 		return
 	}
+	if err := a.refreshPublishedDigests(path); err != nil {
+		fail(http.StatusInternalServerError, "RELEASE_REFRESH_FAILED", err)
+		return
+	}
+	_ = os.Remove(backup)
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "path": path, "tags": tagView(tags), "stream_info": streamInfoView(tags.StreamInfo)})
 }
 
@@ -625,6 +647,10 @@ func (a *App) saveLibraryLyrics(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "code": "INVALID_REQUEST"})
 		return
 	}
+	if body.Embed && !strings.EqualFold(filepath.Ext(path), ".flac") {
+		writeJSON(w, http.StatusUnprocessableEntity, map[string]any{"ok": false, "code": "UNSUPPORTED_FORMAT", "error": "embedded lyrics are only supported for FLAC"})
+		return
+	}
 	parsed, err := lrc.Parse(body.Text)
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "code": "INVALID_LRC", "error": err.Error()})
@@ -638,23 +664,38 @@ func (a *App) saveLibraryLyrics(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "code": "LYRICS_UNAVAILABLE"})
 		return
 	}
+	backup := ""
+	if body.Embed {
+		if backup, err = backupFile(path); err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "code": "TAG_UNAVAILABLE"})
+			return
+		}
+	}
+	failEmbed := func(cause error) {
+		restored, resultErr := restoreBackupOnFailure(path, backup, cause)
+		writeJSON(w, http.StatusUnprocessableEntity, map[string]any{"ok": false, "code": "LYRICS_WRITE_FAILED", "restored": restored, "error": resultErr.Error()})
+	}
 	sidecarWritten, embedded := false, false
 	if body.Sidecar {
 		if err := writeSidecarOverwrite(path, text); err != nil {
+			if backup != "" {
+				_ = os.Remove(backup)
+			}
 			writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "code": "LYRICS_UNAVAILABLE", "error": err.Error()})
 			return
 		}
 		sidecarWritten = true
 	}
 	if body.Embed {
-		if !strings.EqualFold(filepath.Ext(path), ".flac") {
-			writeJSON(w, http.StatusUnprocessableEntity, map[string]any{"ok": false, "code": "UNSUPPORTED_FORMAT", "error": "embedded lyrics are only supported for FLAC"})
-			return
-		}
 		if err := writeFLACTags(path, map[string][]string{"LYRICS": {text}}); err != nil {
-			writeTagError(w, err)
+			failEmbed(err)
 			return
 		}
+		if err := a.refreshPublishedDigests(path); err != nil {
+			failEmbed(err)
+			return
+		}
+		_ = os.Remove(backup)
 		embedded = true
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "path": path, "text": text, "sidecar_written": sidecarWritten, "embedded": embedded, "lines": len(normalized.Lines)})

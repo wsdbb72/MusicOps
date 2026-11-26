@@ -826,3 +826,16 @@ func TestMaintenanceWorkflowTreatsStaleLossyCandidateAsCompletedUpgrade(t *testi
 		t.Fatalf("completed lossless transition became a maintenance failure: %+v", report.Errors)
 	}
 }
+
+func TestStoppingDeduplicationIsNotReportedAsFailure(t *testing.T) {
+	application := newApp(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	application.runAutomatedDeduplication(ctx)
+	_, report := application.libraryAutomation.snapshot()
+	for _, message := range report.Errors {
+		if strings.Contains(message, "重复扫描失败") {
+			t.Fatalf("manual stop was reported as a scan failure: %+v", report.Errors)
+		}
+	}
+}

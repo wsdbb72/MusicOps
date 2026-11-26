@@ -1573,6 +1573,10 @@ func (a *App) runAutomatedDeduplication(ctx context.Context) bool {
 		state.addError(fmt.Errorf("重复扫描缓存保存失败: %w", err))
 	}
 	if err != nil {
+		if ctx.Err() != nil || errors.Is(err, context.Canceled) {
+			state.touch("dedupe", "本轮去重已按请求停止，下一轮从持久缓存继续")
+			return true
+		}
 		if errors.Is(err, context.DeadlineExceeded) && ctx.Err() == nil {
 			state.touch("dedupe", "本轮去重指纹已达到独立安全时间片，下一轮从持久缓存继续")
 			return true

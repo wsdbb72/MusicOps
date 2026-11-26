@@ -158,7 +158,11 @@ func (r *Repository) retryAction(job *Job, task *taskrepo.Task) ReviewAction {
 		default:
 			return ReviewAction{Action: "retry", Reason: "这次核对不能重试"}
 		}
-	case "failed":
+	case "failed", "completed":
+		// A multi-track album can finish other descendants after one publish
+		// task failed, leaving the root at completed while its active task is
+		// failed. That is still an actionable failure: retry the task and set
+		// the root back to the task's durable stage.
 		if task.State != "failed" {
 			return ReviewAction{Action: "retry", Reason: "任务状态不允许重试"}
 		}
@@ -689,7 +693,7 @@ func (r *Repository) reviewRetry(requestID string, job Job, task *taskrepo.Task,
 		if task.State != "blocked" || !reviewRetryKinds[job.ReviewKind] {
 			return Result{}, ErrStale
 		}
-	case "failed":
+	case "failed", "completed":
 		if task.State != "failed" {
 			return Result{}, ErrStale
 		}

@@ -252,6 +252,19 @@ func albumProgress(tree []jobView) (string, string) {
 	best := 0
 	for i := range tree {
 		job := &tree[i]
+		if job.Stage == "completed" && job.Result != nil && job.Result.State == "failed" {
+			// A sibling can finish the album after this task failed. The root
+			// stage alone would then say "completed" and hide the active task's
+			// actionable verification error.
+			failedView := *job
+			failedView.Stage = "failed"
+			failedView.ExecutionState = "failed"
+			failedView.Progress = firstNonEmpty(job.Progress, "未能继续")
+			failedView.Headline = firstNonEmpty(job.Result.Message, job.Headline, "任务失败")
+			failedView.Message = firstNonEmpty(job.Result.Message, job.Message)
+			failedView.ErrorClass = firstNonEmpty(job.Result.ErrorClass, job.ErrorClass)
+			job = &failedView
+		}
 		switch job.Stage {
 		case "needs_review":
 			if review == nil || job.UpdatedNS >= review.UpdatedNS {
@@ -306,6 +319,19 @@ func summarizeRootJobs(tree []jobView) rootStatusView {
 	best := 0
 	for i := range tree {
 		job := &tree[i]
+		if job.Stage == "completed" && job.Result != nil && job.Result.State == "failed" {
+			// A sibling can finish the album after this task failed. The root
+			// stage alone would then say "completed" and hide the active task's
+			// actionable verification error.
+			failedView := *job
+			failedView.Stage = "failed"
+			failedView.ExecutionState = "failed"
+			failedView.Progress = firstNonEmpty(job.Progress, "未能继续")
+			failedView.Headline = firstNonEmpty(job.Result.Message, job.Headline, "任务失败")
+			failedView.Message = firstNonEmpty(job.Result.Message, job.Message)
+			failedView.ErrorClass = firstNonEmpty(job.Result.ErrorClass, job.ErrorClass)
+			job = &failedView
+		}
 		switch job.Stage {
 		case "needs_review":
 			if review == nil || job.UpdatedNS >= review.UpdatedNS {

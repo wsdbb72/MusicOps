@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"strings"
 	"testing"
 	"time"
 
@@ -194,5 +195,21 @@ func TestRootSummaryDoesNotHideFailedDescendant(t *testing.T) {
 	}
 	if summary.Result == nil || summary.Result.ErrorClass != "QBITTORENT_UNAVAILABLE" {
 		t.Fatalf("root summary lost the actionable diagnostic: %+v", summary)
+	}
+}
+
+func TestRootSummarySurfacesFailedTaskUnderCompletedJob(t *testing.T) {
+	summary := summarizeRootJobs([]jobView{
+		{ID: "root", RootID: "root", Stage: "completed", ExecutionState: "completed", Message: "已完成", UpdatedNS: 1},
+		{
+			ID: "search:root", RootID: "root", ParentID: "root", Stage: "completed", ExecutionState: "completed", UpdatedNS: 2,
+			Result: &jobResultView{Stage: "completed", State: "failed", ErrorClass: "VERIFY_FAILED", Message: "library record did not verify: file missing"},
+		},
+	})
+	if summary.JobID != "search:root" || summary.Stage != "failed" || summary.ExecutionState != "failed" || summary.ErrorClass != "VERIFY_FAILED" {
+		t.Fatalf("completed job hid its failed active task: %+v", summary)
+	}
+	if summary.Result == nil || summary.Result.State != "failed" || !strings.Contains(summary.Headline, "file missing") {
+		t.Fatalf("failed task diagnostic was lost: %+v", summary)
 	}
 }

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"testing"
 
+	"github.com/wsdbb72/MusicOps/native/core/internal/dataengine"
 	"github.com/wsdbb72/MusicOps/native/core/internal/searchdecision"
 	"github.com/wsdbb72/MusicOps/native/core/internal/taskrepo"
 )
@@ -525,5 +526,70 @@ func TestReviewRetryCountsTemporaryStreamingFallback(t *testing.T) {
 	retried, err := repo.Review("fallback-retry", "process:search:album1", ReviewDecision{Action: "retry"}, 7000)
 	if err != nil || retried.Job == nil || retried.Job.Stage != "fallback" || retried.Job.SearchRetryCount != 1 {
 		t.Fatalf("retried=%+v err=%v", retried.Job, err)
+	}
+}
+
+func TestReviewRetriesFailedTaskUnderCompletedRoot(t *testing.T) {
+	repo, tasks := fixture(t)
+	startPlaylist(t, repo)
+	publishID := "stage:album1:publishing"
+	if _, err := tasks.Enqueue("enqueue-publish-failed", taskrepo.Spec{
+		ID: publishID, Command: cmdPublish, Lane: "publish", Priority: 1, CreatedNS: 1500,
+	}, []byte(`{}`)); err != nil {
+		t.Fatal(err)
+	}
+	token := begin(t, tasks, publishID, "publish")
+	if _, err := tasks.Finish("finish-publish-failed", token, taskrepo.Completion{
+		State: "failed", Message: "library record did not verify", ErrorClass: "VERIFY_FAILED", NowNS: 3000,
+	}, nil); err != nil {
+		t.Fatal(err)
+	}
+
+	var condition dataengine.Condition
+	var writes []dataengine.Mutation
+	if err := repo.engine.View(func(view *dataengine.View) error {
+		job, raw, err := readJob(view, "album1")
+		if err != nil {
+			return err
+		}
+		previous := append([]byte(nil), raw...)
+		next := *job
+		next.Stage = "completed"
+		next.ActiveTaskID = publishID
+		next.Message = "已入库并完成发布校验"
+		updated, err := bump(next, 4000, true)
+		if err != nil {
+			return err
+		}
+		condition, writes, err = putJob(previous, updated)
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	ok, err := repo.engine.CompareAndSwap([]dataengine.Condition{condition}, writes)
+	if err != nil || !ok {
+		t.Fatalf("write completed root: ok=%v err=%v", ok, err)
+	}
+
+	actions, err := repo.ReviewActions("album1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	allowed := false
+	for _, action := range actions {
+		if action.Action == "retry" {
+			allowed = action.Allowed
+		}
+	}
+	if !allowed {
+		t.Fatalf("completed root with a failed active task did not offer retry: %+v", actions)
+	}
+	result, err := repo.Review("review-completed-failed", "album1", ReviewDecision{Action: "retry"}, 5000)
+	if err != nil || result.Job == nil || result.Job.Stage != "publishing" {
+		t.Fatalf("job=%+v err=%v", result.Job, err)
+	}
+	task, err := tasks.Get(publishID)
+	if err != nil || task == nil || task.State != "queued" {
+		t.Fatalf("task=%+v err=%v", task, err)
 	}
 }

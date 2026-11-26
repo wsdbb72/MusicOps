@@ -17,6 +17,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/wsdbb72/MusicOps/native/core/internal/artistnorm"
 	"github.com/wsdbb72/MusicOps/native/core/internal/flactags"
 	"github.com/wsdbb72/MusicOps/native/core/internal/musicbrainz"
 )
@@ -36,7 +37,7 @@ const (
 	libraryAutomationScanWorkers    = 8
 	duplicateFingerprintWorkers     = 8
 	libraryAutomationCheckpoint     = 20_000
-	libraryAutomationScanVersion    = 4
+	libraryAutomationScanVersion    = 5
 	libraryAutomationStallTimeout   = 45 * time.Minute
 	libraryAutomationScrapeSlice    = 45 * time.Minute
 	libraryAutomationArtworkSlice   = 30 * time.Minute
@@ -1178,7 +1179,7 @@ func (a *App) runAutomatedGenericScrapeDir(ctx context.Context, dir string, path
 			continue
 		}
 		albumArtist := firstNonEmpty(info.AlbumArtist, info.Artist)
-		key := foldTagText(albumArtist) + "\x00" + foldTagText(info.Album)
+		key := artistnorm.Key(albumArtist) + "\x00" + foldTagText(info.Album)
 		if _, exists := groups[key]; !exists {
 			order = append(order, key)
 		}
@@ -1361,7 +1362,7 @@ func maintenanceMissingArtwork(path string, tags *flactags.Tags) bool {
 	if tags == nil {
 		return false
 	}
-	if !hasLyricsSidecar(path) {
+	if lyricsNeedsWrite(path, tags.Raw["LYRICS"]) {
 		return true
 	}
 	sidecar := strings.TrimSuffix(path, filepath.Ext(path)) + ".jpg"
@@ -1882,7 +1883,7 @@ func albumAuditIdentity(dir string, tracks []localWorkflowTrack) string {
 		return ""
 	}
 	albumArtist := localWorkflowAlbumArtist(tracks)
-	return filepath.Clean(dir) + "\x00" + normalizeKey(tracks[0].Album) + "\x00" + normalizeKey(albumArtist)
+	return filepath.Clean(dir) + "\x00" + normalizeKey(tracks[0].Album) + "\x00" + artistnorm.Key(albumArtist)
 }
 
 func albumWorkflowSignature(tracks []localWorkflowTrack) string {

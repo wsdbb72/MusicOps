@@ -8,6 +8,7 @@ package app
 // (for the ones that read files).
 
 import (
+	"errors"
 	"os"
 
 	"github.com/wsdbb72/MusicOps/native/core/internal/lrc"
@@ -23,12 +24,7 @@ func lyricsSidecarPath(audioPath string) string {
 // the user's own lyrics, so the overwrite flag is what decides whether it may
 // be replaced.
 func hasLyricsSidecar(audioPath string) bool {
-	for _, path := range []string{lrc.SidecarPath(audioPath), audioPath + ".lrc"} {
-		if info, err := os.Stat(path); err == nil && info.Size() > 0 {
-			return true
-		}
-	}
-	return false
+	return lyricsSidecarUsable(audioPath)
 }
 
 // writeLyricsSidecar writes the sidecar with a trailing newline. UTF-8 without
@@ -39,6 +35,9 @@ func writeLyricsSidecar(audioPath, lyrics string) error {
 	body := trimLyricsBody(lyrics)
 	if body == "" {
 		return nil
+	}
+	if !lyricsTextUsable(body) {
+		return errors.New("lrc: refusing lyrics with masked word placeholders")
 	}
 	if err := replaceFileAtomically(lrc.SidecarPath(audioPath), []byte(body+"\n"), 0); err != nil {
 		return err

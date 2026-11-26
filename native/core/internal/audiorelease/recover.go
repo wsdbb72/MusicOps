@@ -132,35 +132,45 @@ func RecoverPublished(ctx context.Context, engine *dataengine.Engine, input Reco
 	if err != nil {
 		return empty, err
 	}
-	ok, err := writeRecoveredRelease(engine, input.RequestID, albumKey(input.RootID, input.Track), encoded)
-	if err != nil {
-		return empty, err
-	}
-	if !ok {
+	primaryKey := albumKey(input.RootID, input.Track)
+	alternateKey := alternateAlbumKey(input.RootID, input.Track, input.RequestID)
+	for attempt := 0; attempt < 3; attempt++ {
 		current, found, readErr := readRelease(engine, input.RequestID)
 		if readErr != nil {
 			return empty, readErr
 		}
-		if found && current.RootID == input.RootID && current.SHA256 == expected &&
-			(format == "" || current.Format == format) {
-			return Verify(engine, input.RequestID)
+		if found {
+			if current.RootID == input.RootID && current.SHA256 == expected && (format == "" || current.Format == format) {
+				return Verify(engine, input.RequestID)
+			}
+			return empty, fmt.Errorf("%w: recovery observed a different concurrent release", ErrConflict)
 		}
-		if !found {
-			// A metadata-only row may legitimately occupy the primary
-			// (root, track) slot. Keep that row and use the request-qualified
-			// album key, the same collision rule used by reindexing.
-			ok, err = writeRecoveredRelease(engine, input.RequestID, alternateAlbumKey(input.RootID, input.Track, input.RequestID), encoded)
-			if err != nil {
-				return empty, err
+		key := primaryKey
+		if _, occupied, readErr := readRaw(engine, primaryKey); readErr != nil {
+			return empty, readErr
+		} else if occupied {
+			key = alternateKey
+			if _, occupied, readErr := readRaw(engine, alternateKey); readErr != nil {
+				return empty, readErr
+			} else if occupied {
+				return empty, fmt.Errorf("%w: both recovery album slots are occupied", ErrConflict)
 			}
 		}
+		ok, writeErr := writeRecoveredRelease(engine, input.RequestID, key, encoded)
+		if writeErr != nil {
+			return empty, writeErr
+		}
+		if ok {
+			// The original incoming source is not known here; only the library file
+			// is attested.
+			return resultFrom(rec, false, false), nil
+		}
+		// A concurrent index-maintenance write can invalidate an auxiliary
+		// condition without changing either catalogue slot. Re-read the slots
+		// and retry the same deterministic recovery instead of surfacing a
+		// transient conflict as a failed publication.
 	}
-	if !ok {
-		return empty, fmt.Errorf("%w: release slot changed during recovery", ErrConflict)
-	}
-	// The original incoming source is not known here; only the library file
-	// is attested.
-	return resultFrom(rec, false, false), nil
+	return empty, fmt.Errorf("%w: release slot changed during recovery after retries", ErrConflict)
 }
 
 func restoreAliasedRelease(engine *dataengine.Engine, requestID, path, expected, format, decodeState, library string) (Result, error) {
@@ -176,6 +186,7 @@ func restoreAliasedRelease(engine *dataengine.Engine, requestID, path, expected,
 	if err != nil {
 		return Result{}, err
 	}
+	pathChanged := !sameReleasePath(rec.Path, path)
 	original := *rec.AliasedFrom
 	updated := rec
 	updated.Path = path
@@ -198,6 +209,11 @@ func restoreAliasedRelease(engine *dataengine.Engine, requestID, path, expected,
 	}
 	conditions := []dataengine.Condition{{Key: releaseKey(requestID), Value: raw}}
 	mutations := []dataengine.Mutation{{Key: releaseKey(requestID), Value: encoded}}
+	if pathChanged {
+		if err := appendPathReleaseIndexIfMissing(engine, &conditions, &mutations, path, requestID); err != nil {
+			return Result{}, err
+		}
+	}
 	keys, err := albumKeysFor(engine, rec.RootID)
 	if err != nil {
 		return Result{}, err
@@ -213,6 +229,11 @@ func restoreAliasedRelease(engine *dataengine.Engine, requestID, path, expected,
 		}
 		conditions = append(conditions, dataengine.Condition{Key: key, Value: keyRaw})
 		mutations = append(mutations, dataengine.Mutation{Key: key, Value: encoded})
+		if pathChanged {
+			if err := appendPathAlbumIndexIfMissing(engine, &conditions, &mutations, path, requestID, key); err != nil {
+				return Result{}, err
+			}
+		}
 	}
 	ok, err := engine.CompareAndSwap(conditions, mutations)
 	if err != nil {
@@ -225,16 +246,25 @@ func restoreAliasedRelease(engine *dataengine.Engine, requestID, path, expected,
 }
 
 func writeRecoveredRelease(engine *dataengine.Engine, requestID string, key, encoded []byte) (bool, error) {
-	return engine.CompareAndSwap(
-		[]dataengine.Condition{
-			{Key: releaseKey(requestID), Absent: true},
-			{Key: key, Absent: true},
-		},
-		[]dataengine.Mutation{
-			{Key: releaseKey(requestID), Value: encoded},
-			{Key: key, Value: encoded},
-		},
-	)
+	var rec record
+	if json.Unmarshal(encoded, &rec) != nil || rec.RequestID != requestID || strings.TrimSpace(rec.Path) == "" {
+		return false, ErrConflict
+	}
+	conditions := []dataengine.Condition{
+		{Key: releaseKey(requestID), Absent: true},
+		{Key: key, Absent: true},
+	}
+	mutations := []dataengine.Mutation{
+		{Key: releaseKey(requestID), Value: encoded},
+		{Key: key, Value: encoded},
+	}
+	if err := appendPathReleaseIndexIfMissing(engine, &conditions, &mutations, rec.Path, requestID); err != nil {
+		return false, err
+	}
+	if err := appendPathAlbumIndexIfMissing(engine, &conditions, &mutations, rec.Path, requestID, key); err != nil {
+		return false, err
+	}
+	return engine.CompareAndSwap(conditions, mutations)
 }
 
 func validateRecoveryCandidate(ctx context.Context, path, expected, format string, decoder Decoder) (string, string, error) {

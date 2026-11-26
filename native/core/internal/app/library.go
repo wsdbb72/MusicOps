@@ -31,6 +31,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/wsdbb72/MusicOps/native/core/internal/artistnorm"
 	"github.com/wsdbb72/MusicOps/native/core/internal/audiorelease"
 	"github.com/wsdbb72/MusicOps/native/core/internal/dataengine"
 	"github.com/wsdbb72/MusicOps/native/core/internal/flactags"
@@ -178,7 +179,7 @@ func (a *App) scanDuplicatesWithOptions(ctx context.Context, limit int, root str
 		if artist == "" || album == "" || title == "" {
 			continue
 		}
-		key := normalizeKey(artist) + "\x00" + normalizeKey(album) + "\x00" + title
+		key := artistnorm.Key(artist) + "\x00" + normalizeKey(album) + "\x00" + title
 		byRecording[key] = append(byRecording[key], entry)
 	}
 	candidateKeys := make([]string, 0, len(byRecording))
@@ -559,7 +560,7 @@ func duplicateFileFromFingerprint(entry audiorelease.Entry, fingerprint cachedDu
 
 func duplicateRecordingTitle(tail, artist string) string {
 	title := strings.TrimSpace(trackTitle(tail))
-	if credit, track, ok := strings.Cut(title, " - "); ok && normalizeKey(credit) == normalizeKey(artist) {
+	if credit, track, ok := strings.Cut(title, " - "); ok && artistnorm.Same(credit, artist) {
 		title = track
 	}
 	return normalizeKey(title)
@@ -850,7 +851,7 @@ func (a *App) duplicateMerge(w http.ResponseWriter, r *http.Request) {
 	// moved yet.
 	filled, err := a.fillMissingTags(group)
 	if err != nil {
-		writeJSON(w, http.StatusUnprocessableEntity, map[string]any{"ok": false, "code": "MERGE_TAG_FAILED", "error": "补写标签失败，文件没有移动", "restored": true})
+		writeJSON(w, http.StatusUnprocessableEntity, map[string]any{"ok": false, "code": "MERGE_TAG_FAILED", "error": "补写标签失败，文件没有移动", "restored": tagMutationRestored(err)})
 		return
 	}
 	if len(filled) > 0 {
@@ -1103,9 +1104,25 @@ var fillableTagFields = []string{"ALBUMARTIST", "DATE", "GENRE", "COMPOSER", "LY
 // fillMissingTags copies a duplicate's tag into an empty keeper field when the
 // duplicates agree on exactly one value. It never overwrites: a curated value
 // wins, and a conflict is simply not filled. Only FLAC is edited.
+type tagMutationError struct {
+	restored bool
+	err      error
+}
+
+func (e *tagMutationError) Error() string { return e.err.Error() }
+func (e *tagMutationError) Unwrap() error { return e.err }
+
+func tagMutationRestored(err error) bool {
+	var mutationErr *tagMutationError
+	if errors.As(err, &mutationErr) {
+		return mutationErr.restored
+	}
+	return true
+}
+
 func (a *App) fillMissingTags(group *duplicateGroup) ([]string, error) {
-	if group.Keep == nil {
-		return nil, nil
+	if group == nil || group.Keep == nil || group.Keep.File == "" {
+		return nil, dataengine.ErrInvalidRequest
 	}
 	keeperPath := a.libraryFilePath(group.Keep.LibraryDir, group.Keep.File)
 	if !strings.EqualFold(filepath.Ext(keeperPath), ".flac") {
@@ -1113,7 +1130,7 @@ func (a *App) fillMissingTags(group *duplicateGroup) ([]string, error) {
 	}
 	keeper, err := flactags.ReadFile(keeperPath)
 	if err != nil {
-		return nil, nil
+		return nil, err
 	}
 	candidates := map[string]map[string]bool{}
 	for _, file := range group.Files {
@@ -1167,14 +1184,28 @@ func (a *App) fillMissingTags(group *duplicateGroup) ([]string, error) {
 	if len(updates) == 0 {
 		return nil, nil
 	}
-	if err := writeFLACTags(keeperPath, updates); err != nil {
+	if err := checkNotHardlinked(keeperPath); err != nil {
+		return nil, &tagMutationError{restored: true, err: err}
+	}
+	backup, err := backupFile(keeperPath)
+	if err != nil {
 		return nil, err
+	}
+	fail := func(cause error) ([]string, error) {
+		restored, resultErr := restoreBackupOnFailure(keeperPath, backup, cause)
+		return nil, &tagMutationError{restored: restored, err: resultErr}
+	}
+	if err := writeFLACTags(keeperPath, updates); err != nil {
+		return fail(err)
 	}
 	// The write changed the bytes: the library record must carry the new
-	// digest or the next duplicate scan reports the file as changed.
+	// digest or the next duplicate scan reports the file as changed. If that
+	// commit fails, restore the original bytes rather than reporting a partial
+	// success while leaving the receipt stale.
 	if _, err := audiorelease.RefreshPathDigests(a.engine, []string{keeperPath}); err != nil {
-		return nil, err
+		return fail(err)
 	}
+	_ = os.Remove(backup)
 	return filled, nil
 }
 
@@ -1590,9 +1621,13 @@ func folderArtist(artists []string) string {
 	names := []string{}
 	for _, credit := range artists {
 		for _, part := range artistFolderSplit.Split(credit, -1) {
-			name := strings.TrimSpace(part)
-			if name != "" && !seen[strings.ToLower(name)] {
-				seen[strings.ToLower(name)] = true
+			name := artistnorm.Canonical(part)
+			key := artistnorm.Key(name)
+			if name == "" || key == "" {
+				key = strings.ToLower(strings.TrimSpace(name))
+			}
+			if name != "" && !seen[key] {
+				seen[key] = true
 				names = append(names, name)
 			}
 		}
@@ -1710,13 +1745,18 @@ func (a *App) planArtistFolder(entry audiorelease.Entry, library string) artistF
 	switch strings.ToLower(filepath.Ext(full)) {
 	case ".flac":
 		if tags, err := flactags.ReadFile(full); err == nil {
-			artists = tags.Artists
+			if strings.TrimSpace(tags.AlbumArtist) != "" {
+				artists = []string{tags.AlbumArtist}
+			} else {
+				artists = tags.Artists
+			}
 			album = tags.Album
 		}
 	case ".wav":
 		if tags, err := wavflac.ReadDescription(full); err == nil {
-			if tags.Artist != "" {
-				artists = []string{tags.Artist}
+			artistCredit := tags.Artist
+			if artistCredit != "" {
+				artists = []string{artistCredit}
 			}
 			album = tags.Album
 		}

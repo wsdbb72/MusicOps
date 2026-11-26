@@ -30,6 +30,7 @@ import (
 	"time"
 	"unicode"
 
+	"github.com/wsdbb72/MusicOps/native/core/internal/artistnorm"
 	"github.com/wsdbb72/MusicOps/native/core/internal/audiorelease"
 	"github.com/wsdbb72/MusicOps/native/core/internal/dataengine"
 	"github.com/wsdbb72/MusicOps/native/core/internal/musicbrainz"
@@ -368,7 +369,7 @@ func trackPathOf(file string) (artist, album, title string) {
 // distinguish editions while folding path separators and whitespace.
 func trackKeyOfPath(file string) (artist, album, title string) {
 	artist, album, title = trackPathOf(file)
-	return normalizeKey(artist), normalizeKey(album), normalizeKey(title)
+	return artistnorm.Key(artist), normalizeKey(album), normalizeKey(title)
 }
 
 // libraryPathKey is the playlist-presence key. Filesystem-safe publishing may
@@ -919,6 +920,36 @@ func (index playlistLibraryIndex) hasRecordingIdentity(artist, title string) boo
 	}
 	return false
 }
+func (index playlistLibraryIndex) hasSamePCMRecording(source, title string) bool {
+	title = strings.TrimSpace(title)
+	if title == "" {
+		return false
+	}
+	ids := make([]string, 0, 32)
+	seen := map[string]bool{}
+	for _, key := range []string{playlistMatchKey(title), playlistCompactTitleKey(playlistMatchKey(title))} {
+		for _, id := range index.titleCandidates[key] {
+			if !seen[id] {
+				seen[id] = true
+				ids = append(ids, id)
+			}
+		}
+	}
+	for _, id := range ids {
+		if !index.isUnchanged(id) {
+			continue
+		}
+		path, found, err := audiorelease.PathFor(index.engine, id)
+		if err != nil || !found || !strings.EqualFold(filepath.Ext(path), ".flac") {
+			continue
+		}
+		tags := index.recording(path)
+		if neteaseAlternateTitleMatches(title, tags.title) && playlistSamePCM(source, []string{path}) {
+			return true
+		}
+	}
+	return false
+}
 func (index playlistLibraryIndex) hasTrack(artist, album, title string) bool {
 	// A source row without an album is published under its own title.
 	// Use that same folder when checking whether it has already been filed.
@@ -1246,7 +1277,7 @@ func (a *App) enqueuePlaylistTracks(ctx context.Context, playlistJobID string, r
 		if title == "" {
 			continue
 		}
-		trackKey := normalizeKey(artist) + "\x00" + normalizeKey(normalizePlaylistAlbumTitle(row.Album)) + "\x00" + normalizeKey(title)
+		trackKey := artistnorm.Key(artist) + "\x00" + normalizeKey(normalizePlaylistAlbumTitle(row.Album)) + "\x00" + normalizeKey(title)
 		if row.NeteaseSongID > 0 {
 			trackKey = "netease:" + strconv.FormatInt(row.NeteaseSongID, 10)
 		}
@@ -1295,7 +1326,7 @@ func playlistAlbumGroupKey(row playlistTrack, album string) string {
 	if row.NeteaseAlbumID > 0 {
 		return "netease-album:" + strconv.FormatInt(row.NeteaseAlbumID, 10)
 	}
-	return "artist-album:" + normalizeKey(row.Artist) + "\x00" + normalizeKey(album)
+	return "artist-album:" + artistnorm.Key(row.Artist) + "\x00" + normalizeKey(album)
 }
 
 func playlistJobReusable(stage string) bool {
@@ -1375,7 +1406,7 @@ func (a *App) startPlaylistAlbumJob(ctx context.Context, client *musicbrainz.Cli
 	if albumCompletion && album != "" {
 		keyTitle = ""
 	}
-	parts := []string{playlistJobID, normalizeKey(artist), normalizeKey(album), normalizeKey(keyTitle)}
+	parts := []string{playlistJobID, artistnorm.Key(artist), normalizeKey(album), normalizeKey(keyTitle)}
 	if neteaseOnly {
 		parts = append(parts, "netease-only")
 	}

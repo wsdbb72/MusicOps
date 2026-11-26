@@ -190,3 +190,14 @@ func TestUnicodeCompatibilityAndTypographyMatchWithoutCollapsingIdentity(t *test
 		t.Fatal("different CJK title words were collapsed")
 	}
 }
+
+func TestReviewedCrossLanguageArtistAliasesMatch(t *testing.T) {
+	for _, alias := range []string{"周傑倫", "Jay Chou", "JayChou"} {
+		if !Compare("晴天", "周杰伦", Hit{Title: "晴天", Artists: []string{alias}}).Pass {
+			t.Fatalf("artist alias %q was rejected", alias)
+		}
+	}
+	if Compare("晴天", "周杰伦", Hit{Title: "晴天", Artists: []string{"Jay"}}).Pass {
+		t.Fatal("short unrelated artist name was accepted")
+	}
+}

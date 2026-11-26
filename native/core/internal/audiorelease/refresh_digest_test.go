@@ -92,3 +92,36 @@ func TestRefreshPathDigestsIgnoresUnpublishedFiles(t *testing.T) {
 		t.Fatalf("updated=%d err=%v", updated, err)
 	}
 }
+
+func TestRefreshPathDigestsIndexesReceiptsPublishedAfterBackfill(t *testing.T) {
+	engine, _, library := openRelease(t)
+	folder := filepath.Join(library, "Artist", "Album")
+	if err := os.MkdirAll(folder, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(folder, "01 Title.wav")
+	if err := os.WriteFile(path, wav(16), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if added, err := IndexExisting(engine, Existing{RequestID: "before-index", RootID: "before-root", Track: 1, Path: path, Library: library, Format: "wav"}); err != nil || !added {
+		t.Fatalf("index baseline added=%v err=%v", added, err)
+	}
+	if _, err := RefreshPathDigests(engine, []string{path}); err != nil {
+		t.Fatalf("initialize path index: %v", err)
+	}
+	if added, err := IndexExisting(engine, Existing{RequestID: "after-index", RootID: "after-root", Track: 1, Path: path, Library: library, Format: "wav"}); err != nil || !added {
+		t.Fatalf("index later receipt added=%v err=%v", added, err)
+	}
+	if err := os.WriteFile(path, wav(72), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	updated, err := RefreshPathDigests(engine, []string{path})
+	if err != nil || updated != 4 {
+		t.Fatalf("updated=%d err=%v, want both receipts and album mappings", updated, err)
+	}
+	for _, id := range []string{"before-index", "after-index"} {
+		if _, err := Verify(engine, id); err != nil {
+			t.Fatalf("verify %s: %v", id, err)
+		}
+	}
+}

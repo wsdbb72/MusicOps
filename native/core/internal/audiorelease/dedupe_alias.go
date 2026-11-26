@@ -116,6 +116,7 @@ func PrepareDedupeAlias(engine *dataengine.Engine, input DedupeAliasInput) (Dedu
 		return empty, err
 	}
 
+	pathChanged := !sameReleasePath(rec.Path, keeper)
 	updated := rec
 	if updated.AliasedFrom == nil {
 		updated.AliasedFrom = &aliasOrigin{
@@ -142,6 +143,11 @@ func PrepareDedupeAlias(engine *dataengine.Engine, input DedupeAliasInput) (Dedu
 		Mutations:  []dataengine.Mutation{{Key: releaseKey(input.RequestID), Value: encoded}},
 		Linked:     true,
 	}
+	if pathChanged {
+		if err := appendPathReleaseIndexIfMissing(engine, &batch.Conditions, &batch.Mutations, keeper, input.RequestID); err != nil {
+			return empty, err
+		}
+	}
 	keys, err := albumKeysFor(engine, rec.RootID)
 	if err != nil {
 		return empty, err
@@ -159,6 +165,11 @@ func PrepareDedupeAlias(engine *dataengine.Engine, input DedupeAliasInput) (Dedu
 		matched++
 		batch.Conditions = append(batch.Conditions, dataengine.Condition{Key: key, Value: keyRaw})
 		batch.Mutations = append(batch.Mutations, dataengine.Mutation{Key: key, Value: encoded})
+		if pathChanged {
+			if err := appendPathAlbumIndexIfMissing(engine, &batch.Conditions, &batch.Mutations, keeper, input.RequestID, key); err != nil {
+				return empty, err
+			}
+		}
 	}
 	if matched == 0 {
 		key := albumKey(rec.RootID, input.Track)
@@ -175,6 +186,11 @@ func PrepareDedupeAlias(engine *dataengine.Engine, input DedupeAliasInput) (Dedu
 		}
 		batch.Conditions = append(batch.Conditions, dataengine.Condition{Key: key, Absent: true})
 		batch.Mutations = append(batch.Mutations, dataengine.Mutation{Key: key, Value: encoded})
+		if pathChanged {
+			if err := appendPathAlbumIndexIfMissing(engine, &batch.Conditions, &batch.Mutations, keeper, input.RequestID, key); err != nil {
+				return empty, err
+			}
+		}
 	}
 	return batch, nil
 }

@@ -449,3 +449,14 @@ func TestNeteaseTitleDurationRecoveryUsesSoundtrackUploader(t *testing.T) {
 		t.Fatalf("NetEase cover was not restored: %v", err)
 	}
 }
+
+func TestNeteaseGenericCompilationArtistsUseIdentityKeys(t *testing.T) {
+	for _, value := range []string{"Various Artists", "Various Artist", "群星", "合辑"} {
+		if !neteasePlaylistArtistsAreGeneric([]string{value}) {
+			t.Fatalf("generic compilation artist %q was not recognized", value)
+		}
+	}
+	if neteasePlaylistArtistsAreGeneric([]string{"Bill Withers"}) {
+		t.Fatal("a concrete performer was classified as a compilation label")
+	}
+}

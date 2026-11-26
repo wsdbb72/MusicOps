@@ -10,6 +10,8 @@ import (
 	"strings"
 	"unicode"
 	"unicode/utf8"
+
+	"github.com/wsdbb72/MusicOps/native/core/internal/artistnorm"
 )
 
 const durationWindow = 3.0
@@ -90,7 +92,7 @@ func artistKey(artists []string) string {
 	seen := map[string]bool{}
 	var keys []string
 	for _, artist := range artists {
-		text := strictText(artist)
+		text := artistnorm.Key(artist)
 		if text == "" || seen[text] {
 			continue
 		}

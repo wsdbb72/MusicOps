@@ -707,3 +707,16 @@ func TestTrackerQueryNormalizesCompatibilityFormsAndTypography(t *testing.T) {
 		t.Fatalf("path key=%q", got)
 	}
 }
+
+func TestPlaylistArtistPresenceAndAlbumGroupingUseCanonicalAliases(t *testing.T) {
+	englishArtist, album, title := trackKeyOfPath(filepath.Join("music", "Jay Chou", "范特西", "03 简单爱.flac"))
+	chineseArtist, _, _ := trackKeyOfPath(filepath.Join("music", "周傑倫", "范特西", "03 简单爱.flac"))
+	if englishArtist == "" || englishArtist != chineseArtist || album == "" || title == "" {
+		t.Fatalf("artist keys differ: %q vs %q", englishArtist, chineseArtist)
+	}
+	left := playlistAlbumGroupKey(playlistTrack{Artist: "JayChou"}, "范特西")
+	right := playlistAlbumGroupKey(playlistTrack{Artist: "周杰伦"}, "范特西")
+	if left != right {
+		t.Fatalf("album groups differ: %q vs %q", left, right)
+	}
+}

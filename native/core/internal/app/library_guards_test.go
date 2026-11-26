@@ -231,3 +231,17 @@ func guardTestUpdatePath(dir string) string {
 	}
 	return dir
 }
+
+func TestMergeFillSkipsNonFLACFiles(t *testing.T) {
+	application := newApp(t)
+	group := &duplicateGroup{
+		Keep: &duplicateFile{File: "Artist/Album/01 Song.mp3", LibraryDir: application.libraryDir()},
+	}
+	filled, err := application.fillMissingTags(group)
+	if err != nil || len(filled) != 0 {
+		t.Fatalf("non-FLAC fill = %v, %v", filled, err)
+	}
+	if filled, err := application.fillMissingTags(nil); err == nil || len(filled) != 0 {
+		t.Fatal("a missing merge group must be rejected")
+	}
+}

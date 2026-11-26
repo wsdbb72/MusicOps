@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/wsdbb72/MusicOps/native/core/internal/artistnorm"
 	"github.com/wsdbb72/MusicOps/native/core/internal/audiorelease"
 	"github.com/wsdbb72/MusicOps/native/core/internal/dataengine"
 )
@@ -102,6 +103,6 @@ func (a *App) openImport(w http.ResponseWriter, r *http.Request) {
 // two tracks of the same album land in the same folder and a repeated import
 // replays its receipt instead of creating a second album.
 func derivedImportRoot(artist, album string) string {
-	sum := sha256.Sum256([]byte("open-import\x00" + foldTagText(artist) + "\x00" + foldTagText(album)))
+	sum := sha256.Sum256([]byte("open-import\x00" + artistnorm.Key(artist) + "\x00" + foldTagText(album)))
 	return "imp-" + hex.EncodeToString(sum[:8])
 }

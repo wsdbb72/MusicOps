@@ -12,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/wsdbb72/MusicOps/native/core/internal/artistnorm"
 	"github.com/wsdbb72/MusicOps/native/core/internal/musicbrainz"
 )
 
@@ -268,7 +269,7 @@ func (a *App) scrapeGenericFiles(ctx context.Context, paths []string, client *mu
 			results[path].Status, results[path].Code, results[path].Note = "skipped", "NO_TAGS", "缺艺人、专辑或曲名，且路径不足以推断"
 			continue
 		}
-		key := foldTagText(info.Artist) + "\x00" + foldTagText(info.Album)
+		key := artistnorm.Key(info.Artist) + "\x00" + foldTagText(info.Album)
 		group := byAlbum[key]
 		if group == nil {
 			group = &genericScrapeGroup{artist: info.Artist, album: info.Album}

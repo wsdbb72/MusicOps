@@ -20,6 +20,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/wsdbb72/MusicOps/native/core/internal/artistnorm"
 	"github.com/wsdbb72/MusicOps/native/core/internal/audiorelease"
 	"github.com/wsdbb72/MusicOps/native/core/internal/flactags"
 	"github.com/wsdbb72/MusicOps/native/core/internal/musicbrainz"
@@ -344,7 +345,7 @@ func (a *App) libraryWorkflow(w http.ResponseWriter, r *http.Request) {
 		}
 		if len(tracks) > 0 {
 			albumMismatch := normalizeKey(track.Album) != normalizeKey(tracks[0].Album)
-			artistMismatch := normalizeKey(track.Artist) != normalizeKey(tracks[0].Artist)
+			artistMismatch := !artistnorm.Same(track.Artist, tracks[0].Artist)
 			dirMismatch := body.Scene == "expand" && !samePath(filepath.Dir(track.Path), filepath.Dir(tracks[0].Path))
 			if albumMismatch || dirMismatch || body.Scene != "expand" && artistMismatch {
 				writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "code": "MIXED_ALBUM", "error": "请选择同一目录中的同一专辑文件"})
@@ -519,7 +520,7 @@ func (a *App) completeMetadata(w http.ResponseWriter, r *http.Request) {
 	// the sidecar, so replacing it while the overwrite flag is off would
 	// silently swap out the user's own file.
 	if lyrics != "" {
-		if (len(current.Raw["LYRICS"]) == 0 && !hasLyricsSidecar(path)) || body.Overwrite {
+		if body.Overwrite || lyricsNeedsWrite(path, current.Raw["LYRICS"]) {
 			updates["LYRICS"] = []string{lyrics}
 			completion.Written = append(completion.Written, "lyrics")
 		} else {
@@ -548,7 +549,7 @@ func (a *App) completeMetadata(w http.ResponseWriter, r *http.Request) {
 	if len(updates) == 0 && cover == nil {
 		note := "标签已经和目录一致，没有改动文件。"
 		sidecarWritten := false
-		if existing := firstTagValue(current.Raw, "LYRICS"); strings.TrimSpace(existing) != "" && !hasLyricsSidecar(path) {
+		if existing := firstTagValue(current.Raw, "LYRICS"); lyricsTextUsable(existing) && !hasLyricsSidecar(path) {
 			if writeLyricsSidecar(path, existing) == nil {
 				sidecarWritten = true
 				note += "已按标签内容补写同名 lrc（Roon / Plex / Navidrome 读文件）。"
@@ -565,6 +566,14 @@ func (a *App) completeMetadata(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
+	settings, _ := a.loadLyricsSettings()
+	mode := coverWriteMode(body.CoverMode, settings)
+	if len(updates) > 0 || cover != nil && mode == "embed" {
+		if err := checkNotHardlinked(path); err != nil {
+			writeJSON(w, http.StatusConflict, map[string]any{"ok": false, "code": "HARDLINK_EDIT_FORBIDDEN", "written": false, "error": err.Error()})
+			return
+		}
+	}
 	backup, err := backupFile(path)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "code": "TAG_UNAVAILABLE", "written": false})
@@ -576,8 +585,6 @@ func (a *App) completeMetadata(w http.ResponseWriter, r *http.Request) {
 			lyricsWritten = true
 		}
 	}
-	settings, _ := a.loadLyricsSettings()
-	mode := coverWriteMode(body.CoverMode, settings)
 	sidecar := strings.TrimSuffix(path, filepath.Ext(path)) + ".jpg"
 	sidecarPaths := []string{}
 	if lyricsWritten {
@@ -774,7 +781,7 @@ func desiredTags(view *catalogReleaseView, track catalogReleaseTrack) map[string
 		desired["ALBUM"] = []string{view.Title}
 	}
 	if view.AlbumArtist != "" {
-		desired["ALBUMARTIST"] = []string{view.AlbumArtist}
+		desired["ALBUMARTIST"] = canonicalArtistValues([]string{view.AlbumArtist})
 	}
 	if view.Date != "" {
 		desired["DATE"] = []string{view.Date}
@@ -788,7 +795,7 @@ func desiredTags(view *catalogReleaseView, track catalogReleaseTrack) map[string
 		desired["TITLE"] = []string{track.Title}
 	}
 	if len(track.Artists) > 0 {
-		desired["ARTIST"] = append([]string(nil), track.Artists...)
+		desired["ARTIST"] = canonicalArtistValues(track.Artists)
 	}
 	if track.Position > 0 {
 		desired["TRACKNUMBER"] = []string{strconv.Itoa(track.Position)}
@@ -843,7 +850,12 @@ func planTagWrite(current *flactags.Tags, desired map[string][]string, overwrite
 			updates[key] = want
 			result.Written = append(result.Written, strings.ToLower(key))
 		case sameTagValue(key, have, want):
-			result.Unchanged = append(result.Unchanged, strings.ToLower(key))
+			if artistTagNeedsCanonicalRewrite(key, have, want) {
+				updates[key] = want
+				result.Written = append(result.Written, strings.ToLower(key))
+			} else {
+				result.Unchanged = append(result.Unchanged, strings.ToLower(key))
+			}
 		case overwrite:
 			updates[key] = want
 			result.Written = append(result.Written, strings.ToLower(key))
@@ -852,6 +864,34 @@ func planTagWrite(current *flactags.Tags, desired map[string][]string, overwrite
 		}
 	}
 	return updates, result
+}
+
+func canonicalArtistValues(values []string) []string {
+	out := make([]string, 0, len(values))
+	for _, value := range values {
+		if canonical := artistnorm.Canonical(value); canonical != "" {
+			out = append(out, canonical)
+		}
+	}
+	return out
+}
+
+func artistTagNeedsCanonicalRewrite(key string, have, want []string) bool {
+	if key != "ARTIST" && key != "ALBUMARTIST" {
+		return false
+	}
+	if len(have) != len(want) {
+		return false
+	}
+	for i := range have {
+		if artistnorm.Canonical(have[i]) != artistnorm.Canonical(want[i]) {
+			return false
+		}
+		if have[i] != want[i] {
+			return true
+		}
+	}
+	return false
 }
 
 // sameTagValue compares one field. A track/disc "3/12" equals "3"; text
@@ -868,6 +908,12 @@ func sameTagValue(key string, have, want []string) bool {
 		return false
 	}
 	for i := range have {
+		if key == "ARTIST" || key == "ALBUMARTIST" {
+			if !artistnorm.Same(have[i], want[i]) {
+				return false
+			}
+			continue
+		}
 		if foldTagText(have[i]) != foldTagText(want[i]) {
 			return false
 		}
@@ -1263,6 +1309,7 @@ func (a *App) fetchArtworkContext(ctx context.Context, lyricsBase, coverBase, ar
 			cover = body
 		}
 	}
+	lyrics = a.cleanFetchedLyrics(ctx, artist, album, title, lyrics)
 	return lyrics, cover, nil
 }
 

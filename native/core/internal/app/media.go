@@ -299,6 +299,10 @@ func (a *App) saveLibraryTags(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "code": "INVALID_REQUEST"})
 		return
 	}
+	if err := checkNotHardlinked(path); err != nil {
+		writeJSON(w, http.StatusConflict, map[string]any{"ok": false, "code": "HARDLINK_EDIT_FORBIDDEN", "error": err.Error()})
+		return
+	}
 	updates, err := parseTagUpdates(body.Tags)
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "code": "INVALID_REQUEST", "error": err.Error()})
@@ -637,6 +641,10 @@ func (a *App) saveLibraryLyrics(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "code": "INVALID_REQUEST"})
 		return
 	}
+	if hasMaskedLyrics(body.Text) {
+		writeJSON(w, http.StatusUnprocessableEntity, map[string]any{"ok": false, "code": "MASKED_LYRICS", "error": "歌词含 * 占位符；请使用完整歌词后重试"})
+		return
+	}
 	path, err := a.resolveLibraryPath(body.Path)
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "code": "INVALID_REQUEST"})
@@ -650,6 +658,12 @@ func (a *App) saveLibraryLyrics(w http.ResponseWriter, r *http.Request) {
 	if body.Embed && !strings.EqualFold(filepath.Ext(path), ".flac") {
 		writeJSON(w, http.StatusUnprocessableEntity, map[string]any{"ok": false, "code": "UNSUPPORTED_FORMAT", "error": "embedded lyrics are only supported for FLAC"})
 		return
+	}
+	if body.Embed {
+		if err := checkNotHardlinked(path); err != nil {
+			writeJSON(w, http.StatusConflict, map[string]any{"ok": false, "code": "HARDLINK_EDIT_FORBIDDEN", "error": err.Error()})
+			return
+		}
 	}
 	parsed, err := lrc.Parse(body.Text)
 	if err != nil {

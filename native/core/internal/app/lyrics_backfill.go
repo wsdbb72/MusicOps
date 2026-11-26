@@ -95,13 +95,13 @@ func (a *App) backfillLyricsSidecars(root string, dryRun bool) {
 		}
 		standard := lrc.SidecarPath(path)
 		kept := false
-		if data, readErr := os.ReadFile(standard); readErr == nil && len(strings.TrimSpace(string(data))) > 0 {
+		if data, readErr := os.ReadFile(standard); readErr == nil && lyricsTextUsable(string(data)) {
 			kept = true
 		}
 		legacy := path + ".lrc"
 		renamed, written, missing, skipped := false, false, false, false
 		if !kept {
-			if data, readErr := os.ReadFile(legacy); readErr == nil && len(strings.TrimSpace(string(data))) > 0 {
+			if data, readErr := os.ReadFile(legacy); readErr == nil && lyricsTextUsable(string(data)) {
 				if dryRun {
 					renamed = true
 				} else if renameErr := renameFileWithRetry(legacy, standard); renameErr != nil {
@@ -120,7 +120,7 @@ func (a *App) backfillLyricsSidecars(root string, dryRun bool) {
 					text = lyricsTagOf(path)
 				}
 				switch {
-				case strings.TrimSpace(text) == "":
+				case !lyricsTextUsable(text):
 					missing = true
 				case dryRun:
 					written = true
@@ -172,7 +172,11 @@ func lyricsTagOf(path string) string {
 	if err != nil {
 		return ""
 	}
-	return firstTagValue(tags.Raw, "LYRICS")
+	text := firstTagValue(tags.Raw, "LYRICS")
+	if !lyricsTextUsable(text) {
+		return ""
+	}
+	return text
 }
 
 func readFLACTagsPrefix(path string) (*flactags.Tags, error) {

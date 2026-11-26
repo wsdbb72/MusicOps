@@ -45,6 +45,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/wsdbb72/MusicOps/native/core/internal/dataengine"
 	"github.com/wsdbb72/MusicOps/native/core/internal/searchdecision"
@@ -336,6 +337,68 @@ func (r *Repository) interruptedRecoveryStage(job Job, task *taskrepo.Task) (str
 		return "", ErrStale
 	}
 	return r.retryStage(job, task)
+}
+
+// DeferSearchUntil releases a recovered search back to its durable queue until
+// the original retry deadline. Sleeping inside a worker made a restart occupy
+// every scheduler slot until the longest backoff elapsed.
+func (r *Repository) DeferSearchUntil(requestID string, token taskrepo.Token, nowNS, notBeforeNS int64, reason string) (Result, error) {
+	if !validID(token.ID) || token.Owner == "" || len(token.Owner) > 128 || requestID == "" || len(requestID) > 128 || nowNS <= 0 || notBeforeNS <= nowNS || len(reason) > 4000 {
+		return Result{}, dataengine.ErrInvalidRequest
+	}
+	task, err := r.tasks.Get(token.ID)
+	if err != nil || task == nil {
+		if err != nil {
+			return Result{}, err
+		}
+		return Result{}, ErrNotFound
+	}
+	if task.Command != cmdSearch || task.WorkflowJobID == "" || task.CancelRequested {
+		return Result{}, ErrStale
+	}
+	extra, _ := json.Marshal(struct{ JobID, Action string }{task.WorkflowJobID, "backoff_wait"})
+	result, err := r.tasks.RequeueOwnedAfter(requestID, token, nowNS, notBeforeNS, extra, func(v *dataengine.View, _, after *taskrepo.Task, _ []taskrepo.Task) ([]dataengine.Condition, []dataengine.Mutation, json.RawMessage, error) {
+		if after == nil || after.State != "queued" || after.Owner != "" || after.Execution != "" || after.WorkflowJobID != task.WorkflowJobID || after.NotBeforeNS != notBeforeNS {
+			return nil, nil, nil, ErrStale
+		}
+		live, raw, err := readJob(v, task.WorkflowJobID)
+		if err != nil || live == nil {
+			if err != nil {
+				return nil, nil, nil, err
+			}
+			return nil, nil, nil, ErrNotFound
+		}
+		if live.CancelRequested || !queuedTaskStillCurrent(v, *live, after) {
+			return nil, nil, nil, fmt.Errorf("%w: defer job stage=%s active=%s task=%s", ErrStale, live.Stage, live.ActiveTaskID, after.ID)
+		}
+		if live.RootID != live.ID {
+			root, _, err := readJob(v, live.RootID)
+			if err != nil || root == nil || root.CancelRequested {
+				if err != nil {
+					return nil, nil, nil, err
+				}
+				return nil, nil, nil, ErrStale
+			}
+		}
+		next := *live
+		remaining := notBeforeNS - nowNS
+		next.SearchRetryAfterSec = int((remaining + int64(time.Second) - 1) / int64(time.Second))
+		next.Message = messageOr(reason, "等待有界重试时间；未占用执行线程")
+		updated, err := bump(next, nowNS, false)
+		if err != nil {
+			return nil, nil, nil, err
+		}
+		condition, writes, err := putJob(raw, updated)
+		if err != nil {
+			return nil, nil, nil, err
+		}
+		attached, err := json.Marshal(Result{Job: &updated})
+		return []dataengine.Condition{condition}, writes, attached, err
+	})
+	if err != nil {
+		return Result{}, fmt.Errorf("defer search until backoff: %w", err)
+	}
+	return decode(result, err)
 }
 
 // ReplayStaleSearch requeues a read-only search after a local CAS conflict.

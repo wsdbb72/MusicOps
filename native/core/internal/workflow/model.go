@@ -337,9 +337,7 @@ func validJob(job Job) bool {
 	if job.SearchRetryCount > 3 || job.RecoveryRetryCount > 3 || job.AIResearchCount > 1 {
 		return false
 	}
-	switch job.SearchRetryAfterSec {
-	case 0, 600, 1800, 3600:
-	default:
+	if job.SearchRetryAfterSec < 0 || job.SearchRetryAfterSec > 3600 {
 		return false
 	}
 	switch job.Kind {

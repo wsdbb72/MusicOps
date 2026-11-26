@@ -11,6 +11,8 @@ import (
 	"net/http"
 	"sort"
 	"strings"
+
+	"github.com/wsdbb72/MusicOps/native/core/internal/artistnorm"
 )
 
 // sourceCandidate is one hit from one source.
@@ -82,7 +84,7 @@ func (a *App) lookupSources(w http.ResponseWriter, r *http.Request) {
 				if err != nil || song == nil {
 					continue
 				}
-				exact := foldTagText(song.Name) == foldTagText(title) && (artist == "" || strings.Contains(foldTagText(song.Artist), foldTagText(artist)))
+				exact := foldTagText(song.Name) == foldTagText(title) && (artist == "" || strings.Contains(foldTagText(song.Artist), foldTagText(artist)) || artistnorm.Same(song.Artist, artist))
 				candidates = append(candidates, sourceCandidate{
 					Source: service, Title: song.Name, Artist: song.Artist, Album: song.Album,
 					Duration: song.Duration, Exact: exact,

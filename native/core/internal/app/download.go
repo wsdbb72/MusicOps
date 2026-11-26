@@ -1541,9 +1541,11 @@ func (a *App) ingestDownload(ctx context.Context, plan downloadPlan, meta qbitto
 	artist, album = publishComponent(artist), publishComponent(album)
 	var existingTracks map[string][]string
 	var trackNumbers map[string]int
+	var indexedLibrary playlistLibraryIndex
 	if plan.PlaylistBatch {
 		existingTracks = a.verifiedPlaylistAlbumTracks(library, artist, album, plan.ExpectedTitle)
 		trackNumbers = playlistTrackNumbers(meta, seedDir)
+		indexedLibrary = a.playlistLibrary()
 	}
 	jobDigest := sha256.Sum256([]byte(plan.JobID))
 	short := hex.EncodeToString(jobDigest[:8])
@@ -1581,11 +1583,13 @@ func (a *App) ingestDownload(ctx context.Context, plan downloadPlan, meta qbitto
 		if err != nil {
 			return nil, downloadError("INGEST_FAILED", "种子文件路径越界："+f.Path)
 		}
-		if plan.PlaylistBatch && ext == ".flac" && len(existingTracks) > 0 {
-			if tags, err := readFLACTagsPrefix(source); err == nil &&
-				normalizeKey(tags.Album) == normalizeKey(planAlbum) && playlistSamePCM(source, existingTracks[normalizeKey(tags.Title)]) {
-				present++
-				continue
+		if plan.PlaylistBatch && ext == ".flac" {
+			if tags, err := readFLACTagsPrefix(source); err == nil {
+				exact := normalizeKey(tags.Album) == normalizeKey(planAlbum) && playlistSamePCM(source, existingTracks[normalizeKey(tags.Title)])
+				if exact || indexedLibrary.hasSamePCMRecording(source, tags.Title) {
+					present++
+					continue
+				}
 			}
 		}
 		incomingName := fmt.Sprintf("dl-%s-%02d-%s", short, track, filepath.Base(f.Path))

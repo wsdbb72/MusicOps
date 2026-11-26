@@ -11,6 +11,7 @@ import (
 	"time"
 	"unicode"
 
+	"github.com/wsdbb72/MusicOps/native/core/internal/artistnorm"
 	"github.com/wsdbb72/MusicOps/native/core/internal/downloadpolicy"
 	"github.com/wsdbb72/MusicOps/native/core/internal/flactags"
 )
@@ -240,16 +241,7 @@ func sameNeteaseArtists(want, got []string) bool {
 }
 
 func normalizeNeteaseArtist(value string) string {
-	var builder strings.Builder
-	for _, char := range foldTagText(value) {
-		switch {
-		case unicode.IsLetter(char), unicode.IsNumber(char):
-			builder.WriteRune(char)
-		case unicode.IsSpace(char):
-			builder.WriteRune(' ')
-		}
-	}
-	return strings.Join(strings.Fields(builder.String()), " ")
+	return artistnorm.Key(value)
 }
 
 func neteasePlaylistArtistsAreGeneric(artists []string) bool {
@@ -258,7 +250,7 @@ func neteasePlaylistArtistsAreGeneric(artists []string) bool {
 	}
 	for _, artist := range artists {
 		switch normalizeNeteaseArtist(artist) {
-		case "various artists", "various artist", "various", "va", "群星", "合辑":
+		case "variousartists", "variousartist", "various", "va", "群星", "合辑":
 		default:
 			return false
 		}
@@ -272,13 +264,13 @@ func neteaseAlternateMissingArtistsNamedInTitle(title string, want, got []string
 	if len(want) == 0 || len(got) == 0 {
 		return false
 	}
-	titleKey := " " + normalizeNeteaseArtist(title) + " "
+	titleKey := " " + neteaseArtistInTitleKey(title) + " "
 	missing := false
 	for _, expected := range want {
-		expectedKey := normalizeNeteaseArtist(expected)
+		expectedID := normalizeNeteaseArtist(expected)
 		found := false
 		for _, actual := range got {
-			if expectedKey != "" && expectedKey == normalizeNeteaseArtist(actual) {
+			if expectedID != "" && expectedID == normalizeNeteaseArtist(actual) {
 				found = true
 				break
 			}
@@ -287,13 +279,34 @@ func neteaseAlternateMissingArtistsNamedInTitle(title string, want, got []string
 			continue
 		}
 		missing = true
-		if expectedKey == "" || !strings.Contains(titleKey, " "+expectedKey+" ") {
+		expectedInTitle := neteaseArtistInTitleKey(expected)
+		if expectedInTitle == "" || !strings.Contains(titleKey, " "+expectedInTitle+" ") {
 			return false
 		}
 	}
 	return missing
 }
 
+// neteaseArtistInTitleKey keeps word boundaries while folding punctuation and
+// orthographic variants. Artist identity keys intentionally discard spaces;
+// reusing them here made a credited name impossible to find inside a longer
+// title (for example "Grover Washington Jr." in a parenthetical credit).
+func neteaseArtistInTitleKey(value string) string {
+	var out strings.Builder
+	pendingSpace := false
+	for _, r := range foldPlaylistMatchText(value) {
+		if unicode.IsLetter(r) || unicode.IsDigit(r) {
+			if pendingSpace && out.Len() > 0 {
+				out.WriteByte(' ')
+			}
+			out.WriteRune(r)
+			pendingSpace = false
+			continue
+		}
+		pendingSpace = true
+	}
+	return strings.TrimSpace(out.String())
+}
 func neteaseAlternateTitleMatches(want, got string) bool {
 	// Catalogue and embedded tags commonly disagree on Traditional Chinese,
 	// Japanese ellipses and wave-dash glyphs. Fold only the bounded equivalent

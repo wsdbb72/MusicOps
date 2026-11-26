@@ -44,6 +44,19 @@ func (a *App) fetchJOOXAudio(ctx context.Context, id string) ([]byte, string, er
 	client := a.jooxHTTPClient
 	if client == nil {
 		client = &http.Client{Timeout: 3 * time.Minute}
+	} else {
+		copy := *client
+		client = &copy
+	}
+	baseRedirect := client.CheckRedirect
+	client.CheckRedirect = func(request *http.Request, via []*http.Request) error {
+		if err := jooxSafeRedirect(request, via); err != nil {
+			return err
+		}
+		if baseRedirect != nil {
+			return baseRedirect(request, via)
+		}
+		return nil
 	}
 	metadataURL, err := jooxTrackURL(base, id)
 	if err != nil {
@@ -141,6 +154,15 @@ func jooxTrackSecret(id string) string {
 	return hex.EncodeToString(sum[:])
 }
 
+func jooxSafeRedirect(request *http.Request, via []*http.Request) error {
+	if request == nil || request.URL == nil || (request.URL.Scheme != "https" && request.URL.Scheme != "http") || !jooxAudioHost(request.URL.Hostname()) {
+		return errors.New("JOOX redirect left the approved host")
+	}
+	if len(via) >= 10 {
+		return errors.New("JOOX redirect limit exceeded")
+	}
+	return nil
+}
 func jooxAudioHost(host string) bool {
 	host = strings.ToLower(strings.TrimSuffix(host, "."))
 	return host == "joox.com" || strings.HasSuffix(host, ".joox.com")

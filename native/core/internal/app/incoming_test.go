@@ -110,7 +110,8 @@ func TestUploadIncomingRejectsNonAudioAndBadNames(t *testing.T) {
 
 func TestUploadIncomingRejectsOversized(t *testing.T) {
 	application := newApp(t)
-	big := bytes.Repeat([]byte{0}, (32<<20)+1)
+	application.incomingLimitOverride = 1024
+	big := bytes.Repeat([]byte{0}, 1025)
 	recorder := uploadFile(t, application, "big.wav", big, "")
 	if recorder.Code != http.StatusRequestEntityTooLarge || !strings.Contains(recorder.Body.String(), "AUDIO_TOO_LARGE") {
 		t.Fatal(recorder.Code, recorder.Body.String())

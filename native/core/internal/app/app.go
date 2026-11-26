@@ -85,25 +85,32 @@ type App struct {
 	// uses http.DefaultClient); tests set it to a fake server's client
 	// so a TLS test server is trusted. The same seam pattern as
 	// searcher.Now and Wait above.
-	aiHTTPClient      *http.Client
-	mu                sync.Mutex
-	background        sync.WaitGroup
-	backgroundMu      sync.Mutex
-	backgroundActive  map[string]int
-	duplicateMu       sync.Mutex
-	duplicateScanMu   sync.Mutex
-	neteaseRecoveryMu sync.Mutex
-	secrets           map[string]string
-	proxyConfigErr    string
-	stopSubs          chan struct{}
-	stopReconcile     chan struct{}
-	stopAutoReview    chan struct{}
-	stopLibraryAuto   chan struct{}
-	libraryAutomation *libraryAutomationState
-	autoReviewMu      sync.Mutex
-	autoReviewRetryAt map[string]time.Time
-	autoReviewCursor  []byte
-	autoReviewRuntime autoReviewRuntime
+	aiHTTPClient *http.Client
+	// lyricsFallbackBase and lyricsHTTPClient are test seams for the public
+	// LRCLIB fallback used when the configured lyrics service returns masked
+	// placeholders such as "****". Production leaves them empty.
+	lyricsFallbackBase string
+	lyricsHTTPClient   *http.Client
+	// incomingAudioLimit is a test seam; zero uses audiorelease.MaxAudioBytes.
+	incomingLimitOverride int64
+	mu                    sync.Mutex
+	background            sync.WaitGroup
+	backgroundMu          sync.Mutex
+	backgroundActive      map[string]int
+	duplicateMu           sync.Mutex
+	duplicateScanMu       sync.Mutex
+	neteaseRecoveryMu     sync.Mutex
+	secrets               map[string]string
+	proxyConfigErr        string
+	stopSubs              chan struct{}
+	stopReconcile         chan struct{}
+	stopAutoReview        chan struct{}
+	stopLibraryAuto       chan struct{}
+	libraryAutomation     *libraryAutomationState
+	autoReviewMu          sync.Mutex
+	autoReviewRetryAt     map[string]time.Time
+	autoReviewCursor      []byte
+	autoReviewRuntime     autoReviewRuntime
 	// lastTokenRead bounds the background balance reads to one per site per
 	// minute. The ledger's read hold only exists for failures; a successful
 	// read leaves no trace there, and a 30-second ticker would otherwise read

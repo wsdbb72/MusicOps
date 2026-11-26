@@ -9,6 +9,7 @@ import (
 	"unicode"
 	"unicode/utf8"
 
+	"github.com/wsdbb72/MusicOps/native/core/internal/artistnorm"
 	"github.com/wsdbb72/MusicOps/native/core/internal/textnorm"
 )
 
@@ -131,7 +132,7 @@ func artistsAgree(expected string, observed []string) bool {
 		return false
 	}
 	for _, name := range observed {
-		if fold(name) == wanted || creditAliasMatches(wanted, fold(name)) {
+		if fold(name) == wanted || creditAliasMatches(wanted, fold(name)) || artistnorm.Same(expected, name) {
 			return true
 		}
 	}

@@ -117,6 +117,42 @@ func TestPlaylistAlbumFillDoesNotConflateSameTitleDifferentPCM(t *testing.T) {
 		t.Fatal("album completion did not distinguish different audio checksums")
 	}
 }
+func TestAlbumCompletionFindsExistingPCMOutsideExpectedFolder(t *testing.T) {
+	application := newApp(t)
+	library := t.TempDir()
+	incoming := t.TempDir()
+	body := syntheticFLAC(t, false)
+	body[26] = 1 // nonzero decoded-audio checksum
+	tagged, err := flactags.WriteBytes(body, flactags.Tags{Title: "Track", Artist: "Guest Artist", Album: "Localized Album", TrackNumber: 7})
+	if err != nil {
+		t.Fatal(err)
+	}
+	local := filepath.Join(library, "Various Artists", "Localized Album", "07 Track.flac")
+	if err := os.MkdirAll(filepath.Dir(local), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(local, tagged, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if added, _, _, err := application.indexLibraryTree(context.Background(), library); err != nil || added != 1 {
+		t.Fatalf("index existing library added=%d err=%v", added, err)
+	}
+	source := filepath.Join(incoming, "download.flac")
+	if err := os.WriteFile(source, tagged, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if !application.playlistLibrary().hasSamePCMRecording(source, "Track") {
+		t.Fatal("an unchanged recording in a localized album folder was not recognized")
+	}
+	changed := append([]byte(nil), tagged...)
+	changed[26] = 2 // different nonzero decoded-audio checksum
+	if err := os.WriteFile(source, changed, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if application.playlistLibrary().hasSamePCMRecording(source, "Track") {
+		t.Fatal("different PCM was treated as the existing recording")
+	}
+}
 func TestHotSlowCompilationKeepsArtistAndPerTrackCover(t *testing.T) {
 	a := newApp(t)
 	server, _ := lrcAPIFake(t, "", jpegBody(), "", "")

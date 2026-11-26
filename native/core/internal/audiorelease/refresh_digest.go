@@ -44,14 +44,27 @@ func RefreshPathDigests(engine *dataengine.Engine, paths []string) (int, error) 
 	if len(targets) == 0 {
 		return 0, nil
 	}
+	if err := ensurePathIndex(engine); err != nil {
+		return 0, err
+	}
 
 	type plannedUpdate struct {
 		key []byte
 		raw []byte
 		new []byte
 	}
-	var updates []plannedUpdate
-	releaseTargets := make(map[string]pathDigest)
+	updates := []plannedUpdate{}
+	planned := map[string]bool{}
+	lateIndexes := map[string]pathIndexEntry{}
+	addUpdate := func(key, raw []byte, target pathDigest) error {
+		updated, changed, err := refreshedRecord(raw, target)
+		if err != nil || !changed || planned[string(key)] {
+			return err
+		}
+		planned[string(key)] = true
+		updates = append(updates, plannedUpdate{key: append([]byte(nil), key...), raw: append([]byte(nil), raw...), new: updated})
+		return nil
+	}
 	err := engine.View(func(view *dataengine.View) error {
 		scan := func(prefix []byte, visit func([]byte, []byte) error) error {
 			var after []byte
@@ -72,49 +85,87 @@ func RefreshPathDigests(engine *dataengine.Engine, paths []string) (int, error) 
 			}
 		}
 
-		if err := scan([]byte("library/audio/"), func(key, raw []byte) error {
-			var rec record
-			if json.Unmarshal(raw, &rec) != nil {
+		for targetKey, target := range targets {
+			releasePrefix := pathReleaseIndexPrefix(target.Path)
+			releaseIDs := map[string]bool{}
+			if err := scan(releasePrefix, func(key, raw []byte) error {
+				if string(raw) != targetKey {
+					return nil
+				}
+				id := strings.TrimPrefix(string(key), string(releasePrefix))
+				if validID(id) {
+					releaseIDs[id] = true
+				}
 				return nil
-			}
-			target, ok := targets[pathKey(rec.Path)]
-			if !ok {
-				return nil
-			}
-			updated, changed, err := refreshedRecord(raw, target)
-			if err != nil {
+			}); err != nil {
 				return err
 			}
-			if changed {
-				updates = append(updates, plannedUpdate{key: append([]byte(nil), key...), raw: append([]byte(nil), raw...), new: updated})
+			for id := range releaseIDs {
+				raw, found, err := view.Get(releaseKey(id))
+				if err != nil {
+					return err
+				}
+				if found {
+					if err := addUpdate(releaseKey(id), raw, target); err != nil {
+						return err
+					}
+				}
 			}
-			releaseTargets[rec.RequestID] = target
-			return nil
-		}); err != nil {
-			return err
-		}
 
-		return scan([]byte("library/album-audio/"), func(key, raw []byte) error {
-			var rec record
-			if json.Unmarshal(raw, &rec) != nil {
+			albumPrefix := pathAlbumIndexPrefix(target.Path)
+			if err := scan(albumPrefix, func(_ []byte, albumKey []byte) error {
+				raw, found, err := view.Get(albumKey)
+				if err != nil {
+					return err
+				}
+				if found {
+					return addUpdate(albumKey, raw, target)
+				}
 				return nil
-			}
-			target, ok := releaseTargets[rec.RequestID]
-			if !ok || !sameReleasePath(rec.Path, target.Path) {
-				return nil
-			}
-			updated, changed, err := refreshedRecord(raw, target)
-			if err != nil {
+			}); err != nil {
 				return err
 			}
-			if changed {
-				updates = append(updates, plannedUpdate{key: append([]byte(nil), key...), raw: append([]byte(nil), raw...), new: updated})
+
+			if len(releaseIDs) > 0 {
+				continue
 			}
-			return nil
-		})
+			// A record created by an older process after the one-time backfill
+			// may lack an index row. Repair that path conservatively with a full
+			// scan; normal writes keep this fallback out of the hot path.
+			if err := scan([]byte("library/audio/"), func(key, raw []byte) error {
+				var rec record
+				if json.Unmarshal(raw, &rec) != nil || !sameReleasePath(rec.Path, target.Path) {
+					return nil
+				}
+				lateIndexes[string(pathReleaseIndexKey(rec.Path, rec.RequestID))] = pathReleaseIndexEntry(rec.Path, rec.RequestID)
+				return addUpdate(key, raw, target)
+			}); err != nil {
+				return err
+			}
+			if err := scan([]byte("library/album-audio/"), func(key, raw []byte) error {
+				var rec record
+				if json.Unmarshal(raw, &rec) != nil || !sameReleasePath(rec.Path, target.Path) {
+					return nil
+				}
+				lateIndexes[string(pathAlbumIndexKey(rec.Path, rec.RequestID, key))] = pathAlbumIndexEntry(rec.Path, rec.RequestID, key)
+				return addUpdate(key, raw, target)
+			}); err != nil {
+				return err
+			}
+		}
+		return nil
 	})
 	if err != nil {
 		return 0, err
+	}
+	if len(lateIndexes) > 0 {
+		ordered := make([]pathIndexEntry, 0, len(lateIndexes))
+		for _, entry := range lateIndexes {
+			ordered = append(ordered, entry)
+		}
+		if err := installPathIndexEntries(engine, ordered); err != nil {
+			return 0, err
+		}
 	}
 	if len(updates) == 0 {
 		return 0, nil
@@ -171,7 +222,12 @@ func digestRegularFile(path string) (pathDigest, error) {
 	if err != nil {
 		return pathDigest{}, err
 	}
-	if size != before.Size() || after.Size() != before.Size() || !after.ModTime().Equal(before.ModTime()) {
+	afterPath, err := os.Lstat(path)
+	if err != nil || afterPath.Mode()&os.ModeSymlink != 0 || afterPath.Mode()&os.ModeNamedPipe != 0 || !afterPath.Mode().IsRegular() || !os.SameFile(before, afterPath) {
+		return pathDigest{}, ErrConflict
+	}
+	if size != before.Size() || after.Size() != before.Size() || afterPath.Size() != before.Size() ||
+		!after.ModTime().Equal(before.ModTime()) || !afterPath.ModTime().Equal(before.ModTime()) {
 		return pathDigest{}, ErrConflict
 	}
 	return pathDigest{

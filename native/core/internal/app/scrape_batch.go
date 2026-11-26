@@ -17,6 +17,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/wsdbb72/MusicOps/native/core/internal/artistnorm"
 	"github.com/wsdbb72/MusicOps/native/core/internal/flactags"
 	"github.com/wsdbb72/MusicOps/native/core/internal/musicbrainz"
 )
@@ -115,7 +116,7 @@ func (a *App) writeScrapeArtworkSidecars(path string, data scrapeArtworkData, ov
 		return false, false, data.Err
 	}
 	coverPath := strings.TrimSuffix(path, filepath.Ext(path)) + ".jpg"
-	wantLyrics := strings.TrimSpace(data.Lyrics) != "" && (overwrite || !hasLyricsSidecar(path))
+	wantLyrics := lyricsTextUsable(data.Lyrics) && (overwrite || !hasLyricsSidecar(path))
 	wantCover := validCoverBytes(data.Cover)
 	if wantCover {
 		wantCover = overwrite || !validCoverSidecar(coverPath)
@@ -269,7 +270,7 @@ func (a *App) scrapeLibrary(w http.ResponseWriter, r *http.Request) {
 			result.Status, result.Code, result.Note = "skipped", "NO_TAGS", "缺艺人、专辑或曲名，且路径不足以推断"
 			continue
 		}
-		key := foldTagText(artist) + "\x00" + foldTagText(album)
+		key := artistnorm.Key(artist) + "\x00" + foldTagText(album)
 		group := index[key]
 		if group == nil {
 			group = &scrapeAlbumGroup{artist: artist, album: album}
@@ -400,7 +401,7 @@ func (a *App) scrapeLibrary(w http.ResponseWriter, r *http.Request) {
 					}
 					cover = art.Cover
 					fetchedLyrics := art.Lyrics
-					if fetchedLyrics != "" && ((len(entry.tags.Raw["LYRICS"]) == 0 && !hasLyricsSidecar(entry.full)) || body.Overwrite) {
+					if lyricsTextUsable(fetchedLyrics) && (lyricsNeedsWrite(entry.full, entry.tags.Raw["LYRICS"]) || body.Overwrite) {
 						updates["LYRICS"] = []string{fetchedLyrics}
 						lyricsText = fetchedLyrics
 						completion.Written = append(completion.Written, "lyrics")
@@ -445,6 +446,12 @@ func (a *App) scrapeLibrary(w http.ResponseWriter, r *http.Request) {
 			// One backup covers both writes: tags first, then the embedded
 			// cover, so a failed cover leaves the original file in place.
 			backup := ""
+			if len(updates) > 0 || cover != nil && coverMode == "embed" {
+				if err := checkNotHardlinked(entry.full); err != nil {
+					result.Status, result.Code, result.Note = "failed", "HARDLINK_EDIT_FORBIDDEN", "硬链接文件不能原地写标签或内嵌内容"
+					continue
+				}
+			}
 			if len(updates) > 0 || cover != nil || lyricsText != "" {
 				if backup, err = backupFile(entry.full); err != nil {
 					result.Status, result.Code, result.Note = "failed", "TAG_UNAVAILABLE", "备份失败，文件没有改"

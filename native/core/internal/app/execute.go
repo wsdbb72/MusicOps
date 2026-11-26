@@ -213,12 +213,15 @@ func (a *App) searchOnce(ctx context.Context, execution *scheduler.Execution, pa
 		return scheduler.Outcome{}, errors.New("search job disappeared")
 	}
 	if wait := RetryRemaining(job.UpdatedNS, job.SearchRetryAfterSec, a.now()); wait > 0 {
-		if err = a.wait(ctx, wait); err != nil {
+		// A restart can recover a queued retry before its persisted NotBefore
+		// timestamp. Release it back to the durable queue instead of sleeping
+		// inside a worker and occupying every scheduler slot for up to an hour.
+		now := a.now()
+		dueNS := time.Unix(0, job.UpdatedNS).Add(time.Duration(job.SearchRetryAfterSec) * time.Second).UnixNano()
+		if _, err = a.flows.DeferSearchUntil(intentID("defer-search", token.ID, token.Fence), token, now.UnixNano(), dueNS, "检索退避尚未到期，已释放执行线程并等待重试"); err != nil {
 			return scheduler.Outcome{}, err
 		}
-		if err = a.cancelled(ctx, execution); err != nil {
-			return scheduler.Outcome{}, err
-		}
+		return scheduler.Outcome{}, scheduler.ErrRequeued
 	}
 	if err = a.waitIfPaused(ctx); err != nil {
 		return scheduler.Outcome{}, err

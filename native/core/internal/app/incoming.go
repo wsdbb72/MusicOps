@@ -18,8 +18,9 @@ import (
 // put a file into the library. Nothing is written anywhere else, and an
 // existing file is never overwritten.
 func (a *App) uploadIncoming(w http.ResponseWriter, r *http.Request) {
-	r.Body = http.MaxBytesReader(w, r.Body, audiorelease.MaxAudioBytes+(1<<20))
-	if err := r.ParseMultipartForm(audiorelease.MaxAudioBytes); err != nil {
+	limit := a.incomingAudioLimit()
+	r.Body = http.MaxBytesReader(w, r.Body, limit+(1<<20))
+	if err := r.ParseMultipartForm(8 << 20); err != nil {
 		if strings.Contains(err.Error(), "request body too large") {
 			writeJSON(w, http.StatusRequestEntityTooLarge, map[string]any{"ok": false, "code": "AUDIO_TOO_LARGE"})
 			return
@@ -56,7 +57,7 @@ func (a *App) uploadIncoming(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusUnprocessableEntity, map[string]any{"ok": false, "code": "AUDIO_REJECTED", "class": "audio_rejected"})
 		return
 	}
-	if header.Size > audiorelease.MaxAudioBytes {
+	if header.Size > limit {
 		writeJSON(w, http.StatusRequestEntityTooLarge, map[string]any{"ok": false, "code": "AUDIO_TOO_LARGE"})
 		return
 	}
@@ -95,7 +96,7 @@ func (a *App) uploadIncoming(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusUnprocessableEntity, map[string]any{"ok": false, "code": "AUDIO_REJECTED", "class": "audio_rejected"})
 		return
 	}
-	if written > audiorelease.MaxAudioBytes {
+	if written > limit {
 		os.Remove(filepath.Join(incoming, name))
 		writeJSON(w, http.StatusRequestEntityTooLarge, map[string]any{"ok": false, "code": "AUDIO_TOO_LARGE"})
 		return
@@ -103,6 +104,13 @@ func (a *App) uploadIncoming(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{
 		"ok": true, "source_name": name, "size": written, "sha256": hex.EncodeToString(sum.Sum(nil)[:]), "origin": origin,
 	})
+}
+
+func (a *App) incomingAudioLimit() int64 {
+	if a != nil && a.incomingLimitOverride > 0 {
+		return a.incomingLimitOverride
+	}
+	return audiorelease.MaxAudioBytes
 }
 
 // validIncomingName accepts only a plain basename: no directories, no empty

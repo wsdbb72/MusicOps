@@ -502,7 +502,7 @@ func TestAutomationRepairsInvalidExistingCover(t *testing.T) {
 	if !maintenanceMissingSidecars(full) {
 		t.Fatal("truncated sidecar was treated as valid artwork")
 	}
-	if !maintenanceMissingArtwork(full, &flactags.Tags{HasFrontCover: true}) {
+	if !maintenanceMissingArtwork(full, &flactags.Tags{HasFrontCover: true, Raw: map[string][]string{"LYRICS": {"[00:01.00]lyrics"}}}) {
 		t.Fatal("invalid sidecar was hidden by an embedded cover marker")
 	}
 	if err := os.WriteFile(cover, valid, 0o600); err != nil {
@@ -511,7 +511,7 @@ func TestAutomationRepairsInvalidExistingCover(t *testing.T) {
 	if maintenanceMissingSidecars(full) {
 		t.Fatal("fully decodable sidecar was still marked missing")
 	}
-	if maintenanceMissingArtwork(full, &flactags.Tags{HasFrontCover: true}) {
+	if maintenanceMissingArtwork(full, &flactags.Tags{HasFrontCover: true, Raw: map[string][]string{"LYRICS": {"[00:01.00]lyrics"}}}) {
 		t.Fatal("valid sidecar was still marked missing")
 	}
 }

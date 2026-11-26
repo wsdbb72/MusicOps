@@ -277,6 +277,7 @@ func newApp(t *testing.T) *App {
 	// Tests use the bundled bridge seam; direct JOOX resolution is exercised
 	// separately with an injected transport.
 	application.jooxAPIBaseURL = "http://127.0.0.1:1"
+	application.lyricsFallbackBase = "http://127.0.0.1:1"
 	t.Cleanup(func() {
 		if err := application.Close(); err != nil {
 			t.Errorf("close application: %v", err)

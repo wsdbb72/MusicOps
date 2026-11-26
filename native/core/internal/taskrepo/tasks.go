@@ -572,14 +572,22 @@ func interruptDecision(v *dataengine.View, current *Task, token Token, nowNS int
 // a local stale conflict but the task token itself is still valid: no external
 // effect has to be replayed and no review is warranted.
 func (r *Repository) RequeueOwned(requestID string, token Token, nowNS int64, extra []byte, domain Domain) (Result, error) {
-	if !validToken(token) || nowNS <= 0 || domain == nil {
+	return r.RequeueOwnedAfter(requestID, token, nowNS, 0, extra, domain)
+}
+
+// RequeueOwnedAfter also records a durable earliest execution time. A worker
+// that claims a recovered backoff task can release it without sleeping for the
+// remaining interval and occupying a scheduler slot.
+func (r *Repository) RequeueOwnedAfter(requestID string, token Token, nowNS, notBeforeNS int64, extra []byte, domain Domain) (Result, error) {
+	if !validToken(token) || nowNS <= 0 || notBeforeNS < 0 || notBeforeNS != 0 && notBeforeNS <= nowNS || domain == nil {
 		return Result{}, dataengine.ErrInvalidRequest
 	}
 	intent := struct {
-		Operation string
-		Token     Token
-		Extra     []byte
-	}{"workflow_requeue", token, extra}
+		Operation   string
+		Token       Token
+		NotBeforeNS int64
+		Extra       []byte
+	}{"workflow_requeue", token, notBeforeNS, extra}
 	return r.apply(requestID, token.ID, intent, func(v *dataengine.View, current *Task) (*Task, []dataengine.Mutation, error) {
 		if !matches(current, token) || current.Execution != "started" || (current.State != "running" && current.State != "paused") || current.CancelRequested || current.WorkflowJobID == "" {
 			return nil, nil, ErrStale
@@ -600,6 +608,7 @@ func (r *Repository) RequeueOwned(requestID string, token Token, nowNS int64, ex
 		next.Phase = ""
 		next.ErrorClass = ""
 		next.ResultHash = ""
+		next.NotBeforeNS = notBeforeNS
 		next.UpdatedNS = effectiveTime(nowNS, current)
 		attempt, err := readAttempt(v, token)
 		if err != nil {

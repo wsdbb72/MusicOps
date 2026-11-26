@@ -534,6 +534,8 @@ func TestFolderArtist(t *testing.T) {
 		{[]string{"A feat. B feat. C"}, "A／B／C"},
 		{[]string{"A", "a"}, "A"},
 		{[]string{"陈奕迅"}, "陈奕迅"},
+		{[]string{"陈奕迅", "Eason Chan"}, "陈奕迅"},
+		{[]string{"周傑倫", "Jay Chou", "JayChou"}, "周杰伦"},
 		{[]string{""}, ""},
 	}
 	for _, tc := range cases {
@@ -1227,5 +1229,28 @@ func TestDuplicateMergeRefusesFileReferencedByActiveWorkflow(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(application.Dir, "library-audio", second.File)); err != nil {
 		t.Fatalf("duplicate was moved: %v", err)
+	}
+}
+
+func TestScrapeCanonicalizesKnownArtistAliases(t *testing.T) {
+	current := &flactags.Tags{Raw: map[string][]string{
+		"ARTIST":      {"JayChou"},
+		"ALBUMARTIST": {"周傑倫"},
+	}}
+	updates, completion := planTagWrite(current, map[string][]string{
+		"ARTIST":      {"周杰伦"},
+		"ALBUMARTIST": {"周杰伦"},
+	}, false)
+	if updates["ARTIST"][0] != "周杰伦" || updates["ALBUMARTIST"][0] != "周杰伦" {
+		t.Fatalf("artist aliases were not canonicalized: %+v", updates)
+	}
+	if len(completion.Written) != 2 {
+		t.Fatalf("canonical rewrites were not reported: %+v", completion)
+	}
+	if !sameTagValue("ARTIST", []string{"Jay Chou"}, []string{"周杰伦"}) {
+		t.Fatal("known artist aliases did not compare equal")
+	}
+	if sameTagValue("ARTIST", []string{"Jay"}, []string{"JAY-Z"}) {
+		t.Fatal("unrelated artist names were collapsed")
 	}
 }

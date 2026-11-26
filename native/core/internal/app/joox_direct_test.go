@@ -71,3 +71,17 @@ func TestJOOXDirectFallbackUsesPlaybackURLWhenEngineReturns404(t *testing.T) {
 		t.Fatalf("tags=%+v", tags)
 	}
 }
+
+func TestJOOXRedirectPolicyRejectsNonJOOXHosts(t *testing.T) {
+	request, err := http.NewRequest(http.MethodGet, "https://evil.example/audio.mp3", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := jooxSafeRedirect(request, nil); err == nil {
+		t.Fatal("cross-host JOOX redirect was accepted")
+	}
+	request.URL.Host = "ak-hk.stream.music.joox.com"
+	if err := jooxSafeRedirect(request, nil); err != nil {
+		t.Fatalf("approved JOOX CDN redirect was rejected: %v", err)
+	}
+}

@@ -367,6 +367,52 @@ func TestFLACTagsReadWriteEndpoint(t *testing.T) {
 	}
 }
 
+func TestFLACMetadataWritesRefuseHardlinksWithoutSplittingThem(t *testing.T) {
+	application := newApp(t)
+	path := genTestFLAC(t, filepath.Join(application.Dir, "incoming"), "hardlink.flac")
+	alias := path + ".alias.flac"
+	if err := os.Link(path, alias); err != nil {
+		t.Skipf("hard links unavailable: %v", err)
+	}
+	before, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rel, err := filepath.Rel(application.Dir, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	code, decoded := mediaPost(t, application, "/v1/library/tags", map[string]any{
+		"path": filepath.ToSlash(rel), "tags": map[string]any{"genre": "Rock"},
+	})
+	if code != http.StatusConflict || decoded["code"] != "HARDLINK_EDIT_FORBIDDEN" {
+		t.Fatalf("tag write on hardlink: code=%d body=%v", code, decoded)
+	}
+	code, decoded = mediaPost(t, application, "/v1/library/lyrics", map[string]any{
+		"path": filepath.ToSlash(rel), "text": "[00:01.00]clean lyric", "embed": true,
+	})
+	if code != http.StatusConflict || decoded["code"] != "HARDLINK_EDIT_FORBIDDEN" {
+		t.Fatalf("lyrics write on hardlink: code=%d body=%v", code, decoded)
+	}
+	originalInfo, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	aliasInfo, err := os.Stat(alias)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !os.SameFile(originalInfo, aliasInfo) {
+		t.Fatal("a rejected metadata write split the hard link")
+	}
+	after, err := os.ReadFile(alias)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(before, after) {
+		t.Fatal("a rejected metadata write changed the linked file")
+	}
+}
 func TestFLACTagWriteRefreshesEveryPublishedReceipt(t *testing.T) {
 	application := newApp(t)
 	library := application.libraryDir()

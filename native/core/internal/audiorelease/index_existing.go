@@ -176,6 +176,13 @@ func indexRecordAt(engine *dataengine.Engine, requestID, path string, key, encod
 		{Key: releaseKey(requestID), Value: encoded},
 		{Key: key, Value: encoded},
 	}
+	if err := appendPathReleaseIndexIfMissing(engine, &conditions, &mutations, path, requestID); err != nil {
+		return false, err
+	}
+	if err := appendPathAlbumIndexIfMissing(engine, &conditions, &mutations, path, requestID, key); err != nil {
+		return false, err
+	}
+
 	if found {
 		var current record
 		if json.Unmarshal(currentRaw, &current) != nil {
@@ -452,6 +459,9 @@ func IndexSnapshots(engine *dataengine.Engine, items []Existing) (int, error) {
 			dataengine.Mutation{Key: releaseKey(item.RequestID), Value: encoded},
 			dataengine.Mutation{Key: primary, Value: encoded},
 		)
+		appendPathReleaseIndex(&conditions, &mutations, item.Path, item.RequestID)
+		appendPathAlbumIndex(&conditions, &mutations, item.Path, item.RequestID, primary)
+
 	}
 	if batchable {
 		ok, err := engine.CompareAndSwap(conditions, mutations)

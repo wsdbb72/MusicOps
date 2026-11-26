@@ -29,9 +29,11 @@ import (
 	"github.com/wsdbb72/MusicOps/native/core/internal/dataengine"
 )
 
-// MaxAudioBytes is the largest single audio file the release path accepts.
-// The incoming upload endpoint enforces the same limit.
-const MaxAudioBytes = 32 << 20
+// MaxAudioBytes is the largest single audio file the manually authenticated
+// import and release paths accept. It matches the internally generated
+// staging ceiling so a legitimate 44.1/48 kHz FLAC is not forced through
+// lossy downsampling merely to fit an arbitrary 32 MiB multipart limit.
+const MaxAudioBytes = 320 << 20
 
 // MaxStagedAudioBytes is the separate ceiling for internal download staging.
 const MaxStagedAudioBytes = 320 << 20
@@ -408,16 +410,29 @@ func Release(ctx context.Context, engine *dataengine.Engine, input Request) (Res
 		}
 		return empty, err
 	}
-	ok, err := engine.CompareAndSwap(
-		[]dataengine.Condition{
-			{Key: releaseKey(input.RequestID), Absent: true},
-			{Key: albumKey(input.RootID, input.Track), Absent: true},
-		},
-		[]dataengine.Mutation{
-			{Key: releaseKey(input.RequestID), Value: encoded},
-			{Key: albumKey(input.RootID, input.Track), Value: encoded},
-		},
-	)
+	albumMappingKey := albumKey(input.RootID, input.Track)
+	conditions := []dataengine.Condition{
+		{Key: releaseKey(input.RequestID), Absent: true},
+		{Key: albumMappingKey, Absent: true},
+	}
+	mutations := []dataengine.Mutation{
+		{Key: releaseKey(input.RequestID), Value: encoded},
+		{Key: albumMappingKey, Value: encoded},
+	}
+	if err := appendPathReleaseIndexIfMissing(engine, &conditions, &mutations, dest, input.RequestID); err != nil {
+		if restoreErr := restoreOriginal(); restoreErr != nil {
+			return empty, errors.Join(err, restoreErr)
+		}
+		return empty, err
+	}
+	if err := appendPathAlbumIndexIfMissing(engine, &conditions, &mutations, dest, input.RequestID, albumMappingKey); err != nil {
+		if restoreErr := restoreOriginal(); restoreErr != nil {
+			return empty, errors.Join(err, restoreErr)
+		}
+		return empty, err
+	}
+
+	ok, err := engine.CompareAndSwap(conditions, mutations)
 	if err != nil {
 		if restoreErr := restoreOriginal(); restoreErr != nil {
 			return empty, errors.Join(err, restoreErr)
@@ -540,16 +555,23 @@ func RecordPublished(ctx context.Context, engine *dataengine.Engine, input Publi
 	if err != nil {
 		return empty, err
 	}
-	ok, err := engine.CompareAndSwap(
-		[]dataengine.Condition{
-			{Key: releaseKey(input.RequestID), Absent: true},
-			{Key: albumKey(input.RootID, input.Track), Absent: true},
-		},
-		[]dataengine.Mutation{
-			{Key: releaseKey(input.RequestID), Value: encoded},
-			{Key: albumKey(input.RootID, input.Track), Value: encoded},
-		},
-	)
+	albumMappingKey := albumKey(input.RootID, input.Track)
+	conditions := []dataengine.Condition{
+		{Key: releaseKey(input.RequestID), Absent: true},
+		{Key: albumMappingKey, Absent: true},
+	}
+	mutations := []dataengine.Mutation{
+		{Key: releaseKey(input.RequestID), Value: encoded},
+		{Key: albumMappingKey, Value: encoded},
+	}
+	if err := appendPathReleaseIndexIfMissing(engine, &conditions, &mutations, path, input.RequestID); err != nil {
+		return empty, err
+	}
+	if err := appendPathAlbumIndexIfMissing(engine, &conditions, &mutations, path, input.RequestID, albumMappingKey); err != nil {
+		return empty, err
+	}
+
+	ok, err := engine.CompareAndSwap(conditions, mutations)
 	if err != nil {
 		return empty, err
 	}
@@ -596,6 +618,7 @@ func Relocate(engine *dataengine.Engine, requestID, newPath string) error {
 	if err := sameFile(newPath, rec.SHA256); err != nil {
 		return err
 	}
+	pathChanged := !sameReleasePath(rec.Path, newPath)
 	updated := rec
 	updated.Path = newPath
 	encoded, err := json.Marshal(updated)
@@ -606,6 +629,11 @@ func Relocate(engine *dataengine.Engine, requestID, newPath string) error {
 	mutations := []dataengine.Mutation{{Key: releaseKey(requestID), Value: encoded}}
 	// The album key is per (root, track); find the album key(s) holding
 	// this request and update them in the same atomic swap.
+	if pathChanged {
+		if err := appendPathReleaseIndexIfMissing(engine, &conditions, &mutations, newPath, requestID); err != nil {
+			return err
+		}
+	}
 	albumKeys, err := albumKeysFor(engine, rec.RootID)
 	if err != nil {
 		return err
@@ -621,6 +649,11 @@ func Relocate(engine *dataengine.Engine, requestID, newPath string) error {
 		}
 		conditions = append(conditions, dataengine.Condition{Key: key, Value: keyRaw})
 		mutations = append(mutations, dataengine.Mutation{Key: key, Value: encoded})
+		if pathChanged {
+			if err := appendPathAlbumIndexIfMissing(engine, &conditions, &mutations, newPath, requestID, key); err != nil {
+				return err
+			}
+		}
 	}
 	ok, err := engine.CompareAndSwap(conditions, mutations)
 	if err != nil {

@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"time"
 )
 
 // ValidateNavidromeURL validates a Navidrome base URL. An empty URL is
@@ -49,14 +50,14 @@ func ValidateNavidromeURL(raw string) error {
 // ping (GET /rest/ping) that only verifies the server accepts the
 // credentials. See navidromeRequest for the auth scheme and status rules.
 func NavidromePing(ctx context.Context, baseURL, username, password string) error {
-	return navidromeRequest(ctx, baseURL, username, password, "/rest/ping")
+	return navidromeRequest(ctx, baseURL, username, password, "/rest/ping", requestTimeout)
 }
 
 // NavidromeScan mirrors navidrome.scan: after audio has been added to the
 // library it requests a rescan with GET /rest/startScan using the same
 // Subsonic authentication as the ping.
 func NavidromeScan(ctx context.Context, baseURL, username, password string) error {
-	return navidromeRequest(ctx, baseURL, username, password, "/rest/startScan")
+	return navidromeRequest(ctx, baseURL, username, password, "/rest/startScan", scanRequestTimeout)
 }
 
 // navidromeRequest performs one authenticated Subsonic GET. The token
@@ -66,7 +67,7 @@ func NavidromeScan(ctx context.Context, baseURL, username, password string) erro
 // Success requires HTTP 200 and subsonic-response.status == "ok"; anything
 // else is ErrAccessBlocked, and a response that is not JSON at all is
 // additionally an invalid payload.
-func navidromeRequest(ctx context.Context, baseURL, username, password, path string) error {
+func navidromeRequest(ctx context.Context, baseURL, username, password, path string, timeout time.Duration) error {
 	if err := ValidateNavidromeURL(baseURL); err != nil {
 		return err
 	}
@@ -88,7 +89,7 @@ func navidromeRequest(ctx context.Context, baseURL, username, password, path str
 	query.Set("c", "MusicOps")
 	query.Set("f", "json")
 	endpoint := strings.TrimRight(baseURL, "/") + path + "?" + query.Encode()
-	body, status, err := httpGet(ctx, endpoint, nil, 0)
+	body, status, err := httpGetWithTimeout(ctx, endpoint, nil, 0, timeout)
 	if err != nil {
 		return err
 	}

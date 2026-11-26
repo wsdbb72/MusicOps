@@ -47,6 +47,11 @@ var (
 // requestTimeout mirrors the 15 second timeout used by the Python clients.
 const requestTimeout = 15 * time.Second
 
+// scanRequestTimeout covers synchronous Subsonic scans. Navidrome can spend
+// tens of seconds walking a large library before /rest/startScan returns;
+// the short health/ping timeout made a completed scan look like a failure.
+const scanRequestTimeout = 2 * time.Minute
+
 var localSuffixes = []string{".localhost", ".local", ".lan", ".internal", ".home.arpa"}
 
 var singleLabelName = regexp.MustCompile(`^[a-z0-9_](?:[a-z0-9_-]{0,61}[a-z0-9_])?$`)
@@ -108,6 +113,10 @@ func isLocalIP(ip net.IP) bool {
 // read, so the caller can detect an over-limit response without reading an
 // unbounded body. Transport failures are wrapped with ErrNetwork.
 func httpGet(ctx context.Context, endpoint string, headers map[string]string, limit int64) ([]byte, int, error) {
+	return httpGetWithTimeout(ctx, endpoint, headers, limit, requestTimeout)
+}
+
+func httpGetWithTimeout(ctx context.Context, endpoint string, headers map[string]string, limit int64, timeout time.Duration) ([]byte, int, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
 	if err != nil {
 		return nil, 0, fmt.Errorf("musicservers: build request: %w", err)
@@ -116,7 +125,7 @@ func httpGet(ctx context.Context, endpoint string, headers map[string]string, li
 		req.Header.Set(key, value)
 	}
 	client := &http.Client{
-		Timeout: requestTimeout,
+		Timeout: timeout,
 		CheckRedirect: func(req *http.Request, via []*http.Request) error {
 			return http.ErrUseLastResponse
 		},

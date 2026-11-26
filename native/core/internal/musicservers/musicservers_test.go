@@ -11,6 +11,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 )
 
 const plexSectionsFixture = `<?xml version="1.0" encoding="UTF-8"?>
@@ -390,5 +391,20 @@ func TestLocalServiceHost(t *testing.T) {
 		if localServiceHost(host) {
 			t.Errorf("localServiceHost(%q) = true, want false", host)
 		}
+	}
+}
+
+func TestHTTPGetWithTimeoutSupportsSlowScanResponses(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		time.Sleep(40 * time.Millisecond)
+		_, _ = w.Write([]byte("ok"))
+	}))
+	defer server.Close()
+	body, status, err := httpGetWithTimeout(context.Background(), server.URL, nil, 0, 200*time.Millisecond)
+	if err != nil || status != http.StatusOK || string(body) != "ok" {
+		t.Fatal(string(body), status, err)
+	}
+	if _, _, err := httpGetWithTimeout(context.Background(), server.URL, nil, 0, 5*time.Millisecond); !errors.Is(err, ErrNetwork) {
+		t.Fatalf("short deadline error = %v", err)
 	}
 }

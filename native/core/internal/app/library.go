@@ -1609,7 +1609,8 @@ func (a *App) recoverRestoredMergeRecords(moves []mergeMove) (int, []string) {
 // with its audio file.
 
 // artistFolderSplit splits one artist credit the way Python SPLIT does.
-var artistFolderSplit = regexp.MustCompile(`(?i)\s*(?:&|＆|/|／|;|；|,|，|、|×|\bfeat\.|\bfeat\b|\bft\.|\bfeaturing\b)\s*`)
+// ASCII slash is handled separately so compact names such as AC/DC stay intact.
+var artistFolderSplit = regexp.MustCompile(`(?i)\s*(?:&|＆|;|；|,|，|、|×|\bfeat\.|\bfeat\b|\bft\.|\bfeaturing\b)\s*`)
 
 var unknownArtists = map[string]bool{
 	"": true, "unknown": true, "unknown artist": true, "未知": true, "未知歌手": true, "未知艺人": true, "[unknown]": true,
@@ -1620,15 +1621,17 @@ func folderArtist(artists []string) string {
 	seen := map[string]bool{}
 	names := []string{}
 	for _, credit := range artists {
-		for _, part := range artistFolderSplit.Split(credit, -1) {
-			name := artistnorm.Canonical(part)
-			key := artistnorm.Key(name)
-			if name == "" || key == "" {
-				key = strings.ToLower(strings.TrimSpace(name))
-			}
-			if name != "" && !seen[key] {
-				seen[key] = true
-				names = append(names, name)
+		for _, combined := range splitPlaylistArtists(credit) {
+			for _, part := range artistFolderSplit.Split(combined, -1) {
+				name := artistnorm.Canonical(part)
+				key := artistnorm.Key(name)
+				if name == "" || key == "" {
+					key = strings.ToLower(strings.TrimSpace(name))
+				}
+				if name != "" && !seen[key] {
+					seen[key] = true
+					names = append(names, name)
+				}
 			}
 		}
 	}

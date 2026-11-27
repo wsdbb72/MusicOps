@@ -651,8 +651,9 @@ const (
 	// Presence checks may need to inspect thousands of files on a slow library
 	// disk. Immutable catalogue maps and the single-flight file verification
 	// cache are shared; only each worker's tag memo remains independent.
-	playlistPresenceWorkers    = 4
+	playlistPresenceWorkers    = 1
 	playlistPresenceFlushBatch = 200
+	playlistPresencePause      = 2 * time.Millisecond
 )
 
 func (a *App) playlistLibrary() playlistLibraryIndex {
@@ -732,6 +733,11 @@ func playlistPresenceForIndexContext(ctx context.Context, index playlistLibraryI
 				return nil, err
 			}
 			present[i] = local.hasPlaylistRow(row)
+			select {
+			case <-runCtx.Done():
+				return nil, runCtx.Err()
+			case <-time.After(playlistPresencePause):
+			}
 			if (i+1)%playlistPresenceFlushBatch == 0 {
 				if err := index.flushPresenceSnapshots(); err != nil {
 					return nil, err

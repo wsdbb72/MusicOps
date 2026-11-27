@@ -1771,7 +1771,7 @@ const appJS = `(function () {
     var autoReport = libraryAutomation && libraryAutomation.report ? libraryAutomation.report : {};
     var autoRunning = !!(libraryAutomation && libraryAutomation.running);
     var autoText = libraryAutomationSummary(autoReport, autoRunning);
-    var automationCard = '<article class="automation-card"><div class="section-heading"><div><h2>自动维护</h2><p class="section-copy">持续处理刮削、去重、音质升级和单曲补全。</p></div><span class="run-state ' + (autoRunning ? "running" : "") + '">' + (autoRunning ? "运行中" : "空闲") + '</span></div>' +
+    var automationCard = '<article class="automation-card"><div class="section-heading"><div><h2>自动维护</h2><p class="section-copy">索引优先，未变化的音频不重读；扫描、哈希、补图与歌单校验各使用一个低并发通道并主动节流，避免播放时出现整库突发读写。</p></div><span class="run-state ' + (autoRunning ? "running" : "") + '">' + (autoRunning ? "运行中" : "空闲") + '</span></div>' +
       '<div class="maintenance-status ' + (autoRunning ? "running" : "") + '" id="auto-maintenance-status" role="status" aria-live="polite">' + escapeText(autoText) + '</div>' +
       '<div class="option-grid">' +
       '<label><input type="checkbox" id="auto-maintenance-enabled"' + (auto.enabled ? " checked" : "") + '> 持续自动维护</label>' +

@@ -622,8 +622,13 @@ func TestCachedArtworkInvalidatedWhenLyricsSidecarsChange(t *testing.T) {
 	if err := os.Chtimes(primary, primaryMod, primaryMod); err != nil {
 		t.Fatal(err)
 	}
-	if cachedArtworkFresh(track, entry, now.Add(time.Minute)) {
-		t.Fatal("same-size primary lyric sidecar with unchanged mtime reused stale validation")
+	if !cachedArtworkFresh(track, entry, now.Add(time.Minute)) {
+		t.Fatal("low-impact cache performed a content read before the sharded digest audit was due")
+	}
+	auditAt := nextLyricsDigestAuditForTest(track, now.Add(time.Minute))
+	entry.LyricsDigestCheckedNS = auditAt.Add(-lyricsDigestAuditTTL - time.Minute).UnixNano()
+	if cachedArtworkFresh(track, entry, auditAt) {
+		t.Fatal("same-size primary lyric sidecar with unchanged mtime reused stale validation at the sharded digest audit")
 	}
 	if err := os.WriteFile(primary, []byte("[00:01.00]clean lyric\n"), 0o600); err != nil {
 		t.Fatal(err)
@@ -640,8 +645,20 @@ func TestCachedArtworkInvalidatedWhenLyricsSidecarsChange(t *testing.T) {
 	if err := os.Chtimes(legacy, legacyMod, legacyMod); err != nil {
 		t.Fatal(err)
 	}
-	if cachedArtworkFresh(track, entry, now.Add(3*time.Minute)) {
-		t.Fatal("same-size legacy lyric sidecar with unchanged mtime reused stale validation")
+	legacyAuditAt := nextLyricsDigestAuditForTest(track, now.Add(3*time.Minute))
+	entry.LyricsDigestCheckedNS = legacyAuditAt.Add(-lyricsDigestAuditTTL - time.Minute).UnixNano()
+	if cachedArtworkFresh(track, entry, legacyAuditAt) {
+		t.Fatal("same-size legacy lyric sidecar with unchanged mtime reused stale validation at the sharded digest audit")
+	}
+}
+
+func nextLyricsDigestAuditForTest(path string, after time.Time) time.Time {
+	for {
+		checkedNS := after.Add(-lyricsDigestAuditTTL - time.Minute).UnixNano()
+		if lyricsDigestAuditDue(path, checkedNS, after) {
+			return after
+		}
+		after = after.Add(lyricsDigestInterval)
 	}
 }
 

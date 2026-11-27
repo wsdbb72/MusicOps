@@ -532,6 +532,8 @@ func TestFolderArtist(t *testing.T) {
 		{[]string{"A", "B"}, "A／B"},
 		{[]string{"A & B"}, "A／B"},
 		{[]string{"A feat. B feat. C"}, "A／B／C"},
+		{[]string{"AC/DC / Florence + the Machine"}, "AC/DC／Florence + the Machine"},
+		{[]string{"A路人／LKs／LS"}, "A路人／LKs／LS"},
 		{[]string{"A", "a"}, "A"},
 		{[]string{"陈奕迅"}, "陈奕迅"},
 		{[]string{"陈奕迅", "Eason Chan"}, "陈奕迅"},

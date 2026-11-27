@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"hash/fnv"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -35,22 +36,27 @@ const (
 	libraryAutomationInitialDelay    = 5 * time.Minute
 	libraryAutomationMaxMerges       = 1000
 	libraryAutomationMaxJobs         = 200
-	libraryAutomationScanWorkers     = 8
-	duplicateFingerprintWorkers      = 8
+	libraryAutomationScanWorkers     = 1
+	duplicateFingerprintWorkers      = 1
 	libraryAutomationCheckpoint      = 20_000
+	libraryAutomationReuseDelay      = 2 * time.Millisecond
+	libraryAutomationContentDelay    = 10 * time.Millisecond
 	libraryAutomationScanVersion     = 7
 	libraryAutomationMetadataVersion = 1
 	libraryAutomationStallTimeout    = 45 * time.Minute
+	lyricsDigestAuditTTL             = 7 * 24 * time.Hour
+	lyricsDigestSlots                = 28
+	lyricsDigestInterval             = lyricsDigestAuditTTL / lyricsDigestSlots
 	libraryAutomationScrapeSlice     = 45 * time.Minute
 	libraryAutomationArtworkSlice    = 30 * time.Minute
 	libraryAutomationDedupeSlice     = 15 * time.Minute
-	libraryAutomationArtworkWorkers  = 6
+	libraryAutomationArtworkWorkers  = 1
 	libraryAutomationPolicyVersion   = 3
 	corruptRepairKeyPrefix           = "corrupt-repair-v4"
 	libraryAutomationSkippedRetry    = 24 * time.Hour
 	libraryAlbumAuditTTL             = 30 * 24 * time.Hour
 	libraryAutomationAlbumChecks     = 200
-	libraryArtworkValidationTTL      = 7 * 24 * time.Hour
+	libraryArtworkValidationTTL      = 30 * 24 * time.Hour
 	libraryArtworkRefreshTTL         = 30 * 24 * time.Hour
 )
 
@@ -190,32 +196,33 @@ func (a *App) saveLibraryAutomationSettings(in libraryAutomationSettings) (libra
 }
 
 type cachedLibraryScan struct {
-	Size             int64                       `json:"size"`
-	ModNS            int64                       `json:"mod_ns"`
-	MetadataVersion  int                         `json:"metadata_version,omitempty"`
-	NeedsCatalog     bool                        `json:"needs_catalog"`
-	NeedsArtwork     bool                        `json:"needs_artwork"`
-	Codec            string                      `json:"codec,omitempty"`
-	Duration         float64                     `json:"duration,omitempty"`
-	Artist           string                      `json:"artist,omitempty"`
-	AlbumArtist      string                      `json:"album_artist,omitempty"`
-	Artists          []string                    `json:"artists,omitempty"`
-	Album            string                      `json:"album,omitempty"`
-	Title            string                      `json:"title,omitempty"`
-	TrackTotal       int                         `json:"track_total,omitempty"`
-	ArtworkSize      int64                       `json:"artwork_size,omitempty"`
-	ArtworkModNS     int64                       `json:"artwork_mod_ns,omitempty"`
-	LyricsSize       int64                       `json:"lyrics_size,omitempty"`
-	LyricsModNS      int64                       `json:"lyrics_mod_ns,omitempty"`
-	LyricsSHA256     string                      `json:"lyrics_sha256,omitempty"`
-	LegacyLyricsSize int64                       `json:"legacy_lyrics_size,omitempty"`
-	LegacyLyricsMod  int64                       `json:"legacy_lyrics_mod_ns,omitempty"`
-	LegacyLyricsSHA  string                      `json:"legacy_lyrics_sha256,omitempty"`
-	ArtworkCheckedNS int64                       `json:"artwork_checked_ns,omitempty"`
-	ArtworkValid     bool                        `json:"artwork_valid,omitempty"`
-	ArtworkRefresh   bool                        `json:"artwork_refresh,omitempty"`
-	Duplicate        *cachedDuplicateFingerprint `json:"duplicate,omitempty"`
-	DuplicateOnly    bool                        `json:"duplicate_only,omitempty"`
+	Size                  int64                       `json:"size"`
+	ModNS                 int64                       `json:"mod_ns"`
+	MetadataVersion       int                         `json:"metadata_version,omitempty"`
+	NeedsCatalog          bool                        `json:"needs_catalog"`
+	NeedsArtwork          bool                        `json:"needs_artwork"`
+	Codec                 string                      `json:"codec,omitempty"`
+	Duration              float64                     `json:"duration,omitempty"`
+	Artist                string                      `json:"artist,omitempty"`
+	AlbumArtist           string                      `json:"album_artist,omitempty"`
+	Artists               []string                    `json:"artists,omitempty"`
+	Album                 string                      `json:"album,omitempty"`
+	Title                 string                      `json:"title,omitempty"`
+	TrackTotal            int                         `json:"track_total,omitempty"`
+	ArtworkSize           int64                       `json:"artwork_size,omitempty"`
+	ArtworkModNS          int64                       `json:"artwork_mod_ns,omitempty"`
+	LyricsSize            int64                       `json:"lyrics_size,omitempty"`
+	LyricsModNS           int64                       `json:"lyrics_mod_ns,omitempty"`
+	LyricsSHA256          string                      `json:"lyrics_sha256,omitempty"`
+	LegacyLyricsSize      int64                       `json:"legacy_lyrics_size,omitempty"`
+	LegacyLyricsMod       int64                       `json:"legacy_lyrics_mod_ns,omitempty"`
+	LegacyLyricsSHA       string                      `json:"legacy_lyrics_sha256,omitempty"`
+	LyricsDigestCheckedNS int64                       `json:"lyrics_digest_checked_ns,omitempty"`
+	ArtworkCheckedNS      int64                       `json:"artwork_checked_ns,omitempty"`
+	ArtworkValid          bool                        `json:"artwork_valid,omitempty"`
+	ArtworkRefresh        bool                        `json:"artwork_refresh,omitempty"`
+	Duplicate             *cachedDuplicateFingerprint `json:"duplicate,omitempty"`
+	DuplicateOnly         bool                        `json:"duplicate_only,omitempty"`
 }
 
 // cachedDuplicateFingerprint stores the expensive decode result for an
@@ -820,7 +827,7 @@ func (a *App) runAutomatedScrape(ctx context.Context, root string, paths []strin
 		workers = 1
 	}
 	jobs := make(chan libraryAutomationScanInput)
-	results := make(chan libraryAutomationScanResult, workers*2)
+	results := make(chan libraryAutomationScanResult, workers)
 	var workersWG sync.WaitGroup
 	for i := 0; i < workers; i++ {
 		workersWG.Add(1)
@@ -868,6 +875,16 @@ func (a *App) runAutomatedScrape(ctx context.Context, root string, paths []strin
 					repairTracks = append(repairTracks, track)
 				}
 			}
+		}
+		delay := libraryAutomationContentDelay
+		if result.reused {
+			delay = libraryAutomationReuseDelay
+		}
+		select {
+		case <-ctx.Done():
+			// Drain the bounded scanner channels instead of returning while a
+			// producer or worker may still be blocked on send.
+		case <-time.After(delay):
 		}
 		if checked%100 == 0 || checked == len(inputs) {
 			state.update(func(report *libraryAutomationReport) {
@@ -1467,9 +1484,25 @@ func cachedArtworkFresh(path string, entry cachedLibraryScan, now time.Time) boo
 	} else if entry.ArtworkSize != 0 || entry.ArtworkModNS != 0 || entry.NeedsArtwork {
 		return false
 	}
-	lyrics, legacy := lyricsSidecarInfo(path)
-	return entry.LyricsSize == lyrics.Size && entry.LyricsModNS == lyrics.ModNS && entry.LyricsSHA256 == lyrics.SHA256 &&
-		entry.LegacyLyricsSize == legacy.Size && entry.LegacyLyricsMod == legacy.ModNS && entry.LegacyLyricsSHA == legacy.SHA256
+	lyrics, legacy := lyricsSidecarMetadata(path)
+	if entry.LyricsSize != lyrics.Size || entry.LyricsModNS != lyrics.ModNS ||
+		entry.LegacyLyricsSize != legacy.Size || entry.LegacyLyricsMod != legacy.ModNS {
+		return false
+	}
+	primaryExists := lyrics.Size != 0 || lyrics.ModNS != 0
+	legacyExists := legacy.Size != 0 || legacy.ModNS != 0
+	if (primaryExists && entry.LyricsSHA256 == "") || (legacyExists && entry.LegacyLyricsSHA == "") {
+		return false
+	}
+	checkedNS := entry.LyricsDigestCheckedNS
+	if checkedNS <= 0 {
+		checkedNS = entry.ArtworkCheckedNS
+	}
+	if !lyricsDigestAuditDue(path, checkedNS, now) {
+		return true
+	}
+	lyrics, legacy = lyricsSidecarInfo(path)
+	return entry.LyricsSHA256 == lyrics.SHA256 && entry.LegacyLyricsSHA == legacy.SHA256
 }
 
 func artworkRefreshDue(entry cachedLibraryScan, now time.Time) bool {
@@ -1488,6 +1521,7 @@ func recordArtworkValidation(entry *cachedLibraryScan, path string, now time.Tim
 	lyrics, legacy := lyricsSidecarInfo(path)
 	entry.LyricsSize, entry.LyricsModNS, entry.LyricsSHA256 = lyrics.Size, lyrics.ModNS, lyrics.SHA256
 	entry.LegacyLyricsSize, entry.LegacyLyricsMod, entry.LegacyLyricsSHA = legacy.Size, legacy.ModNS, legacy.SHA256
+	entry.LyricsDigestCheckedNS = now.UnixNano()
 	entry.ArtworkCheckedNS = now.UnixNano()
 	entry.ArtworkValid = !entry.NeedsArtwork
 }
@@ -1503,7 +1537,7 @@ type lyricsSidecarFingerprint struct {
 // keep the same byte length and filesystem timestamp granularity. The audio
 // cache must notice that change; otherwise a clean scan can hide a later
 // masked-lyrics replacement until the weekly refresh.
-func lyricsSidecarInfo(audioPath string) (primary, legacy lyricsSidecarFingerprint) {
+func lyricsSidecarMetadata(audioPath string) (primary, legacy lyricsSidecarFingerprint) {
 	for _, candidate := range []struct {
 		path string
 		out  *lyricsSidecarFingerprint
@@ -1517,9 +1551,42 @@ func lyricsSidecarInfo(audioPath string) (primary, legacy lyricsSidecarFingerpri
 		}
 		candidate.out.Size = info.Size()
 		candidate.out.ModNS = info.ModTime().UnixNano()
-		candidate.out.SHA256, _ = hashFile(candidate.path)
 	}
 	return
+}
+
+func lyricsSidecarInfo(audioPath string) (primary, legacy lyricsSidecarFingerprint) {
+	primary, legacy = lyricsSidecarMetadata(audioPath)
+	for _, candidate := range []struct {
+		path string
+		out  *lyricsSidecarFingerprint
+	}{
+		{lyricsSidecarPath(audioPath), &primary},
+		{audioPath + ".lrc", &legacy},
+	} {
+		if candidate.out.Size != 0 || candidate.out.ModNS != 0 {
+			candidate.out.SHA256, _ = hashFile(candidate.path)
+		}
+	}
+	return
+}
+
+func lyricsDigestAuditDue(path string, checkedNS int64, now time.Time) bool {
+	if checkedNS <= 0 {
+		return true
+	}
+	age := now.UnixNano() - checkedNS
+	if age < 0 || age < int64(lyricsDigestAuditTTL) {
+		return false
+	}
+	slot := (now.UnixNano() / int64(lyricsDigestInterval)) % int64(lyricsDigestSlots)
+	return int(slot) == lyricsDigestShard(path)
+}
+
+func lyricsDigestShard(path string) int {
+	hasher := fnv.New32a()
+	_, _ = hasher.Write([]byte(strings.ToLower(filepath.Clean(path))))
+	return int(hasher.Sum32() % uint32(lyricsDigestSlots))
 }
 
 func automationTrackIdentity(path string) (artist, album, title string, err error) {

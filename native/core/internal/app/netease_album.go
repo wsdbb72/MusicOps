@@ -317,12 +317,13 @@ func neteasePlaylistIDFromBatch(batchID string) string {
 
 func splitPlaylistArtists(raw string) []string {
 	// Commas frequently belong to one performer name (for example
-	// "Grover Washington, Jr."), and slash is valid inside names such as
-	// "AC/DC". Split unambiguous semicolon and ideographic-comma separators
-	// unconditionally, but split a slash only when at least one side is padded
-	// with whitespace. NetEase also supplies a discrete artist array once a hit
-	// is available.
-	normalized := strings.NewReplacer("／", "/", "、", "\n", ";", "\n", "；", "\n").Replace(raw)
+	// "Grover Washington, Jr."), and ASCII slash is valid inside names such as
+	// "AC/DC". A full-width solidus is the source-platform separator even when
+	// it is not padded with spaces. Split that unconditionally, split an ASCII
+	// slash only when at least one side has whitespace, and split semicolons /
+	// ideographic commas unconditionally. NetEase also supplies a discrete
+	// artist array once a hit is available.
+	normalized := strings.NewReplacer("、", "\n", ";", "\n", "；", "\n").Replace(raw)
 	out := []string{}
 	add := func(value string) {
 		if value = strings.TrimSpace(value); value != "" {
@@ -333,12 +334,12 @@ func splitPlaylistArtists(raw string) []string {
 		runes := []rune(strings.TrimSpace(group))
 		start := 0
 		for i, r := range runes {
-			if r != '/' {
+			if r != '/' && r != '／' {
 				continue
 			}
 			leftSpace := i > 0 && unicode.IsSpace(runes[i-1])
 			rightSpace := i+1 < len(runes) && unicode.IsSpace(runes[i+1])
-			if !leftSpace && !rightSpace {
+			if r == '/' && !leftSpace && !rightSpace {
 				continue
 			}
 			add(string(runes[start:i]))

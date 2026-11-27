@@ -480,6 +480,16 @@ func TestSplitPlaylistArtistsPreservesCompactSlashNames(t *testing.T) {
 	}
 }
 
+func TestSplitPlaylistArtistsHandlesCompactFullWidthSolidus(t *testing.T) {
+	got := splitPlaylistArtists("A路人／LKs／LS")
+	want := []string{"A路人", "LKs", "LS"}
+	if len(got) != len(want) || got[0] != want[0] || got[1] != want[1] || got[2] != want[2] {
+		t.Fatalf("splitPlaylistArtists=%q, want %q", got, want)
+	}
+	if got := splitPlaylistArtists("AC/DC"); len(got) != 1 || got[0] != "AC/DC" {
+		t.Fatalf("compact ASCII slash name was split: %q", got)
+	}
+}
 func TestPlaylistArtistsMatchSplitsVorbisAndSourceSeparators(t *testing.T) {
 	tests := []struct {
 		name string

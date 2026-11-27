@@ -93,6 +93,14 @@ type playlistEnqueueReport struct {
 	Tracks    int      `json:"tracks"`
 }
 
+type playlistAlbumState uint8
+
+const (
+	playlistAlbumUnknown playlistAlbumState = iota
+	playlistAlbumIncomplete
+	playlistAlbumComplete
+)
+
 // Index only candidate names. Verify bytes lazily for playlist matches.
 type playlistLibraryIndex struct {
 	engine           *dataengine.Engine
@@ -227,6 +235,8 @@ type playlistMetadataCache struct {
 	compilationFlights map[string]chan struct{}
 	albumGaps          map[[2]string]bool
 	albumGapFlights    map[[2]string]chan struct{}
+	albumStates        map[[2]string]playlistAlbumState
+	albumStateFlights  map[[2]string]chan struct{}
 }
 
 func newPlaylistMetadataCache() *playlistMetadataCache {
@@ -239,6 +249,8 @@ func newPlaylistMetadataCache() *playlistMetadataCache {
 		compilationFlights: map[string]chan struct{}{},
 		albumGaps:          map[[2]string]bool{},
 		albumGapFlights:    map[[2]string]chan struct{}{},
+		albumStates:        map[[2]string]playlistAlbumState{},
+		albumStateFlights:  map[[2]string]chan struct{}{},
 	}
 }
 
@@ -347,6 +359,34 @@ func (cache *playlistMetadataCache) albumGapFor(key [2]string, compute func() bo
 	cache.mu.Lock()
 	cache.albumGaps[key] = result
 	delete(cache.albumGapFlights, key)
+	close(flight)
+	cache.mu.Unlock()
+	return result
+}
+
+func (cache *playlistMetadataCache) albumStateFor(key [2]string, compute func() playlistAlbumState) playlistAlbumState {
+	cache.mu.Lock()
+	if result, found := cache.albumStates[key]; found {
+		cache.mu.Unlock()
+		return result
+	}
+	if flight, found := cache.albumStateFlights[key]; found {
+		cache.mu.Unlock()
+		<-flight
+		cache.mu.Lock()
+		result := cache.albumStates[key]
+		cache.mu.Unlock()
+		return result
+	}
+	flight := make(chan struct{})
+	cache.albumStateFlights[key] = flight
+	cache.mu.Unlock()
+
+	result := compute()
+
+	cache.mu.Lock()
+	cache.albumStates[key] = result
+	delete(cache.albumStateFlights, key)
 	close(flight)
 	cache.mu.Unlock()
 	return result
@@ -1327,35 +1367,93 @@ func (index playlistLibraryIndex) needsAlbumCompletion(artist, album, title stri
 	if !index.hasAlbum(artist, album) || !index.hasTrack(artist, album, title) {
 		return true
 	}
-	return index.hasAlbumGap(artist, album)
+	return index.albumCompletionState(artist, album) != playlistAlbumComplete
 }
 
-// Only an explicit total in a local file is evidence that a folder has gaps.
-func (index playlistLibraryIndex) hasAlbumGap(artist, album string) bool {
+// A path-only match is not proof that an album is complete. A local release is
+// confirmed complete only when an unchanged FLAC in the target artist/album
+// folder carries a matching album tag and an explicit track total equal to the
+// number of unchanged files in that folder. Unknown evidence is deliberately
+// reported as not complete so the album job can verify the source release
+// instead of suppressing it forever.
+func (index playlistLibraryIndex) albumCompletionState(artist, album string) playlistAlbumState {
 	key := [2]string{libraryPathKey(artist), libraryPathKey(album)}
-	build := func() bool {
-		ids := index.albums[key]
+	build := func() playlistAlbumState {
+		ids := append([]string(nil), index.albums[key]...)
+		exact := make(map[string]bool, len(ids))
 		for _, id := range ids {
-			path, found, err := audiorelease.PathFor(index.engine, id)
-			if err != nil || !found || !strings.EqualFold(filepath.Ext(path), ".flac") {
+			exact[id] = true
+		}
+		// Sanitized or flat folder layouts can live outside the canonical
+		// artist/album pair. Include embedded album-name candidates, but only
+		// after repeating the same artist and album checks used by hasAlbum.
+		fallback := append([]string(nil), index.albumMembers[playlistMatchKey(album)]...)
+		fallback = append(fallback, index.albumTailMembers[playlistMatchKey(album)]...)
+		seen := make(map[string]bool, len(ids)+len(fallback))
+		for _, id := range ids {
+			seen[id] = true
+		}
+		for _, id := range fallback {
+			if id == "" || seen[id] {
 				continue
 			}
-			tags := index.recording(path)
-			if tags.trackTotal > len(ids) {
-				return true
-			}
+			seen[id] = true
+			ids = append(ids, id)
 		}
-		return false
+		present := 0
+		explicitTotal := 0
+		for _, id := range ids {
+			path, found, err := audiorelease.PathFor(index.engine, id)
+			if err != nil || !found || !index.isUnchanged(id) {
+				continue
+			}
+			isFLAC := strings.EqualFold(filepath.Ext(path), ".flac")
+			var tags playlistRecordingTags
+			if isFLAC {
+				tags = index.recording(path)
+			}
+			if !exact[id] {
+				artists, albumTag := tags.artists, tags.album
+				if !isFLAC {
+					artists, albumTag, _ = index.trackTags(path)
+				}
+				pathArtist, _, _ := trackPathOf(path)
+				if !playlistAlbumTagMatches(album, albumTag) ||
+					(!playlistArtistTagMatches(artist, artists) && !playlistArtistFallbackMatches(artist, pathArtist)) {
+					continue
+				}
+			}
+			present++
+			if !isFLAC || tags.trackTotal <= 0 || !playlistAlbumTagMatches(album, tags.album) {
+				continue
+			}
+			if explicitTotal != 0 && explicitTotal != tags.trackTotal {
+				return playlistAlbumIncomplete
+			}
+			explicitTotal = tags.trackTotal
+		}
+		switch {
+		case explicitTotal == 0:
+			return playlistAlbumUnknown
+		case present < explicitTotal:
+			return playlistAlbumIncomplete
+		case present == explicitTotal:
+			return playlistAlbumComplete
+		default:
+			// Duplicate formats or stale extra rows exceed the advertised
+			// track total. They require verification instead of claiming the
+			// album is complete.
+			return playlistAlbumUnknown
+		}
 	}
 	if index.metadata != nil {
-		return index.metadata.albumGapFor(key, build)
+		return index.metadata.albumStateFor(key, build)
 	}
-	if gap, checked := index.albumGaps[key]; checked {
-		return gap
-	}
-	gap := build()
-	index.albumGaps[key] = gap
-	return gap
+	return build()
+}
+
+func (index playlistLibraryIndex) hasAlbumGap(artist, album string) bool {
+	return index.albumCompletionState(artist, album) == playlistAlbumIncomplete
 }
 
 // enqueuePlaylistTracks starts the work for the selected rows.

@@ -4,14 +4,16 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
-	"github.com/wsdbb72/MusicOps/native/core/internal/audiorelease"
-	"github.com/wsdbb72/MusicOps/native/core/internal/taskrepo"
+	"net"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/wsdbb72/MusicOps/native/core/internal/audiorelease"
+	"github.com/wsdbb72/MusicOps/native/core/internal/taskrepo"
 )
 
 func TestAudioCacheUsageCountsAudioStagingButNotManifests(t *testing.T) {
@@ -756,6 +758,40 @@ func TestActiveTaskReferenceProtectsPublishedCacheCopy(t *testing.T) {
 	}
 }
 
+func TestConfiguredOfflineQBittorrentBlocksDownloadCachePrune(t *testing.T) {
+	application := newApp(t)
+	listener, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	baseURL := "http://" + listener.Addr().String()
+	if err := listener.Close(); err != nil {
+		t.Fatal(err)
+	}
+	post(t, application, "/v1/settings/qbittorrent", map[string]any{
+		"base_url": baseURL, "username": "user", "password": "pass",
+	})
+	downloads := application.workPath("downloads")
+	cachePath := filepath.Join(downloads, "process-search-qbt-offline", "Album", "01 Song.flac")
+	if err := os.MkdirAll(filepath.Dir(cachePath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(cachePath, make([]byte, 4096), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now()
+	old := now.Add(-3 * time.Hour)
+	if err := os.Chtimes(cachePath, old, old); err != nil {
+		t.Fatal(err)
+	}
+	_, _, err = application.pruneExpiredDownloadCacheLocked([]string{downloads}, time.Hour, now, 4096, nil)
+	if err == nil {
+		t.Fatal("configured-but-offline qBittorrent must block unverified download-cache pruning")
+	}
+	if _, statErr := os.Stat(cachePath); statErr != nil {
+		t.Fatalf("download cache was removed while qBittorrent ownership was unverified: %v", statErr)
+	}
+}
 func TestActiveQBittorrentSeedProtectsPublishedCacheCopyRegardlessOfTag(t *testing.T) {
 	application := newApp(t)
 	incoming := application.workPath("incoming")

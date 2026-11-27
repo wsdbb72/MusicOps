@@ -210,7 +210,7 @@ func TestSubscriptionNeteaseJobCarriesConfirmedSourceIdentity(t *testing.T) {
 		t.Fatal(err)
 	}
 	if !plan.Identity.IdentityConfirmed || !plan.Identity.TracklistVerified || plan.Identity.Source != "netease" ||
-		!plan.NeteaseOnly || !plan.NeteaseTrackOnly || plan.PlaylistTrack != "Song" || plan.NeteaseSongID != 42 || plan.NeteaseAlbumID != 84 {
+		plan.NeteaseOnly || !plan.NeteaseTrackOnly || plan.PlaylistTrack != "Song" || plan.NeteaseSongID != 42 || plan.NeteaseAlbumID != 84 {
 		t.Fatal(plan)
 	}
 	if !isNeteasePlaylistBatch(jobID) {
@@ -237,7 +237,7 @@ func TestNeteaseSubscriptionRecoveryReconstructsLegacyIdentity(t *testing.T) {
 		t.Fatal("legacy subscription identity was not recovered")
 	}
 	if !plan.Identity.IdentityConfirmed || !plan.Identity.TracklistVerified || plan.Identity.Source != "netease" ||
-		!plan.NeteaseOnly || plan.NeteaseTrackOnly || plan.NeteaseAlbumID != 9 {
+		plan.NeteaseOnly || plan.NeteaseTrackOnly || plan.NeteaseAlbumID != 9 {
 		t.Fatal(plan)
 	}
 	if id := neteasePlaylistIDFromBatch(jobID); id != "590536461" {

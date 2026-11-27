@@ -87,7 +87,7 @@ func TestSubscriptionAlbumCompletionExpandsSingleTrackPlan(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !plan.NeteaseOnly || plan.NeteaseTrackOnly || plan.NeteaseAlbumID != 84 || plan.NeteaseSongID != 42 {
+	if plan.NeteaseOnly || plan.NeteaseTrackOnly || plan.NeteaseAlbumID != 84 || plan.NeteaseSongID != 42 {
 		t.Fatalf("album completion plan was reduced to one track: %+v", plan)
 	}
 }
@@ -148,7 +148,7 @@ func TestManualSubscriptionCheckBypassesAlbumRetryAndKeepsFullAlbumPlan(t *testi
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !plan.NeteaseOnly || plan.NeteaseTrackOnly || plan.NeteaseAlbumID != 34 || plan.NeteaseSongID != 12 {
+	if plan.NeteaseOnly || plan.NeteaseTrackOnly || plan.NeteaseAlbumID != 34 || plan.NeteaseSongID != 12 {
 		t.Fatalf("manual album completion was reduced to one track: %+v", plan)
 	}
 }

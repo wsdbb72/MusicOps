@@ -192,7 +192,9 @@ func recoverNeteaseSubscriptionPlan(rows []playlistTrack, plan *SearchPlan) bool
 			return false
 		}
 	}
-	plan.NeteaseOnly = true
+	// Source recovery must not make a NetEase-origin playlist exclusive.
+	// The batch id already routes NetEase as the first fallback after the
+	// four-site search; setting NeteaseOnly here would disable that search.
 	plan.NeteaseTrackOnly = len(selected) == 1
 	if len(selected) == 1 {
 		plan.PlaylistTrack = selected[0].Title

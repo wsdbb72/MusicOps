@@ -1042,7 +1042,7 @@ func (a *App) activeQBittorrentSeedRoots() ([]string, error) {
 	}
 	login, baseURL, ok := a.savedQBittorrentLogin()
 	if !ok {
-		return nil, nil
+		return nil, errors.New("qbittorrent: configured client has no readable saved login; refusing to prune unverified download cache")
 	}
 	client, err := qbittorrent.NewClient(qbittorrent.Config{BaseURL: baseURL, Username: login.Username, Password: login.Password})
 	if err != nil {
@@ -1052,9 +1052,10 @@ func (a *App) activeQBittorrentSeedRoots() ([]string, error) {
 	defer cancel()
 	if err := client.Login(ctx); err != nil {
 		if errors.Is(err, qbittorrent.ErrUnavailable) {
-			// Only a refused connection proves the configured client is stopped.
-			// A timeout or ambiguous transport failure must block cache deletion.
-			return nil, nil
+			// A configured client can reconnect after a restart and may still
+			// own files in downloads. Do not turn a refused connection into
+			// permission to delete those files.
+			return nil, fmt.Errorf("qbittorrent: configured client is unavailable; refusing to prune unverified download cache: %w", err)
 		}
 		return nil, err
 	}

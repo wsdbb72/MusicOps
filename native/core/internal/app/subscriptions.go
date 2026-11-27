@@ -535,7 +535,9 @@ func (a *App) queueSubscriptionAlbum(jobID, playlistID, album string, tracks []p
 				allSameAlbum = false
 			}
 		}
-		plan.NeteaseOnly = true
+		// NetEase origin controls fallback order, not tracker eligibility.
+		// NeteaseOnly is reserved for an explicit user-selected exclusive
+		// source; setting it here disabled every PT site before search.
 		// A single playlist row can still represent an incomplete album. In
 		// that case keep the album id and fetch the full tracklist; treating
 		// it as track-only would skip as soon as the one requested track is

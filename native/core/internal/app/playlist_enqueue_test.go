@@ -99,13 +99,20 @@ func TestPlaylistPresenceRequiresMatchingUnchangedAudio(t *testing.T) {
 
 func indexPlaylistTestFile(t *testing.T, application *App, library, relative, artist, album, title string) string {
 	t.Helper()
+	return indexPlaylistTestFileWithTotal(t, application, library, relative, artist, album, title, 0)
+}
+
+func indexPlaylistTestFileWithTotal(t *testing.T, application *App, library, relative, artist, album, title string, trackTotal int) string {
+	t.Helper()
 	path := filepath.Join(library, filepath.FromSlash(relative))
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	body, err := flactags.WriteBytes(syntheticFLAC(t, false), flactags.Tags{
-		Artists: splitPlaylistArtists(artist), Album: album, Title: title,
-	})
+	tags := flactags.Tags{Artists: splitPlaylistArtists(artist), Album: album, Title: title}
+	if trackTotal > 0 {
+		tags.Raw = map[string][]string{"TRACKTOTAL": {strconv.Itoa(trackTotal)}}
+	}
+	body, err := flactags.WriteBytes(syntheticFLAC(t, false), tags)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -126,9 +133,9 @@ func indexPlaylistTestFile(t *testing.T, application *App, library, relative, ar
 func TestPlaylistPresenceUsesEmbeddedIdentityForFlatArtistAlbumFolder(t *testing.T) {
 	application := newApp(t)
 	library := t.TempDir()
-	indexPlaylistTestFile(t, application, library,
+	indexPlaylistTestFileWithTotal(t, application, library,
 		"郑智化 - 岁月风华之恋曲典藏/郑智化 - 水手.flac",
-		"郑智化", "岁月风华之恋曲典藏", "水手")
+		"郑智化", "岁月风华之恋曲典藏", "水手", 1)
 	application.invalidatePlaylistLibraryCache()
 	index := application.playlistLibrary()
 	if !index.hasTrack("郑智化", "岁月风华之恋曲典藏", "水手") {
@@ -319,6 +326,52 @@ func TestEnqueueCompletesMissingTargetAlbumWhenRecordingExistsElsewhere(t *testi
 	}
 	if len(report.Created) != 1 || report.Albums != 1 || len(report.Skipped) != 0 {
 		t.Fatalf("a recording in another release suppressed its missing target album: %+v", report)
+	}
+}
+
+func TestAlbumCompletionDoesNotTrustPathOrConflictingEmbeddedTags(t *testing.T) {
+	application := newApp(t)
+	library := t.TempDir()
+	indexPlaylistTestFile(t, application, library,
+		"春奈るな/空は高く風は歌う (アニメ盤)/春奈るな - 空は高く風は歌う.flac",
+		"春奈るな", "OVERSKY", "空は高く風は歌う")
+	application.invalidatePlaylistLibraryCache()
+	index := application.playlistLibrary()
+
+	if state := index.albumCompletionState("春奈るな", "空は高く風は歌う (アニメ盤)"); state != playlistAlbumUnknown {
+		t.Fatalf("conflicting embedded tags without a track total produced state %v", state)
+	}
+	if !index.needsAlbumCompletion("春奈るな", "空は高く風は歌う (アニメ盤)", "空は高く風は歌う") {
+		t.Fatal("a path-only match with a track tagged for another album was treated as complete")
+	}
+	report, err := application.enqueuePlaylistTracks(context.Background(), "pl-album-conflict",
+		[]playlistTrack{{
+			Artist: "春奈るな", Album: "空は高く風は歌う (アニメ盤)", Title: "空は高く風は歌う",
+			Duration: "271", NeteaseSongID: 27505499, NeteaseAlbumID: 2117810,
+		}}, []int{0}, playlistEnqueueOptions{AlbumCompletion: true})
+	if err != nil || len(report.Created) != 1 || report.Albums != 1 || len(report.Skipped) != 0 {
+		t.Fatalf("the unverified target album was suppressed: report=%+v err=%v", report, err)
+	}
+}
+
+func TestAlbumCompletionAcceptsExplicitMatchingTrackTotal(t *testing.T) {
+	application := newApp(t)
+	library := t.TempDir()
+	indexPlaylistTestFileWithTotal(t, application, library,
+		"Artist/Album/01 Song.flac", "Artist", "Album", "Song", 1)
+	application.invalidatePlaylistLibraryCache()
+	index := application.playlistLibrary()
+	if state := index.albumCompletionState("Artist", "Album"); state != playlistAlbumComplete {
+		t.Fatalf("matching explicit total produced state %v", state)
+	}
+	if index.needsAlbumCompletion("Artist", "Album", "Song") {
+		t.Fatal("an explicitly complete album was requested again")
+	}
+	report, err := application.enqueuePlaylistTracks(context.Background(), "pl-album-complete",
+		[]playlistTrack{{Artist: "Artist", Album: "Album", Title: "Song"}}, []int{0},
+		playlistEnqueueOptions{AlbumCompletion: true})
+	if err != nil || len(report.Created) != 0 || len(report.Skipped) != 1 {
+		t.Fatalf("an explicitly complete album was re-queued: report=%+v err=%v", report, err)
 	}
 }
 

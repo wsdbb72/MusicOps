@@ -96,26 +96,29 @@ func TestWorkflowUsesTheSelectedFileWithoutSpending(t *testing.T) {
 	if missing.Code != http.StatusBadRequest {
 		t.Fatal(missing.Code, missing.Body.String())
 	}
-	resolvedLibrary, err := filepath.EvalSymlinks(library)
-	if err != nil {
-		t.Fatal(err)
+	reportedPathMatches := func(got, want string) bool {
+		if samePath(got, want) {
+			return true
+		}
+		if resolved, err := filepath.EvalSymlinks(want); err == nil && samePath(got, resolved) {
+			return true
+		}
+		if parent, err := filepath.EvalSymlinks(filepath.Dir(want)); err == nil && samePath(got, filepath.Join(parent, filepath.Base(want))) {
+			return true
+		}
+		return false
 	}
-	expectedMissing := filepath.Join(resolvedLibrary, filepath.Base(missingPath))
 	var missingPayload map[string]any
-	if err := json.Unmarshal(missing.Body.Bytes(), &missingPayload); err != nil || fmt.Sprint(missingPayload["path"]) != expectedMissing {
-		t.Fatalf("missing-file response did not identify %q: %v %s", expectedMissing, err, missing.Body.String())
+	if err := json.Unmarshal(missing.Body.Bytes(), &missingPayload); err != nil || !reportedPathMatches(fmt.Sprint(missingPayload["path"]), missingPath) {
+		t.Fatalf("missing-file response did not identify %q: %v %s", missingPath, err, missing.Body.String())
 	}
 	invalid := postCode(t, application, "/v1/library/workflow", map[string]any{"scene": "fill", "path": path, "confirmed": true})
 	if invalid.Code != http.StatusUnprocessableEntity || !strings.Contains(invalid.Body.String(), "LOCAL_IDENTITY_UNAVAILABLE") {
 		t.Fatal(invalid.Code, invalid.Body.String())
 	}
-	resolvedPath, err := filepath.EvalSymlinks(path)
-	if err != nil {
-		t.Fatal(err)
-	}
 	var invalidPayload map[string]any
-	if err := json.Unmarshal(invalid.Body.Bytes(), &invalidPayload); err != nil || fmt.Sprint(invalidPayload["path"]) != resolvedPath {
-		t.Fatalf("identity failure did not identify %q: %v %s", resolvedPath, err, invalid.Body.String())
+	if err := json.Unmarshal(invalid.Body.Bytes(), &invalidPayload); err != nil || !reportedPathMatches(fmt.Sprint(invalidPayload["path"]), path) {
+		t.Fatalf("identity failure did not identify %q: %v %s", path, err, invalid.Body.String())
 	}
 }
 

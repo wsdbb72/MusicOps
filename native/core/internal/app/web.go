@@ -44,7 +44,7 @@ const appJS = `(function () {
   var selectedJobs = {};
   var loading = false;
   var lastLoadedAt = 0;
-  var taskFilter = "all";
+  var taskFilter = "active";
   var composerOpen = false;
   var status = document.getElementById("status");
   var list = document.getElementById("list");
@@ -69,7 +69,7 @@ const appJS = `(function () {
   function retryPending(job) { return retryAt(job) > Date.now(); }
   function retryLabel(value) {
     var when = new Date(Number(value) / 1000000);
-    return isNaN(when.getTime()) ? "冷却重试中" : "冷却至 " + when.toLocaleTimeString([], {hour:"2-digit", minute:"2-digit"});
+    return isNaN(when.getTime()) ? "等待重试" : "等待至 " + when.toLocaleTimeString([], {hour:"2-digit", minute:"2-digit"});
   }
   function autoReviewLabel() {
     if (!autoReviewStatus) return "自动 AI 核对状态未知";
@@ -80,7 +80,7 @@ const appJS = `(function () {
   }
   function pill(job) {
     var progress = retryPending(job) ? retryLabel(retryAt(job)) : (job.progress || "未下载");
-    var moving = progress === "检索中" || progress === "获取中" || progress === "识别中" || progress === "已排队流媒体" || progress === "正在入库" || progress.indexOf("冷却至") === 0;
+    var moving = retryPending(job) || progress === "检索中" || progress === "获取中" || progress === "识别中" || progress === "已排队流媒体" || progress === "正在入库";
     var kind = progress === "待核对" ? "review" : (progress === "未能继续" ? "fail" : (progress === "部分入库" ? "partial" : (moving ? "queue" : "")));
     return '<span class="pill ' + kind + '">' + escapeText(progress) + "</span>";
   }
@@ -90,22 +90,48 @@ const appJS = `(function () {
     });
   }
   function roots() { return jobs.filter(function (job) { return !job.parent_job_id; }); }
+  function taskRepresentativeRank(job) {
+    if (job.execution_state === "running") return 0;
+    if (job.stage === "requesting" || job.stage === "downloading" || job.stage === "validating" || job.stage === "publishing" || job.stage === "notifying") return 1;
+    if (job.stage === "fallback") return 2;
+    if (active[job.stage] || job.execution_state === "queued") return 3;
+    if (job.stage === "needs_review") return 4;
+    if (job.stage === "failed" || job.execution_state === "failed") return 5;
+    return 6;
+  }
   function taskRows() {
-    var seen = {}, rows = [];
+    // The API can add live descendants beside the root page so an active album
+    // is never hidden behind old history. Collapse every family here as well:
+    // one stable root row, represented by its most actionable live task.
+    var groups = {}, order = [];
     jobs.forEach(function (job) {
-      if (!job.parent_job_id || !active[job.stage]) return;
       var root = job.root_id || job.job_id;
-      if (seen[root]) return;
-      seen[root] = true;
-      rows.push(job);
+      if (!root) return;
+      if (!groups[root]) {
+        groups[root] = [];
+        order.push(root);
+      }
+      groups[root].push(job);
     });
-    roots().forEach(function (job) {
-      var root = job.root_id || job.job_id;
-      if (seen[root]) return;
-      seen[root] = true;
-      rows.push(job);
+    return order.map(function (root) {
+      var group = groups[root];
+      var rep = group[0];
+      for (var i = 1; i < group.length; i++) {
+        var candidate = group[i];
+        var candidateRank = taskRepresentativeRank(candidate);
+        var repRank = taskRepresentativeRank(rep);
+        if (candidateRank < repRank ||
+            candidateRank === repRank && Number(candidate.updated_ns || 0) > Number(rep.updated_ns || 0) ||
+            candidateRank === repRank && Number(candidate.updated_ns || 0) === Number(rep.updated_ns || 0) && candidate.job_id === root) {
+          rep = candidate;
+        }
+      }
+      var row = Object.assign({}, rep);
+      row.job_id = root;
+      row.root_id = root;
+      row.parent_job_id = "";
+      return row;
     });
-    return rows;
   }
   function stageLabel(stage) {
     var names = {preparing: "准备", identifying: "识别", snapshotting: "读取身份", metadata: "元数据", searching: "检索", requesting: "请求", downloading: "下载", fallback: "流媒体回退", validating: "校验", publishing: "入库", notifying: "通知音乐服务", needs_review: "待核对", skipped: "已结束", completed: "已完成", cancelled: "已取消", failed: "失败"};
@@ -130,7 +156,10 @@ const appJS = `(function () {
       else if (bucket === "failed") failed++;
       else finished++;
     });
-    return {total: roots().length, running: running, executing: running - queued, queued: queued, review: review, failed: failed, finished: finished};
+    return {total: roots().length, running: running - queued, executing: running - queued, queued: queued, review: review, failed: failed, finished: finished};
+  }
+  function activeTaskCount(counts) {
+    return checkCount(counts, "running") + checkCount(counts, "queued");
   }
   function taskFilterRows(rows) {
     if (view !== "tasks" || taskFilter === "all") return rows;
@@ -141,9 +170,11 @@ const appJS = `(function () {
     var visible = view === "tasks" || view === "queue" || view === "review";
     if (viewLive) viewLive.hidden = !visible;
     if (!viewLive) return;
-    viewLive.className = "view-live" + (pipelinePaused ? " paused" : (activeCount > 0 ? " running" : " idle"));
+    var queued = checkCount(globalJobCounts || taskCounts(), "queued");
+    var waiting = !pipelinePaused && activeCount === 0 && queued > 0;
+    viewLive.className = "view-live" + (pipelinePaused ? " paused" : (activeCount > 0 ? " running" : (waiting ? " waiting" : " idle")));
     if (viewLiveLabel) {
-      viewLiveLabel.textContent = pipelinePaused ? "后台已暂停" : (activeCount > 0 ? displayNumber(activeCount) + " 项运行中" : "后台待命");
+      viewLiveLabel.textContent = pipelinePaused ? "后台已暂停" : (activeCount > 0 ? displayNumber(activeCount) + " 项运行中" : (waiting ? displayNumber(queued) + " 项等待重试" : "后台待命"));
     }
   }
   function pipelineStages() {
@@ -216,11 +247,13 @@ const appJS = `(function () {
   }
   function operationsPanel(counts) {
     var running = displayNumber(activeCount);
-    var stateClass = pipelinePaused ? "paused" : (activeCount > 0 ? "running" : "idle");
-    var stateTitle = pipelinePaused ? "后台执行已暂停" : (activeCount > 0 ? "流水线正在运行" : "后台待命");
-    var stateCopy = pipelinePaused ? "未开始的任务会保留在队列中，继续后可接着处理。" : (activeCount > 0 ? "任务会依次经过识别、检索、回退、下载、校验和入库。" : "导入歌单或启动整库维护后，这里会显示实时进度。");
+    var queued = displayNumber(checkCount(counts, "queued"));
+    var waiting = !pipelinePaused && activeCount === 0 && checkCount(counts, "queued") > 0;
+    var stateClass = pipelinePaused ? "paused" : (activeCount > 0 ? "running" : (waiting ? "waiting" : "idle"));
+    var stateTitle = pipelinePaused ? "后台执行已暂停" : (activeCount > 0 ? "流水线正在运行" : (waiting ? "后台正在等待重试" : "后台待命"));
+    var stateCopy = pipelinePaused ? "未开始的任务会保留在队列中，继续后可接着处理。" : (activeCount > 0 ? "任务会依次经过识别、检索、回退、下载、校验和入库。" : (waiting ? queued + " 项正在冷却或等待空闲线程，到点后会自动继续。" : "导入歌单或启动整库维护后，这里会显示实时进度。"));
     return '<section class="ops-overview ' + stateClass + '" id="ops-overview" aria-label="运行总览">' +
-      '<div class="ops-main"><div class="ops-state"><span class="live-dot" aria-hidden="true"></span><span>' + (pipelinePaused ? "已暂停" : (activeCount > 0 ? "运行中" : "待命")) + '</span></div>' +
+      '<div class="ops-main"><div class="ops-state"><span class="live-dot" aria-hidden="true"></span><span>' + (pipelinePaused ? "已暂停" : (activeCount > 0 ? "运行中" : (waiting ? "等待中" : "待命"))) + '</span></div>' +
       '<div class="ops-copy"><h2 id="ops-live-title">' + stateTitle + '</h2><p id="ops-live-copy">' + stateCopy + '</p></div>' +
       '<div class="ops-actions"><button type="button" id="pipeline-pause"' + (pipelinePaused ? " disabled" : "") + '>暂停调度</button><button type="button" id="pipeline-resume" class="primary"' + (!pipelinePaused ? " disabled" : "") + '>继续调度</button></div></div>' +
       '<div class="ops-metrics">' +
@@ -235,7 +268,7 @@ const appJS = `(function () {
   function filterBar(counts, rows, shown) {
     var modes = [
       {id:"all", label:"全部", count:checkCount(counts, "total")},
-      {id:"active", label:"执行中", count:checkCount(counts, "running")},
+      {id:"active", label:"执行中", count:activeTaskCount(counts)},
       {id:"review", label:"待核对", count:checkCount(counts, "review")},
       {id:"failed", label:"失败", count:checkCount(counts, "failed")},
       {id:"done", label:"已完成", count:checkCount(counts, "finished")}
@@ -270,7 +303,7 @@ const appJS = `(function () {
   function taskCard(job) {
     var checked = selectedJobs[job.job_id] ? " checked" : "";
     var bucket = taskBucket(job);
-    var state = executionLabel(job.execution_state, job.paused, retryAt(job));
+    var state = retryPending(job) ? "" : executionLabel(job.execution_state, job.paused, retryAt(job));
     var stage = stageLabel(job.stage);
     if (stage === job.progress) stage = "";
     var selectable = bucket !== "done";
@@ -388,7 +421,7 @@ const appJS = `(function () {
       var node = document.getElementById("stat-" + name);
       if (node) node.textContent = displayNumber(values[name]);
     });
-    var filterCounts = {all:checkCount(counts, "total"), active:checkCount(counts, "running"), review:checkCount(counts, "review"), failed:checkCount(counts, "failed"), done:checkCount(counts, "finished")};
+    var filterCounts = {all:checkCount(counts, "total"), active:activeTaskCount(counts), review:checkCount(counts, "review"), failed:checkCount(counts, "failed"), done:checkCount(counts, "finished")};
     document.querySelectorAll("button[data-task-filter]").forEach(function (button) {
       var badge = button.querySelector("span");
       var value = filterCounts[button.getAttribute("data-task-filter")];
@@ -400,10 +433,12 @@ const appJS = `(function () {
     if (pause) pause.disabled = pipelinePaused;
     var resume = document.getElementById("pipeline-resume");
     if (resume) resume.disabled = !pipelinePaused;
+    var queued = checkCount(counts, "queued");
+    var waiting = !pipelinePaused && activeCount === 0 && queued > 0;
     var title = document.getElementById("ops-live-title");
-    if (title) title.textContent = pipelinePaused ? "后台执行已暂停" : (activeCount > 0 ? "流水线正在运行" : "后台待命");
+    if (title) title.textContent = pipelinePaused ? "后台执行已暂停" : (activeCount > 0 ? "流水线正在运行" : (waiting ? "后台正在等待重试" : "后台待命"));
     var copy = document.getElementById("ops-live-copy");
-    if (copy) copy.textContent = pipelinePaused ? "未开始的任务会保留在队列中，继续后可接着处理。" : (activeCount > 0 ? "任务会依次经过识别、检索、回退、下载、校验和入库。" : "导入歌单或启动整库维护后，这里会显示实时进度。");
+    if (copy) copy.textContent = pipelinePaused ? "未开始的任务会保留在队列中，继续后可接着处理。" : (activeCount > 0 ? "任务会依次经过识别、检索、回退、下载、校验和入库。" : (waiting ? displayNumber(queued) + " 项正在冷却或等待空闲线程，到点后会自动继续。" : "导入歌单或启动整库维护后，这里会显示实时进度。"));
     updateLiveChrome();
   }
   // The queue is a live view: counts refresh without disturbing a collapsed

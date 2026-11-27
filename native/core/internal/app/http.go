@@ -788,12 +788,7 @@ func (a *App) jobs(w http.ResponseWriter, r *http.Request) {
 	}
 	jobs := make([]jobView, 0, len(collected))
 	for _, job := range collected {
-		entry := a.publicJobWithResult(job)
-		entry.AIReviewEligible = a.aiReviewEligible(job)
-		if task, err := a.tasks.Get(job.ActiveTaskID); err == nil && task != nil {
-			entry.ExecutionState = task.State
-		}
-		jobs = append(jobs, entry)
+		jobs = append(jobs, a.workflowJobView(job))
 	}
 	jobs = presentJobs(jobs)
 	roots := make([]string, 0, len(jobs))
@@ -811,10 +806,37 @@ func (a *App) jobs(w http.ResponseWriter, r *http.Request) {
 	}
 	jobs = markReleased(jobs, albums)
 	if rootsOnly {
-		for i := range jobs {
-			rootID := jobs[i].RootID
+		// roots=1 must return exactly one stable row per workflow family. Live
+		// descendants may be appended after the root page so an active album is
+		// never hidden behind older completed rows; projecting those descendants
+		// directly used to return a child row as if it were another root. Fetch
+		// the root when only its live descendant was in the page, then project the
+		// entire family onto that one row.
+		rootViews := map[string]jobView{}
+		rootOrder := make([]string, 0, len(jobs))
+		for _, job := range jobs {
+			rootID := job.RootID
 			if rootID == "" {
-				rootID = jobs[i].ID
+				rootID = job.ID
+			}
+			existing, found := rootViews[rootID]
+			if !found {
+				rootOrder = append(rootOrder, rootID)
+			}
+			if !found || job.ID == rootID && job.ParentID == "" && (existing.ID != rootID || existing.ParentID != "") {
+				rootViews[rootID] = job
+			}
+		}
+		projected := make([]jobView, 0, len(rootOrder))
+		for _, rootID := range rootOrder {
+			rootView := rootViews[rootID]
+			if rootView.ID != rootID || rootView.ParentID != "" {
+				rootJob, rootErr := a.flows.Job(rootID)
+				if rootErr != nil || rootJob == nil {
+					writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "code": "JOBS_UNAVAILABLE"})
+					return
+				}
+				rootView = a.workflowJobView(*rootJob)
 			}
 			family, familyErr := a.flows.Family(rootID)
 			if familyErr != nil {
@@ -823,34 +845,31 @@ func (a *App) jobs(w http.ResponseWriter, r *http.Request) {
 			}
 			familyViews := make([]jobView, 0, len(family))
 			for _, job := range family {
-				entry := a.publicJobWithResult(job)
-				entry.AIReviewEligible = a.aiReviewEligible(job)
-				if task, taskErr := a.tasks.Get(job.ActiveTaskID); taskErr == nil && task != nil {
-					entry.ExecutionState = task.State
-				}
-				familyViews = append(familyViews, entry)
+				familyViews = append(familyViews, a.workflowJobView(job))
 			}
 			familyViews = presentJobs(familyViews)
 			familyViews = markReleased(familyViews, map[string]bool{rootID: albums[rootID]})
 			summary := summarizeRootJobs(familyViews)
-			jobs[i].RootStatus = &summary
-			jobs[i].Stage = summary.Stage
-			jobs[i].ExecutionState = summary.ExecutionState
-			jobs[i].Progress = summary.Progress
-			jobs[i].Headline = summary.Headline
-			jobs[i].Message = summary.Message
-			jobs[i].ErrorClass = summary.ErrorClass
-			jobs[i].ReviewKind = summary.ReviewKind
-			jobs[i].Paused = summary.Paused
-			jobs[i].CancelRequested = summary.CancelRequested
-			jobs[i].Downloaded = summary.Downloaded
-			jobs[i].LibraryPublished = summary.LibraryPublished
-			jobs[i].UpdatedNS = summary.UpdatedNS
-			jobs[i].RetryAfterNS = summary.RetryAfterNS
+			rootView.RootStatus = &summary
+			rootView.Stage = summary.Stage
+			rootView.ExecutionState = summary.ExecutionState
+			rootView.Progress = summary.Progress
+			rootView.Headline = summary.Headline
+			rootView.Message = summary.Message
+			rootView.ErrorClass = summary.ErrorClass
+			rootView.ReviewKind = summary.ReviewKind
+			rootView.Paused = summary.Paused
+			rootView.CancelRequested = summary.CancelRequested
+			rootView.Downloaded = summary.Downloaded
+			rootView.LibraryPublished = summary.LibraryPublished
+			rootView.UpdatedNS = summary.UpdatedNS
+			rootView.RetryAfterNS = summary.RetryAfterNS
 			if summary.Result != nil {
-				jobs[i].Result = summary.Result
+				rootView.Result = summary.Result
 			}
+			projected = append(projected, rootView)
 		}
+		jobs = projected
 	}
 	if liveOnly || rootsOnly {
 		sortJobsForLiveView(jobs)
@@ -867,6 +886,23 @@ func (a *App) jobs(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{
 		"ok": true, "jobs": jobs, "next": next, "counts": counts, "active_count": activeCount, "pipeline_paused": a.pipelinePaused(), "auto_review": a.autoReviewHealth(), "downloaded": downloaded, "library_published": published, "production_verified": false, "python": false,
 	})
+}
+
+// workflowJobView exposes the durable task's runtime state. In particular,
+// NotBeforeNS is the actual retry deadline for search and request cooldowns;
+// workflow.Job.RetryAfterNS only covers review-decision delays. Without this
+// projection the UI reports a long cooldown as active work while all scheduler
+// workers are asleep.
+func (a *App) workflowJobView(job workflow.Job) jobView {
+	entry := a.publicJobWithResult(job)
+	entry.AIReviewEligible = a.aiReviewEligible(job)
+	if task, err := a.tasks.Get(job.ActiveTaskID); err == nil && task != nil {
+		entry.ExecutionState = task.State
+		if task.State == "queued" && task.NotBeforeNS > 0 {
+			entry.RetryAfterNS = task.NotBeforeNS
+		}
+	}
+	return entry
 }
 
 // sortJobsForLiveView keeps the work an operator is waiting for at the top.

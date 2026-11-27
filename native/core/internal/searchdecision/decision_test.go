@@ -37,13 +37,17 @@ func TestTrackerSitesMatchTheConfiguredOrder(t *testing.T) {
 	}
 }
 
-func TestNeteaseSourceFallbackWaitsUntilSitesAreExhausted(t *testing.T) {
+func TestNeteaseSourceFallbackRetriesOnceThenUsesKnownSource(t *testing.T) {
 	contract := base()
 	contract.Scene = "expand"
 	contract.SourceFallback = true
 	contract.Sites = sites(map[string]SiteReport{"dicmusic": {Status: "API_CONTRACT_ERROR", Attempted: true}})
-	if decision, err := Decide(contract); err != nil || decision.Action != ActionRetry || decision.Reason != "transient_retry" {
+	if decision, err := Decide(contract); err != nil || decision.Action != ActionRetry || decision.Reason != "source_fallback_retry" || decision.RetryAfterSec != 60 {
 		t.Fatalf("contract decision=%+v err=%v", decision, err)
+	}
+	contract.RetryCount = 1
+	if decision, err := Decide(contract); err != nil || decision.Action != ActionFallback || decision.Reason != "source_fallback_after_retry" {
+		t.Fatalf("contract retry decision=%+v err=%v", decision, err)
 	}
 
 	candidate := base()
@@ -61,8 +65,12 @@ func TestNeteaseSourceFallbackWaitsUntilSitesAreExhausted(t *testing.T) {
 		"open.cd":  {Status: "AUTH_FAILED", Attempted: true},
 		"redacted": {Status: "DISABLED"},
 	})
-	if decision, err := Decide(authAndEmpty); err != nil || decision.Action != ActionReviewSearch || decision.Reason != "auth_blocked" {
+	if decision, err := Decide(authAndEmpty); err != nil || decision.Action != ActionRetry || decision.Reason != "source_fallback_retry" || decision.RetryAfterSec != 60 {
 		t.Fatalf("auth decision=%+v err=%v", decision, err)
+	}
+	authAndEmpty.RetryCount = 1
+	if decision, err := Decide(authAndEmpty); err != nil || decision.Action != ActionFallback || decision.Reason != "source_fallback_after_retry" {
+		t.Fatalf("auth retry decision=%+v err=%v", decision, err)
 	}
 
 	contractExhausted := base()
@@ -73,8 +81,8 @@ func TestNeteaseSourceFallbackWaitsUntilSitesAreExhausted(t *testing.T) {
 		"dicmusic": {Status: "API_CONTRACT_ERROR", Attempted: true},
 		"redacted": {Status: "DISABLED"},
 	})
-	if decision, err := Decide(contractExhausted); err != nil || decision.Action != ActionReviewSearch || decision.Reason != "contract_error" {
-		t.Fatalf("contract exhausted decision=%+v err=%v", decision, err)
+	if decision, err := Decide(contractExhausted); err != nil || decision.Action != ActionFallback || decision.Reason != "source_fallback_after_retry" {
+		t.Fatalf("contract retry budget decision=%+v err=%v", decision, err)
 	}
 
 	authPlusRate := base()
@@ -85,12 +93,12 @@ func TestNeteaseSourceFallbackWaitsUntilSitesAreExhausted(t *testing.T) {
 		"dicmusic": {Status: "RATE_LIMITED", Attempted: true},
 		"redacted": {Status: "DISABLED"},
 	})
-	if decision, err := Decide(authPlusRate); err != nil || decision.Action != ActionRetry || decision.Reason != "transient_retry" {
+	if decision, err := Decide(authPlusRate); err != nil || decision.Action != ActionRetry || decision.Reason != "source_fallback_retry" || decision.RetryAfterSec != 60 {
 		t.Fatalf("auth plus rate decision=%+v err=%v", decision, err)
 	}
-	authPlusRate.RetryCount = 3
-	if decision, err := Decide(authPlusRate); err != nil || decision.Action != ActionReviewSearch || decision.Reason != "transient_exhausted" {
-		t.Fatalf("auth plus exhausted rate decision=%+v err=%v", decision, err)
+	authPlusRate.RetryCount = 1
+	if decision, err := Decide(authPlusRate); err != nil || decision.Action != ActionFallback || decision.Reason != "source_fallback_after_retry" {
+		t.Fatalf("auth plus rate retry decision=%+v err=%v", decision, err)
 	}
 	genuinelyEmpty := base()
 	genuinelyEmpty.Scene = "expand"

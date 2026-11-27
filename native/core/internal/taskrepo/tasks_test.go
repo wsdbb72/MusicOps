@@ -133,7 +133,7 @@ func TestClaimLeavesFutureRetryQueuedWithoutBlockingLaterWork(t *testing.T) {
 		t.Fatalf("future task claimed early=%+v err=%v", claim, err)
 	}
 	claim, err = r.Claim("claim-due", "identify", "owner", 10_000)
-	if err != nil || claim.Task == nil || claim.Task.ID != "future" {
+	if err != nil || claim.Task == nil || claim.Task.ID != "future" || claim.Task.NotBeforeNS != 0 {
 		t.Fatalf("due task=%+v err=%v", claim, err)
 	}
 }

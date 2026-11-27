@@ -348,7 +348,7 @@ func TestNeteaseCandidateReviewAdvancesToAlbumFallback(t *testing.T) {
 	}
 }
 
-func TestExpiredLoginDoesNotStrandDefinitiveSearchReview(t *testing.T) {
+func TestExpiredLoginSchedulesShortSourceFallbackRetry(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Header.Get("X-MusicOps-Site") == "open.cd" {
 			w.WriteHeader(http.StatusUnauthorized)
@@ -362,20 +362,34 @@ func TestExpiredLoginDoesNotStrandDefinitiveSearchReview(t *testing.T) {
 	body := searchBody("album-expired-auth", server.URL, []string{"open.cd", "dicmusic", "orpheus", "redacted"}, true)
 	body["batch_id"] = "pl-netease-590536461-test"
 	post(t, application, "/v1/search", body)
-	search := waitJob(t, application, "search:album-expired-auth", "needs_review")
-	if search.ReviewKind != "search" {
-		t.Fatal(search)
+	deadline := time.Now().Add(15 * time.Second)
+	var search *workflow.Job
+	for {
+		var err error
+		search, err = application.flows.Job("search:album-expired-auth")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if search != nil && search.SearchAction == searchdecision.ActionRetry {
+			break
+		}
+		if search != nil && search.Stage == "needs_review" {
+			t.Fatalf("expired login still stranded the source-owned track in review: %+v", search)
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("expired login did not schedule the short source retry: %+v", search)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if search.ProcessingJobID != "" || search.SearchRetryCount != 1 || search.SearchRetryAfterSec != 60 {
+		t.Fatalf("expired login did not schedule the short source retry: %+v", search)
+	}
+	inspection := inspect(t, application, search.ID)
+	if inspection.Task == nil || inspection.Task.State != "queued" || inspection.Task.NotBeforeNS <= time.Now().UnixNano() || inspection.Task.NotBeforeNS > time.Now().Add(70*time.Second).UnixNano() {
+		t.Fatalf("source retry deadline is not bounded to the short cooldown: %+v", inspection.Task)
 	}
 	if err := application.runner.Stop(context.Background()); err != nil {
 		t.Fatal(err)
-	}
-	stats := application.autoReviewPass(context.Background())
-	if stats.Candidates != 1 || stats.Accepted != 1 || stats.Held != 0 {
-		t.Fatalf("auto review did not resolve the definitive search: %+v", stats)
-	}
-	job, err := application.flows.Job("search:album-expired-auth")
-	if err != nil || job == nil || job.Stage != "completed" || job.SearchAction != searchdecision.ActionFallback || job.ProcessingJobID == "" {
-		t.Fatalf("search did not queue fallback: %+v err=%v", job, err)
 	}
 }
 

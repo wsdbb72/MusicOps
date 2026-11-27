@@ -92,7 +92,7 @@ func TestJobsRejectsAMalformedCursor(t *testing.T) {
 	}
 }
 
-func TestJobsLiveFilterIncludesAQueuedWorkflowDescendant(t *testing.T) {
+func TestJobsLiveFilterProjectsDescendantsOntoOneRoot(t *testing.T) {
 	application := newApp(t)
 	if err := application.runner.Stop(context.Background()); err != nil {
 		t.Fatal(err)
@@ -115,30 +115,55 @@ func TestJobsLiveFilterIncludesAQueuedWorkflowDescendant(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
+	searchID := "search:" + rootID
+	token = claimAndBeginWorkflowTask(t, application, searchID, "identify", now+300)
+	dueNS := now + int64(time.Hour)
+	if _, err := application.flows.DeferSearchUntil("defer-"+rootID, token, now+400, dueNS, "站点暂时不可用，等待冷却重试"); err != nil {
+		t.Fatal(err)
+	}
 
-	for _, path := range []string{"/v1/jobs?live=1", "/v1/jobs?roots=1&live=1"} {
-		recorder := getAuth(t, application, path)
-		if recorder.Code != http.StatusOK {
-			t.Fatal(path, recorder.Code, recorder.Body.String())
-		}
-		var decoded struct {
-			Jobs []jobView `json:"jobs"`
-		}
-		if err := json.Unmarshal(recorder.Body.Bytes(), &decoded); err != nil {
-			t.Fatal(err)
-		}
-		found := false
-		for _, job := range decoded.Jobs {
-			if job.ID == "search:"+rootID {
-				found = true
-				if job.ParentID != rootID || job.Stage != "searching" {
-					t.Fatalf("live descendant was flattened incorrectly: %+v", job)
-				}
+	live := getAuth(t, application, "/v1/jobs?live=1")
+	if live.Code != http.StatusOK {
+		t.Fatal(live.Code, live.Body.String())
+	}
+	var liveBody struct {
+		Jobs []jobView `json:"jobs"`
+	}
+	if err := json.Unmarshal(live.Body.Bytes(), &liveBody); err != nil {
+		t.Fatal(err)
+	}
+	foundChild := false
+	for _, job := range liveBody.Jobs {
+		if job.ID == searchID {
+			foundChild = true
+			if job.ParentID != rootID || job.Stage != "searching" || job.ExecutionState != "queued" || job.RetryAfterNS != dueNS {
+				t.Fatalf("live descendant lost its cooldown or parent: %+v", job)
 			}
 		}
-		if !found {
-			t.Fatalf("%s hid the queued descendant: %+v", path, decoded.Jobs)
-		}
+	}
+	if !foundChild {
+		t.Fatalf("live=1 hid the queued descendant: %+v", liveBody.Jobs)
+	}
+
+	rootsResponse := getAuth(t, application, "/v1/jobs?roots=1&live=1")
+	if rootsResponse.Code != http.StatusOK {
+		t.Fatal(rootsResponse.Code, rootsResponse.Body.String())
+	}
+	var rootsBody struct {
+		Jobs []jobView `json:"jobs"`
+	}
+	if err := json.Unmarshal(rootsResponse.Body.Bytes(), &rootsBody); err != nil {
+		t.Fatal(err)
+	}
+	if len(rootsBody.Jobs) != 1 {
+		t.Fatalf("roots=1 returned duplicate family rows: %+v", rootsBody.Jobs)
+	}
+	root := rootsBody.Jobs[0]
+	if root.ID != rootID || root.ParentID != "" || root.Stage != "searching" || root.ExecutionState != "queued" || root.RetryAfterNS != dueNS {
+		t.Fatalf("root family was not projected onto one stable row: %+v", root)
+	}
+	if root.RootStatus == nil || root.RootStatus.JobID != searchID {
+		t.Fatalf("root summary did not identify the actionable child: %+v", root.RootStatus)
 	}
 }
 

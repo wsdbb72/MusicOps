@@ -191,3 +191,28 @@ func TestWholeLibraryScrapeNamesEveryMetadataScope(t *testing.T) {
 		}
 	}
 }
+
+func TestTaskRowsCollapseRootFamiliesAndShowCooldownOnce(t *testing.T) {
+	for _, want := range []string{
+		`var taskFilter = "active";`,
+		`function activeTaskCount(counts)`,
+		`active:activeTaskCount(counts)`,
+		`后台正在等待重试`,
+		`function taskRepresentativeRank(job)`,
+		`groups[root].push(job)`,
+		`row.job_id = root`,
+		`row.parent_job_id = ""`,
+		`retryPending(job) ? "" : executionLabel(job.execution_state, job.paused, retryAt(job))`,
+		`"等待至 "`,
+	} {
+		if !strings.Contains(appJS, want) {
+			t.Fatal("missing root aggregation or cooldown behavior:", want)
+		}
+	}
+	if strings.Contains(appJS, `if (!job.parent_job_id || !active[job.stage]) return;`) {
+		t.Fatal("taskRows still chooses the first live child instead of the actionable family representative")
+	}
+	if !strings.Contains(appCSS, ".view-live.waiting") || !strings.Contains(appCSS, ".ops-overview.waiting") {
+		t.Fatal("the waiting queue state needs a distinct visible style")
+	}
+}

@@ -240,6 +240,12 @@ func decide(in classified) Decision {
 	if research(report) && !in.mismatch && !in.held {
 		return Decision{Action: ActionResearch, Reason: "alias_research"}
 	}
+	if sourceFallbackRecoverable(in) {
+		if report.RetryCount == 0 {
+			return Decision{Action: ActionRetry, Reason: "source_fallback_retry", RetryAfterSec: 60}
+		}
+		return Decision{Action: ActionFallback, Reason: "source_fallback_after_retry"}
+	}
 	if retryable(in) {
 		return Decision{Action: ActionRetry, Reason: "transient_retry", RetryAfterSec: retryDelaySec[report.RetryCount]}
 	}
@@ -311,6 +317,31 @@ func research(report Report) bool {
 		return false
 	}
 	return true
+}
+
+// sourceFallbackRecoverable recognises a source-owned playlist whose exact
+// identity is already known and whose only unresolved site outcomes are
+// outages or access failures. One short retry gives the trackers a second
+// chance; after that the source platform is the safe automatic fallback.
+// Qualified matches, held seeders, edition mismatches and incomplete searches
+// deliberately stay outside this path.
+func sourceFallbackRecoverable(in classified) bool {
+	report := in.report
+	if !report.IdentityConfirmed || !report.StreamingEnabled || !report.SourceFallback || !fallbackAllowed(report) ||
+		in.limited || len(in.qualified) > 0 || in.held || in.mismatch {
+		return false
+	}
+	sawFailure := false
+	for _, site := range TrackerSites {
+		switch in.classes[site] {
+		case ClassAuth, ClassForbidden, ClassRateLimited, ClassNetwork, ClassTransient, ClassContract:
+			sawFailure = true
+		case ClassNoResult, ClassDisabled:
+		default:
+			return false
+		}
+	}
+	return sawFailure
 }
 
 func retryable(in classified) bool {

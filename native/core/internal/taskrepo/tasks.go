@@ -150,6 +150,7 @@ func (r *Repository) applyClaim(requestID string, selected Task, intent any, own
 		next.Owner = owner
 		next.Fence++
 		next.Revision++
+		next.NotBeforeNS = 0
 		next.UpdatedNS = effectiveTime(nowNS, current)
 		next.ProgressSequence = 0
 		next.ProgressHash = ""

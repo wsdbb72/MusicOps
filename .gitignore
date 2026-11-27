@@ -11,6 +11,8 @@ dist/
 work/
 reports/
 outputs/
+output/
+.playwright-cli/
 # Go Windows version-resource objects (generated per release by
 # packaging/build_windows_go.ps1, removed after the build).
 *.syso

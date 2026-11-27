@@ -106,12 +106,16 @@ func TestNeteaseSourceFallbackRetriesOnceThenUsesKnownSource(t *testing.T) {
 		"dicmusic": {Status: "RATE_LIMITED", Attempted: true},
 		"redacted": {Status: "DISABLED"},
 	})
-	if decision, err := Decide(authPlusRate); err != nil || decision.Action != ActionRetry || decision.Reason != "source_fallback_retry" || decision.RetryAfterSec != 60 {
+	if decision, err := Decide(authPlusRate); err != nil || decision.Action != ActionRetry || decision.Reason != "transient_retry" || decision.RetryAfterSec != 600 {
 		t.Fatalf("auth plus rate decision=%+v err=%v", decision, err)
 	}
 	authPlusRate.RetryCount = 1
-	if decision, err := Decide(authPlusRate); err != nil || decision.Action != ActionFallback || decision.Reason != "source_fallback_after_retry" {
+	if decision, err := Decide(authPlusRate); err != nil || decision.Action != ActionRetry || decision.Reason != "transient_retry" || decision.RetryAfterSec != 1800 {
 		t.Fatalf("auth plus rate retry decision=%+v err=%v", decision, err)
+	}
+	authPlusRate.RetryCount = 3
+	if decision, err := Decide(authPlusRate); err != nil || decision.Action != ActionReviewSearch || decision.Reason != "transient_exhausted" {
+		t.Fatalf("auth plus rate exhausted decision=%+v err=%v", decision, err)
 	}
 	genuinelyEmpty := base()
 	genuinelyEmpty.Scene = "expand"
@@ -154,6 +158,28 @@ func TestNeteaseSourceFallbackRetriesOnceThenUsesKnownSource(t *testing.T) {
 	})
 	if decision, err := Decide(reviewFallback); err != nil || decision.Action != ActionFallback || decision.Reason != "review_confirmed_fallback" {
 		t.Fatalf("reviewed fallback did not continue past expired auth=%+v err=%v", decision, err)
+	}
+}
+
+func TestRateLimitedNeteaseSourceFallbackConsumesFullRetryBudget(t *testing.T) {
+	report := base()
+	report.Scene = "expand"
+	report.SourceFallback = true
+	report.Sites = sites(map[string]SiteReport{
+		"orpheus":  {Status: "RATE_LIMITED", Attempted: true},
+		"redacted": {Status: "DISABLED"},
+	})
+	for retry, delay := range []int{600, 1800, 3600} {
+		report.RetryCount = uint8(retry)
+		decision, err := Decide(report)
+		if err != nil || decision.Action != ActionRetry || decision.Reason != "transient_retry" || decision.RetryAfterSec != delay {
+			t.Fatalf("retry %d decision=%+v err=%v", retry, decision, err)
+		}
+	}
+	report.RetryCount = 3
+	decision, err := Decide(report)
+	if err != nil || decision.Action != ActionFallback || decision.Reason != "transient_fallback" {
+		t.Fatalf("exhausted decision=%+v err=%v", decision, err)
 	}
 }
 

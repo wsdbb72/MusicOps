@@ -737,9 +737,14 @@ func (r *Repository) commitJob(v *dataengine.View, raw, rootRaw []byte, live Job
 		}
 		switch decision.Action {
 		case searchdecision.ActionRetry:
-			next.SearchRetryCount = live.SearchRetryCount + 1
+			if decision.Reason == "rate_limit_retry" {
+				next.RateLimitRetryCount = live.RateLimitRetryCount + 1
+				next.Message = messageOr(in.Message, "站点仍在限流，已安排每小时重试；尚未回退流媒体")
+			} else {
+				next.SearchRetryCount = live.SearchRetryCount + 1
+				next.Message = messageOr(in.Message, "站点暂时不可用，已安排重新检索；尚未回退流媒体")
+			}
 			next.SearchRetryAfterSec = decision.RetryAfterSec
-			next.Message = messageOr(in.Message, "站点暂时不可用，已安排重新检索；尚未回退流媒体")
 		case searchdecision.ActionResearch:
 			next.AIResearchCount = live.AIResearchCount + 1
 			next.SearchRetryAfterSec = 0

@@ -62,3 +62,36 @@ func TestDeferredSearchKeepsOriginalRetryDeadline(t *testing.T) {
 		t.Fatalf("task=%+v err=%v", task, err)
 	}
 }
+
+func TestRateLimitRetryUsesSeparateExtendedBudget(t *testing.T) {
+	repo, tasks, token := openSearch(t)
+	report := matchedReport()
+	report.SourceFallback = true
+	report.StreamingEnabled = true
+	report.SelectedSite = ""
+	report.SelectedCandidateID = ""
+	report.Sites = fourSites(map[string]searchdecision.SiteReport{"orpheus": {Status: "RATE_LIMITED", Attempted: true, RetryAfterSec: 3600}})
+
+	current := token
+	for retry := uint8(1); retry <= 3; retry++ {
+		report.RetryCount = retry - 1
+		result, err := repo.Complete("rate-limit-budget-"+string(rune('0'+retry)), current, Complete{
+			JobID: "search:album1", Edge: edgeDefer, TaskState: "completed", NowNS: int64(4000) + int64(retry)*1000, Search: &report,
+		})
+		if err != nil || result.Job.SearchRetryCount != retry || len(result.Followups) != 1 {
+			t.Fatalf("retry %d: %+v err=%v", retry, result, err)
+		}
+		current = begin(t, tasks, result.Followups[0].ID, "identify")
+	}
+
+	report.RetryCount = 3
+	result, err := repo.Complete("rate-limit-extended", current, Complete{
+		JobID: "search:album1", Edge: edgeDefer, TaskState: "completed", NowNS: 9000, Search: &report,
+	})
+	if err != nil || result.Job == nil || len(result.Followups) != 1 {
+		t.Fatalf("result=%+v err=%v", result, err)
+	}
+	if result.Job.SearchRetryCount != 3 || result.Job.RateLimitRetryCount != 1 || result.Job.SearchRetryAfterSec != 3600 || result.Job.SearchAction != searchdecision.ActionRetry {
+		t.Fatalf("job=%+v", result.Job)
+	}
+}

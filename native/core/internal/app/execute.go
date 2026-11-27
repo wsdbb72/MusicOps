@@ -332,7 +332,7 @@ func (a *App) observe(ctx context.Context, execution *scheduler.Execution, job w
 	}
 	report := searchdecision.Report{
 		Scene: job.Scene, IdentityConfirmed: plan.Identity.IdentityConfirmed, StreamingEnabled: plan.StreamingEnabled,
-		RetryCount: job.SearchRetryCount, AIResearchCount: job.AIResearchCount, Query: plan.Query, Sites: make([]searchdecision.SiteReport, 0, 4),
+		RetryCount: job.SearchRetryCount, RateLimitRetryCount: job.RateLimitRetryCount, AIResearchCount: job.AIResearchCount, Query: plan.Query, Sites: make([]searchdecision.SiteReport, 0, 4),
 	}
 	solverURL, solverToken := a.solverTarget()
 	evidence := []workflow.EvidenceInput{}

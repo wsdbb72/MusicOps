@@ -95,6 +95,7 @@ type Report struct {
 	QualityImproved         bool         `json:"quality_improved"`
 	VersionChoice           bool         `json:"version_choice"`
 	RetryCount              uint8        `json:"retry_count"`
+	RateLimitRetryCount     uint8        `json:"rate_limit_retry_count,omitempty"`
 	AIResearchCount         uint8        `json:"ai_research_count"`
 	AIEnabled               bool         `json:"ai_enabled"`
 	AIGrounded              bool         `json:"ai_grounded"`
@@ -248,7 +249,11 @@ func decide(in classified) Decision {
 		return Decision{Action: ActionFallback, Reason: "source_fallback_after_retry"}
 	}
 	if retryable(in) {
-		return Decision{Action: ActionRetry, Reason: "transient_retry", RetryAfterSec: retryDelay(report)}
+		reason := "transient_retry"
+		if report.RetryCount >= 3 {
+			reason = "rate_limit_retry"
+		}
+		return Decision{Action: ActionRetry, Reason: reason, RetryAfterSec: retryDelay(report)}
 	}
 	if transientFallback(in) {
 		return Decision{Action: ActionFallback, Reason: "transient_fallback"}
@@ -351,7 +356,7 @@ func sourceFallbackRecoverable(in classified) bool {
 
 func retryable(in classified) bool {
 	if in.report.RetryCount >= 3 {
-		return false
+		return extendedRateLimitRetry(in)
 	}
 	saw := false
 	for _, site := range TrackerSites {
@@ -366,8 +371,36 @@ func retryable(in classified) bool {
 	return saw
 }
 
+// extendedRateLimitRetry keeps a source-owned playlist in a durable hourly
+// retry state after the ordinary 10/30/60 minute budget is spent. A tracker
+// that is still returning Retry-After has not produced negative evidence, so
+// switching the entire album to streaming would be premature. The separate
+// 12-attempt budget means this can last up to half a day without overflowing
+// the normal three-attempt transient budget.
+func extendedRateLimitRetry(in classified) bool {
+	report := in.report
+	if !report.SourceFallback || report.RateLimitRetryCount >= 12 || !report.IdentityConfirmed || !report.StreamingEnabled ||
+		!fallbackAllowed(report) || in.limited || len(in.qualified) > 0 || in.held || in.mismatch {
+		return false
+	}
+	sawRateLimit := false
+	for _, site := range TrackerSites {
+		switch in.classes[site] {
+		case ClassRateLimited:
+			sawRateLimit = true
+		case ClassNoResult, ClassDisabled:
+		default:
+			return false
+		}
+	}
+	return sawRateLimit
+}
+
 func retryDelay(report Report) int {
-	delay := retryDelaySec[report.RetryCount]
+	delay := retryDelaySec[len(retryDelaySec)-1]
+	if report.RetryCount < uint8(len(retryDelaySec)) {
+		delay = retryDelaySec[report.RetryCount]
+	}
 	for _, site := range report.Sites {
 		if site.RetryAfterSec > delay {
 			delay = site.RetryAfterSec

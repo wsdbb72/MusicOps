@@ -204,7 +204,7 @@ func (a *App) reviewData(w http.ResponseWriter, r *http.Request) {
 func (a *App) rebuildReviewReport(job workflow.Job, plan SearchPlan, observations map[string]trackersearch.Observation, site, candidateID string) searchdecision.Report {
 	report := searchdecision.Report{
 		Scene: job.Scene, IdentityConfirmed: plan.Identity.IdentityConfirmed,
-		StreamingEnabled: plan.StreamingEnabled, RetryCount: job.SearchRetryCount, Query: plan.Query,
+		StreamingEnabled: plan.StreamingEnabled, RetryCount: job.SearchRetryCount, RateLimitRetryCount: job.RateLimitRetryCount, Query: plan.Query,
 		Sites:        make([]searchdecision.SiteReport, 0, len(searchdecision.TrackerSites)),
 		SelectedSite: site, SelectedCandidateID: candidateID,
 	}

@@ -193,9 +193,17 @@ func TestRateLimitedNeteaseSourceFallbackConsumesFullRetryBudget(t *testing.T) {
 		}
 	}
 	report.RetryCount = 3
+	for count := uint8(0); count < 12; count++ {
+		report.RateLimitRetryCount = count
+		decision, err := Decide(report)
+		if err != nil || decision.Action != ActionRetry || decision.Reason != "rate_limit_retry" || decision.RetryAfterSec != 3600 {
+			t.Fatalf("extended retry %d decision=%+v err=%v", count, decision, err)
+		}
+	}
+	report.RateLimitRetryCount = 12
 	decision, err := Decide(report)
 	if err != nil || decision.Action != ActionFallback || decision.Reason != "transient_fallback" {
-		t.Fatalf("exhausted decision=%+v err=%v", decision, err)
+		t.Fatalf("extended budget exhausted decision=%+v err=%v", decision, err)
 	}
 }
 

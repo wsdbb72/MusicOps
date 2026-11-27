@@ -144,7 +144,7 @@ func TestLibraryAutomationQueuesCorruptFLACReplacement(t *testing.T) {
 	if err := os.WriteFile(path, make([]byte, 256), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := application.runLibraryAutomationPass(context.Background(), libraryAutomationSettings{Enabled: true, Scrape: true, Upgrade: true, IntervalHours: 6}); err != nil {
+	if err := application.runLibraryAutomationPass(context.Background(), libraryAutomationSettings{Enabled: true, Scrape: true, Upgrade: false, IntervalHours: 6}); err != nil {
 		t.Fatal(err)
 	}
 	_, report := application.libraryAutomation.snapshot()

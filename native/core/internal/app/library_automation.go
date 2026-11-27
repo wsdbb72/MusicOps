@@ -634,7 +634,7 @@ func (a *App) runLibraryAutomationPass(ctx context.Context, settings libraryAuto
 	})
 	if settings.Scrape {
 		state.setPhase("scrape")
-		a.runAutomatedScrape(ctx, root, paths, settings.Upgrade)
+		a.runAutomatedScrape(ctx, root, paths, true)
 	}
 	if ctx.Err() != nil {
 		return ctx.Err()
@@ -2063,6 +2063,17 @@ func (a *App) enqueueMaintenanceWorkflowKey(ctx context.Context, scene string, t
 		paths = append(paths, resolved)
 	}
 	sort.Strings(paths)
+	if scene == "upgrade" {
+		// The cache may contain a complete tag snapshot for a file that was
+		// replaced or corrupted afterwards. Validate the exact paths before
+		// crossing the workflow API so a stale row cannot become a recurring
+		// HTTP 422 LOCAL_IDENTITY_UNAVAILABLE failure every maintenance pass.
+		for _, path := range paths {
+			if _, probeErr := probeLocalWorkflowTrackForRepair(ctx, path); probeErr != nil {
+				return false
+			}
+		}
+	}
 	key := scene + "|" + filepath.Clean(dir) + "|" + strings.Join(paths, "|")
 	if keyPrefix != "" {
 		key = keyPrefix + "|" + key

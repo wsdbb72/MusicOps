@@ -406,8 +406,10 @@ func (a *App) runSubscriptionCheck(playlistID string, manual bool) (map[string]a
 		}
 		if albumNeedsCompletion {
 			albumPending[key] = true
-			if retryAt, err := time.Parse(time.RFC3339, row.AlbumRetry[key]); err == nil && now.Before(retryAt) {
-				continue
+			if !manual {
+				if retryAt, err := time.Parse(time.RFC3339, row.AlbumRetry[key]); err == nil && now.Before(retryAt) {
+					continue
+				}
 			}
 		}
 		if queuedKeys[key] {
@@ -436,7 +438,14 @@ func (a *App) runSubscriptionCheck(playlistID string, manual bool) (map[string]a
 		members := groups[groupKey]
 		album := groupLabels[groupKey]
 		jobID := subscriptionJobID(playlistID, album+"\x00"+groupKey, a.now(), index)
-		if err := a.queueSubscriptionAlbum(jobID, playlistID, album, members); err != nil {
+		completeAlbum := false
+		for _, member := range members {
+			if albumPending[trackKey(member)] {
+				completeAlbum = true
+				break
+			}
+		}
+		if err := a.queueSubscriptionAlbum(jobID, playlistID, album, members, completeAlbum); err != nil {
 			row.LastResult = "排队未完成：" + err.Error()
 			_ = a.updateStoredSubscription(row)
 			return nil, err
@@ -488,7 +497,7 @@ func playlistTrackNeedsSubscription(library playlistLibraryIndex, track playlist
 	return library.needsAlbumCompletion(track.Artist, album, track.Title)
 }
 
-func (a *App) queueSubscriptionAlbum(jobID, playlistID, album string, tracks []playlistTrack) error {
+func (a *App) queueSubscriptionAlbum(jobID, playlistID, album string, tracks []playlistTrack, completeAlbum bool) error {
 	encoded := encodeM3U(album, tracks)
 	incoming := a.workPath("incoming")
 	if err := os.MkdirAll(incoming, 0o755); err != nil {
@@ -527,7 +536,11 @@ func (a *App) queueSubscriptionAlbum(jobID, playlistID, album string, tracks []p
 			}
 		}
 		plan.NeteaseOnly = true
-		plan.NeteaseTrackOnly = len(tracks) == 1
+		// A single playlist row can still represent an incomplete album. In
+		// that case keep the album id and fetch the full tracklist; treating
+		// it as track-only would skip as soon as the one requested track is
+		// present and leave the album permanently incomplete.
+		plan.NeteaseTrackOnly = len(tracks) == 1 && !completeAlbum
 		if len(tracks) == 1 {
 			plan.PlaylistTrack = tracks[0].Title
 			if seconds, parseErr := strconv.ParseFloat(strings.TrimSpace(tracks[0].Duration), 64); parseErr == nil && seconds > 0 {

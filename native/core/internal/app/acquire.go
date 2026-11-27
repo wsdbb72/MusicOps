@@ -256,18 +256,38 @@ func (a *App) acquireCandidate(ctx context.Context, execution *scheduler.Executi
 	return scheduler.Outcome{}, unavailableCandidate("该种子没有 FL 免费标记，也没有令牌按钮；为避免产生普通下载量，未向站点请求", "")
 }
 
-func (a *App) finishCandidateExhaustion(ctx context.Context, execution *scheduler.Execution, held taskrepo.Token, job workflow.Job, plan SearchPlan, failures []candidateUnavailable) (scheduler.Outcome, error) {
-	if isNeteasePlaylistFallback(job.BatchID, plan) {
-		return a.acquireFallback(ctx, execution, held, job, plan)
-	}
-	class := ""
-	review := "candidate"
-	tokenFailure := false
+func candidateFailureSummary(failures []candidateUnavailable) string {
 	parts := make([]string, 0, len(failures))
 	for _, failure := range failures {
 		if len(parts) < 6 {
 			parts = append(parts, failure.message)
 		}
+	}
+	if len(failures) > len(parts) {
+		parts = append(parts, fmt.Sprintf("另有 %d 个候选未获取", len(failures)-len(parts)))
+	}
+	return strings.Join(parts, "；")
+}
+
+func (a *App) finishCandidateExhaustion(ctx context.Context, execution *scheduler.Execution, held taskrepo.Token, job workflow.Job, plan SearchPlan, failures []candidateUnavailable) (scheduler.Outcome, error) {
+	summary := candidateFailureSummary(failures)
+	if isNeteasePlaylistFallback(job.BatchID, plan) {
+		outcome, err := a.acquireFallback(ctx, execution, held, job, plan)
+		if err != nil {
+			return scheduler.Outcome{}, err
+		}
+		if summary != "" {
+			// The source-platform fallback is allowed to replace the message
+			// visible to the user, but it must not erase why every tracker
+			// candidate was refused before qBittorrent saw a torrent.
+			outcome.Message = "四站候选未获取：" + summary + "；流媒体回退：" + outcome.Message
+		}
+		return outcome, nil
+	}
+	class := ""
+	review := "candidate"
+	tokenFailure := false
+	for _, failure := range failures {
 		if failure.class != "" && (class == "" || failure.token && !tokenFailure) {
 			class = failure.class
 		}
@@ -276,10 +296,7 @@ func (a *App) finishCandidateExhaustion(ctx context.Context, execution *schedule
 			review = "token"
 		}
 	}
-	if len(failures) > len(parts) {
-		parts = append(parts, fmt.Sprintf("另有 %d 个候选未获取", len(failures)-len(parts)))
-	}
-	message := strings.Join(parts, "；")
+	message := summary
 	if message == "" {
 		message = "所有候选均不可获取；未向站点使用令牌、尚未下载、尚未入库"
 	} else {

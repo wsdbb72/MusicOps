@@ -84,22 +84,39 @@ func (a *App) audioCacheUsageSnapshot() (used, limit int64, roots []string, err 
 }
 
 // audioCacheRoots returns every managed staging tree that contributes to the
-// one global cache limit. Legacy state-directory trees remain counted after a
-// user moves the work directory, so an old cache cannot silently coexist with
-// a fresh one and consume twice the configured quota.
+// one global temporary-cache limit. Permanent seeding payloads are deliberately
+// excluded: qBittorrent can reconnect after any amount of downtime, so deleting
+// a seed directory is never a safe cache-reclamation operation. Legacy
+// state-directory staging trees remain counted after the user moves the work
+// directory, so an old cache cannot silently coexist with a fresh one.
 func (a *App) audioCacheRoots(current string) []string {
 	if a == nil {
-		return normalizeAudioCacheRoots([]string{current})
+		return temporaryAudioCacheRoots([]string{current})
 	}
 	candidates := []string{current}
 	work := a.workDir()
 	for _, root := range []string{a.Dir, work} {
-		for _, name := range []string{"incoming", "downloads", "seeds"} {
+		for _, name := range []string{"incoming", "downloads"} {
 			candidates = append(candidates, filepath.Join(root, name))
 		}
 	}
 	candidates = append(candidates, audioCacheReservedRootsExcept("")...)
-	return normalizeAudioCacheRoots(candidates)
+	return temporaryAudioCacheRoots(candidates)
+}
+
+func temporaryAudioCacheRoots(candidates []string) []string {
+	roots := normalizeAudioCacheRoots(candidates)
+	filtered := make([]string, 0, len(roots))
+	for _, root := range roots {
+		if !isPermanentSeedingRoot(root) {
+			filtered = append(filtered, root)
+		}
+	}
+	return filtered
+}
+
+func isPermanentSeedingRoot(root string) bool {
+	return strings.EqualFold(filepath.Base(filepath.Clean(root)), "seeds")
 }
 
 func normalizeAudioCacheRoots(in []string) []string {
@@ -510,6 +527,9 @@ func pruneStaleAudioCacheRootsWithCountProtected(roots []string, need int64, max
 		if freed >= need {
 			break
 		}
+		if isPermanentSeedingRoot(root) {
+			continue
+		}
 		walkErr := filepath.WalkDir(root, func(path string, entry fs.DirEntry, err error) error {
 			if freed >= need {
 				return fs.SkipAll
@@ -635,9 +655,23 @@ func (a *App) pruneAudioCacheAll(maxAge time.Duration, now time.Time) (int64, in
 	audioCacheMu.Lock()
 	defer audioCacheMu.Unlock()
 	roots := a.audioCacheRoots("")
-	used, err := audioCacheUsageRoots(roots)
+	activeReferences, err := a.activeAudioCacheReferences()
 	if err != nil {
 		return 0, 0, err
+	}
+	const maxInt64 = int64(^uint64(0) >> 1)
+	// Reproducible NetEase/transcode staging is safe to discard as soon as it
+	// ages out. Reclaim it on every maintenance pass, even below the quota
+	// high-water mark, instead of waiting until downloads are already cramped.
+	staleBytes, staleFiles, err := pruneStaleAudioCacheRootsWithCountProtected(roots, maxInt64, maxAge, now, func(path string) bool {
+		return cachePathReferencedByTasks(path, activeReferences)
+	})
+	if err != nil {
+		return staleBytes, staleFiles, err
+	}
+	used, err := audioCacheUsageRoots(roots)
+	if err != nil {
+		return staleBytes, staleFiles, err
 	}
 	limit := audioCacheLimitBytes()
 	need := audioCacheReclaimNeed(used, limit)
@@ -645,24 +679,9 @@ func (a *App) pruneAudioCacheAll(maxAge time.Duration, now time.Time) (int64, in
 		// Quarantine is recoverable dedupe history, not active download cache.
 		// It is excluded from the admission quota, but maintenance still drains
 		// every safely proven old receipt without risking a data loss tradeoff.
-		const maxInt64 = int64(^uint64(0) >> 1)
-		return a.pruneSuccessfulQuarantineLocked(0, now, maxInt64)
+		quarantineBytes, quarantineFiles, quarantineErr := a.pruneSuccessfulQuarantineLocked(0, now, maxInt64)
+		return staleBytes + quarantineBytes, staleFiles + quarantineFiles, quarantineErr
 	}
-	activeReferences, err := a.activeAudioCacheReferences()
-	if err != nil {
-		return 0, 0, err
-	}
-	staleBytes, staleFiles, err := pruneStaleAudioCacheRootsWithCountProtected(roots, need, maxAge, now, func(path string) bool {
-		return cachePathReferencedByTasks(path, activeReferences)
-	})
-	if err != nil {
-		return staleBytes, staleFiles, err
-	}
-	used, err = audioCacheUsageRoots(roots)
-	if err != nil {
-		return staleBytes, staleFiles, err
-	}
-	need = audioCacheReclaimNeed(used, limit)
 	downloadBytes, downloadFiles := int64(0), 0
 	if need > 0 {
 		downloadBytes, downloadFiles, err = a.pruneExpiredDownloadCacheLocked(roots, audioCacheStaleAfter, now, need, func(path string) bool {
@@ -689,7 +708,6 @@ func (a *App) pruneAudioCacheAll(maxAge time.Duration, now time.Time) (int64, in
 		}
 		need = audioCacheReclaimNeed(used, limit)
 	}
-	const maxInt64 = int64(^uint64(0) >> 1)
 	quarantineBytes, quarantineFiles, quarantineErr := a.pruneSuccessfulQuarantineLocked(0, now, maxInt64)
 	if err == nil {
 		err = quarantineErr
@@ -727,6 +745,9 @@ func (a *App) prunePublishedAudioCacheRootsLocked(roots []string, maxAge time.Du
 	for _, root := range roots {
 		if need > 0 && freed >= need {
 			break
+		}
+		if isPermanentSeedingRoot(root) {
+			continue
 		}
 		if strings.EqualFold(filepath.Base(root), "quarantine") {
 			// Non-empty quarantine files remain recoverable until the merge
@@ -824,8 +845,11 @@ func (a *App) pruneExpiredDownloadCacheLocked(roots []string, maxAge time.Durati
 	var freed int64
 	removedFiles := 0
 	for _, root := range normalizeAudioCacheRoots(roots) {
+		if isPermanentSeedingRoot(root) {
+			continue
+		}
 		base := strings.ToLower(filepath.Base(root))
-		if base != "downloads" && base != "seeds" {
+		if base != "downloads" {
 			continue
 		}
 		entries, readErr := os.ReadDir(root)
@@ -1002,6 +1026,9 @@ func (a *App) libraryAddsDifferentPublishedCopy(entry audiorelease.Entry, cacheP
 // activeQBittorrentSeedRoots protects files that the configured qBittorrent
 // client is still using. A refused connection proves the client is stopped and
 // therefore cannot seed a local file; any uncertain failure aborts the pass.
+// Read every torrent, not only the current project tag: a failed add, a legacy
+// tag or a tag edited in qBittorrent must not make its live files eligible for
+// deletion.
 func (a *App) activeQBittorrentSeedRoots() ([]string, error) {
 	if a == nil {
 		return nil, nil
@@ -1031,7 +1058,7 @@ func (a *App) activeQBittorrentSeedRoots() ([]string, error) {
 		}
 		return nil, err
 	}
-	rows, err := client.InfoByTag(ctx, qbittorrent.ProjectTag)
+	rows, err := client.Info(ctx)
 	if err != nil {
 		return nil, err
 	}

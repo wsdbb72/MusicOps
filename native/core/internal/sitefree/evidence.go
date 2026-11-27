@@ -61,7 +61,9 @@ func Read(site, resource string, bodies [][]byte, observedAt time.Time) (Decisio
 	decision.Mode = mode(decision)
 	if decision.Personal || decision.Global {
 		decision.Source = "website"
-		if decision.Personal {
+		if decision.Personal && decision.RowFree == "" {
+			// Personal free may come from Gazelle JSON even when the torrent
+			// row is unavailable. An exact HTML row remains website evidence.
 			decision.Source = "api"
 		}
 	}
@@ -242,7 +244,7 @@ func labelStatus(row string) string {
 		if classContains(tag, "tl_free") {
 			text := row[at+tagEnd+1 : at+closeAt]
 			title := attr(tag, "title")
-			return classifyLabel(text + " " + title)
+			return classifyLabel(html.UnescapeString(text + " " + title))
 		}
 		from = at + closeAt + 9
 	}

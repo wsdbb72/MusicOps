@@ -40,3 +40,16 @@ func TestCandidateReadFailureClassKeepsTransientReadFailuresAutomatic(t *testing
 		}
 	}
 }
+
+func TestCandidateFailureSummaryKeepsBoundedEvidenceForStreamingFallback(t *testing.T) {
+	failures := []candidateUnavailable{
+		{message: "dicmusic:6240：本批次要求 FL 令牌", token: true},
+		{message: "orpheus:77：详情读取失败"},
+	}
+	got := candidateFailureSummary(failures)
+	for _, want := range []string{"dicmusic:6240", "本批次要求 FL 令牌", "orpheus:77", "详情读取失败", "；"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("summary %q missing %q", got, want)
+		}
+	}
+}

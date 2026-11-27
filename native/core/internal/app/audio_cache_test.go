@@ -5,7 +5,6 @@ import (
 	"encoding/hex"
 	"errors"
 	"github.com/wsdbb72/MusicOps/native/core/internal/audiorelease"
-	"github.com/wsdbb72/MusicOps/native/core/internal/qbittorrent"
 	"github.com/wsdbb72/MusicOps/native/core/internal/taskrepo"
 	"os"
 	"path/filepath"
@@ -49,10 +48,8 @@ func TestAudioCacheRootsCountLegacyAndConfiguredActiveTreesOnce(t *testing.T) {
 	want := map[string]bool{
 		filepath.Join(application.Dir, "incoming"):  false,
 		filepath.Join(application.Dir, "downloads"): false,
-		filepath.Join(application.Dir, "seeds"):     false,
 		filepath.Join(work, "incoming"):             false,
 		filepath.Join(work, "downloads"):            false,
-		filepath.Join(work, "seeds"):                false,
 	}
 	for _, root := range roots {
 		key := filepath.Clean(root)
@@ -342,6 +339,30 @@ func TestAutomationCacheCleanupScansLegacyAndConfiguredRoots(t *testing.T) {
 	}
 }
 
+func TestAutomationCacheCleanupReclaimsAgedStagingBelowHighWater(t *testing.T) {
+	application := newApp(t)
+	now := time.Now()
+	path := filepath.Join(application.workPath("incoming"), "netease-below-high-water.flac")
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, make([]byte, 300), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	old := now.Add(-2 * time.Hour)
+	if err := os.Chtimes(path, old, old); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("MUSICOPS_AUDIO_CACHE_BYTES", "10000")
+	freed, files, err := application.pruneAudioCacheAll(time.Hour, now)
+	if err != nil || freed != 300 || files != 1 {
+		t.Fatalf("freed=%d files=%d err=%v", freed, files, err)
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Fatalf("aged reproducible staging survived below the quota high-water mark: %v", err)
+	}
+}
+
 func TestAudioCacheReclaimNeedTargetsHeadroomBelowTheLimit(t *testing.T) {
 	const limit = int64(1 << 30)
 	if got := audioCacheReclaimNeed(700<<20, limit); got != 0 {
@@ -512,15 +533,18 @@ func TestAudioCacheAdmissionReclaimsRecentPublishedCopy(t *testing.T) {
 	}
 }
 
-func TestExpiredDownloadCachePrunesOnlyCompleteInactiveTaskTree(t *testing.T) {
+func TestExpiredDownloadCachePrunesInactiveDownloadsButNeverSeeds(t *testing.T) {
 	application := newApp(t)
 	downloads := application.workPath("downloads")
 	seeds := application.workPath("seeds")
-	oldDir := filepath.Join(downloads, "process-old-task")
-	recentDir := filepath.Join(seeds, "process-recent-task")
-	protectedDir := filepath.Join(seeds, "process-protected-task")
-	abandonedDir := filepath.Join(seeds, "process-abandoned-task")
-	for _, dir := range []string{oldDir, recentDir, protectedDir, abandonedDir} {
+	oldDirs := []string{
+		filepath.Join(downloads, "process-old-task-a"),
+		filepath.Join(downloads, "process-old-task-b"),
+	}
+	recentSeed := filepath.Join(seeds, "process-recent-task")
+	protectedSeed := filepath.Join(seeds, "process-protected-task")
+	abandonedSeed := filepath.Join(seeds, "process-abandoned-task")
+	for _, dir := range append(append([]string{}, oldDirs...), recentSeed, protectedSeed, abandonedSeed) {
 		if err := os.MkdirAll(dir, 0o700); err != nil {
 			t.Fatal(err)
 		}
@@ -528,24 +552,23 @@ func TestExpiredDownloadCachePrunesOnlyCompleteInactiveTaskTree(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	oldCheck := cacheRemovalPath(oldDir)
-	abandonedCheck := cacheRemovalPath(abandonedDir)
 	now := time.Now()
-	old := now.Add(-2 * time.Hour)
-	for _, dir := range []string{oldDir, protectedDir} {
+	old := now.Add(-80 * time.Hour)
+	for _, dir := range oldDirs {
 		path := filepath.Join(dir, "audio.flac")
 		if err := os.Chtimes(path, old, old); err != nil {
 			t.Fatal(err)
 		}
 	}
-	abandoned := now.Add(-80 * time.Hour)
-	if err := os.Chtimes(filepath.Join(abandonedDir, "audio.flac"), abandoned, abandoned); err != nil {
-		t.Fatal(err)
+	for _, dir := range []string{protectedSeed, abandonedSeed} {
+		path := filepath.Join(dir, "audio.flac")
+		if err := os.Chtimes(path, old, old); err != nil {
+			t.Fatal(err)
+		}
 	}
 	audioCacheMu.Lock()
 	freed, files, err := application.pruneExpiredDownloadCacheLocked([]string{downloads, seeds}, time.Hour, now, 800, func(path string) bool {
-		resolved := cacheRemovalPath(path)
-		return samePath(resolved, cacheRemovalPath(protectedDir)) || samePath(resolved, cacheRemovalPath(abandonedDir))
+		return samePath(cacheRemovalPath(path), cacheRemovalPath(protectedSeed))
 	})
 	audioCacheMu.Unlock()
 	if err != nil {
@@ -554,22 +577,14 @@ func TestExpiredDownloadCachePrunesOnlyCompleteInactiveTaskTree(t *testing.T) {
 	if freed != 800 || files != 2 {
 		t.Fatalf("freed=%d files=%d", freed, files)
 	}
-	deadline := time.Now().Add(5 * time.Second)
-	for _, dir := range []string{oldCheck, abandonedCheck} {
-		for {
-			_, statErr := os.Stat(dir)
-			if os.IsNotExist(statErr) {
-				break
-			}
-			if time.Now().After(deadline) {
-				t.Fatalf("expired task cache %s survived: %v", dir, statErr)
-			}
-			time.Sleep(25 * time.Millisecond)
+	for _, dir := range oldDirs {
+		if _, err := os.Stat(cacheRemovalPath(dir)); !os.IsNotExist(err) {
+			t.Fatalf("expired download cache %s survived: %v", dir, err)
 		}
 	}
-	for _, dir := range []string{recentDir, protectedDir} {
+	for _, dir := range []string{recentSeed, protectedSeed, abandonedSeed} {
 		if _, err := os.Stat(dir); err != nil {
-			t.Fatalf("protected cache %s was removed: %v", dir, err)
+			t.Fatalf("permanent seeding payload %s was removed: %v", dir, err)
 		}
 	}
 }
@@ -741,7 +756,7 @@ func TestActiveTaskReferenceProtectsPublishedCacheCopy(t *testing.T) {
 	}
 }
 
-func TestActiveQBittorrentSeedProtectsPublishedCacheCopy(t *testing.T) {
+func TestActiveQBittorrentSeedProtectsPublishedCacheCopyRegardlessOfTag(t *testing.T) {
 	application := newApp(t)
 	incoming := application.workPath("incoming")
 	sourceWAV := filepath.Join(incoming, "qbt-seed-source.wav")
@@ -773,7 +788,7 @@ func TestActiveQBittorrentSeedProtectsPublishedCacheCopy(t *testing.T) {
 	fake.mu.Lock()
 	fake.row = &fakeQBTorrent{
 		hash: "0123456789abcdef0123456789abcdef01234567", savePath: filepath.Dir(cachePath),
-		contentPath: filepath.Dir(cachePath), tags: qbittorrent.ProjectTag, started: true,
+		contentPath: filepath.Dir(cachePath), tags: "legacy-user-tag", category: "musicops", started: true,
 	}
 	fake.mu.Unlock()
 	post(t, application, "/v1/settings/qbittorrent", map[string]any{
@@ -849,5 +864,77 @@ func TestActiveTaskProtectsStaleNeteaseStagingFromMaintenancePrune(t *testing.T)
 	}
 	if _, err := os.Stat(path); err != nil {
 		t.Fatalf("active NetEase staging was removed: %v", err)
+	}
+}
+
+func TestAudioCacheUsageExcludesPermanentSeedingPayload(t *testing.T) {
+	application := newApp(t)
+	incoming := filepath.Join(application.Dir, "incoming")
+	seeds := filepath.Join(application.Dir, "seeds", "process-permanent-seed")
+	if err := os.MkdirAll(incoming, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(seeds, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(incoming, "netease-active.flac"), make([]byte, 123), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(seeds, "lossless.flac"), make([]byte, 4096), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	used, _, roots, err := application.audioCacheUsageSnapshot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if used != 123 {
+		t.Fatalf("temporary cache usage=%d, want 123; permanent seeding data must not consume its quota", used)
+	}
+	for _, root := range roots {
+		if isPermanentSeedingRoot(root) {
+			t.Fatalf("permanent seeding root leaked into temporary cache quota: %s", root)
+		}
+	}
+}
+
+func TestPublishedCachePruneNeverDeletesOfflineSeedingPayload(t *testing.T) {
+	application := newApp(t)
+	sourceWAV := filepath.Join(t.TempDir(), "offline-seed-source.wav")
+	sourceFLAC := filepath.Join(application.workPath("incoming"), "offline-seed-source.flac")
+	writeToneWAV(t, sourceWAV, 660)
+	writeFLACFromWAV(t, sourceWAV, sourceFLAC)
+	releaseLibraryFile(t, application, filepath.Base(sourceFLAC), "offline-seed-root", "Artist", "Album", "Offline Seed", 1)
+	entries, err := audiorelease.List(application.engine)
+	if err != nil || len(entries) == 0 {
+		t.Fatal(entries, err)
+	}
+	body, err := os.ReadFile(filepath.Join(entries[0].LibraryDir, filepath.FromSlash(entries[0].File)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	seedRoot := application.workPath("seeds")
+	seedPath := filepath.Join(seedRoot, "process-offline-seed", "Album", "01 Offline Seed.flac")
+	if err := os.MkdirAll(filepath.Dir(seedPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(seedPath, body, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now()
+	old := now.Add(-3 * time.Hour)
+	if err := os.Chtimes(seedPath, old, old); err != nil {
+		t.Fatal(err)
+	}
+	audioCacheMu.Lock()
+	freed, removed, err := application.prunePublishedAudioCacheRootsLocked([]string{seedRoot}, 0, now, 0)
+	audioCacheMu.Unlock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if freed != 0 || removed != 0 {
+		t.Fatalf("offline seeding payload was reclaimed: freed=%d removed=%d", freed, removed)
+	}
+	if _, err := os.Stat(seedPath); err != nil {
+		t.Fatalf("offline seeding payload was removed even though qBittorrent metadata can reconnect later: %v", err)
 	}
 }

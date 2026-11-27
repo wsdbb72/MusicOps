@@ -24,6 +24,14 @@ func TestPersonalRowAuthorizesOnlyTheExactTorrent(t *testing.T) {
 	}
 }
 
+func TestPersonalRowDecodesEntityEncodedGazelleLabel(t *testing.T) {
+	page := `<tr id="torrent6240"><td><strong class="torrent_label tooltip tl_free" title="&#20010;&#20154;&#20813;&#36153;&#65281;">&#20010;&#20154;&#20813;&#36153;&#65281;</strong></td></tr>`
+	decision, err := Read("dicmusic", "6240", [][]byte{[]byte(page)}, time.Unix(10, 0))
+	if err != nil || decision.Mode != "direct" || !decision.Personal || decision.RowFree != "personal" || decision.Source != "website" {
+		t.Fatal(decision, err)
+	}
+}
+
 func TestTokenButtonRequiresOneCanonicalLinkAndABalance(t *testing.T) {
 	page := `<a href="torrents.php?action=download&amp;id=3">DL</a><a href="torrents.php?action=download&amp;id=3&amp;usetoken=1">FL</a><span>令牌: 4</span>`
 	decision, err := Read("orpheus", "3", [][]byte{[]byte(page)}, time.Unix(10, 0))

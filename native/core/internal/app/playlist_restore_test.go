@@ -190,7 +190,7 @@ func TestSubscriptionNeteaseJobCarriesConfirmedSourceIdentity(t *testing.T) {
 		Artist: "Artist", Title: "Song", Album: "Album", Duration: "180",
 		NeteaseSongID: 42, NeteaseAlbumID: 84,
 	}}
-	if err := application.queueSubscriptionAlbum(jobID, "netease-590536461", "Album", tracks); err != nil {
+	if err := application.queueSubscriptionAlbum(jobID, "netease-590536461", "Album", tracks, false); err != nil {
 		t.Fatal(err)
 	}
 	job, err := application.flows.Job(jobID)

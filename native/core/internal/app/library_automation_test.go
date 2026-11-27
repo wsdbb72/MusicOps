@@ -302,7 +302,7 @@ func TestLibraryAutomationReusesUnchangedScanCache(t *testing.T) {
 	}
 	cache := libraryAutomationScanDocument{Version: libraryAutomationScanVersion, Root: library, Files: map[string]cachedLibraryScan{
 		"Artist/Album/cached.mp3": {
-			Size: info.Size(), ModNS: info.ModTime().UnixNano(), MetadataVersion: libraryAutomationMetadataVersion, NeedsCatalog: false, NeedsArtwork: false,
+			Size: info.Size(), ModNS: info.ModTime().UnixNano(), NeedsCatalog: false, NeedsArtwork: false,
 			ArtworkCheckedNS: time.Now().UnixNano(), ArtworkValid: true,
 		},
 	}}

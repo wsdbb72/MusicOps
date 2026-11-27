@@ -159,6 +159,59 @@ func TestPlaylistLibraryUsesCachedMetadataWithoutOpeningAudio(t *testing.T) {
 	}
 }
 
+func TestPlaylistAuditCacheSurvivesRestart(t *testing.T) {
+	vaultKey(t)
+	root := t.TempDir()
+	state := filepath.Join(root, "state")
+	backup := filepath.Join(root, "backups")
+	library := filepath.Join(root, "music")
+	if err := os.MkdirAll(library, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	application, err := Open(state, backup, "test-password-16b")
+	if err != nil {
+		t.Fatal(err)
+	}
+	post(t, application, "/v1/settings/library", map[string]any{"library_dir": library})
+	incoming := application.workPath("incoming")
+	if err := os.MkdirAll(incoming, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	manifest := "#EXTM3U\n#PLAYLIST:Audit cache\n#EXTINF:180,Artist - Song\n#MUSICOPS-ALBUM:Album\n/media/song.flac\n"
+	if err := os.WriteFile(filepath.Join(incoming, "playlist-cache-test.m3u"), []byte(manifest), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	first := getJSON(t, application, "/v1/playlists/tracks?job=cache-test&summary=1")
+	if first["cached"] != false || first["total"] != float64(1) {
+		t.Fatal(first)
+	}
+	if err := application.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	reopened, err := Open(state, backup, "test-password-16b")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reopened.Close()
+	second := getJSON(t, reopened, "/v1/playlists/tracks?job=cache-test&summary=1")
+	if second["cached"] != true || second["total"] != float64(1) {
+		t.Fatalf("restart did not reuse the durable audit result: %v", second)
+	}
+	summary, _ := second["summary"].(map[string]any)
+	if summary["missing"] != float64(1) {
+		t.Fatal(second)
+	}
+	changedManifest := "#EXTM3U\n#PLAYLIST:Audit cache\n#EXTINF:181,Artist - Changed Song\n#MUSICOPS-ALBUM:Album\n/media/changed.flac\n"
+	if err := os.WriteFile(filepath.Join(incoming, "playlist-cache-test.m3u"), []byte(changedManifest), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	third := getJSON(t, reopened, "/v1/playlists/tracks?job=cache-test&summary=1")
+	if third["cached"] != false {
+		t.Fatalf("changed playlist content reused a stale audit: %v", third)
+	}
+}
+
 func TestPlaylistAuditSummaryDoesNotInlineTracks(t *testing.T) {
 	application := newApp(t)
 	incoming := application.workPath("incoming")

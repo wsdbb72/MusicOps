@@ -711,8 +711,11 @@ func scanAutomationFile(ctx context.Context, input libraryAutomationScanInput) l
 		return result
 	}
 	cacheAudioMatch := input.hasCache && !input.cached.DuplicateOnly && input.cached.Size == info.Size() && input.cached.ModNS == info.ModTime().UnixNano()
-	metadataCurrent := input.hasCache && input.cached.MetadataVersion >= libraryAutomationMetadataVersion
-	if cacheAudioMatch && metadataCurrent && cachedArtworkFresh(input.path, input.cached, time.Now()) {
+	// Metadata enrichment is filled lazily by playlist audits. Requiring a
+	// cache-wide version bump here forced every unchanged library file through
+	// the tag reader after each release, turning a routine scan into hours of
+	// random I/O on large mechanical libraries.
+	if cacheAudioMatch && cachedArtworkFresh(input.path, input.cached, time.Now()) {
 		result.entry = input.cached
 		result.ok = true
 		result.reused = true

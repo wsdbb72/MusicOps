@@ -120,6 +120,7 @@ type playlistLibraryIndex struct {
 	pendingSnapshots map[string]audiorelease.VerifiedPresence
 	presence         *playlistPresenceCache
 	metadata         *playlistMetadataCache
+	signature        string
 }
 
 type playlistPresenceResult struct {
@@ -686,7 +687,7 @@ func (index playlistLibraryIndex) presenceWorker() playlistLibraryIndex {
 		titleCandidates: index.titleCandidates, albumMembers: index.albumMembers, albumTailMembers: index.albumTailMembers,
 		verified: map[string]bool{}, tagTitles: map[[2]string]map[string]bool{},
 		compilationTags: map[string]map[[2]string]bool{}, albumGaps: map[[2]string]bool{},
-		records: index.records, paths: index.paths, scanRoot: index.scanRoot, scanFiles: index.scanFiles,
+		records: index.records, paths: index.paths, scanRoot: index.scanRoot, scanFiles: index.scanFiles, signature: index.signature,
 		pendingSnapshots: map[string]audiorelease.VerifiedPresence{},
 		presence:         index.presence, metadata: index.metadata,
 	}
@@ -831,7 +832,7 @@ func indexPlaylistLibrary(engine *dataengine.Engine, entries []audiorelease.Entr
 }
 
 func indexPlaylistLibraryWithMetadata(engine *dataengine.Engine, entries []audiorelease.Entry, scanRoot string, scanFiles map[string]cachedLibraryScan) playlistLibraryIndex {
-	index := playlistLibraryIndex{engine: engine, tracks: map[[3]string][]string{}, albums: map[[2]string][]string{}, titleCandidates: map[string][]string{}, albumMembers: map[string][]string{}, albumTailMembers: map[string][]string{}, verified: map[string]bool{}, tagTitles: map[[2]string]map[string]bool{}, compilationTags: map[string]map[[2]string]bool{}, albumGaps: map[[2]string]bool{}, records: map[string]audiorelease.Entry{}, paths: map[string]string{}, scanRoot: strings.TrimSpace(scanRoot), scanFiles: scanFiles, pendingSnapshots: map[string]audiorelease.VerifiedPresence{}, presence: newPlaylistPresenceCache(), metadata: newPlaylistMetadataCache()}
+	index := playlistLibraryIndex{engine: engine, tracks: map[[3]string][]string{}, albums: map[[2]string][]string{}, titleCandidates: map[string][]string{}, albumMembers: map[string][]string{}, albumTailMembers: map[string][]string{}, verified: map[string]bool{}, tagTitles: map[[2]string]map[string]bool{}, compilationTags: map[string]map[[2]string]bool{}, albumGaps: map[[2]string]bool{}, records: map[string]audiorelease.Entry{}, paths: map[string]string{}, scanRoot: strings.TrimSpace(scanRoot), scanFiles: scanFiles, pendingSnapshots: map[string]audiorelease.VerifiedPresence{}, presence: newPlaylistPresenceCache(), metadata: newPlaylistMetadataCache(), signature: playlistLibrarySignature(entries)}
 	for _, entry := range entries {
 		if !entry.FilePresent {
 			continue
@@ -1958,19 +1959,46 @@ func (a *App) playlistTracksView(w http.ResponseWriter, r *http.Request) {
 		AlbumCompletionNeeded bool   `json:"album_completion_needed"`
 	}
 	includeTracks := r.URL.Query().Get("summary") != "1"
+	library := a.playlistLibrary()
+	playlistDigest := playlistRowsDigest(name, rows)
+	cache := a.loadPlaylistAuditCache(a.libraryDir())
+	if cached, found := cache.Entries[jobID]; found && cached.valid(playlistDigest, library.signature, len(rows), a.now()) {
+		var out any
+		if includeTracks {
+			tracks := make([]rowView, 0, len(rows))
+			for i, row := range rows {
+				state := cached.States[i]
+				tracks = append(tracks, rowView{
+					Index: i, Artist: row.Artist, Title: row.Title, Album: row.Album, Present: state.Present,
+					AlbumPresent: state.AlbumPresent, AlbumIncomplete: state.AlbumIncomplete, AlbumCompletionNeeded: state.AlbumCompletionNeeded,
+				})
+			}
+			out = tracks
+		}
+		response := map[string]any{
+			"ok": true, "name": name, "summary": cached.Summary, "total": len(rows),
+			"cached": true, "checked_ns": cached.CheckedNS,
+		}
+		if includeTracks {
+			response["tracks"] = out
+		}
+		writeJSON(w, http.StatusOK, response)
+		return
+	}
+
+	present, presenceErr := playlistPresenceForIndexContext(r.Context(), library, rows)
+	if presenceErr != nil {
+		if r.Context().Err() == nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "code": "PLAYLIST_PRESENCE_FAILED", "error": presenceErr.Error()})
+		}
+		return
+	}
+	states := make([]playlistAuditRowState, len(rows))
 	out := make([]rowView, 0, len(rows))
 	if !includeTracks {
 		out = nil
 	}
-	library := a.playlistLibrary()
-	present, presenceErr := playlistPresenceForIndexContext(r.Context(), library, rows)
-	if presenceErr != nil {
-		if r.Context().Err() == nil {
-			writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "code": "PLAYLIST_PRESENCE_FAILED"})
-		}
-		return
-	}
-	presentCount, albumPresentCount, albumIncompleteCount, completionNeededCount := 0, 0, 0, 0
+	summary := playlistAuditSummary{Total: len(rows)}
 	for i, row := range rows {
 		albumPresent, albumIncomplete, completionNeeded := true, false, !present[i]
 		album := normalizePlaylistAlbumTitle(row.Album)
@@ -1979,17 +2007,20 @@ func (a *App) playlistTracksView(w http.ResponseWriter, r *http.Request) {
 			albumIncomplete = albumPresent && library.hasAlbumGap(row.Artist, album)
 			completionNeeded = library.needsAlbumCompletion(row.Artist, album, row.Title)
 		}
+		states[i] = playlistAuditRowState{
+			Present: present[i], AlbumPresent: albumPresent, AlbumIncomplete: albumIncomplete, AlbumCompletionNeeded: completionNeeded,
+		}
 		if present[i] {
-			presentCount++
+			summary.Present++
 		}
 		if albumPresent {
-			albumPresentCount++
+			summary.AlbumPresent++
 		}
 		if albumIncomplete {
-			albumIncompleteCount++
+			summary.AlbumIncomplete++
 		}
 		if completionNeeded {
-			completionNeededCount++
+			summary.CompletionNeeded++
 		}
 		if includeTracks {
 			out = append(out, rowView{
@@ -1998,16 +2029,19 @@ func (a *App) playlistTracksView(w http.ResponseWriter, r *http.Request) {
 			})
 		}
 	}
-	summary := map[string]any{
-		"total": len(rows), "present": presentCount, "missing": len(rows) - presentCount,
-		"album_present": albumPresentCount, "album_incomplete": albumIncompleteCount,
-		"completion_needed": completionNeededCount,
+	summary.Missing = summary.Total - summary.Present
+	checkedNS := a.now().UnixNano()
+	_ = a.savePlaylistAuditCacheEntry(a.libraryDir(), jobID, playlistAuditCacheEntry{
+		PlaylistDigest: playlistDigest, LibrarySignature: library.signature, States: states, Summary: summary, CheckedNS: checkedNS,
+	})
+	response := map[string]any{
+		"ok": true, "name": name, "summary": summary, "total": len(rows),
+		"cached": false, "checked_ns": checkedNS,
 	}
-	if !includeTracks {
-		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "name": name, "summary": summary, "total": len(rows)})
-		return
+	if includeTracks {
+		response["tracks"] = out
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "name": name, "tracks": out, "summary": summary, "total": len(rows)})
+	writeJSON(w, http.StatusOK, response)
 }
 
 // enqueuePlaylist is POST /v1/playlists/enqueue {job_id, indices, album_completion}.

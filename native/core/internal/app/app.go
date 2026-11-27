@@ -100,6 +100,7 @@ type App struct {
 	duplicateMu           sync.Mutex
 	duplicateScanMu       sync.Mutex
 	neteaseRecoveryMu     sync.Mutex
+	playlistAuditMu       sync.Mutex
 	secrets               map[string]string
 	proxyConfigErr        string
 	stopSubs              chan struct{}

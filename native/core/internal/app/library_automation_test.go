@@ -611,21 +611,37 @@ func TestCachedArtworkInvalidatedWhenLyricsSidecarsChange(t *testing.T) {
 	if !cachedArtworkFresh(track, entry, now.Add(time.Minute)) {
 		t.Fatal("unchanged lyrics sidecars were not cached")
 	}
+	primaryInfo, err := os.Stat(primary)
+	if err != nil {
+		t.Fatal(err)
+	}
+	primaryMod := primaryInfo.ModTime()
 	if err := os.WriteFile(primary, []byte("[00:01.00]masked ****\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	if err := os.Chtimes(primary, primaryMod, primaryMod); err != nil {
+		t.Fatal(err)
+	}
 	if cachedArtworkFresh(track, entry, now.Add(time.Minute)) {
-		t.Fatal("changed primary lyric sidecar reused stale validation")
+		t.Fatal("same-size primary lyric sidecar with unchanged mtime reused stale validation")
 	}
 	if err := os.WriteFile(primary, []byte("[00:01.00]clean lyric\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	recordArtworkValidation(&entry, track, now.Add(2*time.Minute))
+	legacyInfo, err := os.Stat(legacy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacyMod := legacyInfo.ModTime()
 	if err := os.WriteFile(legacy, []byte("[00:01.00]masked ****\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	if err := os.Chtimes(legacy, legacyMod, legacyMod); err != nil {
+		t.Fatal(err)
+	}
 	if cachedArtworkFresh(track, entry, now.Add(3*time.Minute)) {
-		t.Fatal("changed legacy lyric sidecar reused stale validation")
+		t.Fatal("same-size legacy lyric sidecar with unchanged mtime reused stale validation")
 	}
 }
 

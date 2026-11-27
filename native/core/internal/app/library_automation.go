@@ -38,7 +38,7 @@ const (
 	libraryAutomationScanWorkers     = 8
 	duplicateFingerprintWorkers      = 8
 	libraryAutomationCheckpoint      = 20_000
-	libraryAutomationScanVersion     = 6
+	libraryAutomationScanVersion     = 7
 	libraryAutomationMetadataVersion = 1
 	libraryAutomationStallTimeout    = 45 * time.Minute
 	libraryAutomationScrapeSlice     = 45 * time.Minute
@@ -207,8 +207,10 @@ type cachedLibraryScan struct {
 	ArtworkModNS     int64                       `json:"artwork_mod_ns,omitempty"`
 	LyricsSize       int64                       `json:"lyrics_size,omitempty"`
 	LyricsModNS      int64                       `json:"lyrics_mod_ns,omitempty"`
+	LyricsSHA256     string                      `json:"lyrics_sha256,omitempty"`
 	LegacyLyricsSize int64                       `json:"legacy_lyrics_size,omitempty"`
 	LegacyLyricsMod  int64                       `json:"legacy_lyrics_mod_ns,omitempty"`
+	LegacyLyricsSHA  string                      `json:"legacy_lyrics_sha256,omitempty"`
 	ArtworkCheckedNS int64                       `json:"artwork_checked_ns,omitempty"`
 	ArtworkValid     bool                        `json:"artwork_valid,omitempty"`
 	ArtworkRefresh   bool                        `json:"artwork_refresh,omitempty"`
@@ -1465,9 +1467,9 @@ func cachedArtworkFresh(path string, entry cachedLibraryScan, now time.Time) boo
 	} else if entry.ArtworkSize != 0 || entry.ArtworkModNS != 0 || entry.NeedsArtwork {
 		return false
 	}
-	lyricsSize, lyricsMod, legacySize, legacyMod := lyricsSidecarInfo(path)
-	return entry.LyricsSize == lyricsSize && entry.LyricsModNS == lyricsMod &&
-		entry.LegacyLyricsSize == legacySize && entry.LegacyLyricsMod == legacyMod
+	lyrics, legacy := lyricsSidecarInfo(path)
+	return entry.LyricsSize == lyrics.Size && entry.LyricsModNS == lyrics.ModNS && entry.LyricsSHA256 == lyrics.SHA256 &&
+		entry.LegacyLyricsSize == legacy.Size && entry.LegacyLyricsMod == legacy.ModNS && entry.LegacyLyricsSHA == legacy.SHA256
 }
 
 func artworkRefreshDue(entry cachedLibraryScan, now time.Time) bool {
@@ -1483,28 +1485,39 @@ func recordArtworkValidation(entry *cachedLibraryScan, path string, now time.Tim
 		return
 	}
 	entry.ArtworkSize, entry.ArtworkModNS, _ = artworkSidecarInfo(path)
-	entry.LyricsSize, entry.LyricsModNS, entry.LegacyLyricsSize, entry.LegacyLyricsMod = lyricsSidecarInfo(path)
+	lyrics, legacy := lyricsSidecarInfo(path)
+	entry.LyricsSize, entry.LyricsModNS, entry.LyricsSHA256 = lyrics.Size, lyrics.ModNS, lyrics.SHA256
+	entry.LegacyLyricsSize, entry.LegacyLyricsMod, entry.LegacyLyricsSHA = legacy.Size, legacy.ModNS, legacy.SHA256
 	entry.ArtworkCheckedNS = now.UnixNano()
 	entry.ArtworkValid = !entry.NeedsArtwork
 }
 
-// lyricsSidecarInfo fingerprints both supported sidecar spellings. The audio
-// cache must notice an externally edited or newly added LRC; otherwise a clean
-// scan can hide a later masked-lyrics replacement until the weekly refresh.
-func lyricsSidecarInfo(audioPath string) (primarySize, primaryMod, legacySize, legacyMod int64) {
-	primary := lyricsSidecarPath(audioPath)
-	legacy := audioPath + ".lrc"
+type lyricsSidecarFingerprint struct {
+	Size   int64
+	ModNS  int64
+	SHA256 string
+}
+
+// lyricsSidecarInfo fingerprints both supported sidecar spellings. A content
+// digest is required because edits such as "clean lyric" -> "masked ****" can
+// keep the same byte length and filesystem timestamp granularity. The audio
+// cache must notice that change; otherwise a clean scan can hide a later
+// masked-lyrics replacement until the weekly refresh.
+func lyricsSidecarInfo(audioPath string) (primary, legacy lyricsSidecarFingerprint) {
 	for _, candidate := range []struct {
 		path string
-		size *int64
-		mod  *int64
-	}{{primary, &primarySize, &primaryMod}, {legacy, &legacySize, &legacyMod}} {
+		out  *lyricsSidecarFingerprint
+	}{
+		{lyricsSidecarPath(audioPath), &primary},
+		{audioPath + ".lrc", &legacy},
+	} {
 		info, err := os.Stat(candidate.path)
 		if err != nil || !info.Mode().IsRegular() {
 			continue
 		}
-		*candidate.size = info.Size()
-		*candidate.mod = info.ModTime().UnixNano()
+		candidate.out.Size = info.Size()
+		candidate.out.ModNS = info.ModTime().UnixNano()
+		candidate.out.SHA256, _ = hashFile(candidate.path)
 	}
 	return
 }

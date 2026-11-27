@@ -207,6 +207,41 @@ func TestRateLimitedNeteaseSourceFallbackConsumesFullRetryBudget(t *testing.T) {
 	}
 }
 
+func TestRateLimitedUpgradeRetriesBeforeStreamingFallback(t *testing.T) {
+	report := base()
+	report.Scene = "upgrade"
+	report.RetryCount = 3
+	report.Sites = sites(map[string]SiteReport{
+		"orpheus":  {Status: "RATE_LIMITED", Attempted: true, RetryAfterSec: 3600},
+		"redacted": {Status: "DISABLED"},
+	})
+	for count := uint8(0); count < 12; count++ {
+		report.RateLimitRetryCount = count
+		decision, err := Decide(report)
+		if err != nil || decision.Action != ActionRetry || decision.Reason != "rate_limit_retry" || decision.RetryAfterSec != 3600 {
+			t.Fatalf("extended upgrade retry %d decision=%+v err=%v", count, decision, err)
+		}
+	}
+	report.RateLimitRetryCount = 12
+	decision, err := Decide(report)
+	if err != nil || decision.Action != ActionFallback || decision.Reason != "transient_fallback" {
+		t.Fatalf("upgrade budget exhausted decision=%+v err=%v", decision, err)
+	}
+}
+func TestUpgradeNetworkFailuresKeepTheOrdinaryFallbackBound(t *testing.T) {
+	report := base()
+	report.Scene = "upgrade"
+	report.RetryCount = 3
+	report.Sites = sites(map[string]SiteReport{
+		"orpheus":  {Status: "NETWORK_ERROR", Attempted: true},
+		"redacted": {Status: "DISABLED"},
+	})
+	decision, err := Decide(report)
+	if err != nil || decision.Action != ActionFallback || decision.Reason != "transient_fallback" {
+		t.Fatalf("network failure decision=%+v err=%v", decision, err)
+	}
+}
+
 func TestOfflineSamplesCoverSearchClassesWithoutClaimingDownloads(t *testing.T) {
 	type sample struct {
 		name        string

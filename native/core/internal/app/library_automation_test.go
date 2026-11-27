@@ -587,6 +587,48 @@ func TestCachedArtworkInvalidatedWhenSidecarChanges(t *testing.T) {
 	}
 }
 
+func TestCachedArtworkInvalidatedWhenLyricsSidecarsChange(t *testing.T) {
+	root := t.TempDir()
+	track := filepath.Join(root, "track.flac")
+	if err := os.WriteFile(track, []byte("audio"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cover := strings.TrimSuffix(track, filepath.Ext(track)) + ".jpg"
+	if err := os.WriteFile(cover, jpegBody(), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	primary := lyricsSidecarPath(track)
+	legacy := track + ".lrc"
+	if err := os.WriteFile(primary, []byte("[00:01.00]clean lyric\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(legacy, []byte("[00:01.00]clean legacy\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now()
+	entry := cachedLibraryScan{NeedsArtwork: false}
+	recordArtworkValidation(&entry, track, now)
+	if !cachedArtworkFresh(track, entry, now.Add(time.Minute)) {
+		t.Fatal("unchanged lyrics sidecars were not cached")
+	}
+	if err := os.WriteFile(primary, []byte("[00:01.00]masked ****\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if cachedArtworkFresh(track, entry, now.Add(time.Minute)) {
+		t.Fatal("changed primary lyric sidecar reused stale validation")
+	}
+	if err := os.WriteFile(primary, []byte("[00:01.00]clean lyric\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	recordArtworkValidation(&entry, track, now.Add(2*time.Minute))
+	if err := os.WriteFile(legacy, []byte("[00:01.00]masked ****\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if cachedArtworkFresh(track, entry, now.Add(3*time.Minute)) {
+		t.Fatal("changed legacy lyric sidecar reused stale validation")
+	}
+}
+
 func TestCachedArtworkRequestsPeriodicRefresh(t *testing.T) {
 	now := time.Now()
 	entry := cachedLibraryScan{ArtworkCheckedNS: now.Add(-libraryArtworkRefreshTTL - time.Minute).UnixNano(), ArtworkValid: true}

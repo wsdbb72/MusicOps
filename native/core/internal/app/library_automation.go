@@ -38,7 +38,7 @@ const (
 	libraryAutomationScanWorkers     = 8
 	duplicateFingerprintWorkers      = 8
 	libraryAutomationCheckpoint      = 20_000
-	libraryAutomationScanVersion     = 5
+	libraryAutomationScanVersion     = 6
 	libraryAutomationMetadataVersion = 1
 	libraryAutomationStallTimeout    = 45 * time.Minute
 	libraryAutomationScrapeSlice     = 45 * time.Minute
@@ -46,7 +46,7 @@ const (
 	libraryAutomationDedupeSlice     = 15 * time.Minute
 	libraryAutomationArtworkWorkers  = 6
 	libraryAutomationPolicyVersion   = 3
-	corruptRepairKeyPrefix           = "corrupt-repair-v3"
+	corruptRepairKeyPrefix           = "corrupt-repair-v4"
 	libraryAutomationSkippedRetry    = 24 * time.Hour
 	libraryAlbumAuditTTL             = 30 * 24 * time.Hour
 	libraryAutomationAlbumChecks     = 200
@@ -205,6 +205,10 @@ type cachedLibraryScan struct {
 	TrackTotal       int                         `json:"track_total,omitempty"`
 	ArtworkSize      int64                       `json:"artwork_size,omitempty"`
 	ArtworkModNS     int64                       `json:"artwork_mod_ns,omitempty"`
+	LyricsSize       int64                       `json:"lyrics_size,omitempty"`
+	LyricsModNS      int64                       `json:"lyrics_mod_ns,omitempty"`
+	LegacyLyricsSize int64                       `json:"legacy_lyrics_size,omitempty"`
+	LegacyLyricsMod  int64                       `json:"legacy_lyrics_mod_ns,omitempty"`
 	ArtworkCheckedNS int64                       `json:"artwork_checked_ns,omitempty"`
 	ArtworkValid     bool                        `json:"artwork_valid,omitempty"`
 	ArtworkRefresh   bool                        `json:"artwork_refresh,omitempty"`
@@ -1455,9 +1459,15 @@ func cachedArtworkFresh(path string, entry cachedLibraryScan, now time.Time) boo
 	}
 	size, modNS, exists := artworkSidecarInfo(path)
 	if exists {
-		return entry.ArtworkSize == size && entry.ArtworkModNS == modNS
+		if entry.ArtworkSize != size || entry.ArtworkModNS != modNS {
+			return false
+		}
+	} else if entry.ArtworkSize != 0 || entry.ArtworkModNS != 0 || entry.NeedsArtwork {
+		return false
 	}
-	return entry.ArtworkSize == 0 && entry.ArtworkModNS == 0 && !entry.NeedsArtwork
+	lyricsSize, lyricsMod, legacySize, legacyMod := lyricsSidecarInfo(path)
+	return entry.LyricsSize == lyricsSize && entry.LyricsModNS == lyricsMod &&
+		entry.LegacyLyricsSize == legacySize && entry.LegacyLyricsMod == legacyMod
 }
 
 func artworkRefreshDue(entry cachedLibraryScan, now time.Time) bool {
@@ -1473,8 +1483,30 @@ func recordArtworkValidation(entry *cachedLibraryScan, path string, now time.Tim
 		return
 	}
 	entry.ArtworkSize, entry.ArtworkModNS, _ = artworkSidecarInfo(path)
+	entry.LyricsSize, entry.LyricsModNS, entry.LegacyLyricsSize, entry.LegacyLyricsMod = lyricsSidecarInfo(path)
 	entry.ArtworkCheckedNS = now.UnixNano()
 	entry.ArtworkValid = !entry.NeedsArtwork
+}
+
+// lyricsSidecarInfo fingerprints both supported sidecar spellings. The audio
+// cache must notice an externally edited or newly added LRC; otherwise a clean
+// scan can hide a later masked-lyrics replacement until the weekly refresh.
+func lyricsSidecarInfo(audioPath string) (primarySize, primaryMod, legacySize, legacyMod int64) {
+	primary := lyricsSidecarPath(audioPath)
+	legacy := audioPath + ".lrc"
+	for _, candidate := range []struct {
+		path string
+		size *int64
+		mod  *int64
+	}{{primary, &primarySize, &primaryMod}, {legacy, &legacySize, &legacyMod}} {
+		info, err := os.Stat(candidate.path)
+		if err != nil || !info.Mode().IsRegular() {
+			continue
+		}
+		*candidate.size = info.Size()
+		*candidate.mod = info.ModTime().UnixNano()
+	}
+	return
 }
 
 func automationTrackIdentity(path string) (artist, album, title string, err error) {

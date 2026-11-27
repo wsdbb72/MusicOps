@@ -371,15 +371,17 @@ func retryable(in classified) bool {
 	return saw
 }
 
-// extendedRateLimitRetry keeps a source-owned playlist in a durable hourly
-// retry state after the ordinary 10/30/60 minute budget is spent. A tracker
-// that is still returning Retry-After has not produced negative evidence, so
-// switching the entire album to streaming would be premature. The separate
-// 12-attempt budget means this can last up to half a day without overflowing
+// extendedRateLimitRetry keeps an existing-library upgrade or a source-owned
+// playlist in a durable hourly retry state after the ordinary 10/30/60 minute
+// budget is spent. A tracker that is still returning Retry-After has not
+// produced negative evidence, so switching to streaming would be premature.
+// Upgrade tasks already have a playable local source and must not churn the
+// whole library through the fallback chain because one tracker is throttled.
+// The separate 12-attempt budget bounds this to half a day without consuming
 // the normal three-attempt transient budget.
 func extendedRateLimitRetry(in classified) bool {
 	report := in.report
-	if !report.SourceFallback || report.RateLimitRetryCount >= 12 || !report.IdentityConfirmed || !report.StreamingEnabled ||
+	if (!report.SourceFallback && report.Scene != "upgrade") || report.RateLimitRetryCount >= 12 || !report.IdentityConfirmed || !report.StreamingEnabled ||
 		!fallbackAllowed(report) || in.limited || len(in.qualified) > 0 || in.held || in.mismatch {
 		return false
 	}

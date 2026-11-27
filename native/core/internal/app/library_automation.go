@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/wsdbb72/MusicOps/native/core/internal/artistnorm"
+	"github.com/wsdbb72/MusicOps/native/core/internal/audiorelease"
 	"github.com/wsdbb72/MusicOps/native/core/internal/flactags"
 	"github.com/wsdbb72/MusicOps/native/core/internal/musicbrainz"
 )
@@ -466,7 +467,6 @@ func (s *libraryAutomationState) stopIfStalled(now time.Time) bool {
 }
 
 func (a *App) runLibraryAutomationScheduler(stop <-chan struct{}) {
-	nextRun := time.Now().Add(libraryAutomationInitialDelay)
 	lastBacklogFinished := ""
 	ticker := time.NewTicker(30 * time.Second)
 	defer ticker.Stop()
@@ -480,42 +480,39 @@ func (a *App) runLibraryAutomationScheduler(stop <-chan struct{}) {
 			}
 			settings, err := a.loadLibraryAutomationSettings()
 			if err != nil {
-				nextRun = now.Add(5 * time.Minute)
+				continue
+			}
+			if !settings.Enabled {
 				continue
 			}
 			delay := time.Duration(settings.IntervalHours) * time.Hour
 			if delay <= 0 {
-				delay = 6 * time.Hour
+				delay = libraryAutomationDefaultInterval
 			}
-			if !settings.Enabled {
-				nextRun = now.Add(delay)
-				continue
+			checkpoint, checkpointErr := a.loadLibraryAutomationCheckpoint()
+			if checkpointErr != nil {
+				a.libraryAutomation.addError(fmt.Errorf("读取自动维护计划失败: %w", checkpointErr))
 			}
+			nextRun := libraryAutomationNextRun(now, checkpoint, delay)
 			running, report := a.libraryAutomation.snapshot()
 			if !running && report.Backlog && report.Finished != "" && report.Finished != lastBacklogFinished {
-				delay := time.Minute
-				if report.RetryAfterSec > int(delay/time.Second) {
-					delay = time.Duration(report.RetryAfterSec) * time.Second
+				retryDelay := time.Minute
+				if report.RetryAfterSec > int(retryDelay/time.Second) {
+					retryDelay = time.Duration(report.RetryAfterSec) * time.Second
 				}
-				soon := now.Add(delay)
+				soon := now.Add(retryDelay)
 				if soon.Before(nextRun) {
 					nextRun = soon
 				}
 				lastBacklogFinished = report.Finished
 			}
-			if now.Before(nextRun) {
+			if running || now.Before(nextRun) {
 				continue
 			}
-			if a.startLibraryAutomationRun("scheduled") {
-				nextRun = now.Add(delay)
-			} else {
-				// A manual or long-running pass may still be active. Recheck soon after it ends.
-				nextRun = now.Add(time.Minute)
-			}
+			a.startLibraryAutomationRun("scheduled")
 		}
 	}
 }
-
 func (a *App) startLibraryAutomationRun(reason string) bool {
 	if a == nil || a.libraryAutomation == nil {
 		return false
@@ -567,12 +564,18 @@ func (a *App) startLibraryAutomationRunWithSettings(reason string, settings libr
 	if !started {
 		return false
 	}
+	if err := a.recordLibraryAutomationStarted(reason); err != nil {
+		a.libraryAutomation.addError(fmt.Errorf("保存自动维护开始时间失败: %w", err))
+	}
 	go a.watchLibraryAutomationRun(ctx)
 	go func() {
 		var runErr error
 		defer func() {
 			if recovered := recover(); recovered != nil {
 				runErr = fmt.Errorf("自动维护内部异常: %v", recovered)
+			}
+			if err := a.recordLibraryAutomationFinished(runErr); err != nil {
+				a.libraryAutomation.addError(fmt.Errorf("保存自动维护完成时间失败: %w", err))
 			}
 			a.libraryAutomation.finish(runErr, "本轮自动维护由"+reason+"触发")
 		}()
@@ -610,21 +613,33 @@ func (a *App) runLibraryAutomationPass(ctx context.Context, settings libraryAuto
 		}
 	}
 
-	state.setPhase("reindex")
-	state.touch("reindex", "正在读取现有索引")
-	added, _, pruned, err := a.indexLibraryTreeWithProgress(ctx, root, func(checked int, current string) {
-		state.update(func(report *libraryAutomationReport) { report.IndexChecked = checked })
-		state.touch("reindex", current)
-	})
-	if err != nil {
-		return fmt.Errorf("增量索引失败: %w", err)
+	checkpoint, checkpointErr := a.loadLibraryAutomationCheckpoint()
+	if checkpointErr != nil {
+		state.addError(fmt.Errorf("读取索引检查点失败: %w", checkpointErr))
+		checkpoint = libraryAutomationSchedule{Version: libraryAutomationCheckpointVersion}
 	}
-	state.update(func(report *libraryAutomationReport) {
-		report.IndexedAdded = added
-		report.IndexedPruned = pruned
-	})
+	if libraryAutomationReindexDue(a.now(), checkpoint, root) {
+		state.setPhase("reindex")
+		state.touch("reindex", "正在低速核对现有索引")
+		added, _, pruned, err := a.indexLibraryTreePaced(ctx, root, func(checked int, current string) {
+			state.update(func(report *libraryAutomationReport) { report.IndexChecked = checked })
+			state.touch("reindex", current)
+		})
+		if err != nil {
+			return fmt.Errorf("增量索引失败: %w", err)
+		}
+		state.update(func(report *libraryAutomationReport) {
+			report.IndexedAdded = added
+			report.IndexedPruned = pruned
+		})
+		if err := a.recordLibraryReindex(root); err != nil {
+			state.addError(fmt.Errorf("保存索引完成时间失败: %w", err))
+		}
+	} else {
+		state.touch("index", "持久索引仍新鲜，本轮跳过全库重扫")
+	}
 
-	paths, byDir, err := listLibraryAudio(root)
+	paths, byDir, err := a.indexedLibraryAudio(root)
 	if err != nil {
 		return err
 	}
@@ -668,33 +683,41 @@ func (a *App) runLibraryAutomationPass(ctx context.Context, settings libraryAuto
 	return ctx.Err()
 }
 
-func listLibraryAudio(root string) ([]string, map[string][]string, error) {
+func (a *App) indexedLibraryAudio(root string) ([]string, map[string][]string, error) {
+	entries, err := audiorelease.ListIndexed(a.engine)
+	if err != nil {
+		return nil, nil, err
+	}
+	root = filepath.Clean(root)
 	paths := []string{}
 	byDir := map[string][]string{}
-	err := filepath.WalkDir(root, func(path string, entry os.DirEntry, walkErr error) error {
-		if walkErr != nil {
-			if skipLibraryWalkError(root, path, walkErr) {
-				return nil
-			}
-			return walkErr
+	seen := map[string]bool{}
+	for _, row := range entries {
+		if !row.FilePresent {
+			continue
 		}
-		if entry.IsDir() {
-			return nil
+		path := filepath.Clean(a.entryFilePath(row))
+		rel, relErr := filepath.Rel(root, path)
+		if relErr != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+			continue
 		}
 		ext := strings.TrimPrefix(strings.ToLower(filepath.Ext(path)), ".")
-		if !audioExtensions[ext] || !entry.Type().IsRegular() {
-			return nil
+		if !audioExtensions[ext] {
+			continue
 		}
-		clean := filepath.Clean(path)
-		paths = append(paths, clean)
-		byDir[filepath.Dir(clean)] = append(byDir[filepath.Dir(clean)], clean)
-		return nil
-	})
+		key := strings.ToLower(path)
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		paths = append(paths, path)
+		byDir[filepath.Dir(path)] = append(byDir[filepath.Dir(path)], path)
+	}
 	sort.Strings(paths)
 	for dir := range byDir {
 		sort.Strings(byDir[dir])
 	}
-	return paths, byDir, err
+	return paths, byDir, nil
 }
 
 type libraryAutomationScanInput struct {

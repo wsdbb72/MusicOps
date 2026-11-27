@@ -36,10 +36,13 @@ var audioExtensions = map[string]bool{
 
 func (a *App) reindexLibrary(w http.ResponseWriter, r *http.Request) {
 	root := a.libraryDir()
-	added, kept, pruned, err := a.indexLibraryTree(r.Context(), root)
+	added, kept, pruned, err := a.indexLibraryTreePaced(r.Context(), root, nil)
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "code": "LIBRARY_UNAVAILABLE", "error": "没有可索引的音乐库目录"})
 		return
+	}
+	if err == nil {
+		_ = a.recordLibraryReindex(root)
 	}
 	reconciled := a.reconcileLibrarySatisfiedRoots(a.now(), nil)
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "added": added, "kept": kept, "deleted_files": pruned, "reconciled_failures": reconciled, "note": "已完成增量索引；只清理磁盘上已不存在的旧元数据映射，不删除音乐文件，也不把缺少的文件说成已下载。"})
@@ -50,6 +53,19 @@ func (a *App) indexLibraryTree(ctx context.Context, root string) (added, kept, p
 }
 
 func (a *App) indexLibraryTreeWithProgress(ctx context.Context, root string, progress func(int, string)) (added, kept, pruned int, err error) {
+	return a.indexLibraryTreeWithDelay(ctx, root, progress, 0)
+}
+
+// indexLibraryTreePaced keeps a mechanical library usable while the periodic
+// consistency pass runs. Directory enumeration is the expensive part on a
+// large HDD, so the automatic path intentionally spends a few milliseconds
+// between files instead of allowing thousands of metadata operations per
+// second.
+func (a *App) indexLibraryTreePaced(ctx context.Context, root string, progress func(int, string)) (added, kept, pruned int, err error) {
+	return a.indexLibraryTreeWithDelay(ctx, root, progress, libraryAutomationReindexFileDelay)
+}
+
+func (a *App) indexLibraryTreeWithDelay(ctx context.Context, root string, progress func(int, string), fileDelay time.Duration) (added, kept, pruned int, err error) {
 	info, err := os.Stat(root)
 	if err != nil {
 		return 0, 0, 0, err
@@ -132,6 +148,15 @@ func (a *App) indexLibraryTreeWithProgress(ctx context.Context, root string, pro
 		checked++
 		if progress != nil && checked%250 == 0 {
 			progress(checked, path)
+		}
+		if fileDelay > 0 {
+			timer := time.NewTimer(fileDelay)
+			select {
+			case <-ctx.Done():
+				timer.Stop()
+				return ctx.Err()
+			case <-timer.C:
+			}
 		}
 		abs, err := filepath.Abs(path)
 		if err != nil || abs != filepath.Clean(abs) {

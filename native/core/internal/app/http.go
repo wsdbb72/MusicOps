@@ -929,6 +929,14 @@ func (a *App) workflowJobView(job workflow.Job) jobView {
 	entry.AIReviewEligible = a.aiReviewEligible(job)
 	if task, err := a.tasks.Get(job.ActiveTaskID); err == nil && task != nil {
 		entry.ExecutionState = task.State
+		if task.UpdatedNS > entry.UpdatedNS {
+			entry.UpdatedNS = task.UpdatedNS
+		}
+		if task.State == "running" {
+			entry.TaskProgress = task.Progress
+			entry.TaskPhase = scrub(task.Phase)
+			entry.TaskMessage = scrub(task.Message)
+		}
 		if task.State == "queued" && task.NotBeforeNS > 0 {
 			entry.RetryAfterNS = task.NotBeforeNS
 		}

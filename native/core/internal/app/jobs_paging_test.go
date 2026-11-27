@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/wsdbb72/MusicOps/native/core/internal/taskrepo"
 	"github.com/wsdbb72/MusicOps/native/core/internal/workflow"
 )
 
@@ -276,5 +277,56 @@ func TestClassifyJobCountsIncludesFailedTaskUnderCompletedJob(t *testing.T) {
 	counts := classifyJobCounts(jobs, map[string]bool{}, map[string]bool{"stage:failed-task-root:publishing": true})
 	if counts["failed"] != 1 || counts["finished"] != 1 || counts["total"] != 2 {
 		t.Fatalf("failed active task under completed root was not counted: %+v", counts)
+	}
+}
+
+func TestAlbumProgressShowsLiveAlbumCheckpoint(t *testing.T) {
+	progress, headline := albumProgress([]jobView{{
+		ID: "fallback-root", RootID: "fallback-root", Stage: "fallback", ExecutionState: "running",
+		TaskProgress: 67.5, TaskPhase: "netease_album", TaskMessage: "Ondersteboven", UpdatedNS: 2,
+	}})
+	if progress != "网易云专辑处理中 67.5%" {
+		t.Fatalf("progress=%q", progress)
+	}
+	if headline != "网易云专辑处理中 67.5%：Ondersteboven" {
+		t.Fatalf("headline=%q", headline)
+	}
+}
+
+func TestWorkflowJobViewProjectsRunningTaskCheckpoint(t *testing.T) {
+	application := newApp(t)
+	if err := application.runner.Stop(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UnixNano()
+	rootID := "checkpoint-root"
+	plan, err := json.Marshal(SearchPlan{RootJobID: rootID, Query: "Artist Album", ExpectedTitle: "Album", ExpectedArtist: "Artist", Scene: "expand"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := application.flows.Start("start-"+rootID, workflow.Start{
+		JobID: rootID, BatchID: "checkpoint-playlist", Scene: "expand", Stage: "identifying", Label: "Artist - Album", Payload: plan, NowNS: now,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	token := claimAndBeginWorkflowTask(t, application, rootID, "identify", now+100)
+	if _, err := application.flows.Complete("handoff-"+rootID, token, workflow.Complete{
+		JobID: rootID, Edge: workflow.EdgeQueueSearch, TaskState: "completed", NowNS: now + 200,
+		Evidence: []workflow.EvidenceInput{{ID: "identity-" + rootID, Kind: "api", Source: "musicbrainz", SubjectID: "release-checkpoint", TracklistVerified: true, IdentityConfirmed: true, Payload: []byte("verified tracklist")}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	searchID := "search:" + rootID
+	token = claimAndBeginWorkflowTask(t, application, searchID, "identify", now+300)
+	if _, err := application.tasks.Progress(token, taskrepo.Point{Sequence: 1, Percent: 67.5, Phase: "netease_album", Message: "Ondersteboven", NowNS: now + 400}); err != nil {
+		t.Fatal(err)
+	}
+	job, err := application.flows.Job(searchID)
+	if err != nil || job == nil {
+		t.Fatalf("job: %+v %v", job, err)
+	}
+	view := application.workflowJobView(*job)
+	if view.ExecutionState != "running" || view.TaskProgress != 67.5 || view.TaskPhase != "netease_album" || view.TaskMessage != "Ondersteboven" || view.UpdatedNS != now+400 {
+		t.Fatalf("live task checkpoint was not projected: %+v", view)
 	}
 }

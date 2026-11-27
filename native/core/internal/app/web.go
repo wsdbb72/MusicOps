@@ -80,7 +80,7 @@ const appJS = `(function () {
   }
   function pill(job) {
     var progress = retryPending(job) ? retryLabel(retryAt(job)) : (job.progress || "未下载");
-    var moving = retryPending(job) || progress === "检索中" || progress === "获取中" || progress === "识别中" || progress === "已排队流媒体" || progress === "正在入库";
+    var moving = retryPending(job) || progress.indexOf("处理中") >= 0 || progress.indexOf("正在") === 0 || progress === "检索中" || progress === "获取中" || progress === "识别中" || progress === "已排队流媒体" || progress === "正在入库";
     var kind = progress === "待核对" ? "review" : (progress === "未能继续" ? "fail" : (progress === "部分入库" ? "partial" : (moving ? "queue" : "")));
     return '<span class="pill ' + kind + '">' + escapeText(progress) + "</span>";
   }

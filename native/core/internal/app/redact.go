@@ -3,6 +3,7 @@ package app
 import (
 	"encoding/json"
 	"regexp"
+	"strconv"
 	"strings"
 
 	"github.com/wsdbb72/MusicOps/native/core/internal/sqlitemigrate"
@@ -99,6 +100,9 @@ func redactJSON(value any) any {
 
 type jobView struct {
 	ExecutionState   string          `json:"execution_state,omitempty"`
+	TaskProgress     float64         `json:"task_progress,omitempty"`
+	TaskPhase        string          `json:"task_phase,omitempty"`
+	TaskMessage      string          `json:"task_message,omitempty"`
 	AIReviewEligible bool            `json:"ai_review_eligible,omitempty"`
 	ReviewJobIDs     []string        `json:"review_job_ids,omitempty"`
 	ID               string          `json:"job_id"`
@@ -293,6 +297,10 @@ func albumProgress(tree []jobView) (string, string) {
 	}
 	switch {
 	case active != nil:
+
+		if active.ExecutionState == "running" && (active.TaskProgress > 0 || active.TaskMessage != "") {
+			return liveTaskProgress(active)
+		}
 		return labels[active.Stage], withUndownloaded(active.Message, labels[active.Stage])
 	case review != nil:
 		return "待核对", withUndownloaded(review.Message, "待核对")
@@ -425,6 +433,38 @@ func albumStageRank(stage string) int {
 		return 0
 	}
 }
+
+// liveTaskProgress projects the durable executor checkpoint that keeps a long
+// album fallback visibly alive. The workflow row is only advanced at stage
+// boundaries, so without this overlay a multi-track NetEase album can appear
+// queued for hours even while it is completing one track after another.
+func liveTaskProgress(job *jobView) (string, string) {
+	label := "流媒体处理中"
+	switch job.Stage {
+	case "fallback":
+		if job.TaskPhase == "netease_album" {
+			label = "网易云专辑处理中"
+		}
+	case "downloading":
+		label = "正在下载"
+	case "publishing", "validating":
+		label = "正在校验入库"
+	case "searching":
+		label = "正在检索"
+	case "requesting":
+		label = "正在获取"
+	}
+	if job.TaskProgress > 0 {
+		percent := strconv.FormatFloat(job.TaskProgress, 'f', 1, 64)
+		percent = strings.TrimSuffix(percent, ".0")
+		label += " " + percent + "%"
+	}
+	if message := strings.TrimSpace(job.TaskMessage); message != "" {
+		return label, label + "：" + userFacing(message)
+	}
+	return label, label
+}
+
 func withUndownloaded(message, fallback string) string {
 	message = userFacing(strings.TrimSpace(message))
 	if message == "" {

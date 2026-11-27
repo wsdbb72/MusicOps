@@ -88,7 +88,7 @@ type Config struct {
 }
 
 func DefaultConfig() Config {
-	return Config{Limits: map[string]int{"identify": 4, "publish": 1, "transcode": 1, "aux": 2, "download": 3}, ProgressInterval: 500 * time.Millisecond}
+	return Config{Limits: map[string]int{"identify": 4, "publish": 1, "transcode": 1, "aux": 4, "download": 3}, ProgressInterval: 500 * time.Millisecond}
 }
 
 // schedulerLanes is the exact set of queue lanes the coordinator runs. The

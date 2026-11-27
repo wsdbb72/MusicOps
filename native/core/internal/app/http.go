@@ -27,8 +27,8 @@ import (
 )
 
 const page = `<!doctype html>
-<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
-<meta name="color-scheme" content="light dark"><meta name="theme-color" content="#146b7a">
+<html lang="zh-CN" data-type="software"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark"><meta name="theme-color" content="#2457b8"><meta name="page-type" content="software"><meta name="site-kind" content="software">
 <title>MusicOps</title><link rel="icon" type="image/png" sizes="1024x1024" href="/brand-icon.png"><link rel="apple-touch-icon" sizes="1024x1024" href="/apple-touch-icon.png"><link rel="manifest" href="/app.webmanifest"><link rel="stylesheet" href="/app.css"></head>
 <body>
 <a class="skip" href="#main">跳到主要内容</a>
@@ -832,18 +832,26 @@ func (a *App) jobs(w http.ResponseWriter, r *http.Request) {
 			familyViews = markReleased(familyViews, map[string]bool{rootID: albums[rootID]})
 			summary := summarizeRootJobs(familyViews)
 			jobs[i].RootStatus = &summary
+			jobs[i].Stage = summary.Stage
 			jobs[i].ExecutionState = summary.ExecutionState
 			jobs[i].Progress = summary.Progress
 			jobs[i].Headline = summary.Headline
 			jobs[i].Message = summary.Message
 			jobs[i].ErrorClass = summary.ErrorClass
 			jobs[i].ReviewKind = summary.ReviewKind
+			jobs[i].Paused = summary.Paused
+			jobs[i].CancelRequested = summary.CancelRequested
 			jobs[i].Downloaded = summary.Downloaded
 			jobs[i].LibraryPublished = summary.LibraryPublished
+			jobs[i].UpdatedNS = summary.UpdatedNS
+			jobs[i].RetryAfterNS = summary.RetryAfterNS
 			if summary.Result != nil {
 				jobs[i].Result = summary.Result
 			}
 		}
+	}
+	if liveOnly || rootsOnly {
+		sortJobsForLiveView(jobs)
 	}
 	downloaded, published := false, false
 	for _, job := range jobs {
@@ -859,6 +867,40 @@ func (a *App) jobs(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// sortJobsForLiveView keeps the work an operator is waiting for at the top.
+// Root IDs and durable cursors are stable-key ordered, so a newly active
+// download could otherwise sit behind hundreds of older queued retries.
+func sortJobsForLiveView(jobs []jobView) {
+	priority := func(job jobView) int {
+		if job.ExecutionState == "running" {
+			return 0
+		}
+		switch job.Stage {
+		case "requesting", "downloading", "validating", "publishing", "notifying":
+			return 1
+		case "fallback":
+			return 2
+		case "searching", "identifying", "snapshotting", "metadata", "preparing":
+			return 3
+		case "needs_review":
+			return 4
+		case "failed":
+			return 5
+		default:
+			if job.ExecutionState == "queued" || job.ExecutionState == "paused" {
+				return 3
+			}
+			return 6
+		}
+	}
+	sort.SliceStable(jobs, func(i, j int) bool {
+		left, right := priority(jobs[i]), priority(jobs[j])
+		if left != right {
+			return left < right
+		}
+		return jobs[i].UpdatedNS > jobs[j].UpdatedNS
+	})
+}
 func (a *App) importArchive(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		Source string `json:"source"`

@@ -163,6 +163,21 @@ func TestClassifyJobCountsSeparatesWorkersFromRetryBacklog(t *testing.T) {
 	}
 }
 
+func TestLiveJobOrderingPutsActiveDownloadsFirst(t *testing.T) {
+	jobs := []jobView{
+		{ID: "queued-new", Stage: "searching", ExecutionState: "queued", UpdatedNS: 500},
+		{ID: "done-new", Stage: "completed", ExecutionState: "completed", UpdatedNS: 900},
+		{ID: "download-old", Stage: "downloading", ExecutionState: "running", UpdatedNS: 100},
+		{ID: "publish-old", Stage: "publishing", ExecutionState: "running", UpdatedNS: 90},
+	}
+	sortJobsForLiveView(jobs)
+	want := []string{"download-old", "publish-old", "queued-new", "done-new"}
+	for i, id := range want {
+		if jobs[i].ID != id {
+			t.Fatalf("order[%d]=%s want=%s; all=%+v", i, jobs[i].ID, id, jobs)
+		}
+	}
+}
 func TestJobsCountsOnlyIncludesLiveRuntimeState(t *testing.T) {
 	application := newApp(t)
 	recorder := getAuth(t, application, "/v1/jobs?counts=only")

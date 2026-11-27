@@ -43,6 +43,9 @@ type Engine struct {
 	life   sync.RWMutex
 	write  sync.Mutex
 	closed bool
+
+	changeMu       sync.Mutex
+	changeObserver ChangeObserver
 }
 
 func Open(directory string) (*Engine, error) {
@@ -120,6 +123,27 @@ func validKey(key []byte) bool {
 	return len(key) > 0 && len(key) <= 4096 && !bytes.HasPrefix(key, []byte("system/"))
 }
 
+// ChangeObserver receives committed key mutations before CompareAndSwap returns.
+// Slice values are borrowed for the duration of the call and must be treated as
+// read-only. Production uses this to invalidate derived summaries without
+// repeatedly scanning Pebble; observers must not call back into the engine.
+type ChangeObserver func(conditions []Condition, mutations []Mutation)
+
+// SetChangeObserver installs the process-wide committed-write observer. A
+// single observer is sufficient because all derived caches belong to the App
+// that owns this engine.
+func (e *Engine) SetChangeObserver(observer ChangeObserver) {
+	e.changeMu.Lock()
+	e.changeObserver = observer
+	e.changeMu.Unlock()
+}
+
+func (e *Engine) observer() ChangeObserver {
+	e.changeMu.Lock()
+	defer e.changeMu.Unlock()
+	return e.changeObserver
+}
+
 // CompareAndSwap commits the whole batch only if every current value matches.
 // Repositories own business receipts: progress uses sequence/fence deduplication,
 // while critical commands atomically store their response with their state.
@@ -145,15 +169,19 @@ func (e *Engine) CompareAndSwap(conditions []Condition, mutations []Mutation) (b
 		return false, ErrInvalidRequest
 	}
 	e.life.RLock()
-	defer e.life.RUnlock()
 	if e.closed {
+		e.life.RUnlock()
 		return false, ErrClosed
 	}
 	e.write.Lock()
-	defer e.write.Unlock()
+	unlock := func() {
+		e.write.Unlock()
+		e.life.RUnlock()
+	}
 	for _, condition := range conditions {
 		current, closer, err := e.db.Get(condition.Key)
 		if err != nil && !errors.Is(err, pebble.ErrNotFound) {
+			unlock()
 			return false, err
 		}
 		matches := errors.Is(err, pebble.ErrNotFound) && condition.Absent
@@ -162,6 +190,7 @@ func (e *Engine) CompareAndSwap(conditions []Condition, mutations []Mutation) (b
 			closer.Close()
 		}
 		if !matches {
+			unlock()
 			return false, nil
 		}
 	}
@@ -175,11 +204,18 @@ func (e *Engine) CompareAndSwap(conditions []Condition, mutations []Mutation) (b
 			err = batch.Set(mutation.Key, mutation.Value, nil)
 		}
 		if err != nil {
+			unlock()
 			return false, err
 		}
 	}
 	if err := batch.Commit(pebble.Sync); err != nil {
+		unlock()
 		return false, err
+	}
+	observer := e.observer()
+	unlock()
+	if observer != nil {
+		observer(conditions, mutations)
 	}
 	return true, nil
 }

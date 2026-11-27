@@ -409,6 +409,10 @@ func (a *App) workflowJobsSnapshot() ([]workflow.Job, error) {
 }
 
 func (a *App) jobCounts() (map[string]int, error) {
+	return a.jobCountRollup.load(a.now(), a.computeJobCounts)
+}
+
+func (a *App) computeJobCounts() (map[string]int, error) {
 	jobs, err := a.workflowJobsSnapshot()
 	if err != nil {
 		return nil, err

@@ -460,7 +460,7 @@ const appJS = `(function () {
         } catch (err) { /* The next refresh retries a transient connection failure. */ }
       }
       scheduleQueueRefresh();
-    }, 3000);
+    }, (pipelinePaused || (activeCount === 0 && checkCount(globalJobCounts || {}, "queued") === 0)) ? 10000 : 3000);
   }
   // The composer stays out of the way until someone needs to import a list.
   function newTaskCard() {

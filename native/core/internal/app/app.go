@@ -111,6 +111,7 @@ type App struct {
 	autoReviewMu          sync.Mutex
 	autoReviewRetryAt     map[string]time.Time
 	autoReviewRuntime     autoReviewRuntime
+	jobCountRollup        jobCountCache
 	// lastTokenRead bounds the background balance reads to one per site per
 	// minute. The ledger's read hold only exists for failures; a successful
 	// read leaves no trace there, and a 30-second ticker would otherwise read
@@ -201,6 +202,7 @@ func open(dir, backup, password string, logger StartupLogger) (*App, error) {
 	}
 	progress("native_store_ready", "Pebble opened and schema checked")
 	app := &App{Dir: dir, Backup: backup, password: password, engine: engine, tasks: taskrepo.New(engine), searcher: &trackersearch.Client{ReadInterval: 2 * time.Second}, now: time.Now, secrets: map[string]string{}, autoReviewRetryAt: map[string]time.Time{}, libraryAutomation: &libraryAutomationState{}}
+	engine.SetChangeObserver(app.observeNativeChanges)
 	progress("outbound_proxy", "loading saved proxy before the scheduler starts")
 	if proxyErr := app.restoreOutboundProxy(); proxyErr != nil {
 		progress("outbound_proxy", "saved proxy could not be applied; local services remain available")

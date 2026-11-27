@@ -220,3 +220,33 @@ func TestCrashRecoveryFromSyncedWAL(t *testing.T) {
 		t.Fatal("acknowledged write lost after crash")
 	}
 }
+
+func TestChangeObserverRunsOnlyAfterCommittedBatch(t *testing.T) {
+	e := openTest(t)
+	var calls int
+	e.SetChangeObserver(func(conditions []Condition, mutations []Mutation) {
+		calls++
+		if len(conditions) != 0 || len(mutations) != 1 || string(mutations[0].Key) != "record/observed" {
+			t.Errorf("observer condition/mutation mismatch: %+v %+v", conditions, mutations)
+		}
+	})
+	if ok, err := e.CompareAndSwap(nil, []Mutation{{Key: []byte("record/observed"), Value: []byte("one")}}); err != nil || !ok {
+		t.Fatal(ok, err)
+	}
+	if calls != 1 {
+		t.Fatalf("observer calls=%d", calls)
+	}
+	condition := []Condition{{Key: []byte("record/observed"), Value: []byte("wrong")}}
+	if ok, err := e.CompareAndSwap(condition, []Mutation{{Key: []byte("record/observed"), Value: []byte("two")}}); err != nil || ok {
+		t.Fatal(ok, err)
+	}
+	if calls != 1 {
+		t.Fatalf("failed compare notified observer: calls=%d", calls)
+	}
+	if _, err := e.CompareAndSwap(nil, []Mutation{{Key: []byte("system/schema"), Value: []byte("bad")}}); err == nil {
+		t.Fatal("reserved key accepted")
+	}
+	if calls != 1 {
+		t.Fatalf("rejected batch notified observer: calls=%d", calls)
+	}
+}

@@ -52,7 +52,7 @@ func TestShellHasLandmarksAndGroupedActions(t *testing.T) {
 	for _, want := range []string{
 		`<a class="skip" href="#main">`,
 		`<main id="main" tabindex="-1">`,
-		`<div class="view-head"><h1>`,
+		`<div class="view-head">`, `id="view-subtitle"`, `id="view-live"`, `class="app-bar-inner"`,
 		`<header class="app-bar">`,
 		`<nav id="nav" aria-label="功能">`,
 		`<div id="detail-actions">`,
@@ -125,7 +125,7 @@ func TestTorrentControlsFollowTheJobStage(t *testing.T) {
 func TestTokenReviewUIReportsHeldAndAutomaticOutcomes(t *testing.T) {
 	for _, want := range []string{
 		`result.held || result.stage === "needs_review"`,
-		`余额对账中`,
+		`等待状态对账`,
 		`已自动切换流媒体回退，未重复使用令牌。`,
 		`没有可安全执行的后续路径，已自动结束。`,
 	} {
@@ -138,15 +138,19 @@ func TestTokenReviewUIReportsHeldAndAutomaticOutcomes(t *testing.T) {
 func TestTaskQueueExposesBatchSelectionAndRetryControls(t *testing.T) {
 	for _, want := range []string{
 		`html += batchBar();`,
-		`data-batch-select="all"`,
-		`data-batch-select="retryable"`,
-		`data-batch-select="none"`,
+		`data-batch-select="all">全选已显示`,
+		`data-batch-select="retryable">选择可处理项`,
+		`data-batch-select="none" class="quiet">清空`,
 		`data-batch-action="resume">批量继续`,
 		`data-batch-action="retry">批量重试`,
 		`function setBatchSelection(mode)`,
 		`job.stage === "needs_review" || job.stage === "failed"`,
-		`view === "review") ? '<label><input type="checkbox" data-batch=`,
-		`id="review-ai-all">AI 核对全部</button></p>' + batchBar()`,
+		`class="task-select"><input type="checkbox" data-batch=`,
+		`id="review-ai-all"`,
+		`data-task-filter="`,
+		`function taskFilterRows(rows)`,
+		`function pipelineStages()`,
+		`if (activeCount <= 0) return;`,
 	} {
 		if !strings.Contains(appJS, want) {
 			t.Fatal("missing queue batch behavior:", want)
@@ -154,6 +158,25 @@ func TestTaskQueueExposesBatchSelectionAndRetryControls(t *testing.T) {
 	}
 	if !strings.Contains(appCSS, `.batch button[data-batch-action=resume]`) || !strings.Contains(appCSS, `.batch button[data-batch-select]`) {
 		t.Fatal("batch controls need visible action styles")
+	}
+	if !strings.Contains(appCSS, `.task-item.is-active`) || !strings.Contains(appCSS, `.pipeline-track`) {
+		t.Fatal("the live task list and pipeline need visible states")
+	}
+}
+
+func TestTaskComposerStaysCollapsedAndAIReviewSettlesNoMatch(t *testing.T) {
+	for _, want := range []string{
+		`id="task-composer"`,
+		`(composerOpen ? ' open' : '')`,
+		`result.code === "AI_NO_CONFIRMED_MATCH"`,
+		`body:JSON.stringify({action:"skip"})`,
+		`AI 没有确认安全候选，已自动结束本轮`,
+		`已载入 `,
+		`data-task-filter=`,
+	} {
+		if !strings.Contains(appJS, want) {
+			t.Fatal("missing automatic review or task composer behavior:", want)
+		}
 	}
 }
 

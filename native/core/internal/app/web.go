@@ -2,6 +2,7 @@ package app
 
 const appJS = `(function () {
   var titles = {tasks: "任务", queue: "队列", review: "核对", search: "搜索", sites: "站点", settings: "设置", library: "库", logs: "日志"};
+  var subtitles = {tasks: "从歌单识别、检索、下载到刮削入库，一处查看", queue: "正在运行和等待执行的工作", review: "自动核对未收敛的项目", search: "按目录和站点证据发起一次检索", sites: "全局站点访问边界", settings: "连接、下载、代理与维护策略", library: "整库刮削、去重、专辑补全与音质升级", logs: "任务、事件和运行记录"};
   var active = {preparing: true, identifying: true, snapshotting: true, metadata: true, searching: true, requesting: true, downloading: true, fallback: true, validating: true, publishing: true, notifying: true};
   var view = "tasks";
   var jobs = [];
@@ -42,11 +43,17 @@ const appJS = `(function () {
   var logRows = [];
   var selectedJobs = {};
   var loading = false;
+  var lastLoadedAt = 0;
+  var taskFilter = "all";
+  var composerOpen = false;
   var status = document.getElementById("status");
   var list = document.getElementById("list");
   var note = document.getElementById("note");
   var detail = document.getElementById("detail");
   var heading = document.querySelector("h1");
+  var subtitle = document.getElementById("view-subtitle");
+  var viewLive = document.getElementById("view-live");
+  var viewLiveLabel = document.getElementById("view-live-label");
 
   // One feedback channel for every action: kind ok/fail/review/info, and the
   // server's code when the server refused, instead of a generic failure.
@@ -101,28 +108,89 @@ const appJS = `(function () {
     return rows;
   }
   function stageLabel(stage) {
-    var names = {identifying: "识别", searching: "检索", requesting: "请求", downloading: "下载", fallback: "回退", validating: "校验", publishing: "入库", needs_review: "待核对", done: "完成", failed: "失败"};
+    var names = {preparing: "准备", identifying: "识别", snapshotting: "读取身份", metadata: "元数据", searching: "检索", requesting: "请求", downloading: "下载", fallback: "流媒体回退", validating: "校验", publishing: "入库", notifying: "通知音乐服务", needs_review: "待核对", skipped: "已结束", completed: "已完成", cancelled: "已取消", failed: "失败"};
     return names[stage] || stage || "";
   }
   function queueRows() { return jobs.filter(function (job) { return active[job.stage]; }); }
+  function taskBucket(job) {
+    if (!job) return "done";
+    if (job.stage === "needs_review" || job.progress === "待核对") return "review";
+    if (job.stage === "failed" || job.execution_state === "failed" || job.progress === "未能继续") return "failed";
+    if (active[job.stage] || job.execution_state === "running" || job.execution_state === "queued" || retryPending(job)) return "active";
+    return "done";
+  }
   function taskCounts() {
     var running = 0, queued = 0, review = 0, failed = 0, finished = 0;
     roots().forEach(function (job) {
-      if (active[job.stage]) running++;
-      else if (job.stage === "needs_review") review++;
-      else if (job.stage === "failed") failed++;
+      var bucket = taskBucket(job);
+      if (bucket === "active") {
+        running++;
+        if (job.execution_state !== "running") queued++;
+      } else if (bucket === "review") review++;
+      else if (bucket === "failed") failed++;
       else finished++;
     });
-    return {running: running, queued: queued, review: review, failed: failed, finished: finished};
+    return {total: roots().length, running: running, executing: running - queued, queued: queued, review: review, failed: failed, finished: finished};
+  }
+  function taskFilterRows(rows) {
+    if (view !== "tasks" || taskFilter === "all") return rows;
+    return rows.filter(function (job) { return taskBucket(job) === taskFilter; });
+  }
+  function displayNumber(value) { return Number(value || 0).toLocaleString("zh-CN"); }
+  function updateLiveChrome() {
+    var visible = view === "tasks" || view === "queue" || view === "review";
+    if (viewLive) viewLive.hidden = !visible;
+    if (!viewLive) return;
+    viewLive.className = "view-live" + (pipelinePaused ? " paused" : (activeCount > 0 ? " running" : " idle"));
+    if (viewLiveLabel) {
+      viewLiveLabel.textContent = pipelinePaused ? "后台已暂停" : (activeCount > 0 ? displayNumber(activeCount) + " 项运行中" : "后台待命");
+    }
+  }
+  function pipelineStages() {
+    var groups = [
+      {label:"识别", stages:{preparing:true, identifying:true, snapshotting:true, metadata:true}},
+      {label:"检索", stages:{searching:true}},
+      {label:"回退", stages:{fallback:true}},
+      {label:"请求", stages:{requesting:true}},
+      {label:"下载", stages:{downloading:true}},
+      {label:"校验", stages:{validating:true}},
+      {label:"入库", stages:{publishing:true, notifying:true}}
+    ];
+    var seen = {}, counts = groups.map(function () { return 0; });
+    taskRows().forEach(function (job) {
+      var id = job.root_id || job.job_id;
+      if (seen[id] || !active[job.stage]) return;
+      seen[id] = true;
+      for (var i = 0; i < groups.length; i++) {
+        if (groups[i].stages[job.stage]) { counts[i]++; break; }
+      }
+    });
+    return '<ol class="pipeline-track" aria-label="处理阶段">' + groups.map(function (group, index) {
+      var current = counts[index] > 0 ? " is-active" : "";
+      return '<li class="pipeline-stage' + current + '"><span class="pipeline-index">' + String(index + 1).padStart(2, "0") + '</span><span class="pipeline-name">' + group.label + '</span><span class="pipeline-count">' + (counts[index] ? displayNumber(counts[index]) : "—") + '</span></li>';
+    }).join("") + '</ol>';
+  }
+  function checkCount(counts, name) { return counts && counts[name] != null ? counts[name] : 0; }
+  function taskSort(left, right) {
+    var order = {active:0, review:1, failed:2, done:3};
+    var leftOrder = order[taskBucket(left)];
+    var rightOrder = order[taskBucket(right)];
+    var byState = (leftOrder == null ? 3 : leftOrder) - (rightOrder == null ? 3 : rightOrder);
+    if (byState) return byState;
+    var running = (right.execution_state === "running" ? 1 : 0) - (left.execution_state === "running" ? 1 : 0);
+    if (running) return running;
+    return Number(right.updated_ns || 0) - Number(left.updated_ns || 0);
   }
   function visible() {
-    if (view === "tasks") return taskRows();
-    if (view === "queue") return queueRows();
-    if (view === "review") return jobs.filter(function (job) { return job.stage === "needs_review"; });
-    return [];
+    var rows = [];
+    if (view === "tasks") rows = taskRows();
+    else if (view === "queue") rows = queueRows();
+    else if (view === "review") rows = jobs.filter(function (job) { return job.stage === "needs_review"; });
+    return rows.slice().sort(taskSort);
   }
   function setBusy(next) {
     loading = next;
+    document.getElementById("main").setAttribute("aria-busy", next ? "true" : "false");
     document.querySelectorAll("#nav button[data-view], #back").forEach(function (button) { button.disabled = next; });
   }
   function executionLabel(state, paused, retryAfterNS) {
@@ -146,7 +214,71 @@ const appJS = `(function () {
     }
     return [(job.root_status && job.root_status.job_id) || job.job_id].filter(Boolean);
   }
-  async function reviewAllAI() {
+  function operationsPanel(counts) {
+    var running = displayNumber(activeCount);
+    var stateClass = pipelinePaused ? "paused" : (activeCount > 0 ? "running" : "idle");
+    var stateTitle = pipelinePaused ? "后台执行已暂停" : (activeCount > 0 ? "流水线正在运行" : "后台待命");
+    var stateCopy = pipelinePaused ? "未开始的任务会保留在队列中，继续后可接着处理。" : (activeCount > 0 ? "任务会依次经过识别、检索、回退、下载、校验和入库。" : "导入歌单或启动整库维护后，这里会显示实时进度。");
+    return '<section class="ops-overview ' + stateClass + '" id="ops-overview" aria-label="运行总览">' +
+      '<div class="ops-main"><div class="ops-state"><span class="live-dot" aria-hidden="true"></span><span>' + (pipelinePaused ? "已暂停" : (activeCount > 0 ? "运行中" : "待命")) + '</span></div>' +
+      '<div class="ops-copy"><h2 id="ops-live-title">' + stateTitle + '</h2><p id="ops-live-copy">' + stateCopy + '</p></div>' +
+      '<div class="ops-actions"><button type="button" id="pipeline-pause"' + (pipelinePaused ? " disabled" : "") + '>暂停调度</button><button type="button" id="pipeline-resume" class="primary"' + (!pipelinePaused ? " disabled" : "") + '>继续调度</button></div></div>' +
+      '<div class="ops-metrics">' +
+      '<div><span class="metric-value" id="stat-active">' + running + '</span><span class="metric-label">正在执行</span></div>' +
+      '<div><span class="metric-value" id="stat-queued">' + displayNumber(checkCount(counts, "queued")) + '</span><span class="metric-label">等待执行</span></div>' +
+      '<div><span class="metric-value" id="stat-review">' + displayNumber(checkCount(counts, "review")) + '</span><span class="metric-label">待核对</span></div>' +
+      '<div><span class="metric-value" id="stat-failed">' + displayNumber(checkCount(counts, "failed")) + '</span><span class="metric-label">需处理</span></div>' +
+      '<div><span class="metric-value" id="stat-finished">' + displayNumber(checkCount(counts, "finished")) + '</span><span class="metric-label">已完成</span></div>' +
+      '</div>' + pipelineStages() +
+      '<p class="ops-foot" id="pipeline-status">调度' + (pipelinePaused ? "已暂停" : "已开启") + ' · ' + autoReviewLabel() + ' · <span id="loaded-at">' + loadedAtLabel() + '</span></p></section>';
+  }
+  function filterBar(counts, rows, shown) {
+    var modes = [
+      {id:"all", label:"全部", count:checkCount(counts, "total")},
+      {id:"active", label:"执行中", count:checkCount(counts, "running")},
+      {id:"review", label:"待核对", count:checkCount(counts, "review")},
+      {id:"failed", label:"失败", count:checkCount(counts, "failed")},
+      {id:"done", label:"已完成", count:checkCount(counts, "finished")}
+    ];
+    return '<div class="task-filter-bar"><div class="task-filters" role="group" aria-label="筛选任务">' + modes.map(function (mode) {
+      var pressed = taskFilter === mode.id ? "true" : "false";
+      return '<button type="button" data-task-filter="' + mode.id + '" aria-pressed="' + pressed + '">' + mode.label + '<span>' + displayNumber(mode.count) + '</span></button>';
+    }).join("") + '</div><span class="loaded-count">显示 ' + displayNumber(shown.length) + ' · 已载入 ' + displayNumber(rows.length) + ' 条' + (jobsNext ? " · 可继续加载" : "") + '</span></div>';
+  }
+  function loadedAtLabel() {
+    if (!lastLoadedAt) return "正在读取";
+    var seconds = Math.max(0, Math.round((Date.now() - lastLoadedAt) / 1000));
+    if (seconds < 8) return "刚刚更新";
+    if (seconds < 60) return seconds + " 秒前更新";
+    return Math.floor(seconds / 60) + " 分钟前更新";
+  }
+  function formatTaskTime(value) {
+    var ns = Number(value || 0);
+    if (!ns) return "";
+    var date = new Date(ns / 1000000);
+    if (isNaN(date.getTime())) return "";
+    return date.toLocaleString([], {month:"2-digit", day:"2-digit", hour:"2-digit", minute:"2-digit"});
+  }
+  function emptyResults(rows) {
+    var text = taskFilter === "all" ? "还没有任务。" : "当前筛选下没有任务。";
+    return '<div class="empty-state"><h2>' + text + '</h2><p>' + (taskFilter === "all" ? "导入歌单后，任务会自动进入这条流水线。" : "切换到全部任务查看其他状态。") + '</p>' + (taskFilter === "all" ? "" : '<button type="button" data-task-filter="all">查看全部任务</button>') + '</div>';
+  }
+  function reviewSummary(counts) {
+    var count = checkCount(counts, "review");
+    return '<section class="review-summary"><div><span class="section-kicker">自动核对</span><h2>' + (count ? displayNumber(count) + ' 项等待判断' : '没有待核对任务') + '</h2><p>' + autoReviewLabel() + '。单项可在任务详情里处理；批量核对会逐项提交并显示最终去向。</p></div><button type="button" id="review-ai-all" class="primary"' + (count ? "" : " disabled") + '>AI 核对全部</button></section>';
+  }
+  function taskCard(job) {
+    var checked = selectedJobs[job.job_id] ? " checked" : "";
+    var bucket = taskBucket(job);
+    var state = executionLabel(job.execution_state, job.paused, retryAt(job));
+    var stage = stageLabel(job.stage);
+    if (stage === job.progress) stage = "";
+    var selectable = bucket !== "done";
+    var control = selectable ? '<label class="task-select"><input type="checkbox" data-batch="' + escapeText(job.job_id) + '"' + checked + ' aria-label="选择 ' + escapeText(job.label || "任务") + '"><span aria-hidden="true"></span></label>' : '<span class="task-select placeholder" aria-hidden="true"></span>';
+    return '<article class="task-item is-' + bucket + '">' + control +
+      '<button type="button" class="card-link" data-job="' + escapeText(job.job_id) + '"><span class="task-main"><span class="task-top"><span class="task-title">' + escapeText(job.label || "未命名") + '</span><span class="task-status">' + pill(job) + (state && state !== job.progress ? '<span class="task-exec">' + escapeText(state) + '</span>' : '') + '</span></span>' +
+      '<span class="task-summary">' + escapeText(job.headline || "等待下一步") + '</span><span class="task-foot"><span>' + escapeText(stage) + '</span><span>' + escapeText(formatTaskTime(job.updated_ns)) + '</span></span></span><span class="task-caret" aria-hidden="true">›</span></button></article>';
+  }  async function reviewAllAI() {
     if (loading) return;
     setBusy(true);
     var ids = new Set(), checked = 0, submitted = 0, settled = 0, held = 0, failed = 0, already = 0, failures = {};
@@ -154,36 +286,60 @@ const appJS = `(function () {
       var cursor = "";
       setStatus("info", "正在读取全部待核对任务");
       do {
-        var response = await fetch("/v1/jobs?review=1&after=" + encodeURIComponent(cursor));
+        var response = await fetch("/v1/jobs?review=1&after=" + encodeURIComponent(cursor), {headers: {Accept: "application/json"}});
         if (!response.ok) throw new Error("读取待核对任务失败");
         var page = await response.json();
         (page.jobs || []).forEach(function(job) { reviewJobIDs(job).forEach(function(id) { ids.add(id); }); });
         cursor = page.next || "";
       } while (cursor);
+      if (!ids.size) {
+        await reloadThen("ok", "没有待核对任务。");
+        return;
+      }
+      var index = 0;
       for (var id of ids) {
-        setStatus("info", "AI 核对 " + (checked + failed + already + 1) + " / " + ids.size);
-        var response = await fetch("/v1/jobs/" + encodeURIComponent(id) + "/review", {method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify({action:"ai"})});
-        var result = await response.json();
+        index++;
+        setStatus("info", "AI 核对中 " + index + " / " + ids.size);
+        var aiResponse = await fetch("/v1/jobs/" + encodeURIComponent(id) + "/review", {method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify({action:"ai"})});
+        var result = await aiResponse.json();
         if (result.code === "AI_UNAVAILABLE") throw new Error(result.message || "AI 未启用");
         if (result.already_processed) { already++; continue; }
-        if (!response.ok && result.code !== "AI_NO_CONFIRMED_MATCH") {
-          failed++;
-          var reason = result.code || ("HTTP " + response.status);
-          failures[reason] = (failures[reason] || 0) + 1;
-        } else checked++;
-        if (response.ok && result.ok) {
-          if (result.held || result.stage === "needs_review") held++;
-          else if (result.stage === "skipped") settled++;
-          else submitted++;
+        if (!aiResponse.ok && result.code === "AI_NO_CONFIRMED_MATCH") {
+          checked++;
+          var skipResponse = await fetch("/v1/jobs/" + encodeURIComponent(id) + "/review", {method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify({action:"skip"})});
+          var skipResult = await skipResponse.json();
+          if (skipResponse.ok && skipResult.ok) {
+            if (skipResult.held || skipResult.stage === "needs_review") held++;
+            else if (skipResult.stage === "skipped") settled++;
+            else submitted++;
+          } else {
+            failed++;
+            var skipReason = skipResult.code || ("HTTP " + skipResponse.status);
+            failures[skipReason] = (failures[skipReason] || 0) + 1;
+          }
+          continue;
         }
+        if (!aiResponse.ok || !result.ok) {
+          failed++;
+          var reason = result.code || ("HTTP " + aiResponse.status);
+          failures[reason] = (failures[reason] || 0) + 1;
+          continue;
+        }
+        checked++;
+        if (result.held || result.stage === "needs_review") held++;
+        else if (result.stage === "skipped") settled++;
+        else submitted++;
       }
-      await reloadThen("ok", "AI 已核对 " + checked + " 项，已提交推进 " + submitted + " 项，自动结束 " + settled + " 项，余额对账中 " + held + " 项，调用或提交失败 " + failed + " 项，已处理 " + already + " 项；提交项会继续自动复核最终状态。" + Object.keys(failures).map(function(code) { return code + " " + failures[code] + " 项"; }).join(" · "));
+      var details = Object.keys(failures).map(function(code) { return code + " " + failures[code] + " 项"; }).join(" · ");
+      await reloadThen(failed ? "review" : "ok", "核对完成：检查 " + checked + " 项，继续处理 " + submitted + " 项，自动结束 " + settled + " 项，等待状态对账 " + held + " 项，失败 " + failed + " 项，此前已处理 " + already + " 项。" + (details ? " " + details : ""));
     } catch(err) {
-      setStatus("fail", err.message + "。已核对 " + checked + " 项，已提交推进 " + submitted + " 项。");
+      setStatus("fail", err.message + "。已检查 " + checked + " 项，继续处理 " + submitted + " 项。");
     } finally { setBusy(false); }
   }
   function render() {
     heading.textContent = titles[view];
+    if (subtitle) subtitle.textContent = subtitles[view] || "";
+    updateLiveChrome();
     document.querySelectorAll("#nav button[data-view]").forEach(function (button) {
       button.setAttribute("aria-current", button.getAttribute("data-view") === view ? "page" : "false");
     });
@@ -197,49 +353,61 @@ const appJS = `(function () {
     if (view === "logs") { renderLogs(); return; }
     var rows = visible();
     var counts = globalJobCounts || taskCounts();
-    if (!rows.length) {
-      if (view === "tasks") {
-        list.innerHTML = newTaskCard() + pipelineBar();
-        bindPipeline();
-        bindPlaylists();
-        setStatus("", "还没有任务。");
-      } else if (view === "queue") {
-        list.innerHTML = "";
-        setStatus("", "队列为空：没有正在排队或执行的任务。待核对和已完成的任务在「任务」里。");
-        scheduleQueueRefresh();
-      } else {
-        list.innerHTML = "";
-        setStatus("", "没有待核对的任务。");
-      }
-      return;
-    }
+    var shown = taskFilterRows(rows);
     setStatus("", "");
-    var html = '<p class="meta" id="pipeline-status">后台调度 ' + (pipelinePaused ? "已暂停" : "已开启") + " · 正在执行 " + activeCount + " 项 · " + autoReviewLabel() + "</p>";
+    var html = "";
     if (view === "tasks") {
-      html += '<p class="meta" id="job-counts">共 ' + counts.total + ' 个任务：执行中 ' + counts.running + ' · 待执行 ' + (counts.queued || 0) + ' · 待核对 ' + counts.review + ' · 失败 ' + (counts.failed || 0) + ' · 已完成 ' + counts.finished + '。点任务查看详情。</p>';
-      html += newTaskCard() + pipelineBar() + batchBar();
+      html += operationsPanel(counts) + newTaskCard() + filterBar(counts, rows, shown);
     } else if (view === "queue") {
-      html += '<p class="meta">队列只显示正在识别、检索、下载、校验或入库的任务，每 3 秒刷新。待核对的任务在「任务」里处理。</p>';
-      html += batchBar();
+      html += operationsPanel(counts);
+    } else {
+      html += reviewSummary(counts);
     }
-    if (view === "review") html += '<p><button type="button" id="review-ai-all">AI 核对全部</button></p>' + batchBar();
-    html += '<div class="cards">';
-    rows.forEach(function (job) {
-      var checked = selectedJobs[job.job_id] ? " checked" : "";
-      var box = (view === "tasks" || view === "queue" || view === "review") ? '<label><input type="checkbox" data-batch="' + escapeText(job.job_id) + '"' + checked + '> 选择</label>' : "";
-      var state = executionLabel(job.execution_state, job.paused, retryAt(job));
-      var stage = (state ? " · " + escapeText(state) : "") + (view === "queue" ? ' · ' + escapeText(stageLabel(job.stage)) : "");
-      html += '<article>' + box + '<button type="button" class="card-link" data-job="' + escapeText(job.job_id) + '"><h2>' + escapeText(job.label || "未命名") + '</h2><p class="meta">' + pill(job) + stage + '</p><p>' + escapeText(job.headline || "") + "</p></button></article>";
-    });
-    if ((view === "review" || view === "tasks") && jobsNext) html += '<p><button type="button" id="review-more">加载更多</button></p>';
-    list.innerHTML = html + "</div>";
-    if (view === "tasks") { bindPipeline(); bindPlaylists(); }
+    html += batchBar();
+    if (shown.length) {
+      html += '<section class="task-list" aria-label="' + escapeText(titles[view]) + '列表">' + shown.map(taskCard).join("") + '</section>';
+    } else {
+      html += emptyResults(rows);
+    }
+    if ((view === "review" || view === "tasks") && jobsNext) html += '<div class="pagination"><button type="button" id="review-more">加载更多任务</button><span>当前已载入 ' + displayNumber(rows.length) + ' 条</span></div>';
+    list.innerHTML = html;
+    if (view === "tasks" || view === "queue") bindPipeline();
+    if (view === "tasks") bindPlaylists();
     var aiAll = document.getElementById("review-ai-all");
     if (aiAll) aiAll.addEventListener("click", reviewAllAI);
     scheduleQueueRefresh();
   }
-  // The queue is a live view: without a timer it would show a snapshot and
-  // look frozen. Tasks does not poll, so reading a long list is not disturbed.
+  function updateOpsState(body) {
+    var counts = body && body.counts ? body.counts : {};
+    globalJobCounts = counts;
+    activeCount = Number(body && body.active_count || 0);
+    pipelinePaused = !!(body && body.pipeline_paused);
+    autoReviewStatus = (body && body.auto_review) || autoReviewStatus;
+    var values = {active:activeCount, queued:checkCount(counts, "queued"), review:checkCount(counts, "review"), failed:checkCount(counts, "failed"), finished:checkCount(counts, "finished")};
+    Object.keys(values).forEach(function (name) {
+      var node = document.getElementById("stat-" + name);
+      if (node) node.textContent = displayNumber(values[name]);
+    });
+    var filterCounts = {all:checkCount(counts, "total"), active:checkCount(counts, "running"), review:checkCount(counts, "review"), failed:checkCount(counts, "failed"), done:checkCount(counts, "finished")};
+    document.querySelectorAll("button[data-task-filter]").forEach(function (button) {
+      var badge = button.querySelector("span");
+      var value = filterCounts[button.getAttribute("data-task-filter")];
+      if (badge && value != null) badge.textContent = displayNumber(value);
+    });
+    var statusLine = document.getElementById("pipeline-status");
+    if (statusLine) statusLine.innerHTML = "调度" + (pipelinePaused ? "已暂停" : "已开启") + " · " + autoReviewLabel() + " · <span id=\"loaded-at\">" + loadedAtLabel() + "</span>";
+    var pause = document.getElementById("pipeline-pause");
+    if (pause) pause.disabled = pipelinePaused;
+    var resume = document.getElementById("pipeline-resume");
+    if (resume) resume.disabled = !pipelinePaused;
+    var title = document.getElementById("ops-live-title");
+    if (title) title.textContent = pipelinePaused ? "后台执行已暂停" : (activeCount > 0 ? "流水线正在运行" : "后台待命");
+    var copy = document.getElementById("ops-live-copy");
+    if (copy) copy.textContent = pipelinePaused ? "未开始的任务会保留在队列中，继续后可接着处理。" : (activeCount > 0 ? "任务会依次经过识别、检索、回退、下载、校验和入库。" : "导入歌单或启动整库维护后，这里会显示实时进度。");
+    updateLiveChrome();
+  }
+  // The queue is a live view: counts refresh without disturbing a collapsed
+  // composer, while the full queue refreshes on the same cadence.
   var queueTimer = null;
   function scheduleQueueRefresh() {
     if (queueTimer) { clearTimeout(queueTimer); queueTimer = null; }
@@ -249,33 +417,19 @@ const appJS = `(function () {
         await load(true);
       } else if (view === "tasks" && !loading && detail.hidden) {
         try {
-          var response = await fetch("/v1/jobs?counts=only");
+          var response = await fetch("/v1/jobs?counts=only", {headers: {Accept: "application/json"}});
           if (response.ok && view === "tasks") {
-            var body = await response.json();
-            var counts = body.counts;
-            var label = document.getElementById("job-counts");
-            if (counts && label) {
-              globalJobCounts = counts;
-              activeCount = body.active_count || 0;
-              pipelinePaused = !!body.pipeline_paused;
-              autoReviewStatus = body.auto_review || autoReviewStatus;
-              label.textContent = "共 " + counts.total + " 个任务，执行中 " + counts.running + "，待执行 " + (counts.queued || 0) + "，待核对 " + counts.review + "，失败 " + (counts.failed || 0) + "，已完成 " + counts.finished + "。点任务查看详情。";
-              var pipelineStatus = document.getElementById("pipeline-status");
-              if (pipelineStatus) pipelineStatus.textContent = "后台调度 " + (pipelinePaused ? "已暂停" : "已开启") + " · 正在执行 " + activeCount + " 项 · " + autoReviewLabel();
-            }
+            updateOpsState(await response.json());
+            if (activeCount > 0 && Date.now() - lastLoadedAt > 4000) await load(true);
           }
         } catch (err) { /* The next refresh retries a transient connection failure. */ }
       }
       scheduleQueueRefresh();
     }, 3000);
   }
-  // newTaskCard is the "新建任务" entry: the playlist forms used to hide in
-  // the settings page, which is not where anyone looks for a new task.
+  // The composer stays out of the way until someone needs to import a list.
   function newTaskCard() {
-    return '<article><h2>新建任务</h2><p class="meta">歌单入库和歌单订阅都在这里：拉取公开歌单后勾选"创建入库任务"，任务会出现在下面的列表里，从识别阶段开始，不会立刻下载。</p></article>' + playlistsCard();
-  }
-  function pipelineBar() {
-    return '<p><button type="button" id="pipeline-pause">暂停全部后台</button> <button type="button" id="pipeline-resume">继续后台</button></p>';
+    return '<details class="task-composer" id="task-composer"' + (composerOpen ? ' open' : '') + '><summary><span class="composer-mark" aria-hidden="true"></span><span class="composer-copy"><strong>导入歌单</strong><small>粘贴平台链接、M3U 或表格；可同时创建整专补全任务</small></span><span class="composer-toggle" id="composer-toggle-label">' + (composerOpen ? "收起" : "展开") + '</span></summary><div class="composer-body">' + playlistsCard() + '</div></details>';
   }
   function bindPipeline() {
     var pause = document.getElementById("pipeline-pause");
@@ -289,7 +443,7 @@ const appJS = `(function () {
     return count;
   }
   function updateBatchCount() {
-    var bar = document.querySelector(".batch > span");
+    var bar = document.querySelector(".batch-count");
     if (bar) bar.textContent = "已选 " + selectedCount() + " 个";
   }
   function setBatchSelection(mode) {
@@ -308,14 +462,14 @@ const appJS = `(function () {
   }
   function batchBar() {
     var count = selectedCount();
-    return '<div class="batch"><span>已选 ' + count + ' 个</span>' +
-      '<button type="button" data-batch-select="all">全选当前页</button>' +
-      '<button type="button" data-batch-select="retryable">选择可重试项</button>' +
-      '<button type="button" data-batch-select="none" class="quiet">清空</button>' +
-      '<button type="button" data-batch-action="resume">批量继续</button>' +
+    return '<div class="batch" aria-label="批量操作"><span class="batch-count">已选 ' + count + ' 个</span>' +
+      '<div class="batch-selection"><button type="button" data-batch-select="all">全选已显示</button>' +
+      '<button type="button" data-batch-select="retryable">选择可处理项</button>' +
+      '<button type="button" data-batch-select="none" class="quiet">清空</button></div>' +
+      '<div class="batch-actions"><button type="button" data-batch-action="resume">批量继续</button>' +
       '<button type="button" data-batch-action="pause">批量暂停</button>' +
       '<button type="button" data-batch-action="retry">批量重试</button>' +
-      '<button type="button" data-batch-action="cancel" class="danger">批量取消</button></div>';
+      '<button type="button" data-batch-action="cancel" class="danger">批量取消</button></div></div>';
   }
   async function batchAction(action) {
     var selectedRoots = Object.keys(selectedJobs).filter(function (id) { return selectedJobs[id]; });
@@ -661,39 +815,21 @@ const appJS = `(function () {
       '<p id="roon-result" class="meta"></p><div id="roon-zones"></div></article>';
   }
   function playlistsCard() {
-    var rows = playlistRows.map(function (row) {
-      return '<p class="meta">' + escapeText((row.name || row.id) + "（" + row.track_count + " 首）") + (row.error ? " · " + escapeText(row.error) : "") + '</p>';
+    var saved = playlistRows.map(function (row) {
+      return '<div class="saved-playlist"><div><strong>' + escapeText(row.name || row.id) + '</strong><span>' + displayNumber(row.track_count) + ' 首' + (row.error ? ' · ' + escapeText(row.error) : '') + '</span></div><span class="saved-playlist-id">' + escapeText(row.id) + '</span></div>';
     }).join("");
     var subs = subscriptionRows.map(function (row) {
-      return '<p class="meta">' + escapeText((row.name || row.playlist_id) + " · 每 " + row.interval_hours + " 小时 · " + (row.paused ? "已暂停 · " : "") + (row.last_result || "")) +
-        ' <button type="button" data-sub-check="' + escapeText(row.playlist_id) + '">立即检查</button>' +
-        ' <button type="button" data-sub-pause="' + escapeText(row.playlist_id) + '" data-paused="' + (row.paused ? "1" : "0") + '">' + (row.paused ? "恢复" : "暂停") + '</button>' +
-        ' <button type="button" data-sub-delete="' + escapeText(row.playlist_id) + '">删除</button></p>';
+      return '<div class="saved-playlist"><div><strong>' + escapeText(row.name || row.playlist_id) + '</strong><span>每 ' + escapeText(row.interval_hours) + ' 小时 · ' + (row.paused ? '已暂停' : '运行中') + (row.last_result ? ' · ' + escapeText(row.last_result) : '') + '</span></div><div class="inline-actions"><button type="button" data-sub-check="' + escapeText(row.playlist_id) + '">立即检查</button><button type="button" data-sub-pause="' + escapeText(row.playlist_id) + '" data-paused="' + (row.paused ? "1" : "0") + '">' + (row.paused ? "恢复" : "暂停") + '</button><button type="button" data-sub-delete="' + escapeText(row.playlist_id) + '" class="quiet">删除</button></div></div>';
     }).join("");
-    return '<article><h2>歌单</h2><p class="meta">可导入 .m3u、.m3u8、.json、.csv、.tsv、.txt、.xlsx。只读取歌名、艺人和专辑列，文件里的链接不会被打开。保存后可在搜索时选用。xlsx 不执行宏。</p>' +
-      '<label>歌单名称<input type="text" id="playlist-name" placeholder="留空用文件里的名称"></label>' +
-      '<label>文本顺序（仅 TXT）<select id="playlist-order"><option value="artist-title">歌手 - 歌名</option><option value="title-artist">歌名 - 歌手</option></select></label>' +
-      '<label>上传歌单文件<input type="file" id="playlist-file" accept=".m3u,.m3u8,.json,.csv,.tsv,.txt,.xlsx"></label>' +
-      '<label>或粘贴歌单内容<textarea id="playlist-content" rows="4" placeholder="歌手 - 歌名，或带表头的 CSV / JSON"></textarea></label>' +
-      '<p><button type="button" id="save-playlist" class="primary">保存歌单</button></p>' +
-      (rows || '<p class="meta">还没有已存歌单。</p>') +
-      '<h2>识别歌单链接</h2><p class="meta">只从链接里读出平台和歌单 ID，不访问平台，也不拉取曲目。</p>' +
-      '<label>分享链接或歌单 ID<input type="text" id="playlist-link" placeholder="https://music.163.com/playlist?id=123"></label>' +
-      '<p><button type="button" id="locate-playlist">识别链接</button></p><p id="playlist-locate-result" class="meta"></p>' +
-      '<h2>拉取公开歌单</h2><p class="meta">按旧版只读接口读取网易云、酷狗、汽水、咪咕、Apple Music、Spotify、YouTube、QQ 音乐或酷我的曲目名单。不下载音频。YouTube 必须用用户自己的 API Key，不会改去读网页。本机测试地址只接受回环。</p>' +
-      '<label>平台<select id="remote-platform"><option value="netease">网易云音乐</option><option value="kugou">酷狗</option><option value="qishui">汽水</option><option value="migu">咪咕</option><option value="applemusic">Apple Music</option><option value="spotify">Spotify</option><option value="youtube">YouTube</option><option value="qqmusic">QQ 音乐</option><option value="kuwo">酷我</option></select></label>' +
-      '<label>歌单链接或 ID<input type="text" id="remote-playlist-id" placeholder="粘贴完整分享链接，或直接填歌单 ID"></label>' +
-      '<label>本机测试地址<input type="text" id="remote-base" placeholder="留空则访问各平台公开接口"></label>' +
-      '<label><input type="checkbox" id="playlist-enqueue" checked> 拉取后创建入库任务</label>' +
-      '<label>入库范围<select id="playlist-mode"><option value="all">全部入库（自动跑完）</option><option value="pick">选择部分曲目</option></select></label>' +
-      '<label><input type="checkbox" id="playlist-album" checked> 按专辑补全（库里缺这张专辑的其他歌会一起下）</label>' +
-      '<p><button type="button" id="fetch-playlist">拉取并创建入库任务</button></p><p id="playlist-fetch-result" class="meta"></p><div id="playlist-pick"></div>' +
-      '<h2>订阅已存歌单</h2><p class="meta">未绑定平台时只重新读取本机歌单。绑定了公开歌单后，检查会向该平台读取新增曲目。首次默认只记下现有曲目。删除的曲目不会从音乐库移除。</p>' +
-      '<label>歌单<select id="subscription-playlist"><option value="">选择已存歌单</option>' + playlistRows.map(function (row) { return '<option value="' + escapeText(row.id) + '">' + escapeText(row.name || row.id) + "</option>"; }).join("") + '</select></label>' +
-      '<label>间隔（小时）<input type="number" id="subscription-hours" min="1" max="168" value="6"></label>' +
-      '<label><input type="checkbox" id="subscription-existing"> 现有曲目也入库</label>' +
-      '<p><button type="button" id="save-subscription" class="primary">订阅</button></p>' +
-      (subs || '<p class="meta">还没有订阅。</p>') + '</article>';
+    return '<div class="composer-grid"><section class="composer-section composer-section-primary"><div class="section-heading"><div><h2>从平台导入</h2><p class="section-copy">读取公开歌单的曲目信息，再把缺歌和目标专辑送进后台流水线。</p></div><span class="section-badge">自动处理</span></div>' +
+      '<div class="field-grid"><label>平台<select id="remote-platform"><option value="netease">网易云音乐</option><option value="kugou">酷狗</option><option value="qishui">汽水</option><option value="migu">咪咕</option><option value="applemusic">Apple Music</option><option value="spotify">Spotify</option><option value="youtube">YouTube</option><option value="qqmusic">QQ 音乐</option><option value="kuwo">酷我</option></select></label><label>歌单链接或 ID<input type="text" id="remote-playlist-id" placeholder="粘贴歌单链接，或直接填 ID"></label></div>' +
+      '<label>本机测试地址（可选）<input type="text" id="remote-base" placeholder="留空访问平台公开接口"></label>' +
+      '<div class="option-grid composer-options"><label><input type="checkbox" id="playlist-enqueue" checked> 拉取后直接创建入库任务</label><label><input type="checkbox" id="playlist-album" checked> 同时补全缺失的整张专辑</label><label>入库范围<select id="playlist-mode"><option value="all">全部曲目</option><option value="pick">先选择部分曲目</option></select></label></div>' +
+      '<div class="action-row"><button type="button" id="fetch-playlist" class="primary">拉取并创建入库任务</button><span class="form-note">不会直接打开歌单文件里的链接</span></div><p id="playlist-fetch-result" class="meta" aria-live="polite"></p><div id="playlist-pick"></div></section>' +
+      '<section class="composer-section"><div class="section-heading"><div><h2>已存歌单</h2><p class="section-copy">' + (playlistRows.length ? '可在检索页作为流媒体回退来源。' : '还没有已存歌单。') + '</p></div><span class="section-count">' + displayNumber(playlistRows.length) + '</span></div><div class="saved-list">' + (saved || '<div class="inline-empty">保存歌单后会显示在这里。</div>') + '</div></section>' +
+      '<details class="composer-group"><summary><span><strong>导入文件或文本</strong><small>M3U、CSV、JSON、TSV、TXT 或 XLSX</small></span><span class="summary-disclosure" aria-hidden="true"></span></summary><div class="composer-group-body"><div class="field-grid"><label>歌单名称<input type="text" id="playlist-name" placeholder="留空使用文件里的名称"></label><label>文本顺序<select id="playlist-order"><option value="artist-title">歌手 - 歌名</option><option value="title-artist">歌名 - 歌手</option></select></label></div><label>上传文件<input type="file" id="playlist-file" accept=".m3u,.m3u8,.json,.csv,.tsv,.txt,.xlsx"></label><label>或粘贴内容<textarea id="playlist-content" rows="4" placeholder="歌手 - 歌名，或带表头的 CSV / JSON"></textarea></label><div class="action-row"><button type="button" id="save-playlist" class="primary">保存歌单</button></div></div></details>' +
+      '<details class="composer-group"><summary><span><strong>识别链接</strong><small>只在本地解析平台与歌单 ID</small></span><span class="summary-disclosure" aria-hidden="true"></span></summary><div class="composer-group-body"><label>分享链接或歌单 ID<input type="text" id="playlist-link" placeholder="https://music.163.com/playlist?id=123"></label><div class="action-row"><button type="button" id="locate-playlist">识别链接</button></div><p id="playlist-locate-result" class="meta"></p></div></details>' +
+      '<details class="composer-group"><summary><span><strong>订阅歌单变化</strong><small>定时读取新增曲目，不移除库中已有音乐</small></span><span class="summary-disclosure" aria-hidden="true"></span></summary><div class="composer-group-body"><div class="field-grid"><label>歌单<select id="subscription-playlist"><option value="">选择已存歌单</option>' + playlistRows.map(function (row) { return '<option value="' + escapeText(row.id) + '">' + escapeText(row.name || row.id) + '</option>'; }).join("") + '</select></label><label>间隔（小时）<input type="number" id="subscription-hours" min="1" max="168" value="6"></label></div><label><input type="checkbox" id="subscription-existing"> 现有曲目也入库</label><div class="action-row"><button type="button" id="save-subscription" class="primary">订阅</button></div><div class="saved-list">' + (subs || '<div class="inline-empty">还没有订阅。</div>') + '</div></div></details></div>';
   }
   function migrationCard() {
     var report = migrationReport || {};
@@ -783,6 +919,15 @@ const appJS = `(function () {
   }
   // bindPlaylists wires the playlist forms wherever they are rendered.
   function bindPlaylists() {
+    var composer = document.getElementById("task-composer");
+    if (composer) {
+      composerOpen = composer.open;
+      composer.addEventListener("toggle", function () {
+        composerOpen = composer.open;
+        var label = document.getElementById("composer-toggle-label");
+        if (label) label.textContent = composerOpen ? "收起" : "展开";
+      });
+    }
     var savePlaylistButton = document.getElementById("save-playlist");
     if (savePlaylistButton) savePlaylistButton.addEventListener("click", savePlaylist);
     var locatePlaylistButton = document.getElementById("locate-playlist");
@@ -2449,6 +2594,7 @@ const appJS = `(function () {
     if (message && !window.confirm(message)) return;
     var site = "";
     var candidateID = "";
+    var autoSkipped = false;
     if (action === "accept") {
       var picked = document.querySelector("input[name=\"review-candidate\"]:checked");
       if (!picked) { setStatus("fail", "先选一个候选。"); return; }
@@ -2460,6 +2606,15 @@ const appJS = `(function () {
     try {
       var response = await fetch("/v1/jobs/" + encodeURIComponent(currentReviewJobID) + "/review", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({action: action, site: site, candidate_id: candidateID})});
       var body = await response.json();
+      if (!response.ok && action === "ai" && body && body.code === "AI_NO_CONFIRMED_MATCH") {
+        setStatus("info", "AI 没有确认候选，正在自动结束本轮核对");
+        response = await fetch("/v1/jobs/" + encodeURIComponent(currentReviewJobID) + "/review", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({action: "skip"})});
+        body = await response.json();
+        if (response.ok && body && body.ok && body.stage === "skipped") {
+          autoSkipped = true;
+          setStatus("review", "AI 没有确认安全候选，已自动结束本轮，避免继续留在待核对。");
+        }
+      }
       if (!response.ok || !body || !body.ok) {
         setStatus("fail", (body && body.message) || ("核对操作失败。" + (body && body.code ? "（" + body.code + "）" : "")));
         return;
@@ -2471,7 +2626,7 @@ const appJS = `(function () {
       } else if (body.stage === "fallback") {
         setStatus("ok", "已自动切换流媒体回退，未重复使用令牌。");
       } else if (body.stage === "skipped") {
-        setStatus("review", "没有可安全执行的后续路径，已自动结束。");
+        setStatus("review", autoSkipped ? "AI 没有确认安全候选，已自动结束本轮，避免继续留在待核对。" : "没有可安全执行的后续路径，已自动结束。");
       } else {
         setStatus(action === "skip" ? "review" : "ok", action === "accept" ? "已接受候选，继续处理。" : (action === "retry" ? "已自动重试。" : "已自动处理。"));
       }
@@ -2555,6 +2710,7 @@ const appJS = `(function () {
   }
   async function load(quiet) {
     if (loading) return;
+    loading = true;
     if (!quiet) {
       setBusy(true);
       setStatus("info", "正在读取");
@@ -2565,10 +2721,15 @@ const appJS = `(function () {
         var siteBody = await siteResponse.json();
         siteRows = siteBody && Array.isArray(siteBody.sites) ? siteBody.sites : [];
       }
-      if (view === "search") {
+      if (view === "search" || (view === "tasks" && !quiet)) {
         var playlistResponse = await fetch("/v1/playlists", {headers: {Accept: "application/json"}});
         var playlistBody = await playlistResponse.json();
         playlistRows = playlistBody && Array.isArray(playlistBody.playlists) ? playlistBody.playlists : [];
+      }
+      if (view === "tasks" && !quiet) {
+        var subscriptionResponse = await fetch("/v1/subscriptions", {headers: {Accept: "application/json"}});
+        var subscriptionBody = await subscriptionResponse.json();
+        subscriptionRows = subscriptionBody && Array.isArray(subscriptionBody.subscriptions) ? subscriptionBody.subscriptions : [];
       }
       if (view === "settings") {
         var proxyResponse = await fetch("/v1/settings/proxy", {headers: {Accept: "application/json"}});
@@ -2633,7 +2794,7 @@ const appJS = `(function () {
         logRows = logBody && Array.isArray(logBody.tasks) ? logBody.tasks : [];
         logEvents = logBody && Array.isArray(logBody.events) ? logBody.events : [];
       } else {
-        var jobsURL = view === "review" ? "/v1/jobs?review=1" : (view === "tasks" ? "/v1/jobs?roots=1&counts=1&live=1" : "/v1/jobs?live=1");
+        var jobsURL = view === "review" ? "/v1/jobs?review=1&counts=1" : (view === "tasks" ? "/v1/jobs?roots=1&counts=1&live=1" : "/v1/jobs?live=1&counts=1");
         var response = await fetch(jobsURL, {headers: {Accept: "application/json"}});
         var body = await response.json();
         jobs = body && Array.isArray(body.jobs) ? body.jobs : [];
@@ -2642,12 +2803,14 @@ const appJS = `(function () {
         activeCount = body.active_count || 0;
         pipelinePaused = !!body.pipeline_paused;
         autoReviewStatus = body.auto_review || autoReviewStatus;
+        lastLoadedAt = Date.now();
       }
       if (detail.hidden) render();
       arm();
     } catch (err) {
       if (!quiet) setStatus("fail", "任务列表没有读到。");
     } finally {
+      loading = false;
       if (!quiet) setBusy(false);
     }
   }
@@ -2673,8 +2836,8 @@ const appJS = `(function () {
   function arm() {
     clearTimeout(timer);
     if (view !== "tasks" && view !== "queue" && view !== "review") return;
-    if (!jobs.some(function (job) { return active[job.stage]; })) return;
-    timer = setTimeout(function () { load(true); }, 2000);
+    if (activeCount <= 0) return;
+    timer = setTimeout(function () { load(true); }, view === "tasks" ? 5000 : 2500);
   }
   document.getElementById("nav").addEventListener("click", function (event) {
     var button = event.target.closest("button");
@@ -2684,6 +2847,13 @@ const appJS = `(function () {
     load();
   });
   list.addEventListener("click", function (event) {
+    var filterButton = event.target.closest("button[data-task-filter]");
+    if (filterButton) {
+      taskFilter = filterButton.getAttribute("data-task-filter") || "all";
+      selectedJobs = {};
+      render();
+      return;
+    }
     if (event.target.closest("#review-more") && !loading) { loadMoreReview(); return; }
     var selectButton = event.target.closest("button[data-batch-select]");
     if (selectButton) { setBatchSelection(selectButton.getAttribute("data-batch-select")); return; }

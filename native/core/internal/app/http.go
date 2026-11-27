@@ -34,7 +34,8 @@ const page = `<!doctype html>
 <a class="skip" href="#main">跳到主要内容</a>
 <div class="app">
 <header class="app-bar">
-<p class="mark"><img class="brand-icon" alt="" width="24" height="24" src="/brand-icon.png"><span class="brand-name">MusicOps</span><span class="brand-sub">本地音乐流水线</span><span class="app-version">{{version}}</span></p>
+<div class="app-bar-inner">
+<p class="mark"><img class="brand-icon" alt="" width="24" height="24" src="/brand-icon.png"><span class="brand-name">MusicOps</span><span class="brand-sub">音乐自动化工作台</span><span class="app-version">{{version}}</span></p>
 <nav id="nav" aria-label="功能">
 <button type="button" data-view="tasks" aria-current="page">任务</button>
 <button type="button" data-view="queue">队列</button>
@@ -45,9 +46,10 @@ const page = `<!doctype html>
 <button type="button" data-view="library">库</button>
 <button type="button" data-view="logs">日志</button>
 </nav>
+</div>
 </header>
 <main id="main" tabindex="-1">
-<div class="view-head"><h1>任务</h1></div>
+<div class="view-head"><div><h1>任务</h1><p class="view-subtitle" id="view-subtitle">让歌单从识别到入库自动跑完</p></div><div class="view-live" id="view-live" aria-live="polite" hidden><span class="live-dot" aria-hidden="true"></span><span id="view-live-label">等待任务</span></div></div>
 <p id="status" role="status" aria-live="polite">正在读取</p>
 <div id="list"></div>
 <section id="note" hidden></section>

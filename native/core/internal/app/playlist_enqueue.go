@@ -182,6 +182,25 @@ func (cache *playlistPresenceCache) takePending() []audiorelease.VerifiedPresenc
 	return items
 }
 
+// restorePending puts a failed batch back into the durable-verification queue.
+// StampVerifiedPresences is idempotent, so records already written before a
+// later batch error can be retried safely on the next flush.
+func (cache *playlistPresenceCache) restorePending(items []audiorelease.VerifiedPresence) {
+	if cache == nil || len(items) == 0 {
+		return
+	}
+	cache.mu.Lock()
+	defer cache.mu.Unlock()
+	if cache.pending == nil {
+		cache.pending = map[string]audiorelease.VerifiedPresence{}
+	}
+	for _, item := range items {
+		if _, exists := cache.pending[item.RequestID]; !exists {
+			cache.pending[item.RequestID] = item
+		}
+	}
+}
+
 type playlistRecordingTags struct {
 	artists    []string
 	album      string
@@ -555,7 +574,8 @@ const (
 	// Presence checks may need to inspect thousands of files on a slow library
 	// disk. Immutable catalogue maps and the single-flight file verification
 	// cache are shared; only each worker's tag memo remains independent.
-	playlistPresenceWorkers = 4
+	playlistPresenceWorkers    = 4
+	playlistPresenceFlushBatch = 200
 )
 
 func (a *App) playlistLibrary() playlistLibraryIndex {
@@ -611,6 +631,13 @@ func playlistPresenceForIndexContext(ctx context.Context, index playlistLibraryI
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	runCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	// A first scan of a large mechanical library can take minutes. Persist each
+	// already-verified size/mtime snapshot as it is produced so a client timeout
+	// cannot discard the completed prefix. The deferred flush also records work
+	// that finished before cancellation.
+	defer func() { _ = index.flushPresenceSnapshots() }()
 	present := make([]bool, len(rows))
 	workers := playlistPresenceWorkers
 	if len(rows) < workers {
@@ -619,12 +646,22 @@ func playlistPresenceForIndexContext(ctx context.Context, index playlistLibraryI
 	if workers <= 1 {
 		local := index.presenceWorker()
 		for i, row := range rows {
-			if err := ctx.Err(); err != nil {
+			if err := runCtx.Err(); err != nil {
 				return nil, err
 			}
 			present[i] = local.hasPlaylistRow(row)
+			if (i+1)%playlistPresenceFlushBatch == 0 {
+				if err := index.flushPresenceSnapshots(); err != nil {
+					return nil, err
+				}
+			}
 		}
-		local.commitPresenceSnapshots()
+		if err := index.flushPresenceSnapshots(); err != nil {
+			return nil, err
+		}
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		return present, nil
 	}
 	type result struct {
@@ -640,12 +677,12 @@ func playlistPresenceForIndexContext(ctx context.Context, index playlistLibraryI
 		go func() {
 			defer wg.Done()
 			for i := range jobs {
-				if ctx.Err() != nil {
+				if runCtx.Err() != nil {
 					return
 				}
 				select {
 				case results <- result{index: i, present: local.hasPlaylistRow(rows[i])}:
-				case <-ctx.Done():
+				case <-runCtx.Done():
 					return
 				}
 			}
@@ -656,7 +693,7 @@ func playlistPresenceForIndexContext(ctx context.Context, index playlistLibraryI
 		for i := range rows {
 			select {
 			case jobs <- i:
-			case <-ctx.Done():
+			case <-runCtx.Done():
 				return
 			}
 		}
@@ -665,13 +702,30 @@ func playlistPresenceForIndexContext(ctx context.Context, index playlistLibraryI
 		wg.Wait()
 		close(results)
 	}()
+	verified := 0
+	var flushErr error
 	for item := range results {
+		if flushErr != nil {
+			continue
+		}
 		present[item.index] = item.present
+		verified++
+		if verified%playlistPresenceFlushBatch == 0 {
+			if err := index.flushPresenceSnapshots(); err != nil {
+				flushErr = err
+				cancel()
+			}
+		}
+	}
+	if flushErr != nil {
+		return nil, flushErr
 	}
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	index.commitPresenceSnapshots()
+	if err := index.flushPresenceSnapshots(); err != nil {
+		return nil, err
+	}
 	return present, nil
 }
 
@@ -1190,8 +1244,12 @@ func (index playlistLibraryIndex) isUnchanged(id string) bool {
 }
 
 func (index *playlistLibraryIndex) commitPresenceSnapshots() {
+	_ = index.flushPresenceSnapshots()
+}
+
+func (index *playlistLibraryIndex) flushPresenceSnapshots() error {
 	if index == nil || index.engine == nil {
-		return
+		return nil
 	}
 	items := []audiorelease.VerifiedPresence{}
 	if index.presence != nil {
@@ -1202,9 +1260,22 @@ func (index *playlistLibraryIndex) commitPresenceSnapshots() {
 		}
 		index.pendingSnapshots = map[string]audiorelease.VerifiedPresence{}
 	}
-	if len(items) > 0 {
-		_ = audiorelease.StampVerifiedPresences(index.engine, items)
+	if len(items) == 0 {
+		return nil
 	}
+	if err := audiorelease.StampVerifiedPresences(index.engine, items); err != nil {
+		// StampVerifiedPresences is idempotent. Keep failed items pending so a
+		// later batch can retry them without forcing a full file hash again.
+		if index.presence != nil {
+			index.presence.restorePending(items)
+		} else {
+			for _, item := range items {
+				index.pendingSnapshots[item.RequestID] = item
+			}
+		}
+		return err
+	}
+	return nil
 }
 
 // hasAlbum reports whether the requested album already exists as a verified
@@ -1493,7 +1564,7 @@ func (a *App) startPlaylistAlbumJob(ctx context.Context, client *musicbrainz.Cli
 			return "", err
 		}
 	}
-	identity := a.playlistIdentity(ctx, client, jobID, artist, album, title)
+	identity := a.playlistIdentity(ctx, client, jobID, row)
 	if err := ctx.Err(); err != nil {
 		return "", err
 	}
@@ -1534,17 +1605,33 @@ func (a *App) startPlaylistAlbumJob(ctx context.Context, client *musicbrainz.Cli
 	return jobID, nil
 }
 
-// playlistIdentity states what the playlist itself asserted: this artist has
-// this title on this album. It is platform catalogue data, not an AI guess, so
-// it is enough to start a search — the search decides the release, and the
-// review model decides ambiguous candidates. A catalogue lookup is tried first
-// because a MusicBrainz release id is the better claim, but the playlist row
-// is a valid identity on its own: waiting for a catalogue that may not answer
-// would park every track at a manual checkpoint, which is the behaviour this
-// whole path exists to remove.
-func (a *App) playlistIdentity(ctx context.Context, client *musicbrainz.Client, jobID, artist, album, title string) Identity {
+// playlistIdentity states what the playlist itself asserted. NetEase rows
+// carry song and album IDs, so those platform IDs are the strongest evidence
+// already available at enqueue time and no external lookup is needed. For
+// imported rows without those IDs a caller may inject a loopback catalogue in
+// tests; production never performs one serial lookup per album here.
+func (a *App) playlistIdentity(ctx context.Context, client *musicbrainz.Client, jobID string, row playlistTrack) Identity {
+	artist := strings.TrimSpace(row.Artist)
+	album := normalizePlaylistAlbumTitle(row.Album)
+	title := strings.TrimSpace(row.Title)
 	if artist == "" || album == "" {
 		return Identity{}
+	}
+	if row.NeteaseSongID > 0 || row.NeteaseAlbumID > 0 {
+		payload, _ := json.Marshal(map[string]any{
+			"source": "netease", "artist": artist, "album": album, "title": title,
+			"netease_song_id": row.NeteaseSongID, "netease_album_id": row.NeteaseAlbumID,
+			"duration_ms": row.Duration,
+		})
+		subject := fmt.Sprintf("netease:track:%d", row.NeteaseSongID)
+		if row.NeteaseAlbumID > 0 {
+			subject = fmt.Sprintf("netease:album:%d", row.NeteaseAlbumID)
+		}
+		sum := sha256.Sum256(append([]byte(jobID+"/netease/"+subject+"/"), payload...))
+		return Identity{
+			ID: "plsrc" + hex.EncodeToString(sum[:10]), Kind: "api", Source: "netease",
+			SubjectID: subject, TracklistVerified: true, IdentityConfirmed: true, Payload: string(payload),
+		}
 	}
 	if client != nil {
 		if lookup, err := identifyCatalogLookup(ctx, client, a.engine, catalogIdentifyRequest{

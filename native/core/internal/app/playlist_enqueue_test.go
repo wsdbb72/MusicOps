@@ -13,10 +13,13 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/wsdbb72/MusicOps/native/core/internal/audiorelease"
+	"github.com/wsdbb72/MusicOps/native/core/internal/dataengine"
 	"github.com/wsdbb72/MusicOps/native/core/internal/flactags"
+	"github.com/wsdbb72/MusicOps/native/core/internal/musicbrainz"
 	"github.com/wsdbb72/MusicOps/native/core/internal/wavflac"
 )
 
@@ -290,6 +293,108 @@ func TestEnqueueGroupsRowsByAlbum(t *testing.T) {
 	}
 	if second.Label != "Artist B - Song Nine" {
 		t.Fatalf("%+v", second)
+	}
+}
+
+func TestPlaylistIdentityUsesNeteaseEvidenceWithoutCatalogLookup(t *testing.T) {
+	application := newApp(t)
+	var calls atomic.Int32
+	catalog := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		http.Error(w, "catalogue must not be consulted", http.StatusInternalServerError)
+	}))
+	defer catalog.Close()
+	client := musicbrainz.NewClient()
+	client.BaseURL = catalog.URL
+	row := playlistTrack{
+		Artist: "春奈るな", Album: "空は高く風は歌う (アニメ盤)", Title: "空は高く風は歌う",
+		Duration: "282", NeteaseSongID: 27505499, NeteaseAlbumID: 2117810,
+	}
+	identity := application.playlistIdentity(context.Background(), client, "pl-netease-test", row)
+	if identity.Source != "netease" || identity.SubjectID != "netease:album:2117810" ||
+		!identity.IdentityConfirmed || !identity.TracklistVerified || calls.Load() != 0 {
+		t.Fatalf("identity=%+v catalogue_calls=%d", identity, calls.Load())
+	}
+	var payload map[string]any
+	if err := json.Unmarshal([]byte(identity.Payload), &payload); err != nil {
+		t.Fatal(err)
+	}
+	if payload["netease_song_id"] != float64(27505499) || payload["netease_album_id"] != float64(2117810) || payload["source"] != "netease" {
+		t.Fatalf("payload=%v", payload)
+	}
+}
+
+func TestPlaylistPresencePersistsVerifiedSnapshot(t *testing.T) {
+	application := newApp(t)
+	incoming, library := t.TempDir(), t.TempDir()
+	if err := os.WriteFile(filepath.Join(incoming, "track.wav"), pcmWAV(100), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := audiorelease.Release(context.Background(), application.engine, audiorelease.Request{
+		RequestID: "playlist-snapshot", RootID: "playlist-snapshot-root",
+		Artist: "Artist", Album: "Album", Title: "Song", Track: 1,
+		SourceName: "track.wav", Incoming: incoming, Library: library,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	stripIndexedStatsForTest(t, application.engine)
+	application.invalidatePlaylistLibraryCache()
+	index := application.playlistLibrary()
+	present, err := playlistPresenceForIndexContext(context.Background(), index, []playlistTrack{{
+		Artist: "Artist", Album: "Album", Title: "Song",
+	}})
+	if err != nil || len(present) != 1 || !present[0] {
+		t.Fatalf("presence=%v err=%v", present, err)
+	}
+	after, err := audiorelease.ListIndexed(application.engine)
+	if err != nil || len(after) != 1 || !after[0].HasIndexedStat() || !after[0].PresenceUnchanged() {
+		t.Fatalf("persisted index=%+v err=%v", after, err)
+	}
+	if stored, found, lookupErr := audiorelease.PathFor(application.engine, after[0].RequestID); lookupErr != nil || !found || stored == "" {
+		t.Fatalf("stored path=%q found=%v err=%v", stored, found, lookupErr)
+	}
+}
+
+func stripIndexedStatsForTest(t *testing.T, engine *dataengine.Engine) {
+	t.Helper()
+	mutations := []dataengine.Mutation{}
+	for _, prefix := range [][]byte{[]byte("library/audio/"), []byte("library/album-audio/")} {
+		var after []byte
+		for {
+			var page dataengine.Page
+			if err := engine.View(func(v *dataengine.View) error {
+				var err error
+				page, err = v.Scan(prefix, after, 200)
+				return err
+			}); err != nil {
+				t.Fatal(err)
+			}
+			for _, item := range page.Items {
+				record := map[string]any{}
+				if err := json.Unmarshal(item.Value, &record); err != nil {
+					t.Fatal(err)
+				}
+				if _, ok := record["indexed_stat"]; !ok {
+					continue
+				}
+				delete(record, "indexed_stat")
+				raw, err := json.Marshal(record)
+				if err != nil {
+					t.Fatal(err)
+				}
+				mutations = append(mutations, dataengine.Mutation{Key: append([]byte(nil), item.Key...), Value: raw})
+			}
+			if len(page.Next) == 0 {
+				break
+			}
+			after = page.Next
+		}
+	}
+	if len(mutations) == 0 {
+		t.Fatal("no indexed stat was available to strip")
+	}
+	if ok, err := engine.CompareAndSwap(nil, mutations); err != nil || !ok {
+		t.Fatalf("strip indexed stats: ok=%v err=%v", ok, err)
 	}
 }
 

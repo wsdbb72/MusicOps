@@ -78,6 +78,7 @@ type SiteReport struct {
 	ExpectedTitle   string `json:"expected_title,omitempty"`
 	Seeders         int    `json:"seeders"`
 	SeedersKnown    bool   `json:"seeders_known"`
+	RetryAfterSec   int    `json:"retry_after_sec,omitempty"`
 	Limited         bool   `json:"limited"`
 }
 
@@ -247,7 +248,7 @@ func decide(in classified) Decision {
 		return Decision{Action: ActionFallback, Reason: "source_fallback_after_retry"}
 	}
 	if retryable(in) {
-		return Decision{Action: ActionRetry, Reason: "transient_retry", RetryAfterSec: retryDelaySec[report.RetryCount]}
+		return Decision{Action: ActionRetry, Reason: "transient_retry", RetryAfterSec: retryDelay(report)}
 	}
 	if transientFallback(in) {
 		return Decision{Action: ActionFallback, Reason: "transient_fallback"}
@@ -365,6 +366,19 @@ func retryable(in classified) bool {
 	return saw
 }
 
+func retryDelay(report Report) int {
+	delay := retryDelaySec[report.RetryCount]
+	for _, site := range report.Sites {
+		if site.RetryAfterSec > delay {
+			delay = site.RetryAfterSec
+		}
+	}
+	if delay > retryDelaySec[len(retryDelaySec)-1] {
+		delay = retryDelaySec[len(retryDelaySec)-1]
+	}
+	return delay
+}
+
 // transientFallback keeps a confirmed release moving after every tracker
 // outage class has consumed the bounded retry budget. A rate-limited or
 // temporarily broken site must not strand an otherwise unambiguous track in
@@ -449,6 +463,9 @@ func autoFallback(in classified) bool {
 }
 
 func siteClass(site SiteReport) (string, error) {
+	if site.RetryAfterSec < 0 {
+		return "", dataengine.ErrInvalidRequest
+	}
 	switch site.Status {
 	case "DISABLED":
 		if site.Attempted || site.CandidateCount != 0 || site.Exact || site.Limited || site.SeedersKnown {

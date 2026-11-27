@@ -66,3 +66,10 @@ func TestSelectIdentityChoosesHighestQualityAcrossSites(t *testing.T) {
 		t.Fatalf("selected %s %s", site, id)
 	}
 }
+
+func TestSummarizeSiteCandidatesCarriesRetryAfter(t *testing.T) {
+	row, _, _ := summarizeSiteCandidates(SearchPlan{ExpectedTitle: "Album"}, "orpheus", trackersearch.Observation{Status: "RATE_LIMITED", RetryAfterSec: 2400})
+	if row.Status != "RATE_LIMITED" || row.RetryAfterSec != 2400 {
+		t.Fatalf("row=%+v", row)
+	}
+}

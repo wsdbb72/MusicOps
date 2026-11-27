@@ -161,6 +161,22 @@ func TestNeteaseSourceFallbackRetriesOnceThenUsesKnownSource(t *testing.T) {
 	}
 }
 
+func TestRateLimitRetryHonorsSiteRetryAfter(t *testing.T) {
+	report := base()
+	report.Sites = sites(map[string]SiteReport{
+		"orpheus":  {Status: "RATE_LIMITED", Attempted: true, RetryAfterSec: 2400},
+		"redacted": {Status: "DISABLED"},
+	})
+	decision, err := Decide(report)
+	if err != nil || decision.Action != ActionRetry || decision.RetryAfterSec != 2400 {
+		t.Fatalf("decision=%+v err=%v", decision, err)
+	}
+	report.Sites[2].RetryAfterSec = 5400
+	decision, err = Decide(report)
+	if err != nil || decision.Action != ActionRetry || decision.RetryAfterSec != 3600 {
+		t.Fatalf("clamped decision=%+v err=%v", decision, err)
+	}
+}
 func TestRateLimitedNeteaseSourceFallbackConsumesFullRetryBudget(t *testing.T) {
 	report := base()
 	report.Scene = "expand"

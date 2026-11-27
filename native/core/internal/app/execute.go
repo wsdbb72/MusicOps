@@ -451,6 +451,7 @@ func summarizeSiteCandidates(plan SearchPlan, site string, observation trackerse
 	row.Status = observation.Status
 	row.Attempted = true
 	row.CandidateCount = len(observation.Candidates)
+	row.RetryAfterSec = observation.RetryAfterSec
 	row.Limited = observation.Status == "OK" && !observation.SearchComplete
 	picks := make([]identityPick, 0, len(observation.Candidates))
 	pool := make([]reviewai.Candidate, 0, len(observation.Candidates))

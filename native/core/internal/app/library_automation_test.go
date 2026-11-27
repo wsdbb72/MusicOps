@@ -158,6 +158,37 @@ func TestLibraryAutomationQueuesCorruptFLACReplacement(t *testing.T) {
 	}
 }
 
+func TestLibraryWorkflowRepairRecoversCompilationPathThroughAPI(t *testing.T) {
+	if _, err := exec.LookPath("ffprobe"); err != nil {
+		t.Skip("ffprobe unavailable")
+	}
+	application := newApp(t)
+	library := t.TempDir()
+	post(t, application, "/v1/settings/library", map[string]any{"library_dir": library})
+	folder := filepath.Join(library, "Various - Heisei Kamen Rider 20th Works Memorial Best 2 (2019) [WEB FLAC]")
+	if err := os.MkdirAll(folder, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(folder, "10. Shuta Sueyoshi (feat. ISSA) - Over _Quartzer_.flac")
+	if err := os.WriteFile(path, make([]byte, 128), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	recorder := postCode(t, application, "/v1/library/workflow", map[string]any{
+		"scene": "upgrade", "paths": []string{path}, "confirmed": true,
+	})
+	if recorder.Code != http.StatusAccepted {
+		t.Fatalf("repair API code=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+	if !strings.Contains(recorder.Body.String(), `"started":true`) {
+		t.Fatalf("repair API did not start a workflow: %s", recorder.Body.String())
+	}
+	stopCtx, cancelStop := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancelStop()
+	if err := application.runner.Stop(stopCtx); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestLibraryAutomationFetchesArtworkWithoutCatalogIdentity(t *testing.T) {
 	application := newApp(t)
 	service, _ := lrcAPIFake(t, "[00:01.00]direct artwork", jpegBody(), "Authorization", "")
@@ -271,7 +302,7 @@ func TestLibraryAutomationReusesUnchangedScanCache(t *testing.T) {
 	}
 	cache := libraryAutomationScanDocument{Version: libraryAutomationScanVersion, Root: library, Files: map[string]cachedLibraryScan{
 		"Artist/Album/cached.mp3": {
-			Size: info.Size(), ModNS: info.ModTime().UnixNano(), NeedsCatalog: false, NeedsArtwork: false,
+			Size: info.Size(), ModNS: info.ModTime().UnixNano(), MetadataVersion: libraryAutomationMetadataVersion, NeedsCatalog: false, NeedsArtwork: false,
 			ArtworkCheckedNS: time.Now().UnixNano(), ArtworkValid: true,
 		},
 	}}
@@ -801,7 +832,7 @@ func TestMaintenanceWorkflowSkipsCorruptRepairWithoutUsableIdentity(t *testing.T
 	}
 	if application.enqueueMaintenanceWorkflowKey(context.Background(), "upgrade", []localWorkflowTrack{{
 		Path: path, Codec: "invalid", Duration: 1,
-	}}, filepath.Dir(path), "corrupt-repair-v2") {
+	}}, filepath.Dir(path), corruptRepairKeyPrefix) {
 		t.Fatal("identity-less corrupt repair created a workflow")
 	}
 	_, report := application.libraryAutomation.snapshot()
@@ -818,7 +849,7 @@ func TestMaintenanceWorkflowTreatsStaleLossyCandidateAsCompletedUpgrade(t *testi
 	writeFLACFromWAV(t, source, target)
 	if application.enqueueMaintenanceWorkflowKey(context.Background(), "upgrade", []localWorkflowTrack{{
 		Path: target, Artist: "Artist", Album: "Album", Title: "Song", Codec: "mp3", Duration: 1,
-	}}, filepath.Dir(target), "corrupt-repair-v2") {
+	}}, filepath.Dir(target), corruptRepairKeyPrefix) {
 		t.Fatal("already-lossless stale candidate created an upgrade")
 	}
 	_, report := application.libraryAutomation.snapshot()
@@ -837,5 +868,33 @@ func TestStoppingDeduplicationIsNotReportedAsFailure(t *testing.T) {
 		if strings.Contains(message, "重复扫描失败") {
 			t.Fatalf("manual stop was reported as a scan failure: %+v", report.Errors)
 		}
+	}
+}
+
+func TestScanAutomationFileCachesArtistsAndTrackTotal(t *testing.T) {
+	application := newApp(t)
+	_, full := writeScrapeFLAC(t, application, "multi-artist.flac", 180, flactags.Tags{
+		Title: "Song", Artists: []string{"周杰伦", "费玉清"}, AlbumArtist: "周杰伦", Album: "Album",
+		Raw: map[string][]string{
+			"ARTIST": {"周杰伦", "费玉清"}, "TITLE": {"Song"}, "ALBUM": {"Album"}, "TRACKNUMBER": {"3/12"},
+		},
+	})
+	result := scanAutomationFile(context.Background(), libraryAutomationScanInput{path: full})
+	if result.err != nil || !result.ok {
+		t.Fatal(result.err)
+	}
+	if result.entry.MetadataVersion != libraryAutomationMetadataVersion || len(result.entry.Artists) != 2 ||
+		result.entry.Artists[0] != "周杰伦" || result.entry.Artists[1] != "费玉清" || result.entry.TrackTotal != 12 {
+		t.Fatalf("cached playlist metadata=%+v", result.entry)
+	}
+	root := filepath.Dir(full)
+	if err := application.saveLibraryAutomationScanCache(libraryAutomationScanDocument{
+		Version: libraryAutomationScanVersion, Root: root, Files: map[string]cachedLibraryScan{filepath.Base(full): result.entry},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	loaded := application.loadLibraryAutomationScanCache(root).Files[filepath.Base(full)]
+	if loaded.MetadataVersion != libraryAutomationMetadataVersion || len(loaded.Artists) != 2 || loaded.TrackTotal != 12 {
+		t.Fatalf("persisted playlist metadata=%+v", loaded)
 	}
 }

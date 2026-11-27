@@ -28,6 +28,19 @@ func exact(site string, seeders int, known bool) SiteReport {
 	return SiteReport{Status: "OK", Attempted: true, CandidateCount: 1, Exact: true, ObservedTitle: "Kind of Blue", ExpectedTitle: "Kind of Blue", Seeders: seeders, SeedersKnown: known}
 }
 
+func TestExpandFallsBackWhenAllTrackersAreDisabled(t *testing.T) {
+	report := base()
+	report.Scene = "expand"
+	report.SourceFallback = true
+	for i := range report.Sites {
+		report.Sites[i] = SiteReport{Site: TrackerSites[i], Status: "DISABLED"}
+	}
+	decision, err := Decide(report)
+	if err != nil || decision.Action != ActionFallback || decision.Reason != "sites_disabled_fallback" {
+		t.Fatalf("decision=%+v err=%v", decision, err)
+	}
+}
+
 func TestTrackerSitesMatchTheConfiguredOrder(t *testing.T) {
 	if TrackerSites != [4]string{"open.cd", "dicmusic", "orpheus", "redacted"} {
 		t.Fatal(TrackerSites)
@@ -220,12 +233,12 @@ func TestOfflineSamplesCoverSearchClassesWithoutClaimingDownloads(t *testing.T) 
 			r.Sites = sites(map[string]SiteReport{"dicmusic": {Status: "TRANSIENT_ERROR", Attempted: true}})
 			return r
 		}(), action: ActionRetry, reason: "transient_retry", delay: 3600, deferStream: true},
-		{name: "transient-retries-exhausted", report: func() Report {
+		{name: "transient-retries-exhausted-falls-back", report: func() Report {
 			r := base()
 			r.RetryCount = 3
 			r.Sites = sites(map[string]SiteReport{"redacted": {Status: "RATE_LIMITED", Attempted: true}})
 			return r
-		}(), action: ActionReviewSearch, reason: "transient_exhausted", deferStream: true},
+		}(), action: ActionFallback, reason: "transient_fallback"},
 		{name: "transient-exhausted-outside-fallback-scene", report: func() Report {
 			r := base()
 			r.Scene = "complete"
@@ -269,11 +282,11 @@ func TestOfflineSamplesCoverSearchClassesWithoutClaimingDownloads(t *testing.T) 
 			r.Sites = sites(map[string]SiteReport{"dicmusic": {Status: "API_CONTRACT_ERROR", Attempted: true}})
 			return r
 		}(), action: ActionRetry, reason: "transient_retry", delay: 600, deferStream: true},
-		{name: "disabled-sites-do-not-stream", report: func() Report {
+		{name: "disabled-sites-use-enabled-streaming", report: func() Report {
 			r := base()
 			r.Sites = sites(map[string]SiteReport{"open.cd": {Status: "DISABLED"}, "dicmusic": {Status: "DISABLED"}, "orpheus": {Status: "DISABLED"}, "redacted": {Status: "DISABLED"}})
 			return r
-		}(), action: ActionReviewSearch, reason: "no_sites_enabled", deferStream: true},
+		}(), action: ActionFallback, reason: "sites_disabled_fallback"},
 		{name: "clean-empty-playlist-may-stream", report: base(), action: ActionFallback, reason: "sites_exhausted"},
 		{name: "clean-empty-fill-may-stream", report: func() Report { r := base(); r.Scene = "fill"; return r }(), action: ActionFallback, reason: "sites_exhausted"},
 		{name: "clean-empty-upgrade-may-stream", report: func() Report { r := base(); r.Scene = "upgrade"; r.StreamingEnabled = true; return r }(), action: ActionFallback, reason: "sites_exhausted"},

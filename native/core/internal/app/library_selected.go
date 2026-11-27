@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -84,7 +85,7 @@ func probeLocalWorkflowTrackMode(ctx context.Context, path string, allowPathFall
 func localWorkflowTrackFromPath(path, codec string, duration float64) (localWorkflowTrack, error) {
 	artist, album, title, ok := localWorkflowIdentityFromPath(path)
 	if !ok {
-		return localWorkflowTrack{}, errors.New("本地文件损坏且路径不足以恢复艺人、专辑和曲名")
+		return localWorkflowTrack{}, fmt.Errorf("本地文件损坏且路径不足以恢复艺人、专辑和曲名: %s", path)
 	}
 	if strings.TrimSpace(codec) == "" {
 		codec = "invalid"

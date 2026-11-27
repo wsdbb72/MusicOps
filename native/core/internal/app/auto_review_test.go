@@ -31,14 +31,6 @@ func TestAutoReviewPassRunsWithoutAButtonAndCoolsRepeatedMetadataRetry(t *testin
 	post(t, application, "/v1/search", body)
 	waitJob(t, application, "auto-review-metadata", "needs_review")
 
-	job, err := application.flows.Job("auto-review-metadata")
-	if err != nil || job == nil {
-		t.Fatalf("job=%v err=%v", job, err)
-	}
-	application.autoReviewCursor = workflow.ListCursor(*job)
-	if stats := application.autoReviewPass(context.Background()); stats.Candidates != 0 || application.autoReviewCursor != nil {
-		t.Fatalf("scan did not resume and wrap at the end: %+v", stats)
-	}
 	stats := application.autoReviewPass(context.Background())
 	if stats.Candidates != 1 || stats.Accepted != 1 || stats.Held != 0 {
 		t.Fatalf("stats=%+v", stats)

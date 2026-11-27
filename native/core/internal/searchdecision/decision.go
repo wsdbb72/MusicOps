@@ -249,6 +249,9 @@ func decide(in classified) Decision {
 	if retryable(in) {
 		return Decision{Action: ActionRetry, Reason: "transient_retry", RetryAfterSec: retryDelaySec[report.RetryCount]}
 	}
+	if transientFallback(in) {
+		return Decision{Action: ActionFallback, Reason: "transient_fallback"}
+	}
 	if in.mismatch {
 		return Decision{Action: ActionReviewCandidate, Reason: "candidate_review"}
 	}
@@ -361,6 +364,30 @@ func retryable(in classified) bool {
 	return saw
 }
 
+// transientFallback keeps a confirmed release moving after every tracker
+// outage class has consumed the bounded retry budget. A rate-limited or
+// temporarily broken site must not strand an otherwise unambiguous track in
+// manual review when streaming fallback is enabled; ambiguity, limited result
+// pages, authentication/access failures and contract errors stay reviewable.
+func transientFallback(in classified) bool {
+	report := in.report
+	if report.RetryCount < 3 || !report.IdentityConfirmed || !report.StreamingEnabled ||
+		!fallbackAllowed(report) || in.limited || len(in.qualified) > 0 || in.held || in.mismatch {
+		return false
+	}
+	sawTransient := false
+	for _, site := range TrackerSites {
+		switch in.classes[site] {
+		case ClassRateLimited, ClassNetwork, ClassTransient:
+			sawTransient = true
+		case ClassNoResult, ClassDisabled:
+		default:
+			return false
+		}
+	}
+	return sawTransient
+}
+
 func blocked(in classified) (string, string, bool) {
 	// A recoverable failure on a working site must get its backoff even when
 	// another site has a stale login. Otherwise one AUTH_FAILED site masks a
@@ -395,8 +422,8 @@ func blocked(in classified) (string, string, bool) {
 		return ActionReviewSearch, "limited_results", true
 	}
 	if disabled == len(TrackerSites) {
-		if in.report.SourceFallback && in.report.StreamingEnabled && fallbackAllowed(in.report) {
-			return ActionFallback, "source_platform_explicit", true
+		if in.report.StreamingEnabled && fallbackAllowed(in.report) {
+			return ActionFallback, "sites_disabled_fallback", true
 		}
 		return ActionReviewSearch, "no_sites_enabled", true
 	}

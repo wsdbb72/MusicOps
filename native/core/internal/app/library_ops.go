@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"image"
 	_ "image/jpeg"
 	_ "image/png"
@@ -296,17 +297,17 @@ func (a *App) libraryWorkflow(w http.ResponseWriter, r *http.Request) {
 		seen[raw] = true
 		resolved, err := a.resolveLibraryPath(raw)
 		if err != nil {
-			writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "code": "INVALID_REQUEST", "error": "请选择音乐库里的文件"})
+			writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "code": "INVALID_REQUEST", "error": fmt.Sprintf("请选择音乐库里的文件: %s", raw), "path": raw})
 			return
 		}
 		resolved, err = resolveInDir(a.libraryDir(), resolved)
 		if err != nil {
-			writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "code": "INVALID_REQUEST", "error": "请选择音乐库里的文件"})
+			writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "code": "INVALID_REQUEST", "error": fmt.Sprintf("请选择音乐库里的文件: %s", raw), "path": raw})
 			return
 		}
 		info, statErr := os.Stat(resolved)
 		if statErr != nil || info.IsDir() {
-			writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "code": "INVALID_REQUEST", "error": "本地文件不存在"})
+			writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "code": "INVALID_REQUEST", "error": fmt.Sprintf("本地文件不存在: %s", resolved), "path": resolved})
 			return
 		}
 		chosen = append(chosen, resolved)
@@ -340,7 +341,7 @@ func (a *App) libraryWorkflow(w http.ResponseWriter, r *http.Request) {
 			track, err = probeLocalWorkflowTrack(ctx, path)
 		}
 		if err != nil {
-			writeJSON(w, http.StatusUnprocessableEntity, map[string]any{"ok": false, "code": "LOCAL_IDENTITY_UNAVAILABLE", "error": err.Error()})
+			writeJSON(w, http.StatusUnprocessableEntity, map[string]any{"ok": false, "code": "LOCAL_IDENTITY_UNAVAILABLE", "error": fmt.Sprintf("无法读取本地音频 %s: %v", path, err), "path": path})
 			return
 		}
 		if len(tracks) > 0 {
@@ -353,7 +354,7 @@ func (a *App) libraryWorkflow(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		if body.Scene == "upgrade" && !isLossyUpgradeSource(track.Codec) {
-			writeJSON(w, http.StatusUnprocessableEntity, map[string]any{"ok": false, "code": "QUALITY_NOT_PROVEN", "error": "此入口只自动处理有损转无损；现有无损文件不以格式变化当升级"})
+			writeJSON(w, http.StatusUnprocessableEntity, map[string]any{"ok": false, "code": "QUALITY_NOT_PROVEN", "error": fmt.Sprintf("此入口只自动处理有损转无损；现有无损文件不以格式变化当升级: %s", path), "path": path})
 			return
 		}
 		tracks = append(tracks, track)

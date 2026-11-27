@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -30,25 +31,27 @@ var libraryAlbumAuditKey = []byte("app/library/album-audit-cache-v1")
 type automationWorkflowPriorityKey struct{}
 
 const (
-	automationWorkflowPriority      = 50
-	libraryAutomationInitialDelay   = 5 * time.Minute
-	libraryAutomationMaxMerges      = 1000
-	libraryAutomationMaxJobs        = 200
-	libraryAutomationScanWorkers    = 8
-	duplicateFingerprintWorkers     = 8
-	libraryAutomationCheckpoint     = 20_000
-	libraryAutomationScanVersion    = 5
-	libraryAutomationStallTimeout   = 45 * time.Minute
-	libraryAutomationScrapeSlice    = 45 * time.Minute
-	libraryAutomationArtworkSlice   = 30 * time.Minute
-	libraryAutomationDedupeSlice    = 15 * time.Minute
-	libraryAutomationArtworkWorkers = 6
-	libraryAutomationPolicyVersion  = 3
-	libraryAutomationSkippedRetry   = 24 * time.Hour
-	libraryAlbumAuditTTL            = 30 * 24 * time.Hour
-	libraryAutomationAlbumChecks    = 200
-	libraryArtworkValidationTTL     = 7 * 24 * time.Hour
-	libraryArtworkRefreshTTL        = 30 * 24 * time.Hour
+	automationWorkflowPriority       = 50
+	libraryAutomationInitialDelay    = 5 * time.Minute
+	libraryAutomationMaxMerges       = 1000
+	libraryAutomationMaxJobs         = 200
+	libraryAutomationScanWorkers     = 8
+	duplicateFingerprintWorkers      = 8
+	libraryAutomationCheckpoint      = 20_000
+	libraryAutomationScanVersion     = 5
+	libraryAutomationMetadataVersion = 1
+	libraryAutomationStallTimeout    = 45 * time.Minute
+	libraryAutomationScrapeSlice     = 45 * time.Minute
+	libraryAutomationArtworkSlice    = 30 * time.Minute
+	libraryAutomationDedupeSlice     = 15 * time.Minute
+	libraryAutomationArtworkWorkers  = 6
+	libraryAutomationPolicyVersion   = 3
+	corruptRepairKeyPrefix           = "corrupt-repair-v3"
+	libraryAutomationSkippedRetry    = 24 * time.Hour
+	libraryAlbumAuditTTL             = 30 * 24 * time.Hour
+	libraryAutomationAlbumChecks     = 200
+	libraryArtworkValidationTTL      = 7 * 24 * time.Hour
+	libraryArtworkRefreshTTL         = 30 * 24 * time.Hour
 )
 
 type libraryAutomationSettings struct {
@@ -133,6 +136,23 @@ func (a *App) saveLibraryDuplicateCache(doc libraryAutomationScanDocument) error
 	return a.casSaveJSON(libraryDuplicateCacheKey, raw)
 }
 
+// flacTrackTotal reads the explicit release length used by playlist album
+// completion. TRACKNUMBER/TRACKTOTAL values such as "3/12" are accepted.
+func flacTrackTotal(tags *flactags.Tags) int {
+	if tags == nil {
+		return 0
+	}
+	total := firstTagValue(tags.Raw, "TRACKTOTAL")
+	if total == "" {
+		total = firstTagValue(tags.Raw, "TOTALTRACKS")
+	}
+	if total == "" {
+		_, total, _ = strings.Cut(firstTagValue(tags.Raw, "TRACKNUMBER"), "/")
+	}
+	value, _ := strconv.Atoi(strings.TrimSpace(total))
+	return value
+}
+
 func (a *App) loadLibraryAlbumAudit(root string) libraryAlbumAuditDocument {
 	empty := libraryAlbumAuditDocument{Version: 1, Root: filepath.Clean(root), Albums: map[string]libraryAlbumAuditRecord{}}
 	doc := libraryAlbumAuditDocument{}
@@ -172,14 +192,17 @@ func (a *App) saveLibraryAutomationSettings(in libraryAutomationSettings) (libra
 type cachedLibraryScan struct {
 	Size             int64                       `json:"size"`
 	ModNS            int64                       `json:"mod_ns"`
+	MetadataVersion  int                         `json:"metadata_version,omitempty"`
 	NeedsCatalog     bool                        `json:"needs_catalog"`
 	NeedsArtwork     bool                        `json:"needs_artwork"`
 	Codec            string                      `json:"codec,omitempty"`
 	Duration         float64                     `json:"duration,omitempty"`
 	Artist           string                      `json:"artist,omitempty"`
 	AlbumArtist      string                      `json:"album_artist,omitempty"`
+	Artists          []string                    `json:"artists,omitempty"`
 	Album            string                      `json:"album,omitempty"`
 	Title            string                      `json:"title,omitempty"`
+	TrackTotal       int                         `json:"track_total,omitempty"`
 	ArtworkSize      int64                       `json:"artwork_size,omitempty"`
 	ArtworkModNS     int64                       `json:"artwork_mod_ns,omitempty"`
 	ArtworkCheckedNS int64                       `json:"artwork_checked_ns,omitempty"`
@@ -688,7 +711,8 @@ func scanAutomationFile(ctx context.Context, input libraryAutomationScanInput) l
 		return result
 	}
 	cacheAudioMatch := input.hasCache && !input.cached.DuplicateOnly && input.cached.Size == info.Size() && input.cached.ModNS == info.ModTime().UnixNano()
-	if cacheAudioMatch && cachedArtworkFresh(input.path, input.cached, time.Now()) {
+	metadataCurrent := input.hasCache && input.cached.MetadataVersion >= libraryAutomationMetadataVersion
+	if cacheAudioMatch && metadataCurrent && cachedArtworkFresh(input.path, input.cached, time.Now()) {
 		result.entry = input.cached
 		result.ok = true
 		result.reused = true
@@ -718,8 +742,11 @@ func scanAutomationFile(ctx context.Context, input libraryAutomationScanInput) l
 		entry.Duration, _ = flacDuration(tags.StreamInfo)
 		entry.Artist = strings.TrimSpace(tags.Artist)
 		entry.AlbumArtist = strings.TrimSpace(tags.AlbumArtist)
+		entry.Artists = append([]string(nil), tags.Artists...)
 		entry.Album = strings.TrimSpace(tags.Album)
 		entry.Title = strings.TrimSpace(tags.Title)
+		entry.TrackTotal = flacTrackTotal(tags)
+		entry.MetadataVersion = libraryAutomationMetadataVersion
 	} else {
 		genericInfo, probeErr := probeGenericAudio(ctx, input.path)
 		if probeErr != nil {
@@ -734,6 +761,8 @@ func scanAutomationFile(ctx context.Context, input libraryAutomationScanInput) l
 		entry.AlbumArtist = genericInfo.AlbumArtist
 		entry.Album = genericInfo.Album
 		entry.Title = genericInfo.Title
+		entry.Artists = splitPlaylistArtists(firstNonEmpty(genericInfo.Artist, genericInfo.AlbumArtist))
+		entry.MetadataVersion = libraryAutomationMetadataVersion
 	}
 	if refreshArtwork && !entry.NeedsArtwork {
 		entry.NeedsArtwork = true
@@ -854,6 +883,10 @@ func (a *App) runAutomatedScrape(ctx context.Context, root string, paths []strin
 	}
 	if err := a.saveLibraryAutomationScanCache(nextCache); err != nil {
 		state.addError(fmt.Errorf("扫描缓存保存失败: %w", err))
+	} else {
+		// Playlist previews reuse this document for tag and TRACKTOTAL reads.
+		// A completed scan must replace the in-memory 10-minute snapshot.
+		a.invalidatePlaylistLibraryCache()
 	}
 	if ctx.Err() != nil {
 		return
@@ -863,7 +896,7 @@ func (a *App) runAutomatedScrape(ctx context.Context, root string, paths []strin
 		// same path. A versioned repair key creates exactly one new attempt for
 		// genuinely corrupt audio while normal no-source tracks keep their
 		// longer skipped-task cooldown.
-		if a.enqueueMaintenanceWorkflowKey(ctx, "upgrade", []localWorkflowTrack{track}, filepath.Dir(track.Path), "corrupt-repair-v2") {
+		if a.enqueueMaintenanceWorkflowKey(ctx, "upgrade", []localWorkflowTrack{track}, filepath.Dir(track.Path), corruptRepairKeyPrefix) {
 			state.update(func(report *libraryAutomationReport) { report.UpgradeJobs++ })
 		}
 	}
@@ -2034,7 +2067,7 @@ func (a *App) enqueueMaintenanceWorkflowKey(ctx context.Context, scene string, t
 		// The corrupt-file pass uses a separately versioned key. Do not create a
 		// second ordinary upgrade job for the same path in the same maintenance
 		// run; the versioned repair job owns future retry cooldown.
-		if _, existing, lookupErr := a.automationWorkflowID(scene, "corrupt-repair-v2|"+key); lookupErr == nil && existing != nil {
+		if _, existing, lookupErr := a.automationWorkflowID(scene, corruptRepairKeyPrefix+"|"+key); lookupErr == nil && existing != nil {
 			return false
 		}
 	}

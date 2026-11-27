@@ -9,13 +9,13 @@ import (
 	"net/http/httptest"
 	"os"
 	"os/exec"
-
-	"github.com/wsdbb72/MusicOps/native/core/internal/musicbrainz"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/wsdbb72/MusicOps/native/core/internal/flactags"
+	"github.com/wsdbb72/MusicOps/native/core/internal/musicbrainz"
 	"github.com/wsdbb72/MusicOps/native/core/internal/qbittorrent"
 	"github.com/wsdbb72/MusicOps/native/core/internal/reviewmatch"
 	"github.com/wsdbb72/MusicOps/native/core/internal/workflow"
@@ -157,6 +157,14 @@ func TestCorruptFLACPathStillCreatesUpgradeIdentity(t *testing.T) {
 	}
 	if !isLossyUpgradeSource(track.Codec) {
 		t.Fatal("corrupt FLAC was not eligible for replacement")
+	}
+}
+
+func TestCorruptFLACIdentityErrorNamesExactPath(t *testing.T) {
+	path := filepath.Join("broken.flac")
+	_, err := localWorkflowTrackFromPath(path, "invalid", 0)
+	if err == nil || !strings.Contains(err.Error(), path) {
+		t.Fatalf("identity error must identify %q: %v", path, err)
 	}
 }
 

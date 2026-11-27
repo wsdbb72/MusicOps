@@ -631,6 +631,7 @@ func (a *App) liveWorkflowJobs(limit int) ([]workflow.Job, error) {
 		return []workflow.Job{}, nil
 	}
 	seen := map[string]bool{}
+	states := map[string]string{}
 	jobs := make([]workflow.Job, 0, limit)
 	for _, lane := range []string{"identify", "publish", "transcode", "aux", "download"} {
 		for _, state := range []string{"running", "recovery_required", "queued", "paused"} {
@@ -652,6 +653,7 @@ func (a *App) liveWorkflowJobs(limit int) ([]workflow.Job, error) {
 						continue
 					}
 					seen[job.ID] = true
+					states[job.ID] = state
 					jobs = append(jobs, *job)
 				}
 				if len(page.Next) == 0 {
@@ -661,11 +663,36 @@ func (a *App) liveWorkflowJobs(limit int) ([]workflow.Job, error) {
 			}
 		}
 	}
-	sort.SliceStable(jobs, func(i, j int) bool { return jobs[i].UpdatedNS > jobs[j].UpdatedNS })
+	return prioritizeLiveWorkflowJobs(jobs, states, limit), nil
+}
+
+func prioritizeLiveWorkflowJobs(jobs []workflow.Job, states map[string]string, limit int) []workflow.Job {
+	if limit <= 0 || len(jobs) == 0 {
+		return []workflow.Job{}
+	}
+	rank := func(state string) int {
+		switch state {
+		case "running", "recovery_required":
+			return 0
+		case "queued":
+			return 1
+		case "paused":
+			return 2
+		default:
+			return 3
+		}
+	}
+	sort.SliceStable(jobs, func(i, j int) bool {
+		left, right := rank(states[jobs[i].ID]), rank(states[jobs[j].ID])
+		if left != right {
+			return left < right
+		}
+		return jobs[i].UpdatedNS > jobs[j].UpdatedNS
+	})
 	if len(jobs) > limit {
 		jobs = jobs[:limit]
 	}
-	return jobs, nil
+	return jobs
 }
 
 func (a *App) jobs(w http.ResponseWriter, r *http.Request) {
@@ -707,6 +734,7 @@ func (a *App) jobs(w http.ResponseWriter, r *http.Request) {
 
 	collected := make([]workflow.Job, 0, 100)
 	next := ""
+	firstRootPage := len(after) == 0
 	if reviewOnly {
 		jobs, next, err := a.reviewWorkflowJobs(after, 100)
 		if err != nil {
@@ -768,7 +796,10 @@ func (a *App) jobs(w http.ResponseWriter, r *http.Request) {
 				break
 			}
 		}
-		if liveOnly {
+		// The live set is a snapshot appended to the first root page. Repeating
+		// it on every root cursor page made the same queued families appear
+		// indefinitely; later pages now advance only the durable root index.
+		if liveOnly && firstRootPage {
 			live, err := a.liveWorkflowJobs(100)
 			if err != nil {
 				writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "code": "JOBS_UNAVAILABLE"})

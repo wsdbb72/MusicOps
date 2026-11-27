@@ -130,7 +130,7 @@ func TestTransientSearchDefersWithoutStreamingOrASecondJob(t *testing.T) {
 	}
 }
 
-func TestAuthAndDisabledSitesDoNotOpenStreaming(t *testing.T) {
+func TestAuthStaysInReviewWhileDisabledSitesMayStream(t *testing.T) {
 	repo, _, token := openSearch(t)
 	auth := matchedReport()
 	auth.StreamingEnabled = true
@@ -151,16 +151,9 @@ func TestAuthAndDisabledSitesDoNotOpenStreaming(t *testing.T) {
 		"open.cd": {Status: "DISABLED"}, "dicmusic": {Status: "DISABLED"}, "orpheus": {Status: "DISABLED"}, "redacted": {Status: "DISABLED"},
 	})
 	fallback := Complete{JobID: "search:album1", Edge: edgeQueueProcess, NextStage: "fallback", TaskState: "completed", NowNS: 4000, Evidence: searchEvidence(), Search: &disabled}
-	if _, err = repo.Complete("disabled-stream", token, fallback); !errors.Is(err, dataengine.ErrInvalidRequest) {
-		t.Fatal(err)
-	}
-	skipped := Complete{JobID: "search:album1", Edge: edgeTerminal, NextStage: "completed", TaskState: "completed", NowNS: 4000, Search: &disabled}
-	if _, err = repo.Complete("mark-success", token, skipped); !errors.Is(err, dataengine.ErrInvalidRequest) {
-		t.Fatal(err)
-	}
-	job, err := repo.Job("search:album1")
-	if err != nil || job.Stage != "searching" {
-		t.Fatal(job, err)
+	queued, err := repo.Complete("disabled-stream", token, fallback)
+	if err != nil || len(queued.Children) != 1 || queued.Children[0].Stage != "fallback" || queued.Search == nil || queued.Search.Reason != "sites_disabled_fallback" {
+		t.Fatalf("disabled trackers did not use the configured stream: %+v err=%v", queued, err)
 	}
 }
 
@@ -260,24 +253,15 @@ func TestAliasResearchDefersAndDoesNotConfirmANewIdentity(t *testing.T) {
 	}
 }
 
-func TestExhaustedTransientSearchRequiresReviewInsteadOfStreaming(t *testing.T) {
+func TestExhaustedTransientSearchFallsBackToStreaming(t *testing.T) {
 	repo, _, token := openSearch(t)
 	report := searchdecision.Report{
 		Scene: "playlist", IdentityConfirmed: true, StreamingEnabled: true, RetryCount: 3,
 		Sites: fourSites(map[string]searchdecision.SiteReport{"redacted": {Status: "RATE_LIMITED", Attempted: true}}),
 	}
 	fallback := Complete{JobID: "search:album1", Edge: edgeQueueProcess, NextStage: "fallback", TaskState: "completed", NowNS: 4000, Evidence: searchEvidence(), Search: &report}
-	if _, err := repo.Complete("exhausted-fallback", token, fallback); !errors.Is(err, dataengine.ErrInvalidRequest) {
-		t.Fatalf("exhausted transient search was allowed to stream: %v", err)
-	}
-	result, err := repo.Complete("review", token, Complete{
-		JobID: "search:album1", Edge: edgeTerminal, NextStage: "needs_review", ReviewKind: "search",
-		TaskState: "blocked", NowNS: 4000, Evidence: searchEvidence(), Search: &report,
-	})
-	if err != nil || result.Job.Stage != "needs_review" || result.Job.ReviewKind != "search" || result.Job.SearchAction != searchdecision.ActionReviewSearch || len(result.Children) != 0 {
-		t.Fatal(result, err)
-	}
-	if result.Search == nil || result.Search.Reason != "transient_exhausted" || result.Search.StreamingDeferred != true {
-		t.Fatal(result.Search)
+	result, err := repo.Complete("exhausted-fallback", token, fallback)
+	if err != nil || len(result.Children) != 1 || result.Children[0].Stage != "fallback" || result.Search == nil || result.Search.Reason != "transient_fallback" {
+		t.Fatalf("exhausted transient search did not fall back: %+v err=%v", result, err)
 	}
 }

@@ -109,7 +109,6 @@ type App struct {
 	libraryAutomation     *libraryAutomationState
 	autoReviewMu          sync.Mutex
 	autoReviewRetryAt     map[string]time.Time
-	autoReviewCursor      []byte
 	autoReviewRuntime     autoReviewRuntime
 	// lastTokenRead bounds the background balance reads to one per site per
 	// minute. The ledger's read hold only exists for failures; a successful

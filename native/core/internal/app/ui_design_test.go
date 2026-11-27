@@ -150,7 +150,7 @@ func TestTaskQueueExposesBatchSelectionAndRetryControls(t *testing.T) {
 		`data-task-filter="`,
 		`function taskFilterRows(rows)`,
 		`function pipelineStages()`,
-		`if (activeCount <= 0) return;`,
+		`if (activeCount <= 0 && queued <= 0) return;`,
 	} {
 		if !strings.Contains(appJS, want) {
 			t.Fatal("missing queue batch behavior:", want)

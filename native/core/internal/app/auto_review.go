@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -106,70 +107,101 @@ func (a *App) runAutoReview(stop <-chan struct{}) {
 
 func (a *App) autoReviewPass(ctx context.Context) autoReviewStats {
 	stats := autoReviewStats{}
-	if a == nil || a.flows == nil {
+	candidates, err := a.autoReviewCandidateJobs()
+	if err != nil {
+		stats.Failed++
 		return stats
 	}
-	cursor := a.autoReviewCursor
-	for scanned := 0; scanned < 10000 && stats.Candidates < autoReviewBatch; {
-		page, err := a.flows.List(cursor, 100)
-		if err != nil {
-			stats.Failed++
-			return stats
+	for _, job := range candidates {
+		if stats.Candidates >= autoReviewBatch || ctx.Err() != nil {
+			break
 		}
-		scanned += len(page.Jobs)
-		for _, job := range page.Jobs {
-			if stats.Candidates >= autoReviewBatch || ctx.Err() != nil {
-				return stats
-			}
-			a.autoReviewCursor = workflow.ListCursor(job)
-			if !a.aiReviewEligible(job) || a.autoReviewCoolingDown(job.ID, a.now()) {
-				continue
-			}
-			stats.Candidates++
-			code, body := a.autoReviewJob(ctx, job.ID)
-			if code == http.StatusOK {
-				inspection, inspectErr := a.flows.Inspect(job.ID)
-				switch {
-				case inspectErr != nil || inspection.Job.Stage == "needs_review":
-					// Only a decision that still leaves the job at the human
-					// checkpoint belongs in the held count. A token item can now
-					// move to a durable delayed retry and is not still in review.
-					stats.Held++
+		if !a.aiReviewEligible(job) || a.autoReviewCoolingDown(job.ID, a.now()) {
+			continue
+		}
+		stats.Candidates++
+		code, body := a.autoReviewJob(ctx, job.ID)
+		if code == http.StatusOK {
+			inspection, inspectErr := a.flows.Inspect(job.ID)
+			switch {
+			case inspectErr != nil || inspection.Job.Stage == "needs_review":
+				// Only a decision that still leaves the job at the human
+				// checkpoint belongs in the held count. A token item can now
+				// move to a durable delayed retry and is not still in review.
+				stats.Held++
+				a.setAutoReviewCooldown(job.ID, a.now())
+			case inspection.Job.Stage == "skipped":
+				stats.Settled++
+				a.clearAutoReviewCooldown(job.ID)
+			default:
+				stats.Accepted++
+				if job.ReviewKind == "metadata" {
 					a.setAutoReviewCooldown(job.ID, a.now())
-				case inspection.Job.Stage == "skipped":
-					stats.Settled++
-					a.clearAutoReviewCooldown(job.ID)
-				default:
-					stats.Accepted++
-					if job.ReviewKind == "metadata" {
-						a.setAutoReviewCooldown(job.ID, a.now())
-					} else {
-						a.clearAutoReviewCooldown(job.ID)
-					}
-				}
-			} else if autoReviewNoMatch(code, body) {
-				requestID := "auto-skip-" + job.ID + "-" + strconv.FormatInt(a.now().UnixNano(), 10)
-				result, skipErr := a.flows.Review(requestID, job.ID, workflow.ReviewDecision{Action: "skip"}, a.now().UnixNano())
-				if skipErr == nil && result.Job != nil && result.Job.Stage == "skipped" {
-					stats.Settled++
-					a.clearAutoReviewCooldown(job.ID)
 				} else {
-					stats.Held++
-					a.setAutoReviewCooldown(job.ID, a.now())
+					a.clearAutoReviewCooldown(job.ID)
 				}
+			}
+		} else if autoReviewNoMatch(code, body) {
+			requestID := "auto-skip-" + job.ID + "-" + strconv.FormatInt(a.now().UnixNano(), 10)
+			result, skipErr := a.flows.Review(requestID, job.ID, workflow.ReviewDecision{Action: "skip"}, a.now().UnixNano())
+			if skipErr == nil && result.Job != nil && result.Job.Stage == "skipped" {
+				stats.Settled++
+				a.clearAutoReviewCooldown(job.ID)
 			} else {
-				stats.Failed++
 				stats.Held++
 				a.setAutoReviewCooldown(job.ID, a.now())
 			}
+		} else {
+			stats.Failed++
+			stats.Held++
+			a.setAutoReviewCooldown(job.ID, a.now())
 		}
-		if len(page.Next) == 0 {
-			a.autoReviewCursor = nil
-			break
-		}
-		cursor = page.Next
 	}
 	return stats
+}
+
+// autoReviewCandidateJobs reads the small blocked/recovery task indexes instead
+// of walking tens of thousands of historical workflow roots on every pass.
+// Waiting jobs are ordered oldest first so a cursor that happens to sit near a
+// hash boundary cannot starve an old review forever.
+func (a *App) autoReviewCandidateJobs() ([]workflow.Job, error) {
+	if a == nil || a.tasks == nil || a.flows == nil {
+		return []workflow.Job{}, nil
+	}
+	seen := map[string]bool{}
+	jobs := []workflow.Job{}
+	for _, lane := range []string{"identify", "publish", "transcode", "aux", "download"} {
+		for _, state := range []string{"blocked", "recovery_required"} {
+			var after []byte
+			for {
+				page, err := a.tasks.List(lane, state, after, 200)
+				if err != nil {
+					return nil, err
+				}
+				for _, task := range page.Tasks {
+					id := strings.TrimSpace(task.WorkflowJobID)
+					if id == "" || seen[id] {
+						continue
+					}
+					seen[id] = true
+					job, err := a.flows.Job(id)
+					if err != nil {
+						return nil, err
+					}
+					if job == nil || (job.ActiveTaskID != "" && job.ActiveTaskID != task.ID) || !a.aiReviewEligible(*job) {
+						continue
+					}
+					jobs = append(jobs, *job)
+				}
+				if len(page.Next) == 0 {
+					break
+				}
+				after = page.Next
+			}
+		}
+	}
+	sort.SliceStable(jobs, func(i, j int) bool { return jobs[i].UpdatedNS < jobs[j].UpdatedNS })
+	return jobs, nil
 }
 
 func (a *App) autoReviewJob(ctx context.Context, id string) (int, string) {

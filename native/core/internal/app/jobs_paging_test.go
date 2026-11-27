@@ -167,6 +167,20 @@ func TestJobsLiveFilterProjectsDescendantsOntoOneRoot(t *testing.T) {
 	}
 }
 
+func TestPrioritizeLiveWorkflowJobsKeepsOldRunningTask(t *testing.T) {
+	jobs := []workflow.Job{
+		{ID: "queued-new", UpdatedNS: 300},
+		{ID: "queued-old", UpdatedNS: 200},
+		{ID: "running-old", UpdatedNS: 100},
+	}
+	got := prioritizeLiveWorkflowJobs(jobs, map[string]string{
+		"queued-new": "queued", "queued-old": "queued", "running-old": "running",
+	}, 2)
+	if len(got) != 2 || got[0].ID != "running-old" || got[1].ID != "queued-new" {
+		t.Fatalf("live priority truncated the running task: %+v", got)
+	}
+}
+
 func TestClassifyJobCountsSeparatesWorkersFromRetryBacklog(t *testing.T) {
 	jobs := []workflow.Job{
 		{ID: "run-root", RootID: "run-root", Stage: "completed", ActiveTaskID: "run-search"},

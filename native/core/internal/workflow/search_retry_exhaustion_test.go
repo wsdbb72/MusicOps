@@ -7,7 +7,7 @@ import (
 	"github.com/wsdbb72/MusicOps/native/core/internal/searchdecision"
 )
 
-func TestTransientSearchRetryBudgetParksForReview(t *testing.T) {
+func TestTransientSearchRetryBudgetEndsInStreamingFallback(t *testing.T) {
 	repo, tasks, token := openSearch(t)
 	report := matchedReport()
 	report.StreamingEnabled = true
@@ -27,11 +27,10 @@ func TestTransientSearchRetryBudgetParksForReview(t *testing.T) {
 
 	report.RetryCount = 3
 	final, err := repo.Complete("bounded-retry-exhausted", current, Complete{
-		JobID: "search:album1", Edge: edgeTerminal, NextStage: "needs_review", ReviewKind: "search",
-		TaskState: "blocked", NowNS: 9000, Search: &report,
+		JobID: "search:album1", Edge: edgeQueueProcess, NextStage: "fallback", TaskState: "completed", NowNS: 9000, Evidence: searchEvidence(), Search: &report,
 	})
-	if err != nil || final.Job.Stage != "needs_review" || final.Job.ReviewKind != "search" || final.Job.SearchAction != searchdecision.ActionReviewSearch || len(final.Followups) != 0 {
-		t.Fatalf("exhausted retry must park for automated review, not create retry:4: %+v err=%v", final, err)
+	if err != nil || len(final.Children) != 1 || final.Children[0].Stage != "fallback" || final.Search == nil || final.Search.Action != searchdecision.ActionFallback || final.Search.Reason != "transient_fallback" {
+		t.Fatalf("exhausted retry must create the single bounded streaming fallback: %+v err=%v", final, err)
 	}
 }
 

@@ -90,13 +90,22 @@ func TestWorkflowUsesTheSelectedFileWithoutSpending(t *testing.T) {
 		t.Fatal(err)
 	}
 	post(t, application, "/v1/settings/library", map[string]any{"library_dir": library})
-	missing := postCode(t, application, "/v1/library/workflow", map[string]any{"scene": "upgrade", "path": filepath.Join(library, "missing.flac")})
+	missingPath := filepath.Join(library, "missing.flac")
+	missing := postCode(t, application, "/v1/library/workflow", map[string]any{"scene": "upgrade", "path": missingPath})
 	if missing.Code != http.StatusBadRequest {
 		t.Fatal(missing.Code, missing.Body.String())
+	}
+	var missingPayload map[string]any
+	if err := json.Unmarshal(missing.Body.Bytes(), &missingPayload); err != nil || missingPayload["path"] != missingPath {
+		t.Fatalf("missing-file response did not identify %q: %v %s", missingPath, err, missing.Body.String())
 	}
 	invalid := postCode(t, application, "/v1/library/workflow", map[string]any{"scene": "fill", "path": path, "confirmed": true})
 	if invalid.Code != http.StatusUnprocessableEntity || !strings.Contains(invalid.Body.String(), "LOCAL_IDENTITY_UNAVAILABLE") {
 		t.Fatal(invalid.Code, invalid.Body.String())
+	}
+	var invalidPayload map[string]any
+	if err := json.Unmarshal(invalid.Body.Bytes(), &invalidPayload); err != nil || invalidPayload["path"] != path {
+		t.Fatalf("identity failure did not identify %q: %v %s", path, err, invalid.Body.String())
 	}
 }
 

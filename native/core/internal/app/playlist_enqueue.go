@@ -114,6 +114,9 @@ type playlistLibraryIndex struct {
 	compilationTags  map[string]map[[2]string]bool
 	albumGaps        map[[2]string]bool
 	records          map[string]audiorelease.Entry
+	paths            map[string]string
+	scanRoot         string
+	scanFiles        map[string]cachedLibraryScan
 	pendingSnapshots map[string]audiorelease.VerifiedPresence
 	presence         *playlistPresenceCache
 	metadata         *playlistMetadataCache
@@ -210,11 +213,12 @@ func (cache *playlistPresenceCache) restorePending(items []audiorelease.Verified
 }
 
 type playlistRecordingTags struct {
-	artists    []string
-	album      string
-	title      string
-	duration   float64
-	trackTotal int
+	artists         []string
+	album           string
+	title           string
+	duration        float64
+	trackTotal      int
+	trackTotalKnown bool
 }
 
 type playlistRecordingFlight struct {
@@ -237,6 +241,8 @@ type playlistMetadataCache struct {
 	albumGapFlights    map[[2]string]chan struct{}
 	albumStates        map[[2]string]playlistAlbumState
 	albumStateFlights  map[[2]string]chan struct{}
+	trackTotals        map[string]int
+	trackTotalFlights  map[string]chan struct{}
 }
 
 func newPlaylistMetadataCache() *playlistMetadataCache {
@@ -251,6 +257,8 @@ func newPlaylistMetadataCache() *playlistMetadataCache {
 		albumGapFlights:    map[[2]string]chan struct{}{},
 		albumStates:        map[[2]string]playlistAlbumState{},
 		albumStateFlights:  map[[2]string]chan struct{}{},
+		trackTotals:        map[string]int{},
+		trackTotalFlights:  map[string]chan struct{}{},
 	}
 }
 
@@ -276,6 +284,34 @@ func (cache *playlistMetadataCache) recording(path string, compute func() playli
 	cache.recordings[path] = result
 	delete(cache.recordingFlights, path)
 	close(flight.done)
+	cache.mu.Unlock()
+	return result
+}
+
+func (cache *playlistMetadataCache) trackTotalFor(path string, compute func() int) int {
+	cache.mu.Lock()
+	if result, found := cache.trackTotals[path]; found {
+		cache.mu.Unlock()
+		return result
+	}
+	if flight, found := cache.trackTotalFlights[path]; found {
+		cache.mu.Unlock()
+		<-flight
+		cache.mu.Lock()
+		result := cache.trackTotals[path]
+		cache.mu.Unlock()
+		return result
+	}
+	flight := make(chan struct{})
+	cache.trackTotalFlights[path] = flight
+	cache.mu.Unlock()
+
+	result := compute()
+
+	cache.mu.Lock()
+	cache.trackTotals[path] = result
+	delete(cache.trackTotalFlights, path)
+	close(flight)
 	cache.mu.Unlock()
 	return result
 }
@@ -634,7 +670,11 @@ func (a *App) playlistLibrary() playlistLibraryIndex {
 		}
 	}
 	if fresh || !a.playlistIndexCached {
-		a.playlistIndexCache = indexPlaylistLibrary(a.engine, a.playlistEntriesCache)
+		var scan libraryAutomationScanDocument
+		if a.engine != nil {
+			scan = a.loadLibraryAutomationScanCache(a.libraryDir())
+		}
+		a.playlistIndexCache = indexPlaylistLibraryWithMetadata(a.engine, a.playlistEntriesCache, scan.Root, scan.Files)
 		a.playlistIndexCached = true
 	}
 	return a.playlistIndexCache
@@ -646,8 +686,9 @@ func (index playlistLibraryIndex) presenceWorker() playlistLibraryIndex {
 		titleCandidates: index.titleCandidates, albumMembers: index.albumMembers, albumTailMembers: index.albumTailMembers,
 		verified: map[string]bool{}, tagTitles: map[[2]string]map[string]bool{},
 		compilationTags: map[string]map[[2]string]bool{}, albumGaps: map[[2]string]bool{},
-		records: index.records, pendingSnapshots: map[string]audiorelease.VerifiedPresence{},
-		presence: index.presence, metadata: index.metadata,
+		records: index.records, paths: index.paths, scanRoot: index.scanRoot, scanFiles: index.scanFiles,
+		pendingSnapshots: map[string]audiorelease.VerifiedPresence{},
+		presence:         index.presence, metadata: index.metadata,
 	}
 }
 
@@ -786,12 +827,25 @@ func (a *App) invalidatePlaylistLibraryCache() {
 	a.playlistEntriesMu.Unlock()
 }
 func indexPlaylistLibrary(engine *dataengine.Engine, entries []audiorelease.Entry) playlistLibraryIndex {
-	index := playlistLibraryIndex{engine: engine, tracks: map[[3]string][]string{}, albums: map[[2]string][]string{}, titleCandidates: map[string][]string{}, albumMembers: map[string][]string{}, albumTailMembers: map[string][]string{}, verified: map[string]bool{}, tagTitles: map[[2]string]map[string]bool{}, compilationTags: map[string]map[[2]string]bool{}, albumGaps: map[[2]string]bool{}, records: map[string]audiorelease.Entry{}, pendingSnapshots: map[string]audiorelease.VerifiedPresence{}, presence: newPlaylistPresenceCache(), metadata: newPlaylistMetadataCache()}
+	return indexPlaylistLibraryWithMetadata(engine, entries, "", nil)
+}
+
+func indexPlaylistLibraryWithMetadata(engine *dataengine.Engine, entries []audiorelease.Entry, scanRoot string, scanFiles map[string]cachedLibraryScan) playlistLibraryIndex {
+	index := playlistLibraryIndex{engine: engine, tracks: map[[3]string][]string{}, albums: map[[2]string][]string{}, titleCandidates: map[string][]string{}, albumMembers: map[string][]string{}, albumTailMembers: map[string][]string{}, verified: map[string]bool{}, tagTitles: map[[2]string]map[string]bool{}, compilationTags: map[string]map[[2]string]bool{}, albumGaps: map[[2]string]bool{}, records: map[string]audiorelease.Entry{}, paths: map[string]string{}, scanRoot: strings.TrimSpace(scanRoot), scanFiles: scanFiles, pendingSnapshots: map[string]audiorelease.VerifiedPresence{}, presence: newPlaylistPresenceCache(), metadata: newPlaylistMetadataCache()}
 	for _, entry := range entries {
 		if !entry.FilePresent {
 			continue
 		}
 		index.records[entry.RequestID] = entry
+		if entry.File != "" {
+			path := entry.File
+			if !filepath.IsAbs(path) && entry.LibraryDir != "" {
+				path = filepath.Join(entry.LibraryDir, filepath.FromSlash(path))
+			}
+			if filepath.IsAbs(path) {
+				index.paths[entry.RequestID] = filepath.Clean(path)
+			}
+		}
 		rawArtist, rawAlbum, rawTitle := trackPathOf(entry.File)
 		artist, album, title := playlistMatchKey(rawArtist), playlistMatchKey(rawAlbum), playlistMatchKey(rawTitle)
 		if artist != "" && artist != "." && album != "" && album != "." && title != "" {
@@ -814,20 +868,83 @@ func indexPlaylistLibrary(engine *dataengine.Engine, entries []audiorelease.Entr
 	return index
 }
 
+func (index playlistLibraryIndex) pathFor(id string) (string, bool) {
+	if path := strings.TrimSpace(index.paths[id]); path != "" {
+		return path, true
+	}
+	path, found, err := audiorelease.PathFor(index.engine, id)
+	return path, err == nil && found
+}
+
+// cachedScanForPath returns only an unchanged automation scan result. The
+// size/time check makes a stale cache harmless after an external move or tag
+// edit; no FLAC body is opened until that check succeeds.
+func (index playlistLibraryIndex) cachedScanForPath(path string) (cachedLibraryScan, bool) {
+	if strings.TrimSpace(index.scanRoot) == "" || len(index.scanFiles) == 0 || strings.TrimSpace(path) == "" {
+		return cachedLibraryScan{}, false
+	}
+	entry, found := index.scanFiles[automationCacheKey(index.scanRoot, path)]
+	if !found || entry.DuplicateOnly {
+		return cachedLibraryScan{}, false
+	}
+	info, err := os.Lstat(path)
+	if err != nil || !info.Mode().IsRegular() || info.Size() != entry.Size || info.ModTime().UnixNano() != entry.ModNS {
+		return cachedLibraryScan{}, false
+	}
+	return entry, true
+}
+
+func (index playlistLibraryIndex) scanPresence(id string) bool {
+	path, found := index.pathFor(id)
+	if !found {
+		return false
+	}
+	_, found = index.cachedScanForPath(path)
+	return found
+}
+
+func playlistRecordingsFromScan(entry cachedLibraryScan) (playlistRecordingTags, bool) {
+	artists := append([]string(nil), entry.Artists...)
+	if len(artists) == 0 {
+		artists = splitPlaylistArtists(firstNonEmpty(entry.Artist, entry.AlbumArtist))
+	}
+	if len(artists) == 0 && strings.TrimSpace(entry.Album) == "" && strings.TrimSpace(entry.Title) == "" {
+		return playlistRecordingTags{}, false
+	}
+	return playlistRecordingTags{
+		artists: artists, album: entry.Album, title: entry.Title, duration: entry.Duration,
+		trackTotal: entry.TrackTotal, trackTotalKnown: entry.MetadataVersion >= libraryAutomationMetadataVersion,
+	}, true
+}
+
+func (index playlistLibraryIndex) albumTrackTotal(path string) int {
+	if entry, found := index.cachedScanForPath(path); found && entry.MetadataVersion >= libraryAutomationMetadataVersion {
+		return entry.TrackTotal
+	}
+	compute := func() int {
+		tags, err := readFLACTagsPrefix(path)
+		if err != nil {
+			return 0
+		}
+		return flacTrackTotal(tags)
+	}
+	if index.metadata != nil {
+		return index.metadata.trackTotalFor(path, compute)
+	}
+	return compute()
+}
+
 func (index playlistLibraryIndex) recording(path string) playlistRecordingTags {
+	if entry, found := index.cachedScanForPath(path); found {
+		if tags, ok := playlistRecordingsFromScan(entry); ok {
+			return tags
+		}
+	}
 	compute := func() playlistRecordingTags {
 		if strings.EqualFold(filepath.Ext(path), ".flac") {
 			if tags, err := readFLACTagsPrefix(path); err == nil {
 				duration, _ := flacDuration(tags.StreamInfo)
-				total := firstValue(tags.Raw["TRACKTOTAL"])
-				if total == "" {
-					total = firstValue(tags.Raw["TOTALTRACKS"])
-				}
-				if total == "" {
-					_, total, _ = strings.Cut(firstValue(tags.Raw["TRACKNUMBER"]), "/")
-				}
-				trackTotal, _ := strconv.Atoi(total)
-				return playlistRecordingTags{artists: tags.Artists, album: tags.Album, title: tags.Title, duration: duration, trackTotal: trackTotal}
+				return playlistRecordingTags{artists: tags.Artists, album: tags.Album, title: tags.Title, duration: duration, trackTotal: flacTrackTotal(tags), trackTotalKnown: true}
 			}
 			return playlistRecordingTags{}
 		}
@@ -852,8 +969,8 @@ func (index playlistLibraryIndex) albumTagTitles(key [2]string) map[string]bool 
 			if !index.isUnchanged(id) {
 				continue
 			}
-			path, found, err := audiorelease.PathFor(index.engine, id)
-			if err != nil || !found || !strings.EqualFold(filepath.Ext(path), ".flac") {
+			path, found := index.pathFor(id)
+			if !found || !strings.EqualFold(filepath.Ext(path), ".flac") {
 				continue
 			}
 			tags := index.recording(path)
@@ -918,8 +1035,8 @@ func (index playlistLibraryIndex) hasPlaylistRow(row playlistTrack) bool {
 		if !index.isUnchanged(id) {
 			continue
 		}
-		path, found, err := audiorelease.PathFor(index.engine, id)
-		if err != nil || !found {
+		path, found := index.pathFor(id)
+		if !found {
 			continue
 		}
 		tags := index.recording(path)
@@ -1000,8 +1117,8 @@ func (index playlistLibraryIndex) hasRecordingIdentity(artist, title string) boo
 				continue
 			}
 			seen[id] = true
-			path, found, err := audiorelease.PathFor(index.engine, id)
-			if err != nil || !found {
+			path, found := index.pathFor(id)
+			if !found {
 				continue
 			}
 			tags := index.recording(path)
@@ -1040,8 +1157,8 @@ func (index playlistLibraryIndex) hasSamePCMRecording(source, title string) bool
 		if !index.isUnchanged(id) {
 			continue
 		}
-		path, found, err := audiorelease.PathFor(index.engine, id)
-		if err != nil || !found || !strings.EqualFold(filepath.Ext(path), ".flac") {
+		path, found := index.pathFor(id)
+		if !found || !strings.EqualFold(filepath.Ext(path), ".flac") {
 			continue
 		}
 		tags := index.recording(path)
@@ -1087,8 +1204,8 @@ func (index playlistLibraryIndex) hasTrack(artist, album, title string) bool {
 			if !index.isUnchanged(id) {
 				continue
 			}
-			path, found, err := audiorelease.PathFor(index.engine, id)
-			if err != nil || !found {
+			path, found := index.pathFor(id)
+			if !found {
 				continue
 			}
 			artists, albumTag, titleTag := index.trackTags(path)
@@ -1217,8 +1334,8 @@ func (index playlistLibraryIndex) compilationMatches(album string) map[[2]string
 			if !index.isUnchanged(id) {
 				continue
 			}
-			path, found, err := audiorelease.PathFor(index.engine, id)
-			if err != nil || !found {
+			path, found := index.pathFor(id)
+			if !found {
 				continue
 			}
 			artists, albumTag, titleTag := index.trackTags(path)
@@ -1258,6 +1375,9 @@ func compilationTrackTags(path string) (artists []string, album, title string) {
 }
 
 func (index playlistLibraryIndex) isUnchanged(id string) bool {
+	if len(index.scanFiles) > 0 && index.scanPresence(id) {
+		return true
+	}
 	compute := func() playlistPresenceResult {
 		if entry, found := index.records[id]; found {
 			ok := entry.PresenceUnchanged()
@@ -1347,8 +1467,8 @@ func (index playlistLibraryIndex) hasAlbum(artist, album string) bool {
 		if !index.isUnchanged(id) {
 			continue
 		}
-		path, found, err := audiorelease.PathFor(index.engine, id)
-		if err != nil || !found {
+		path, found := index.pathFor(id)
+		if !found {
 			continue
 		}
 		artists, albumTag, _ := index.trackTags(path)
@@ -1403,8 +1523,8 @@ func (index playlistLibraryIndex) albumCompletionState(artist, album string) pla
 		present := 0
 		explicitTotal := 0
 		for _, id := range ids {
-			path, found, err := audiorelease.PathFor(index.engine, id)
-			if err != nil || !found || !index.isUnchanged(id) {
+			path, found := index.pathFor(id)
+			if !found || !index.isUnchanged(id) {
 				continue
 			}
 			isFLAC := strings.EqualFold(filepath.Ext(path), ".flac")
@@ -1424,13 +1544,17 @@ func (index playlistLibraryIndex) albumCompletionState(artist, album string) pla
 				}
 			}
 			present++
-			if !isFLAC || tags.trackTotal <= 0 || !playlistAlbumTagMatches(album, tags.album) {
+			trackTotal := tags.trackTotal
+			if isFLAC && !tags.trackTotalKnown {
+				trackTotal = index.albumTrackTotal(path)
+			}
+			if !isFLAC || trackTotal <= 0 || !playlistAlbumTagMatches(album, tags.album) {
 				continue
 			}
-			if explicitTotal != 0 && explicitTotal != tags.trackTotal {
+			if explicitTotal != 0 && explicitTotal != trackTotal {
 				return playlistAlbumIncomplete
 			}
-			explicitTotal = tags.trackTotal
+			explicitTotal = trackTotal
 		}
 		switch {
 		case explicitTotal == 0:
@@ -1833,15 +1957,20 @@ func (a *App) playlistTracksView(w http.ResponseWriter, r *http.Request) {
 		AlbumIncomplete       bool   `json:"album_incomplete"`
 		AlbumCompletionNeeded bool   `json:"album_completion_needed"`
 	}
+	includeTracks := r.URL.Query().Get("summary") != "1"
 	out := make([]rowView, 0, len(rows))
+	if !includeTracks {
+		out = nil
+	}
 	library := a.playlistLibrary()
-	present, presenceErr := a.playlistPresence(r.Context(), rows)
+	present, presenceErr := playlistPresenceForIndexContext(r.Context(), library, rows)
 	if presenceErr != nil {
 		if r.Context().Err() == nil {
 			writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "code": "PLAYLIST_PRESENCE_FAILED"})
 		}
 		return
 	}
+	presentCount, albumPresentCount, albumIncompleteCount, completionNeededCount := 0, 0, 0, 0
 	for i, row := range rows {
 		albumPresent, albumIncomplete, completionNeeded := true, false, !present[i]
 		album := normalizePlaylistAlbumTitle(row.Album)
@@ -1850,12 +1979,35 @@ func (a *App) playlistTracksView(w http.ResponseWriter, r *http.Request) {
 			albumIncomplete = albumPresent && library.hasAlbumGap(row.Artist, album)
 			completionNeeded = library.needsAlbumCompletion(row.Artist, album, row.Title)
 		}
-		out = append(out, rowView{
-			Index: i, Artist: row.Artist, Title: row.Title, Album: row.Album, Present: present[i],
-			AlbumPresent: albumPresent, AlbumIncomplete: albumIncomplete, AlbumCompletionNeeded: completionNeeded,
-		})
+		if present[i] {
+			presentCount++
+		}
+		if albumPresent {
+			albumPresentCount++
+		}
+		if albumIncomplete {
+			albumIncompleteCount++
+		}
+		if completionNeeded {
+			completionNeededCount++
+		}
+		if includeTracks {
+			out = append(out, rowView{
+				Index: i, Artist: row.Artist, Title: row.Title, Album: row.Album, Present: present[i],
+				AlbumPresent: albumPresent, AlbumIncomplete: albumIncomplete, AlbumCompletionNeeded: completionNeeded,
+			})
+		}
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "name": name, "tracks": out, "total": len(out)})
+	summary := map[string]any{
+		"total": len(rows), "present": presentCount, "missing": len(rows) - presentCount,
+		"album_present": albumPresentCount, "album_incomplete": albumIncompleteCount,
+		"completion_needed": completionNeededCount,
+	}
+	if !includeTracks {
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "name": name, "summary": summary, "total": len(rows)})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "name": name, "tracks": out, "summary": summary, "total": len(rows)})
 }
 
 // enqueuePlaylist is POST /v1/playlists/enqueue {job_id, indices, album_completion}.

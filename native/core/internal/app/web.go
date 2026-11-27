@@ -455,7 +455,7 @@ const appJS = `(function () {
           var response = await fetch("/v1/jobs?counts=only", {headers: {Accept: "application/json"}});
           if (response.ok && view === "tasks") {
             updateOpsState(await response.json());
-            if (activeCount > 0 && Date.now() - lastLoadedAt > 4000) await load(true);
+            if ((activeCount > 0 || checkCount(globalJobCounts || {}, "queued") > 0) && Date.now() - lastLoadedAt > 4000) await load(true);
           }
         } catch (err) { /* The next refresh retries a transient connection failure. */ }
       }
@@ -2857,7 +2857,12 @@ const appJS = `(function () {
       var response = await fetch("/v1/jobs?" + (view === "tasks" ? "roots=1&live=1" : "review=1") + "&after=" + encodeURIComponent(jobsNext), {headers: {Accept: "application/json"}});
       var body = await response.json();
       if (!response.ok || !body || !body.ok) { setStatus("fail", "没有读到更多任务。"); return; }
-      (body.jobs || []).forEach(function (job) { jobs.push(job); });
+      var seen = {};
+      jobs.forEach(function (job) { seen[job.job_id || job.root_id || ""] = true; });
+      (body.jobs || []).forEach(function (job) {
+        var key = job.job_id || job.root_id || "";
+        if (!key || !seen[key]) { jobs.push(job); seen[key] = true; }
+      });
       jobsNext = body.next || "";
       render();
       setStatus("ok", "已加载 " + (body.jobs || []).length + " 条。");
@@ -2871,8 +2876,9 @@ const appJS = `(function () {
   function arm() {
     clearTimeout(timer);
     if (view !== "tasks" && view !== "queue" && view !== "review") return;
-    if (activeCount <= 0) return;
-    timer = setTimeout(function () { load(true); }, view === "tasks" ? 5000 : 2500);
+    var queued = checkCount(globalJobCounts || {}, "queued");
+    if (activeCount <= 0 && queued <= 0) return;
+    timer = setTimeout(function () { load(true); }, view === "tasks" ? (activeCount > 0 ? 5000 : 30000) : (activeCount > 0 ? 2500 : 15000));
   }
   document.getElementById("nav").addEventListener("click", function (event) {
     var button = event.target.closest("button");

@@ -11,6 +11,8 @@ import (
 func TestNeteasePlaylistFallbackKeepsOriginalPlatform(t *testing.T) {
 	plan := SearchPlan{PlaylistTrack: "夏恋慕"}
 	if !isNeteasePlaylistFallback("pl-netease-590536461-batch", plan) ||
+		!isNeteasePlaylistFallback("trk-netease-590536461-track", plan) ||
+		!isNeteasePlaylistFallback("process:search:unknown", SearchPlan{NeteaseSongID: 27505499}) ||
 		isNeteasePlaylistFallback("pl-qqmusic-123-batch", plan) ||
 		!isNeteasePlaylistFallback("pl-netease-590536461-batch", SearchPlan{}) {
 		t.Fatal("fallback source did not reflect the playlist origin")

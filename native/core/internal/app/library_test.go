@@ -227,6 +227,29 @@ func TestDuplicateScanEndpointPersistsFingerprintsForResume(t *testing.T) {
 	}
 }
 
+func TestLegacyPlaylistPresenceStampsWithoutReadingAudio(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "legacy.flac")
+	body := []byte("legacy-audio")
+	if err := os.WriteFile(path, body, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	entry := audiorelease.Entry{RequestID: "legacy", RootID: "legacy-root", Track: 1, File: path, LibraryDir: filepath.Dir(path), SHA256: strings.Repeat("0", 64)}
+	index := playlistLibraryIndex{
+		ctx: context.Background(), records: map[string]audiorelease.Entry{"legacy": entry}, paths: map[string]string{"legacy": path},
+		presence: newPlaylistPresenceCache(), verified: map[string]bool{}, pendingSnapshots: map[string]audiorelease.VerifiedPresence{},
+	}
+	if !index.isUnchanged("legacy") || len(index.presence.takePending()) != 1 {
+		t.Fatal("existing legacy path was not stamped for O(1) future presence checks")
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	index.ctx = ctx
+	index.presence = newPlaylistPresenceCache()
+	if index.isUnchanged("legacy") {
+		t.Fatal("canceled legacy verification continued")
+	}
+}
+
 func TestDuplicatePreparationHonorsCancellation(t *testing.T) {
 	application := newApp(t)
 	ctx, cancel := context.WithCancel(context.Background())

@@ -103,6 +103,7 @@ const (
 
 // Index only candidate names. Verify bytes lazily for playlist matches.
 type playlistLibraryIndex struct {
+	ctx              context.Context
 	engine           *dataengine.Engine
 	tracks           map[[3]string][]string
 	albums           map[[2]string][]string
@@ -684,7 +685,7 @@ func (a *App) playlistLibrary() playlistLibraryIndex {
 
 func (index playlistLibraryIndex) presenceWorker() playlistLibraryIndex {
 	return playlistLibraryIndex{
-		engine: index.engine, tracks: index.tracks, albums: index.albums,
+		ctx: index.ctx, engine: index.engine, tracks: index.tracks, albums: index.albums,
 		titleCandidates: index.titleCandidates, albumMembers: index.albumMembers, albumTailMembers: index.albumTailMembers,
 		verified: map[string]bool{}, tagTitles: map[[2]string]map[string]bool{},
 		compilationTags: map[string]map[[2]string]bool{}, albumGaps: map[[2]string]bool{},
@@ -716,6 +717,9 @@ func playlistPresenceForIndexContext(ctx context.Context, index playlistLibraryI
 	}
 	runCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
+	// The cached index is copied by value; bind this copy to the request so
+	// legacy-file verification can be cancelled without mutating shared cache.
+	index.ctx = runCtx
 	// A first scan of a large mechanical library can take minutes. Persist each
 	// already-verified size/mtime snapshot as it is produced so a client timeout
 	// cannot discard the completed prefix. The deferred flush also records work
@@ -848,7 +852,7 @@ func indexPlaylistLibraryWithMetadata(engine *dataengine.Engine, entries []audio
 }
 
 func indexPlaylistLibraryWithContext(ctx context.Context, engine *dataengine.Engine, entries []audiorelease.Entry, scanRoot string, scanFiles map[string]cachedLibraryScan) (playlistLibraryIndex, error) {
-	index := playlistLibraryIndex{engine: engine, tracks: map[[3]string][]string{}, albums: map[[2]string][]string{}, titleCandidates: map[string][]string{}, albumMembers: map[string][]string{}, albumTailMembers: map[string][]string{}, verified: map[string]bool{}, tagTitles: map[[2]string]map[string]bool{}, compilationTags: map[string]map[[2]string]bool{}, albumGaps: map[[2]string]bool{}, records: map[string]audiorelease.Entry{}, paths: map[string]string{}, scanRoot: strings.TrimSpace(scanRoot), scanFiles: scanFiles, pendingSnapshots: map[string]audiorelease.VerifiedPresence{}, presence: newPlaylistPresenceCache(), metadata: newPlaylistMetadataCache(), signature: playlistLibrarySignature(entries)}
+	index := playlistLibraryIndex{ctx: ctx, engine: engine, tracks: map[[3]string][]string{}, albums: map[[2]string][]string{}, titleCandidates: map[string][]string{}, albumMembers: map[string][]string{}, albumTailMembers: map[string][]string{}, verified: map[string]bool{}, tagTitles: map[[2]string]map[string]bool{}, compilationTags: map[string]map[[2]string]bool{}, albumGaps: map[[2]string]bool{}, records: map[string]audiorelease.Entry{}, paths: map[string]string{}, scanRoot: strings.TrimSpace(scanRoot), scanFiles: scanFiles, pendingSnapshots: map[string]audiorelease.VerifiedPresence{}, presence: newPlaylistPresenceCache(), metadata: newPlaylistMetadataCache(), signature: playlistLibrarySignature(entries)}
 	for i, entry := range entries {
 		if i%256 == 0 {
 			if err := ctx.Err(); err != nil {
@@ -1401,14 +1405,35 @@ func (index playlistLibraryIndex) isUnchanged(id string) bool {
 		return true
 	}
 	compute := func() playlistPresenceResult {
+		ctx := index.ctx
+		if ctx == nil {
+			ctx = context.Background()
+		}
+		if err := ctx.Err(); err != nil {
+			return playlistPresenceResult{}
+		}
 		if entry, found := index.records[id]; found {
-			ok := entry.PresenceUnchanged()
-			if !ok || entry.HasIndexedStat() {
-				return playlistPresenceResult{unchanged: ok}
+			path, pathFound := index.pathFor(id)
+			if !pathFound {
+				return playlistPresenceResult{}
 			}
+			info, statErr := os.Lstat(path)
+			if statErr != nil || !info.Mode().IsRegular() {
+				return playlistPresenceResult{}
+			}
+			if entry.HasIndexedStat() {
+				return playlistPresenceResult{unchanged: entry.IndexedStatMatches(info.Size(), info.ModTime().UnixNano())}
+			}
+			// Playlist presence asks whether the indexed release still exists,
+			// not whether every byte is uncorrupted. A regular file at the indexed
+			// path is enough to stamp the current size/mtime snapshot. Content
+			// integrity remains the job of full-library verification, so a large
+			// playlist must never hash the whole music disk just to render.
 			return playlistPresenceResult{unchanged: true, snapshot: &audiorelease.VerifiedPresence{RequestID: id, RootID: entry.RootID, Track: entry.Track}}
 		}
-		return playlistPresenceResult{unchanged: audiorelease.PresenceUnchanged(index.engine, id)}
+		// Every indexed release is present in records above. An unknown id must
+		// not fall back to a full-file hash on a playlist request.
+		return playlistPresenceResult{}
 	}
 	if index.presence != nil {
 		return index.presence.verify(id, compute)

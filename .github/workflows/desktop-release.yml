@@ -376,7 +376,13 @@ jobs:
           gh('release', 'upload', tag, *map(str, files))
           # The by-tag endpoint returns published releases. Read this new draft
           # by ID so every asset is verified before it becomes publicly visible.
-          created = [release for release in api('/releases?per_page=100') if release['tag_name'] == tag]
+          created = []
+          page = 1
+          while True:
+              releases = api('/releases?per_page=100&page='+str(page))
+              created.extend(release for release in releases if release['tag_name'] == tag)
+              if len(releases) < 100: break
+              page += 1
           if len(created) != 1:
               raise SystemExit('Could not identify the newly created draft')
           release_id = str(created[0]['id'])

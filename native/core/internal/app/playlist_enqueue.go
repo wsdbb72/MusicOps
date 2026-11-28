@@ -659,9 +659,11 @@ const (
 	// Presence checks may need to inspect thousands of files on a slow library
 	// disk. Immutable catalogue maps and the single-flight file verification
 	// cache are shared; only each worker's tag memo remains independent.
-	playlistPresenceWorkers    = 1
-	playlistPresenceFlushBatch = 200
-	playlistPresencePause      = 2 * time.Millisecond
+	playlistPresenceWorkers       = 1
+	playlistPresenceFlushBatch    = 200
+	playlistPresencePause         = 2 * time.Millisecond
+	playlistSnapshotRepairLimit   = 4
+	playlistSnapshotRepairTimeout = 3 * time.Second
 )
 
 func (a *App) playlistLibrary() playlistLibraryIndex {
@@ -729,10 +731,10 @@ func playlistPresenceForIndexContext(ctx context.Context, index playlistLibraryI
 }
 
 // playlistPresenceForIndexSnapshotContext evaluates against the durable index
-// only for the full catalogue pass. At most 16 unresolved rows receive a
-// bounded embedded-metadata repair, so a cold playlist stays responsive even
-// when the library is on a slow HDD. The regular maintenance pass refreshes
-// the durable index outside the request path.
+// only for the full catalogue pass. At most four unresolved rows receive a
+// three-second embedded-metadata repair, so a cold playlist stays responsive
+// even when the library is on a slow HDD. The regular maintenance pass
+// refreshes the durable index outside the request path.
 func playlistPresenceForIndexSnapshotContext(ctx context.Context, index playlistLibraryIndex, rows []playlistTrack) ([]bool, error) {
 	present, err := playlistPresenceForIndexContextMode(ctx, index, rows, true)
 	if err != nil {
@@ -745,18 +747,19 @@ func playlistPresenceForIndexSnapshotContext(ctx context.Context, index playlist
 	// maintenance pass. Resolve only unresolved rows, with a hard bound, so one
 	// truncated filename can still match its embedded full title without turning
 	// the whole playlist into a synchronous tag-reading pass.
-	const repairLimit = 16
+	repairCtx, cancel := context.WithTimeout(ctx, playlistSnapshotRepairTimeout)
+	defer cancel()
 	repair := freshPlaylistVerificationIndex(index)
-	repair.ctx = ctx
+	repair.ctx = repairCtx
 	repair.useIndexSnapshot = false
 	local := repair.presenceWorker()
 	checked, recovered := 0, 0
 	for i, ok := range present {
-		if ok || checked >= repairLimit {
+		if ok || checked >= playlistSnapshotRepairLimit {
 			continue
 		}
-		if err := ctx.Err(); err != nil {
-			return nil, err
+		if repairCtx.Err() != nil {
+			break
 		}
 		checked++
 		if local.hasPlaylistRow(rows[i]) {
@@ -764,11 +767,15 @@ func playlistPresenceForIndexSnapshotContext(ctx context.Context, index playlist
 			recovered++
 		}
 	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	if err := repair.flushPresenceSnapshots(); err != nil {
 		return nil, err
 	}
 	if checked > 0 {
-		log.Printf("playlist audit stage=snapshot_repair checked=%d recovered=%d", checked, recovered)
+		timedOut := repairCtx.Err() == context.DeadlineExceeded
+		log.Printf("playlist audit stage=snapshot_repair checked=%d recovered=%d timed_out=%t", checked, recovered, timedOut)
 	}
 	return present, nil
 }
@@ -1020,6 +1027,9 @@ func (index playlistLibraryIndex) albumTrackTotal(path string) int {
 		return 0
 	}
 	compute := func() int {
+		if index.contextDone() {
+			return 0
+		}
 		tags, err := readFLACTagsPrefix(path)
 		if err != nil {
 			return 0
@@ -1042,6 +1052,9 @@ func (index playlistLibraryIndex) recording(path string) playlistRecordingTags {
 		return playlistRecordingTags{}
 	}
 	compute := func() playlistRecordingTags {
+		if index.contextDone() {
+			return playlistRecordingTags{}
+		}
 		if strings.EqualFold(filepath.Ext(path), ".flac") {
 			if tags, err := readFLACTagsPrefix(path); err == nil {
 				duration, _ := flacDuration(tags.StreamInfo)
@@ -1049,7 +1062,7 @@ func (index playlistLibraryIndex) recording(path string) playlistRecordingTags {
 			}
 			return playlistRecordingTags{}
 		}
-		artists, album, title, duration := playlistRecordingEvidence(path)
+		artists, album, title, duration := playlistRecordingEvidenceContext(index.ctx, path)
 		return playlistRecordingTags{artists: artists, album: album, title: title, duration: duration}
 	}
 	if index.metadata != nil {
@@ -1067,6 +1080,9 @@ func (index playlistLibraryIndex) albumTagTitles(key [2]string) map[string]bool 
 	build := func() map[string]bool {
 		titles := map[string]bool{}
 		for _, id := range index.albums[key] {
+			if index.contextDone() {
+				return nil
+			}
 			if !index.isUnchanged(id) {
 				continue
 			}
@@ -1092,6 +1108,9 @@ func (index playlistLibraryIndex) albumTagTitles(key [2]string) map[string]bool 
 	return titles
 }
 func (index playlistLibraryIndex) hasPlaylistRow(row playlistTrack) bool {
+	if index.contextDone() {
+		return false
+	}
 	if index.hasTrack(row.Artist, row.Album, row.Title) {
 		return true
 	}
@@ -1133,6 +1152,9 @@ func (index playlistLibraryIndex) hasPlaylistRow(row playlistTrack) bool {
 	// credited artist and measured duration still agree; an exact album/path
 	// match can use the normal three-second padding tolerance.
 	for _, id := range ids {
+		if index.contextDone() {
+			return false
+		}
 		if !index.isUnchanged(id) {
 			continue
 		}
@@ -1206,6 +1228,9 @@ func playlistSuperCreditArtistMatches(expected string, actual []string, pathArti
 // records, so callers must only use this after an explicit library reindex and
 // only for acquisition failures that can never hide a quality-upgrade debt.
 func (index playlistLibraryIndex) hasRecordingIdentity(artist, title string) bool {
+	if index.contextDone() {
+		return false
+	}
 	artist = strings.TrimSpace(artist)
 	title = strings.TrimSpace(title)
 	if artist == "" || title == "" {
@@ -1214,6 +1239,9 @@ func (index playlistLibraryIndex) hasRecordingIdentity(artist, title string) boo
 	seen := map[string]bool{}
 	for _, key := range playlistTitleCandidateKeys(title) {
 		for _, id := range index.titleCandidates[key] {
+			if index.contextDone() {
+				return false
+			}
 			if seen[id] || !index.isUnchanged(id) {
 				continue
 			}
@@ -1240,6 +1268,9 @@ func (index playlistLibraryIndex) hasRecordingIdentity(artist, title string) boo
 	return false
 }
 func (index playlistLibraryIndex) hasSamePCMRecording(source, title string) bool {
+	if index.contextDone() {
+		return false
+	}
 	title = strings.TrimSpace(title)
 	if title == "" {
 		return false
@@ -1255,6 +1286,9 @@ func (index playlistLibraryIndex) hasSamePCMRecording(source, title string) bool
 		}
 	}
 	for _, id := range ids {
+		if index.contextDone() {
+			return false
+		}
 		if !index.isUnchanged(id) {
 			continue
 		}
@@ -1270,6 +1304,9 @@ func (index playlistLibraryIndex) hasSamePCMRecording(source, title string) bool
 	return false
 }
 func (index playlistLibraryIndex) hasTrack(artist, album, title string) bool {
+	if index.contextDone() {
+		return false
+	}
 	// A source row without an album is published under its own title.
 	// Use that same folder when checking whether it has already been filed.
 	key := [2]string{playlistMatchKey(artist), playlistMatchKey(firstNonEmpty(album, title))}
@@ -1281,6 +1318,9 @@ func (index playlistLibraryIndex) hasTrack(artist, album, title string) bool {
 		return index.hasCompilationTrack(artist, key[1], want)
 	}
 	for _, id := range index.tracks[[3]string{key[0], key[1], want}] {
+		if index.contextDone() {
+			return false
+		}
 		if index.isUnchanged(id) {
 			return true
 		}
@@ -1302,6 +1342,9 @@ func (index playlistLibraryIndex) hasTrack(artist, album, title string) bool {
 		ids := append([]string(nil), index.titleCandidates[titleKey]...)
 		ids = append(ids, index.titleCandidates[playlistCompactTitleKey(titleKey)]...)
 		for _, id := range ids {
+			if index.contextDone() {
+				return false
+			}
 			if !index.isUnchanged(id) {
 				continue
 			}
@@ -1344,6 +1387,16 @@ func playlistFeaturedTitleKey(title, artist string) string {
 var playlistFeaturing = regexp.MustCompile(`(?i) feat\. +`)
 
 func playlistRecordingEvidence(path string) (artists []string, album, title string, duration float64) {
+	return playlistRecordingEvidenceContext(context.Background(), path)
+}
+
+func playlistRecordingEvidenceContext(parent context.Context, path string) (artists []string, album, title string, duration float64) {
+	if parent == nil {
+		parent = context.Background()
+	}
+	if err := parent.Err(); err != nil {
+		return nil, "", "", 0
+	}
 	if strings.EqualFold(filepath.Ext(path), ".flac") {
 		if tags, err := readFLACTagsPrefix(path); err == nil {
 			duration, _ = flacDuration(tags.StreamInfo)
@@ -1351,7 +1404,7 @@ func playlistRecordingEvidence(path string) (artists []string, album, title stri
 		}
 		return nil, "", "", 0
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(parent, 5*time.Second)
 	defer cancel()
 	if info, err := probeGenericAudio(ctx, path); err == nil {
 		artist := firstNonEmpty(info.Artist, info.AlbumArtist, info.Tags["artist"], info.Tags["artists"])
@@ -1417,8 +1470,14 @@ func playlistArtistTagMatches(expected string, actual []string) bool {
 // Compilation folders share an album artist, so only the embedded track
 // artist can distinguish recordings with the same title.
 func (index playlistLibraryIndex) hasCompilationTrack(artist, album, title string) bool {
+	if index.contextDone() {
+		return false
+	}
 	pathArtist := playlistMatchKey(artist)
 	for _, id := range index.tracks[[3]string{pathArtist, album, playlistMatchKey(title)}] {
+		if index.contextDone() {
+			return false
+		}
 		if pathArtist != playlistMatchKey(hotSlowCompilationArtist) && index.isUnchanged(id) {
 			return true
 		}
@@ -1429,9 +1488,15 @@ func (index playlistLibraryIndex) hasCompilationTrack(artist, album, title strin
 }
 
 func (index playlistLibraryIndex) compilationMatches(album string) map[[2]string]bool {
+	if index.contextDone() {
+		return nil
+	}
 	build := func() map[[2]string]bool {
 		matches := map[[2]string]bool{}
 		for _, id := range index.albumMembers[album] {
+			if index.contextDone() {
+				return nil
+			}
 			if !index.isUnchanged(id) {
 				continue
 			}
@@ -1473,6 +1538,10 @@ func compilationArtistKey(values []string) string {
 
 func compilationTrackTags(path string) (artists []string, album, title string) {
 	return playlistTrackTags(path)
+}
+
+func (index playlistLibraryIndex) contextDone() bool {
+	return index.ctx != nil && index.ctx.Err() != nil
 }
 
 func (index playlistLibraryIndex) isUnchanged(id string) bool {
@@ -1570,12 +1639,18 @@ func (index *playlistLibraryIndex) flushPresenceSnapshots() error {
 // must distinguish those states so a recording that happens to exist in a
 // compilation does not suppress the requested album.
 func (index playlistLibraryIndex) hasAlbum(artist, album string) bool {
+	if index.contextDone() {
+		return false
+	}
 	artist, album = strings.TrimSpace(artist), strings.TrimSpace(album)
 	if artist == "" || album == "" {
 		return false
 	}
 	key := [2]string{libraryPathKey(artist), libraryPathKey(album)}
 	for _, id := range index.albums[key] {
+		if index.contextDone() {
+			return false
+		}
 		if index.isUnchanged(id) {
 			return true
 		}
@@ -1586,6 +1661,9 @@ func (index playlistLibraryIndex) hasAlbum(artist, album string) bool {
 	candidates = append(candidates, index.albumTailMembers[playlistMatchKey(album)]...)
 	seen := map[string]bool{}
 	for _, id := range candidates {
+		if index.contextDone() {
+			return false
+		}
 		if seen[id] {
 			continue
 		}
@@ -1629,6 +1707,9 @@ func (index playlistLibraryIndex) needsAlbumCompletion(artist, album, title stri
 }
 
 func (index playlistLibraryIndex) albumHasConflictingMetadata(artist, album, title string) bool {
+	if index.contextDone() {
+		return false
+	}
 	want := playlistMatchKey(title)
 	if want == "" {
 		return false
@@ -1643,6 +1724,9 @@ func (index playlistLibraryIndex) albumHasConflictingMetadata(artist, album, tit
 		ids := append([]string(nil), index.titleCandidates[key]...)
 		ids = append(ids, index.titleCandidates[playlistCompactTitleKey(key)]...)
 		for _, id := range ids {
+			if index.contextDone() {
+				return false
+			}
 			if seen[id] || !index.isUnchanged(id) {
 				continue
 			}
@@ -1674,6 +1758,9 @@ func (index playlistLibraryIndex) albumHasConflictingMetadata(artist, album, tit
 // reported as not complete so the album job can verify the source release
 // instead of suppressing it forever.
 func (index playlistLibraryIndex) albumCompletionState(artist, album string) playlistAlbumState {
+	if index.contextDone() {
+		return playlistAlbumUnknown
+	}
 	key := [2]string{libraryPathKey(artist), libraryPathKey(album)}
 	build := func() playlistAlbumState {
 		ids := append([]string(nil), index.albums[key]...)
@@ -1700,6 +1787,9 @@ func (index playlistLibraryIndex) albumCompletionState(artist, album string) pla
 		present := 0
 		explicitTotal := 0
 		for _, id := range ids {
+			if index.contextDone() {
+				return playlistAlbumUnknown
+			}
 			path, found := index.pathFor(id)
 			if !found || !index.isUnchanged(id) {
 				continue

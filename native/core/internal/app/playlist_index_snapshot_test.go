@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -122,5 +123,29 @@ func TestPlaylistSnapshotRepairsTruncatedFilenameWithEmbeddedFullTitle(t *testin
 	}})
 	if err != nil || len(present) != 1 || !present[0] {
 		t.Fatalf("bounded snapshot repair present=%v err=%v", present, err)
+	}
+}
+
+func TestPlaylistSnapshotRepairIsBoundedWhenCatalogueCannotMatch(t *testing.T) {
+	application := newApp(t)
+	library := t.TempDir()
+	const rowCount = 6
+	rows := make([]playlistTrack, 0, rowCount)
+	for i := 0; i < rowCount; i++ {
+		title := fmt.Sprintf("Embedded Title %d", i)
+		indexPlaylistTestFile(t, application, library,
+			fmt.Sprintf("Artist/Album/truncated-%02d.flac", i), "Artist", "Album", title)
+		rows = append(rows, playlistTrack{Artist: "Artist", Album: "Album", Title: title, Duration: "180", NeteaseSongID: int64(i + 1)})
+	}
+	application.invalidatePlaylistLibraryCache()
+	present, err := playlistPresenceForIndexSnapshotContext(context.Background(), application.playlistLibrary(), rows)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i, got := range present {
+		want := i < playlistSnapshotRepairLimit
+		if got != want {
+			t.Fatalf("row %d present=%t, want %t; repair must stay bounded to %d rows", i, got, want, playlistSnapshotRepairLimit)
+		}
 	}
 }

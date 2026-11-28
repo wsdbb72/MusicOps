@@ -176,6 +176,18 @@ func TestPacingSharesSiteCooldownAcrossWorkers(t *testing.T) {
 	if retry, err := client.waitRead(context.Background(), Query{Site: "orpheus"}); err != nil || retry != 0 {
 		t.Fatalf("independent site read: retry=%d err=%v", retry, err)
 	}
+	open := Query{Site: "open.cd", Kind: "search"}
+	if retry, err := client.waitRead(context.Background(), open); err != nil || retry != 0 {
+		t.Fatalf("first open.cd read: retry=%d err=%v", retry, err)
+	}
+	openCtx, openCancel := context.WithTimeout(context.Background(), time.Millisecond)
+	defer openCancel()
+	if retry, err := client.waitRead(openCtx, open); err != context.DeadlineExceeded || retry != 0 {
+		t.Fatalf("open.cd search was not paced: retry=%d err=%v", retry, err)
+	}
+	if retry, err := client.waitRead(context.Background(), Query{Site: "open.cd", Kind: "preflight"}); err != nil || retry != 0 {
+		t.Fatalf("open.cd preflight should remain immediate: retry=%d err=%v", retry, err)
+	}
 	client.block("dicmusic", 50)
 	client.block("dicmusic", 10)
 	if retry, err := client.waitRead(context.Background(), query); err != nil || retry < 49 {

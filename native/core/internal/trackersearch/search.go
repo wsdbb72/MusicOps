@@ -423,7 +423,7 @@ func (c *Client) waitRead(ctx context.Context, q Query) (int, error) {
 			c.mu.Unlock()
 			return int((remaining-1)/time.Second) + 1, nil
 		}
-		if c.ReadInterval <= 0 || q.Synthetic || !isTokenSite(q.Site) {
+		if c.ReadInterval <= 0 || q.Synthetic || q.Kind == "preflight" {
 			c.mu.Unlock()
 			return 0, nil
 		}

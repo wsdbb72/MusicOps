@@ -7,6 +7,7 @@ import (
 	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"math"
@@ -223,6 +224,19 @@ func TestDuplicateScanEndpointPersistsFingerprintsForResume(t *testing.T) {
 	}
 	if fingerprints < 2 {
 		t.Fatalf("persisted duplicate fingerprints=%d, want at least 2", fingerprints)
+	}
+}
+
+func TestDuplicatePreparationHonorsCancellation(t *testing.T) {
+	application := newApp(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := application.maintenancePlaylistRowsContext(ctx); !errors.Is(err, context.Canceled) {
+		t.Fatalf("playlist preparation error = %v, want context.Canceled", err)
+	}
+	entries := []audiorelease.Entry{{RequestID: "release-1", File: "Artist/Album/01 Song.flac", FilePresent: true}}
+	if _, err := indexPlaylistLibraryContext(ctx, application.engine, entries); !errors.Is(err, context.Canceled) {
+		t.Fatalf("playlist index error = %v, want context.Canceled", err)
 	}
 }
 

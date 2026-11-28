@@ -834,12 +834,27 @@ func (a *App) invalidatePlaylistLibraryCache() {
 	a.playlistEntriesMu.Unlock()
 }
 func indexPlaylistLibrary(engine *dataengine.Engine, entries []audiorelease.Entry) playlistLibraryIndex {
-	return indexPlaylistLibraryWithMetadata(engine, entries, "", nil)
+	index, _ := indexPlaylistLibraryContext(context.Background(), engine, entries)
+	return index
+}
+
+func indexPlaylistLibraryContext(ctx context.Context, engine *dataengine.Engine, entries []audiorelease.Entry) (playlistLibraryIndex, error) {
+	return indexPlaylistLibraryWithContext(ctx, engine, entries, "", nil)
 }
 
 func indexPlaylistLibraryWithMetadata(engine *dataengine.Engine, entries []audiorelease.Entry, scanRoot string, scanFiles map[string]cachedLibraryScan) playlistLibraryIndex {
+	index, _ := indexPlaylistLibraryWithContext(context.Background(), engine, entries, scanRoot, scanFiles)
+	return index
+}
+
+func indexPlaylistLibraryWithContext(ctx context.Context, engine *dataengine.Engine, entries []audiorelease.Entry, scanRoot string, scanFiles map[string]cachedLibraryScan) (playlistLibraryIndex, error) {
 	index := playlistLibraryIndex{engine: engine, tracks: map[[3]string][]string{}, albums: map[[2]string][]string{}, titleCandidates: map[string][]string{}, albumMembers: map[string][]string{}, albumTailMembers: map[string][]string{}, verified: map[string]bool{}, tagTitles: map[[2]string]map[string]bool{}, compilationTags: map[string]map[[2]string]bool{}, albumGaps: map[[2]string]bool{}, records: map[string]audiorelease.Entry{}, paths: map[string]string{}, scanRoot: strings.TrimSpace(scanRoot), scanFiles: scanFiles, pendingSnapshots: map[string]audiorelease.VerifiedPresence{}, presence: newPlaylistPresenceCache(), metadata: newPlaylistMetadataCache(), signature: playlistLibrarySignature(entries)}
-	for _, entry := range entries {
+	for i, entry := range entries {
+		if i%256 == 0 {
+			if err := ctx.Err(); err != nil {
+				return playlistLibraryIndex{}, err
+			}
+		}
 		if !entry.FilePresent {
 			continue
 		}
@@ -872,7 +887,7 @@ func indexPlaylistLibraryWithMetadata(engine *dataengine.Engine, entries []audio
 			}
 		}
 	}
-	return index
+	return index, nil
 }
 
 func (index playlistLibraryIndex) pathFor(id string) (string, bool) {

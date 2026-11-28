@@ -361,7 +361,7 @@ func (a *App) scanDuplicatesWithOptions(ctx context.Context, limit int, root str
 	if err != nil {
 		return nil, "", false, nil, err
 	}
-	playlistGuard, err := a.duplicatePlaylistGuard(entries)
+	playlistGuard, err := a.duplicatePlaylistGuard(ctx, entries)
 	if err != nil {
 		return nil, "", false, nil, err
 	}
@@ -375,7 +375,12 @@ func (a *App) scanDuplicatesWithOptions(ctx context.Context, limit int, root str
 	// remain part of the title, so those releases never collapse together.
 	byRecording := map[string][]audiorelease.Entry{}
 	seenPhysicalFiles := map[string]bool{}
-	for _, entry := range entries {
+	for i, entry := range entries {
+		if i%1024 == 0 {
+			if err := ctx.Err(); err != nil {
+				return nil, "", false, nil, err
+			}
+		}
 		if !entry.FilePresent || entry.AliasOfRequestID != "" {
 			continue
 		}

@@ -8,6 +8,7 @@ package app
 // currently proves and refuses a quality merge when the bindings differ.
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -23,8 +24,8 @@ type duplicatePlaylistGuard struct {
 	rowsByID map[string][]playlistTrack
 }
 
-func (a *App) duplicatePlaylistGuard(entries []audiorelease.Entry) (duplicatePlaylistGuard, error) {
-	rows, err := a.maintenancePlaylistRows()
+func (a *App) duplicatePlaylistGuard(ctx context.Context, entries []audiorelease.Entry) (duplicatePlaylistGuard, error) {
+	rows, err := a.maintenancePlaylistRowsContext(ctx)
 	if err != nil {
 		return duplicatePlaylistGuard{}, err
 	}
@@ -32,8 +33,17 @@ func (a *App) duplicatePlaylistGuard(entries []audiorelease.Entry) (duplicatePla
 	if len(rows) == 0 || len(entries) == 0 {
 		return guard, nil
 	}
-	guard.index = indexPlaylistLibrary(a.engine, entries)
-	for _, row := range rows {
+	index, err := indexPlaylistLibraryContext(ctx, a.engine, entries)
+	if err != nil {
+		return duplicatePlaylistGuard{}, err
+	}
+	guard.index = index
+	for i, row := range rows {
+		if i%256 == 0 {
+			if err := ctx.Err(); err != nil {
+				return duplicatePlaylistGuard{}, err
+			}
+		}
 		for _, id := range guard.index.playlistCandidateIDs(row) {
 			guard.rowsByID[id] = append(guard.rowsByID[id], row)
 		}
@@ -62,6 +72,10 @@ func (guard duplicatePlaylistGuard) playlistKeys(id string) []string {
 // per-job manifests used by fallback. Reading every manifest is intentional:
 // dedupe needs the complete set of active identities before it moves a file.
 func (a *App) maintenancePlaylistRows() ([]playlistTrack, error) {
+	return a.maintenancePlaylistRowsContext(context.Background())
+}
+
+func (a *App) maintenancePlaylistRowsContext(ctx context.Context) ([]playlistTrack, error) {
 	dirs := []string{a.savedPlaylistsDir(), a.workPath("incoming")}
 	if legacy := filepath.Join(a.Dir, "incoming"); !sameLibraryPath(legacy, dirs[1]) {
 		dirs = append(dirs, legacy)
@@ -70,6 +84,9 @@ func (a *App) maintenancePlaylistRows() ([]playlistTrack, error) {
 	seenRows := map[string]bool{}
 	rows := []playlistTrack{}
 	for _, dir := range dirs {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		entries, err := os.ReadDir(dir)
 		if err != nil {
 			if os.IsNotExist(err) {
@@ -78,6 +95,9 @@ func (a *App) maintenancePlaylistRows() ([]playlistTrack, error) {
 			return nil, err
 		}
 		for _, entry := range entries {
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
 			if entry.IsDir() {
 				continue
 			}
@@ -97,6 +117,9 @@ func (a *App) maintenancePlaylistRows() ([]playlistTrack, error) {
 			}
 			if info.Size() > maxPlaylistBytes {
 				return nil, fmt.Errorf("歌单文件超过安全上限：%s", path)
+			}
+			if err := ctx.Err(); err != nil {
+				return nil, err
 			}
 			data, readErr := os.ReadFile(path)
 			if readErr != nil {

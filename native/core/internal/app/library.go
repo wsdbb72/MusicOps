@@ -92,17 +92,148 @@ type duplicateGroup struct {
 	IdentityUsed string          `json:"identity_used"`
 }
 
-func (a *App) duplicateScan(w http.ResponseWriter, r *http.Request) {
-	a.duplicateScanMu.Lock()
-	defer a.duplicateScanMu.Unlock()
-	root := a.libraryDir()
-	cache := a.loadLibraryDuplicateCache(root)
-	groups, method, truncated, updates, err := a.scanDuplicatesWithOptions(r.Context(), 1000, root, cache.Files, nil, nil)
+type duplicateScanReport struct {
+	Running   bool   `json:"running"`
+	Started   string `json:"started,omitempty"`
+	Finished  string `json:"finished,omitempty"`
+	Checked   int    `json:"checked"`
+	Total     int    `json:"total"`
+	Groups    int    `json:"groups"`
+	Truncated bool   `json:"truncated,omitempty"`
+	Cancelled bool   `json:"cancelled,omitempty"`
+	Error     string `json:"error,omitempty"`
+	Warning   string `json:"warning,omitempty"`
+	Message   string `json:"message,omitempty"`
+	Current   string `json:"current,omitempty"`
+}
+
+type duplicateScanResult struct {
+	Groups       []duplicateGroup `json:"groups"`
+	Method       string           `json:"method"`
+	Truncated    bool             `json:"truncated"`
+	Suppressed   int              `json:"suppressed"`
+	CacheWarning string           `json:"cache_warning,omitempty"`
+}
+
+func (a *App) beginDuplicateScan(parent context.Context) (context.Context, bool) {
+	a.duplicateScanStateMu.Lock()
+	defer a.duplicateScanStateMu.Unlock()
+	if a.duplicateScanRunning {
+		return nil, false
+	}
+	ctx, cancel := context.WithCancel(parent)
+	a.duplicateScanRunning = true
+	a.duplicateScanCancel = cancel
+	a.duplicateScanReport = duplicateScanReport{
+		Running: true, Started: a.now().Format(time.RFC3339), Message: "正在读取本地索引",
+	}
+	return ctx, true
+}
+
+func (a *App) updateDuplicateScanProgress(checked, total int, current string) {
+	a.duplicateScanStateMu.Lock()
+	defer a.duplicateScanStateMu.Unlock()
+	a.duplicateScanReport.Checked = checked
+	a.duplicateScanReport.Total = total
+	a.duplicateScanReport.Current = scrub(current)
+	a.duplicateScanReport.Message = "正在校验重复指纹"
+}
+
+func (a *App) finishDuplicateScan(result *duplicateScanResult, err error) {
+	a.duplicateScanStateMu.Lock()
+	defer a.duplicateScanStateMu.Unlock()
+	a.duplicateScanRunning = false
+	if a.duplicateScanCancel != nil {
+		a.duplicateScanCancel()
+		a.duplicateScanCancel = nil
+	}
+	finished := a.now().Format(time.RFC3339)
+	a.duplicateScanReport.Running = false
+	a.duplicateScanReport.Finished = finished
+	if result != nil && result.CacheWarning != "" {
+		a.duplicateScanReport.Warning = result.CacheWarning
+	}
 	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "code": "LIBRARY_UNAVAILABLE"})
+		a.duplicateScanReport.Cancelled = errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)
+		if a.duplicateScanReport.Cancelled {
+			a.duplicateScanReport.Message = "扫描已停止；已完成的指纹检查点会保留"
+		} else {
+			a.duplicateScanReport.Error = scrub(err.Error())
+			a.duplicateScanReport.Message = "扫描失败"
+		}
 		return
 	}
+	if result == nil {
+		a.duplicateScanReport.Error = "扫描没有返回结果"
+		a.duplicateScanReport.Message = "扫描失败"
+		return
+	}
+	a.duplicateScanLatest = result
+	a.duplicateScanReport.Groups = len(result.Groups)
+	a.duplicateScanReport.Truncated = result.Truncated
+	a.duplicateScanReport.Checked = a.duplicateScanReport.Total
+	a.duplicateScanReport.Message = "扫描完成"
+}
+
+func (a *App) duplicateScanSnapshot() (duplicateScanReport, *duplicateScanResult) {
+	a.duplicateScanStateMu.Lock()
+	defer a.duplicateScanStateMu.Unlock()
+	return a.duplicateScanReport, a.duplicateScanLatest
+}
+
+func (a *App) latestDuplicateGroup(groupID string) (*duplicateGroup, bool) {
+	a.duplicateScanStateMu.Lock()
+	latest := a.duplicateScanLatest
+	a.duplicateScanStateMu.Unlock()
+	if latest == nil {
+		return nil, false
+	}
+	for i := range latest.Groups {
+		if latest.Groups[i].GroupID == groupID {
+			group := latest.Groups[i]
+			return &group, true
+		}
+	}
+	return nil, false
+}
+
+// cancelDuplicateScan stops the current manual or background duplicate scan.
+// Cancellation is cooperative and completed per-file fingerprints are
+// checkpointed before the scan exits.
+func (a *App) cancelDuplicateScan() {
+	a.duplicateScanStateMu.Lock()
+	cancel := a.duplicateScanCancel
+	if cancel != nil {
+		a.duplicateScanReport.Message = "正在停止扫描；已完成检查点会保留"
+	}
+	a.duplicateScanStateMu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
+}
+
+func (a *App) performDuplicateScan(ctx context.Context, progress func(checked, total int, current string)) (*duplicateScanResult, error) {
+	a.duplicateScanMu.Lock()
+	defer a.duplicateScanMu.Unlock()
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if a.pipelinePaused() {
+		return nil, context.Canceled
+	}
+	root := a.libraryDir()
+	cache := a.loadLibraryDuplicateCache(root)
 	cacheWarning := ""
+	checkpoint := func(updates map[string]cachedDuplicateFingerprint) {
+		mergeDuplicateFingerprintCache(&cache, updates)
+		if saveErr := a.saveLibraryDuplicateCache(cache); saveErr != nil {
+			cacheWarning = "重复项扫描缓存保存失败：" + scrub(saveErr.Error())
+		}
+	}
+	groups, method, truncated, updates, err := a.scanDuplicatesWithOptions(ctx, 1000, root, cache.Files, progress, checkpoint)
+	if err != nil {
+		return &duplicateScanResult{CacheWarning: cacheWarning}, err
+	}
 	mergeDuplicateFingerprintCache(&cache, updates)
 	if saveErr := a.saveLibraryDuplicateCache(cache); saveErr != nil {
 		cacheWarning = "重复项已扫描，但结果缓存保存失败：" + scrub(saveErr.Error())
@@ -118,13 +249,84 @@ func (a *App) duplicateScan(w http.ResponseWriter, r *http.Request) {
 		}
 		visible = append(visible, groups[i])
 	}
+	return &duplicateScanResult{Groups: visible, Method: method, Truncated: truncated, Suppressed: suppressed, CacheWarning: cacheWarning}, nil
+}
+
+func writeDuplicateScanResult(w http.ResponseWriter, status int, result *duplicateScanResult) {
 	response := map[string]any{
-		"ok": true, "method": method, "groups": visible, "count": len(visible),
-		"suppressed": suppressed, "truncated": truncated,
+		"ok": true, "method": result.Method, "groups": result.Groups, "count": len(result.Groups),
+		"suppressed": result.Suppressed, "truncated": result.Truncated,
 		"policy": "同一专辑的同一录音只保留可完整解码的最高音质版本；现场、混音、伴奏、Demo、TV size、不同母带或声道保留。旧版本进入可恢复隔离区。",
 	}
-	if cacheWarning != "" {
-		response["cache_warning"] = cacheWarning
+	if result.CacheWarning != "" {
+		response["cache_warning"] = result.CacheWarning
+	}
+	writeJSON(w, status, response)
+}
+
+func (a *App) duplicateScan(w http.ResponseWriter, r *http.Request) {
+	ctx, ok := a.beginDuplicateScan(r.Context())
+	if !ok {
+		writeJSON(w, http.StatusConflict, map[string]any{"ok": false, "code": "LIBRARY_SCAN_BUSY", "error": "已有重复扫描正在运行"})
+		return
+	}
+	result, err := a.performDuplicateScan(ctx, a.updateDuplicateScanProgress)
+	a.finishDuplicateScan(result, err)
+	if err != nil {
+		status := http.StatusInternalServerError
+		response := map[string]any{"ok": false, "code": "LIBRARY_UNAVAILABLE", "error": "重复扫描失败"}
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			status = http.StatusConflict
+			response["code"] = "LIBRARY_SCAN_CANCELED"
+			response["error"] = "重复扫描已停止；已完成检查点会保留，下次会从缓存继续"
+		}
+		if result != nil && result.CacheWarning != "" {
+			response["cache_warning"] = result.CacheWarning
+		}
+		writeJSON(w, status, response)
+		return
+	}
+	writeDuplicateScanResult(w, http.StatusOK, result)
+}
+
+func (a *App) startDuplicateScan(w http.ResponseWriter, _ *http.Request) {
+	if a.pipelinePaused() {
+		writeJSON(w, http.StatusConflict, map[string]any{"ok": false, "code": "LIBRARY_SCAN_CANCELED", "error": "调度已暂停；恢复调度后再开始重复扫描"})
+		return
+	}
+	ctx, ok := a.beginDuplicateScan(context.Background())
+	if !ok {
+		report, latest := a.duplicateScanSnapshot()
+		response := map[string]any{"ok": true, "started": false, "status": report}
+		if !report.Running && report.Error == "" && !report.Cancelled && latest != nil {
+			response["result"] = latest
+		}
+		writeJSON(w, http.StatusOK, response)
+		return
+	}
+	a.startBackground("duplicate-scan", func() {
+		result, err := a.performDuplicateScan(ctx, a.updateDuplicateScanProgress)
+		a.finishDuplicateScan(result, err)
+	})
+	report, latest := a.duplicateScanSnapshot()
+	response := map[string]any{"ok": true, "started": true, "status": report}
+	if !report.Running && report.Error == "" && !report.Cancelled && latest != nil {
+		response["result"] = latest
+	}
+	writeJSON(w, http.StatusAccepted, response)
+}
+
+func (a *App) stopDuplicateScan(w http.ResponseWriter, _ *http.Request) {
+	a.cancelDuplicateScan()
+	report, _ := a.duplicateScanSnapshot()
+	writeJSON(w, http.StatusAccepted, map[string]any{"ok": true, "stopping": report.Running, "status": report})
+}
+
+func (a *App) duplicateScanStatus(w http.ResponseWriter, r *http.Request) {
+	report, latest := a.duplicateScanSnapshot()
+	response := map[string]any{"ok": true, "status": report}
+	if r.URL.Query().Get("include") == "result" && !report.Running && report.Error == "" && !report.Cancelled && latest != nil {
+		response["result"] = latest
 	}
 	writeJSON(w, http.StatusOK, response)
 }
@@ -137,6 +339,14 @@ func (a *App) scanDuplicates(ctx context.Context) ([]duplicateGroup, string, boo
 }
 
 func (a *App) scanDuplicatesWithProgress(ctx context.Context, progress func(checked, total int, current string)) ([]duplicateGroup, string, bool, error) {
+	a.duplicateScanMu.Lock()
+	defer a.duplicateScanMu.Unlock()
+	if err := ctx.Err(); err != nil {
+		return nil, "", false, err
+	}
+	if a.pipelinePaused() {
+		return nil, "", false, context.Canceled
+	}
 	groups, method, truncated, _, err := a.scanDuplicatesWithOptions(ctx, 1000, "", nil, progress, nil)
 	return groups, method, truncated, err
 }
@@ -501,7 +711,7 @@ func (a *App) fingerprintDuplicateFile(ctx context.Context, entry audiorelease.E
 	fileSHA := strings.TrimSpace(entry.SHA256)
 	var hashErr error
 	if fileSHA == "" || !entry.PresenceUnchanged() {
-		fileSHA, hashErr = hashFile(full)
+		fileSHA, hashErr = hashDuplicateFile(ctx, full)
 	}
 	audioInfo, probeErr := probeDuplicateAudio(ctx, full, entry.Format)
 	file := duplicateFile{
@@ -518,7 +728,7 @@ func (a *App) fingerprintDuplicateFile(ctx context.Context, entry audiorelease.E
 		}
 	}
 	if decoder != nil && hashErr == nil && probeErr == nil {
-		file.PCMSHA256, hashErr = pcmHashWithFormat(ctx, full, []string{"-f", "s32le"})
+		file.PCMSHA256, hashErr = pcmHashWithFormatAtReadRate(ctx, full, []string{"-f", "s32le"}, duplicatePCMReadRate(info.Size(), audioInfo.Duration))
 		if hashErr != nil {
 			probeErr = fmt.Errorf("音频解码校验失败: %w", hashErr)
 		}
@@ -784,10 +994,19 @@ func (a *App) duplicateMerge(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var group *duplicateGroup
-	if trusted, ok := r.Context().Value(automationDuplicateGroupKey{}).(*duplicateGroup); ok && trusted != nil && trusted.GroupID == body.GroupID {
-		group = trusted
+	internalScanContext := false
+	if trusted, ok := r.Context().Value(automationDuplicateGroupKey{}).(*duplicateGroup); ok && trusted != nil {
+		internalScanContext = true
+		if trusted.GroupID == body.GroupID {
+			group = trusted
+		}
 	}
-	if group == nil {
+	if group == nil && !internalScanContext {
+		if latest, ok := a.latestDuplicateGroup(body.GroupID); ok {
+			group = latest
+		}
+	}
+	if group == nil && !internalScanContext {
 		groups, _, _, err := a.scanDuplicates(r.Context())
 		if err != nil {
 			writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "code": "LIBRARY_UNAVAILABLE"})
@@ -836,14 +1055,18 @@ func (a *App) duplicateMerge(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusConflict, map[string]any{"ok": false, "code": code, "error": reason})
 		return
 	}
-	// Verify every file is unchanged since the scan before moving any.
+	// Verify every file is unchanged since the scan before moving any. This is
+	// maintenance I/O: it uses the same low OS priority and byte-rate cap as the
+	// fingerprint pass, so a manual merge cannot create a second disk spike.
+	verifiedDigests := make(map[string]string, len(group.Files))
 	for _, file := range group.Files {
 		full := a.libraryFilePath(file.LibraryDir, file.File)
-		digest, err := hashFile(full)
+		digest, err := hashDuplicateFile(r.Context(), full)
 		if err != nil || digest != file.SHA256 {
 			writeJSON(w, http.StatusConflict, map[string]any{"ok": false, "code": "SCAN_STALE", "error": "保留或重复文件发生变化，请重新扫描"})
 			return
 		}
+		verifiedDigests[libraryPathIdentity(full)] = digest
 	}
 	// Fill the keeper's empty fields from the duplicates before anything
 	// moves (Python duplicates.py parity): a loser often carries the genre or
@@ -879,7 +1102,10 @@ func (a *App) duplicateMerge(w http.ResponseWriter, r *http.Request) {
 		keeperLibrary = a.libraryDir()
 	}
 	keeperPath := a.libraryFilePath(group.Keep.LibraryDir, group.Keep.File)
-	keeperDigest, err := hashFile(keeperPath)
+	keeperDigest := verifiedDigests[libraryPathIdentity(keeperPath)]
+	if len(filled) > 0 || keeperDigest == "" {
+		keeperDigest, err = hashDuplicateFile(r.Context(), keeperPath)
+	}
 	if err != nil || keeperDigest == "" {
 		writeJSON(w, http.StatusUnprocessableEntity, map[string]any{
 			"ok": false, "code": "MERGE_RECORD_LINK_FAILED", "error": "无法重新校验保留版本，文件没有移动",
@@ -894,6 +1120,7 @@ func (a *App) duplicateMerge(w http.ResponseWriter, r *http.Request) {
 			Context: r.Context(), RequestID: file.RequestID, RootID: file.RootID, Track: file.Track,
 			KeeperRequestID: group.Keep.RequestID, KeeperPath: keeperPath,
 			KeeperSHA256: keeperDigest, KeeperFormat: group.Keep.Format,
+			KeeperValidated: true, KeeperDecodeState: "decoded",
 			Library: filepath.Clean(keeperLibrary), Decoder: audiorelease.SystemDecoder(),
 		})
 		if linkErr != nil {
@@ -914,7 +1141,7 @@ func (a *App) duplicateMerge(w http.ResponseWriter, r *http.Request) {
 		if file.RequestID == group.Keep.RequestID {
 			continue
 		}
-		if err := a.quarantineFile(&receipt, file, quarantineRoot); err != nil {
+		if err := a.quarantineFileContext(r.Context(), &receipt, file, quarantineRoot); err != nil {
 			unrestored := []mergeMove{}
 			for i := len(receipt.Moved) - 1; i >= 0; i-- {
 				move := receipt.Moved[i]
@@ -1269,6 +1496,10 @@ func (a *App) mergeSeedingGuard(group *duplicateGroup) (string, string) {
 // quarantineFile moves one library file (and its .lrc sidecar when
 // present) into the merge quarantine directory, recording each move.
 func (a *App) quarantineFile(receipt *mergeReceipt, file duplicateFile, quarantineRoot string) error {
+	return a.quarantineFileContext(context.Background(), receipt, file, quarantineRoot)
+}
+
+func (a *App) quarantineFileContext(ctx context.Context, receipt *mergeReceipt, file duplicateFile, quarantineRoot string) error {
 	from := a.libraryFilePath(file.LibraryDir, file.File)
 	info, err := os.Stat(from)
 	if err != nil || !info.Mode().IsRegular() {
@@ -1296,7 +1527,7 @@ func (a *App) quarantineFile(receipt *mergeReceipt, file duplicateFile, quaranti
 	if _, err := os.Lstat(dest); err == nil {
 		return fmt.Errorf("quarantine destination already exists: %s", dest)
 	}
-	if err := moveCheckedFile(from, dest, file.SHA256); err != nil {
+	if err := moveCheckedFileAtRate(ctx, from, dest, file.SHA256, duplicateFingerprintBytesPerSecond); err != nil {
 		return err
 	}
 	movedAudio = true
@@ -1363,6 +1594,10 @@ func cleanupMergeQuarantine(moves []mergeMove, root string) {
 // supports a library and quarantine on different drives, without replacing
 // any existing destination.
 func moveCheckedFile(from, to, digest string) error {
+	return moveCheckedFileAtRate(context.Background(), from, to, digest, 0)
+}
+
+func moveCheckedFileAtRate(ctx context.Context, from, to, digest string, bytesPerSecond int64) error {
 	in, err := os.Open(from)
 	if err != nil {
 		return err
@@ -1383,7 +1618,13 @@ func moveCheckedFile(from, to, digest string) error {
 		}
 	}()
 	sum := sha256.New()
-	_, err = io.Copy(io.MultiWriter(out, sum), in)
+	if bytesPerSecond > 0 {
+		err = runWithBackgroundIO(func() error {
+			return copyAtRate(ctx, io.MultiWriter(out, sum), in, bytesPerSecond)
+		})
+	} else {
+		_, err = io.Copy(io.MultiWriter(out, sum), in)
+	}
 	if err == nil {
 		err = out.Sync()
 	}

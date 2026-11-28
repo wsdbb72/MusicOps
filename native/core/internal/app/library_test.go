@@ -200,6 +200,80 @@ func TestDuplicateScanGroupsSameRecordingAndIgnoresDifferentTitle(t *testing.T) 
 	}
 }
 
+func TestDuplicateScanEndpointPersistsFingerprintsForResume(t *testing.T) {
+	application := newApp(t)
+	incoming := filepath.Join(application.Dir, "incoming")
+	writeToneWAV(t, filepath.Join(incoming, "resume.wav"), 440)
+	writeFLACFromWAV(t, filepath.Join(incoming, "resume.wav"), filepath.Join(incoming, "resume.flac"))
+	releaseLibraryFile(t, application, "resume.wav", "resume-wav", "Artist", "Resume Album", "Song", 1)
+	releaseLibraryFile(t, application, "resume.flac", "resume-flac", "Artist", "Resume Album", "Song", 1)
+
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodGet, "/v1/library/duplicates", nil)
+	application.duplicateScan(recorder, request)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("duplicate scan status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+	cache := application.loadLibraryDuplicateCache(application.libraryDir())
+	fingerprints := 0
+	for _, entry := range cache.Files {
+		if entry.Duplicate != nil && entry.Duplicate.Valid {
+			fingerprints++
+		}
+	}
+	if fingerprints < 2 {
+		t.Fatalf("persisted duplicate fingerprints=%d, want at least 2", fingerprints)
+	}
+}
+
+func TestDuplicateScanAsyncReportsCompletionAndReusesResult(t *testing.T) {
+	application := newApp(t)
+	incoming := filepath.Join(application.Dir, "incoming")
+	writeToneWAV(t, filepath.Join(incoming, "async.wav"), 440)
+	writeFLACFromWAV(t, filepath.Join(incoming, "async.wav"), filepath.Join(incoming, "async.flac"))
+	releaseLibraryFile(t, application, "async.wav", "async-wav", "Artist", "Async Album", "Song", 1)
+	releaseLibraryFile(t, application, "async.flac", "async-flac", "Artist", "Async Album", "Song", 1)
+
+	started := post(t, application, "/v1/library/duplicates/start", map[string]any{})
+	if started["started"] != true {
+		t.Fatal(started)
+	}
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		payload := getJSON(t, application, "/v1/library/duplicates/status?include=result")
+		status, _ := payload["status"].(map[string]any)
+		if status == nil {
+			t.Fatalf("missing scan status: %v", payload)
+		}
+		if status["running"] == false {
+			if status["error"] != nil || payload["result"] == nil {
+				t.Fatalf("async result: %v", payload)
+			}
+			compact := getJSON(t, application, "/v1/library/duplicates/status")
+			if compact["result"] != nil {
+				t.Fatalf("routine status poll resent the complete group result: %v", compact)
+			}
+			result, _ := payload["result"].(map[string]any)
+			groups, _ := result["groups"].([]any)
+			if len(groups) != 1 {
+				t.Fatalf("async groups: %v", result)
+			}
+			groupRow, _ := groups[0].(map[string]any)
+			groupID, _ := groupRow["group_id"].(string)
+			group, ok := application.latestDuplicateGroup(groupID)
+			if !ok || group == nil {
+				t.Fatal("completed async scan result was not available to merge")
+			}
+			break
+		}
+		if time.Now().After(deadline) {
+			application.cancelDuplicateScan()
+			t.Fatal("async duplicate scan did not finish")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
 func TestDuplicateScanLimitStopsAndReportsTruncation(t *testing.T) {
 	application := newApp(t)
 	incoming := filepath.Join(application.Dir, "incoming")

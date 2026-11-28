@@ -76,6 +76,7 @@ func (a *App) pipelineControl(w http.ResponseWriter, r *http.Request) {
 		if a.libraryAutomation != nil {
 			a.libraryAutomation.stop()
 		}
+		a.cancelDuplicateScan()
 	case "resume":
 		if a.flows != nil {
 			var err error

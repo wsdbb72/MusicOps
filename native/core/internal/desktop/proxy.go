@@ -68,8 +68,10 @@ func trimSpace(s string) string {
 // base64("musicops:"+password)` injected. Hop-by-hop headers are stripped
 // in both directions, the core's status code and body are preserved, and an
 // unreachable core yields 502 {"ok":false,"code":"CORE_UNAVAILABLE"}
-// without leaking the password or the core address. Client timeout is
-// 30 seconds. An unparsable coreURL yields a handler that always answers
+// without leaking the password or the core address. The response-header
+// timeout allows bounded library verification and merge operations to finish;
+// routine requests still fail through their own context deadlines. An
+// unparsable coreURL yields a handler that always answers
 // 502.
 func NewProxy(coreURL, password string) http.Handler {
 	target, err := url.Parse(coreURL)
@@ -90,7 +92,7 @@ func NewProxy(coreURL, password string) http.Handler {
 		Transport: &http.Transport{
 			Proxy:                 nil,
 			DialContext:           (&net.Dialer{Timeout: 10 * time.Second}).DialContext,
-			ResponseHeaderTimeout: 30 * time.Second,
+			ResponseHeaderTimeout: 15 * time.Minute,
 			ForceAttemptHTTP2:     false,
 			MaxIdleConns:          16,
 		},

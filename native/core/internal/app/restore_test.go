@@ -244,9 +244,24 @@ func TestXLSXPlaylistReadsRowsWithoutMacros(t *testing.T) {
 
 func TestPipelinePauseBlocksUntilResume(t *testing.T) {
 	application := newApp(t)
+	scanCtx, started := application.beginDuplicateScan(context.Background())
+	if !started {
+		t.Fatal("duplicate scan state did not start")
+	}
 	paused := post(t, application, "/v1/control", map[string]any{"action": "pause"})
+	select {
+	case <-scanCtx.Done():
+	default:
+		t.Fatal("pause did not cancel the active duplicate scan")
+	}
 	if paused["paused"] != true {
 		t.Fatal(paused)
+	}
+	application.finishDuplicateScan(nil, scanCtx.Err())
+	scanRecorder := httptest.NewRecorder()
+	application.duplicateScan(scanRecorder, httptest.NewRequest(http.MethodGet, "/v1/library/duplicates", nil))
+	if scanRecorder.Code != http.StatusConflict || !strings.Contains(scanRecorder.Body.String(), "LIBRARY_SCAN_CANCELED") {
+		t.Fatalf("paused duplicate scan status=%d body=%s", scanRecorder.Code, scanRecorder.Body.String())
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 150*time.Millisecond)
 	defer cancel()

@@ -31,6 +31,7 @@ const appJS = `(function () {
   var streamingOrder = [];
   var libraryRows = [];
   var duplicateRows = [];
+  var duplicateScanStatus = null;
   var libraryFileOffset = 0;
   var libraryFileTotal = 0;
   var libraryPageFiles = [];
@@ -77,6 +78,17 @@ const appJS = `(function () {
     if (autoReviewStatus.active) return "自动 AI 核对正在运行";
     if (autoReviewStatus.next_run_ns) return "自动 AI 核对等待下一轮";
     return "自动 AI 核对空闲";
+  }
+  function duplicateScanLabel() {
+    var status = duplicateScanStatus || null;
+    if (!status) return "重复扫描未开始";
+    if (status.running) {
+      if (status.total > 0) return "正在低频扫描重复项 " + (status.checked || 0) + "/" + status.total;
+      return status.message || "正在读取本地索引";
+    }
+    if (status.cancelled) return (status.message || "扫描已停止；检查点已保留") + (status.warning ? " · " + status.warning : "");
+    if (status.error) return "扫描失败：" + status.error + (status.warning ? " · " + status.warning : "");
+    return "扫描完成 · " + (status.groups || 0) + " 组" + (status.warning ? " · " + status.warning : "");
   }
   function pill(job) {
     var progress = retryPending(job) ? retryLabel(retryAt(job)) : (job.progress || "未下载");
@@ -1819,7 +1831,7 @@ const appJS = `(function () {
       '<p><button type="button" id="plan-artist-folders">查看艺人目录</button> <button type="button" id="apply-artist-folders" class="primary">一键补全歌手目录</button></p>' +
       '<label>NCM 路径<input type="text" id="ncm-source" placeholder="库内 .ncm 路径"></label><p><button type="button" id="decrypt-ncm">解密 NCM</button></p><p id="library-tools-result" class="meta"></p></article>' +
       '<article><h2>重复歌曲</h2><p class="meta">同一专辑的同一录音按真实编码、位深、采样率和码率比较，保留可完整解码的最高音质版本；不同版本、母带或声道不会合并。旧文件进入可恢复隔离区。</p>' +
-      '<p><button type="button" id="scan-duplicates" class="primary">扫描重复</button></p>' + duplicateHtml +
+      '<p class="meta">后台扫描优先读取本地指纹索引，只对缺失项做限速音频校验；暂停调度会停止正在运行的扫描并保存已完成进度。</p><div class="maintenance-status ' + (duplicateScanStatus && duplicateScanStatus.running ? "running" : "") + '" id="duplicate-scan-status" role="status" aria-live="polite">' + escapeText(duplicateScanLabel()) + '</div><p><button type="button" id="scan-duplicates" class="primary"' + (duplicateScanStatus && duplicateScanStatus.running ? " disabled" : "") + '>低频扫描重复</button><button type="button" id="stop-duplicate-scan" class="quiet"' + (duplicateScanStatus && duplicateScanStatus.running ? "" : " disabled") + '>停止扫描</button></p>' + duplicateHtml +
       '<label>恢复编号<input type="text" id="restore-merge-id" placeholder="合并后返回的编号"></label><p><button type="button" id="restore-duplicates">恢复这次合并</button></p></article>' +
       guardCard() +
       '<article><form id="transcode-form"><h2>WAV 无损转 FLAC</h2>' +
@@ -1919,6 +1931,21 @@ const appJS = `(function () {
     if (applyArtists) applyArtists.addEventListener("click", function () { libraryAction("/v1/library/artist-folders", {}, "library-tools-result"); });
     var decrypt = document.getElementById("decrypt-ncm");
     if (decrypt) decrypt.addEventListener("click", function () { libraryAction("/v1/library/ncm/decrypt", {source: document.getElementById("ncm-source").value.trim()}, "library-tools-result"); });
+    var stopDuplicateScan = document.getElementById("stop-duplicate-scan");
+    if (stopDuplicateScan) stopDuplicateScan.addEventListener("click", async function () {
+      stopDuplicateScan.disabled = true;
+      setStatus("info", "正在停止低频重复扫描");
+      try {
+        var response = await fetch("/v1/library/duplicates/stop", {method: "POST", headers: {"Content-Type": "application/json", Accept: "application/json"}, body: "{}"});
+        var body = await response.json();
+        if (!response.ok || !body || !body.ok) throw new Error(body && body.code ? body.code : "停止失败");
+        duplicateScanStatus = body.status || duplicateScanStatus;
+        setStatus("info", "已发送停止请求；扫描会在当前读块结束后退出。");
+      } catch (err) {
+        stopDuplicateScan.disabled = false;
+        setStatus("fail", "停止扫描失败。");
+      }
+    });
     var scan = document.getElementById("scan-duplicates");
     if (scan) scan.addEventListener("click", scanDuplicates);
     var restore = document.getElementById("restore-duplicates");
@@ -2332,15 +2359,51 @@ const appJS = `(function () {
   async function scanDuplicates() {
     if (loading) return;
     setBusy(true);
-    setStatus("info", "正在扫描重复");
+    setStatus("info", "正在启动低频重复扫描");
     try {
-      var response = await fetch("/v1/library/duplicates", {headers: {Accept: "application/json"}});
+      var response = await fetch("/v1/library/duplicates/start", {method: "POST", headers: {"Content-Type": "application/json", Accept: "application/json"}, body: "{}"});
       var body = await response.json();
       if (!response.ok || !body || !body.ok) {
-        setStatus("fail", "扫描失败。" + (body && body.code ? "（" + body.code + "）" : ""));
+        if (body && body.code === "LIBRARY_SCAN_CANCELED") {
+          setStatus("info", body.error || "重复扫描已停止；检查点已保存。");
+          return;
+        }
+        setStatus("fail", "扫描启动失败。" + (body && body.code ? "（" + body.code + "）" : ""));
         return;
       }
-      duplicateRows = body.groups || [];
+      duplicateScanStatus = body.status || duplicateScanStatus;
+      if (body.result) {
+        duplicateRows = body.result.groups || [];
+        body = body.result;
+      }
+      while (duplicateScanStatus && duplicateScanStatus.running) {
+        var duplicateLabel = document.getElementById("duplicate-scan-status");
+        if (duplicateLabel) duplicateLabel.textContent = duplicateScanLabel();
+        await new Promise(function (resolve) { setTimeout(resolve, 1000); });
+        var statusResponse = await fetch("/v1/library/duplicates/status?include=result", {headers: {Accept: "application/json"}});
+        var statusBody = await statusResponse.json();
+        if (!statusResponse.ok || !statusBody || !statusBody.ok) throw new Error(statusBody && statusBody.code ? statusBody.code : "扫描状态不可用");
+        duplicateScanStatus = statusBody.status || duplicateScanStatus;
+        if (!duplicateScanStatus.running) {
+          if (statusBody.result) {
+            duplicateRows = statusBody.result.groups || [];
+            body = statusBody.result;
+          }
+          break;
+        }
+      }
+      if (duplicateScanStatus && duplicateScanStatus.cancelled) {
+        setStatus("info", duplicateScanStatus.message || "重复扫描已停止；检查点已保存。");
+        renderLibrary();
+        return;
+      }
+      if (duplicateScanStatus && duplicateScanStatus.error) {
+        setStatus("fail", "扫描失败。" + duplicateScanStatus.error);
+        renderLibrary();
+        return;
+      }
+      duplicateRows = (body && body.groups) || duplicateRows;
+      if (!body || !Array.isArray(body.groups)) throw new Error("扫描结果缺失");
       if (body.truncated) {
         setStatus("info", "已显示前 " + duplicateRows.length + " 组，仍有候选未展开。自动维护会继续按最佳音质分批处理；同名未确认的不会合并。");
       } else {
@@ -2348,7 +2411,7 @@ const appJS = `(function () {
       }
       renderLibrary();
     } catch (err) {
-      setStatus("fail", "扫描中断。");
+      setStatus("fail", "扫描状态连接中断；后台任务可能仍在运行，可重新打开库页查看状态。");
     } finally {
       setBusy(false);
     }
@@ -2823,6 +2886,15 @@ const appJS = `(function () {
         var transcodeResponse = await fetch("/v1/library/transcode", {headers: {Accept: "application/json"}});
         var transcodeBody = await transcodeResponse.json();
         transcodeRows = transcodeBody && Array.isArray(transcodeBody.receipts) ? transcodeBody.receipts : [];
+        try {
+          var duplicateStatusPath = "/v1/library/duplicates/status" + (duplicateRows.length ? "" : "?include=result");
+          var duplicateStatusResponse = await fetch(duplicateStatusPath, {headers: {Accept: "application/json"}});
+          var duplicateStatusBody = await duplicateStatusResponse.json();
+          if (duplicateStatusBody && duplicateStatusBody.ok) {
+            duplicateScanStatus = duplicateStatusBody.status || duplicateScanStatus;
+            if (duplicateStatusBody.result && Array.isArray(duplicateStatusBody.result.groups)) duplicateRows = duplicateStatusBody.result.groups;
+          }
+        } catch (duplicateStatusErr) { /* The task list remains usable if status is temporarily unavailable. */ }
       } else if (view === "logs") {
         var logResponse = await fetch("/v1/logs", {headers: {Accept: "application/json"}});
         var logBody = await logResponse.json();

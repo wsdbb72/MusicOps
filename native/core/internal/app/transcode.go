@@ -20,6 +20,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -363,14 +364,30 @@ func pcmHash(ctx context.Context, path string) (string, error) {
 }
 
 func pcmHashWithFormat(ctx context.Context, path string, format []string) (string, error) {
+	return pcmHashWithFormatAtReadRate(ctx, path, format, 0)
+}
+
+// pcmHashWithFormatAtReadRate caps ffmpeg input speed for background library
+// maintenance. Values are multiples of realtime; zero keeps normal foreground
+// verification behavior. This avoids a dedupe pass monopolizing the music disk
+// while the user is listening.
+func pcmHashWithFormatAtReadRate(ctx context.Context, path string, format []string, readRate float64) (string, error) {
 	ffmpeg, err := exec.LookPath("ffmpeg")
 	if err != nil {
 		return "", err
 	}
 	runCtx, cancel := context.WithTimeout(ctx, transcodeTimeout)
 	defer cancel()
-	args := append([]string{"-nostdin", "-v", "error", "-xerror", "-i", path, "-map", "0:a:0"}, format...)
+	args := []string{"-nostdin", "-v", "error", "-xerror"}
+	if readRate > 0 {
+		args = append(args, "-readrate", strconv.FormatFloat(readRate, 'f', -1, 64))
+	}
+	args = append(args, "-i", path, "-map", "0:a:0")
+	args = append(args, format...)
 	command := exec.CommandContext(runCtx, ffmpeg, append(args, "-")...)
+	if readRate > 0 {
+		prepareBackgroundCommand(command)
+	}
 	stdout, err := command.StdoutPipe()
 	if err != nil {
 		return "", err

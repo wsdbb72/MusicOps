@@ -3,6 +3,7 @@ package app
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -712,6 +713,36 @@ func TestAutomationMigratesDuplicateCacheBeforeMetadataScan(t *testing.T) {
 	cache := application.loadLibraryDuplicateCache(library)
 	if cache.Files["Artist/Album/01.flac"].Duplicate == nil {
 		t.Fatalf("dedupe cache was lost before metadata scan: %+v", cache)
+	}
+}
+
+func TestDuplicateFingerprintCacheSurvivesMetadataScanVersionBump(t *testing.T) {
+	application := newApp(t)
+	root := t.TempDir()
+	legacy := libraryAutomationScanDocument{
+		Version: 7, Root: root,
+		Files: map[string]cachedLibraryScan{
+			"Artist/Album/01.flac": {Duplicate: &cachedDuplicateFingerprint{FileSize: 42, FileModNS: 7, FileSHA256: "stable"}},
+		},
+	}
+	raw, err := json.Marshal(legacy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = application.casSaveJSON(libraryDuplicateCacheKey, raw); err != nil {
+		t.Fatal(err)
+	}
+	cache := application.loadLibraryDuplicateCache(root)
+	entry, ok := cache.Files["Artist/Album/01.flac"]
+	if !ok || entry.Duplicate == nil || entry.Duplicate.FileSHA256 != "stable" || cache.Version != libraryDuplicateCacheVersion {
+		t.Fatalf("compatible duplicate fingerprint was discarded: %+v", cache)
+	}
+	if err = application.saveLibraryDuplicateCache(cache); err != nil {
+		t.Fatal(err)
+	}
+	again := application.loadLibraryDuplicateCache(root)
+	if again.Files["Artist/Album/01.flac"].Duplicate == nil || again.Version != libraryDuplicateCacheVersion {
+		t.Fatalf("migrated duplicate cache did not round-trip: %+v", again)
 	}
 }
 

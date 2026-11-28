@@ -25,8 +25,14 @@ type DedupeAliasInput struct {
 	KeeperPath      string
 	KeeperSHA256    string
 	KeeperFormat    string
-	Library         string
-	Decoder         Decoder
+	// KeeperValidated lets the merge coordinator reuse its one verified scan
+	// snapshot for every alias in the same group. Without it, a ten-file group
+	// rereads and decodes the keeper ten times. Callers must hash-check every
+	// grouped file immediately before setting this flag.
+	KeeperValidated   bool
+	KeeperDecodeState string
+	Library           string
+	Decoder           Decoder
 }
 
 // DedupeAliasBatch is ready to join the merge receipt and every affected
@@ -104,12 +110,21 @@ func PrepareDedupeAlias(engine *dataengine.Engine, input DedupeAliasInput) (Dedu
 	if _, err := hex.DecodeString(digest); err != nil {
 		return empty, dataengine.ErrInvalidRequest
 	}
-	if err := sameFile(keeper, digest); err != nil {
-		return empty, fmt.Errorf("%w: dedupe keeper changed before catalogue commit", ErrConflict)
-	}
-	actualFormat, decodeState, err := validateRecoveryCandidate(input.Context, keeper, digest, format, input.Decoder)
-	if err != nil {
-		return empty, err
+	actualFormat, decodeState := format, ""
+	if input.KeeperValidated {
+		decodeState = strings.ToLower(strings.TrimSpace(input.KeeperDecodeState))
+		if decodeState != "decoded" && decodeState != "structural" {
+			return empty, dataengine.ErrInvalidRequest
+		}
+	} else {
+		if err := sameFile(keeper, digest); err != nil {
+			return empty, fmt.Errorf("%w: dedupe keeper changed before catalogue commit", ErrConflict)
+		}
+		var validateErr error
+		actualFormat, decodeState, validateErr = validateRecoveryCandidate(input.Context, keeper, digest, format, input.Decoder)
+		if validateErr != nil {
+			return empty, validateErr
+		}
 	}
 	snapshot, err := indexedStatForPath(keeper)
 	if err != nil {

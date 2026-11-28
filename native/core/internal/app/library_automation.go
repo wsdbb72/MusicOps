@@ -33,16 +33,20 @@ var libraryAlbumAuditKey = []byte("app/library/album-audit-cache-v1")
 type automationWorkflowPriorityKey struct{}
 
 const (
-	automationWorkflowPriority       = 50
-	libraryAutomationInitialDelay    = 5 * time.Minute
-	libraryAutomationMaxMerges       = 1000
-	libraryAutomationMaxJobs         = 200
-	libraryAutomationScanWorkers     = 1
-	duplicateFingerprintWorkers      = 1
-	libraryAutomationCheckpoint      = 20_000
-	libraryAutomationReuseDelay      = 2 * time.Millisecond
-	libraryAutomationContentDelay    = 10 * time.Millisecond
-	libraryAutomationScanVersion     = 7
+	automationWorkflowPriority    = 50
+	libraryAutomationInitialDelay = 5 * time.Minute
+	libraryAutomationMaxMerges    = 1000
+	libraryAutomationMaxJobs      = 200
+	libraryAutomationScanWorkers  = 1
+	duplicateFingerprintWorkers   = 1
+	libraryAutomationCheckpoint   = 20_000
+	libraryAutomationReuseDelay   = 2 * time.Millisecond
+	libraryAutomationContentDelay = 10 * time.Millisecond
+	libraryAutomationScanVersion  = 7
+	// Duplicate fingerprints are independent of the metadata scan schema. A
+	// metadata-only version bump must not force every candidate audio file to be
+	// hashed and decoded again from the music disk.
+	libraryDuplicateCacheVersion     = 1
 	libraryAutomationMetadataVersion = 1
 	libraryAutomationStallTimeout    = 45 * time.Minute
 	lyricsDigestAuditTTL             = 7 * 24 * time.Hour
@@ -112,10 +116,15 @@ func (a *App) saveLibraryAutomationScanCache(doc libraryAutomationScanDocument) 
 }
 
 func (a *App) loadLibraryDuplicateCache(root string) libraryAutomationScanDocument {
-	empty := libraryAutomationScanDocument{Version: libraryAutomationScanVersion, Root: filepath.Clean(root), Files: map[string]cachedLibraryScan{}}
+	empty := libraryAutomationScanDocument{Version: libraryDuplicateCacheVersion, Root: filepath.Clean(root), Files: map[string]cachedLibraryScan{}}
 	doc := libraryAutomationScanDocument{}
 	found, err := a.loadJSONSetting(libraryDuplicateCacheKey, &doc)
-	if err == nil && found && doc.Files != nil && doc.Version == libraryAutomationScanVersion && strings.EqualFold(filepath.Clean(doc.Root), empty.Root) {
+	// Version 3 is the first document whose Duplicate fields are compatible
+	// with this cache. Versions 3-7 were written while it shared the metadata
+	// schema number; preserve those fingerprints and migrate the document to
+	// its own version instead of rescanning the entire library.
+	if err == nil && found && doc.Files != nil && (doc.Version == libraryDuplicateCacheVersion || doc.Version >= 3) && strings.EqualFold(filepath.Clean(doc.Root), empty.Root) {
+		doc.Version = libraryDuplicateCacheVersion
 		return doc
 	}
 	// Migrate fingerprints from the old shared document once. Keeping dedupe
@@ -132,7 +141,21 @@ func (a *App) loadLibraryDuplicateCache(root string) libraryAutomationScanDocume
 	return empty
 }
 
+func (a *App) migrateLibraryDuplicateCache(root string) error {
+	// All full-document duplicate-cache read/modify/write operations use this
+	// lock. Without it, a manual scan checkpoint can be overwritten by an older
+	// snapshot loaded before the automation pass.
+	a.duplicateScanMu.Lock()
+	defer a.duplicateScanMu.Unlock()
+	duplicates := a.loadLibraryDuplicateCache(root)
+	if len(duplicates.Files) == 0 {
+		return nil
+	}
+	return a.saveLibraryDuplicateCache(duplicates)
+}
+
 func (a *App) saveLibraryDuplicateCache(doc libraryAutomationScanDocument) error {
+	doc.Version = libraryDuplicateCacheVersion
 	if doc.Files == nil {
 		doc.Files = map[string]cachedLibraryScan{}
 	}
@@ -607,10 +630,8 @@ func (a *App) runLibraryAutomationPass(ctx context.Context, settings libraryAuto
 	}
 	// Persist a separately migrated dedupe cache before the metadata scan can
 	// rewrite the legacy shared document under the new scan-cache version.
-	if duplicates := a.loadLibraryDuplicateCache(root); len(duplicates.Files) > 0 {
-		if err := a.saveLibraryDuplicateCache(duplicates); err != nil {
-			state.addError(fmt.Errorf("迁移去重指纹缓存失败: %w", err))
-		}
+	if err := a.migrateLibraryDuplicateCache(root); err != nil {
+		state.addError(fmt.Errorf("迁移去重指纹缓存失败: %w", err))
 	}
 
 	checkpoint, checkpointErr := a.loadLibraryAutomationCheckpoint()
@@ -2381,6 +2402,7 @@ func (a *App) runLibraryUpgradeHandler(w http.ResponseWriter, r *http.Request) {
 
 func (a *App) stopLibraryAutomationHandler(w http.ResponseWriter, r *http.Request) {
 	a.libraryAutomation.stop()
+	a.cancelDuplicateScan()
 	running, report := a.libraryAutomation.snapshot()
 	writeJSON(w, http.StatusAccepted, map[string]any{"ok": true, "running": running, "stopping": running, "report": report})
 }

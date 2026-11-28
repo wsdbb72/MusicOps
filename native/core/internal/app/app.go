@@ -99,6 +99,11 @@ type App struct {
 	backgroundActive      map[string]int
 	duplicateMu           sync.Mutex
 	duplicateScanMu       sync.Mutex
+	duplicateScanStateMu  sync.Mutex
+	duplicateScanRunning  bool
+	duplicateScanCancel   context.CancelFunc
+	duplicateScanReport   duplicateScanReport
+	duplicateScanLatest   *duplicateScanResult
 	neteaseRecoveryMu     sync.Mutex
 	playlistAuditMu       sync.Mutex
 	secrets               map[string]string
@@ -441,6 +446,7 @@ func (a *App) Close() error {
 	if stopLibraryAuto != nil {
 		close(stopLibraryAuto)
 	}
+	a.cancelDuplicateScan()
 	if a.libraryAutomation != nil {
 		a.libraryAutomation.stop()
 		waitCtx, cancelWait := context.WithTimeout(context.Background(), 15*time.Second)

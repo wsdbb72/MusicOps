@@ -177,7 +177,7 @@ jobs:
           required = {'bundle_no_python','core_present_and_executable','desktop_present_and_executable','core_is_go_built','core_version','desktop_is_go_built','desktop_version','core_version_matches','manifest_hashes_match','engines_present','ffmpeg_present','core_starts_and_serves_healthz','webui_requires_auth','webui_loads_with_auth','jobs_api_empty','settings_api','library_api_empty','duplicate_scan_empty','parallel_api_calls','search_synthetic_end_to_end','review_skip','cookie_never_persisted','transcode_roundtrip'}
           if report['version'] != version or report.get('passed') is not True or set(report.get('checks', {})) != required or not all(report['checks'].values()):
               raise SystemExit('Go bundle smoke evidence is incomplete')
-          if installed.get('version') != version or installed.get('passed') is not True or len(installed.get('checks', {})) != 6 or not all(installed['checks'].values()):
+          if installed.get('version') != version or installed.get('passed') is not True or len(installed.get('checks', {})) != 7 or not all(installed['checks'].values()):
               raise SystemExit('Go installer acceptance is incomplete')
           if report['checks'].get('engines_present') is not True:
               raise SystemExit('Bundled engines were not accepted')

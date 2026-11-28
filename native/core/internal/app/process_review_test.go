@@ -55,6 +55,24 @@ func TestProcessCandidateReviewRetriesAreBounded(t *testing.T) {
 			if inspection.Job.Stage != test.wantStage || inspection.Job.ProcessRetryCount != processCandidateReviewRetryLimit || inspection.Job.SearchRetryCount != wantFallbackCount || inspection.Task == nil || inspection.Task.State != test.wantTask {
 				t.Fatalf("terminal job=%+v task=%+v", inspection.Job, inspection.Task)
 			}
+			if test.streaming {
+				nowNS := base + 10_000
+				token := claimAndBeginWorkflowTask(t, application, processID+"-fallback-1", "aux", nowNS)
+				if _, err := application.flows.Complete("block-fallback-1", token, workflow.Complete{
+					JobID: processID, Edge: workflow.EdgeTerminal, NextStage: "needs_review", ReviewKind: "candidate", TaskState: "blocked",
+					ErrorClass: "STREAM_INGEST_FAILED", Message: "流媒体音频未通过发布校验", NowNS: nowNS + 100,
+				}); err != nil {
+					t.Fatal(err)
+				}
+				recorder = postCode(t, application, "/v1/jobs/"+processID+"/review", map[string]any{"action": "ai"})
+				if recorder.Code != http.StatusOK {
+					t.Fatalf("fallback retry code=%d body=%s", recorder.Code, recorder.Body.String())
+				}
+				inspection = inspect(t, application, processID)
+				if inspection.Job.Stage != "skipped" || inspection.Job.ReviewKind != "" || inspection.Task == nil || inspection.Task.State != "completed" {
+					t.Fatalf("fallback did not settle job=%+v task=%+v", inspection.Job, inspection.Task)
+				}
+			}
 		})
 	}
 }

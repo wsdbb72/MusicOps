@@ -4,6 +4,7 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/wsdbb72/MusicOps/native/core/internal/searchdecision"
 	"github.com/wsdbb72/MusicOps/native/core/internal/workflow"
 )
 
@@ -17,13 +18,20 @@ const (
 	processReviewSkip     processReviewDisposition = "skip"
 )
 
-// processReviewDecisionFor bounds ordinary process-release checkpoints. These
-// are not tracker spend results, so a small retry allowance is safe; after it
-// is exhausted the job must either use the configured streaming fallback or
-// settle instead of returning to the same review every cooldown cycle.
-func processReviewDecisionFor(job workflow.Job, fallbackUsable bool) processReviewDisposition {
-	if job.ProcessRetryCount < processCandidateReviewRetryLimit {
+// processReviewDecisionFor bounds ordinary process-release checkpoints. A
+// fallback child uses SearchRetryCount because that durable counter survives
+// stage changes for process tasks; treating only ProcessRetryCount as the
+// budget made decode failures leave review every 30 seconds forever.
+func processReviewDecisionFor(job workflow.Job, fallbackUsable, alreadyFallback bool) processReviewDisposition {
+	retries := job.ProcessRetryCount
+	if alreadyFallback && job.SearchRetryCount > retries {
+		retries = job.SearchRetryCount
+	}
+	if retries < processCandidateReviewRetryLimit {
 		return processReviewRetry
+	}
+	if alreadyFallback {
+		return processReviewSkip
 	}
 	if fallbackUsable {
 		return processReviewFallback
@@ -31,9 +39,22 @@ func processReviewDecisionFor(job workflow.Job, fallbackUsable bool) processRevi
 	return processReviewSkip
 }
 
+func (a *App) processCandidateUsesFallback(job workflow.Job) bool {
+	if job.SearchAction == searchdecision.ActionFallback {
+		return true
+	}
+	if a == nil || a.flows == nil || job.ParentJobID == "" {
+		return false
+	}
+	parent, err := a.flows.Job(job.ParentJobID)
+	return err == nil && parent != nil && parent.SearchAction == searchdecision.ActionFallback
+}
+
 func (a *App) reviewProcessCandidateCheckpoint(w http.ResponseWriter, requestID, id string, nowNS int64, job workflow.Job) {
 	plan := a.tokenReviewPlan(job)
-	decision := processReviewDecisionFor(job, tokenReviewFallbackUsable(job, plan))
+	fallbackUsable := tokenReviewFallbackUsable(job, plan)
+	alreadyFallback := a.processCandidateUsesFallback(job)
+	decision := processReviewDecisionFor(job, fallbackUsable, alreadyFallback)
 	switch decision {
 	case processReviewRetry:
 		result, err := a.flows.Review(requestID, id, workflow.ReviewDecision{Action: "retry"}, nowNS)

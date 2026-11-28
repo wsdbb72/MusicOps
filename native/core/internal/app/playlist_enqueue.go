@@ -1858,9 +1858,12 @@ func (a *App) enqueuePlaylistTracks(ctx context.Context, playlistJobID string, r
 		}
 		selectedRows[position] = rows[index]
 	}
+	snapshotMode := !opts.VerifyFiles && len(library.scanFiles) > 0
+	library.ctx = ctx
+	library.useIndexSnapshot = snapshotMode
 	var selectedPresence []bool
 	var presenceErr error
-	if opts.VerifyFiles || len(library.scanFiles) == 0 {
+	if !snapshotMode {
 		selectedPresence, presenceErr = playlistPresenceForIndexContext(ctx, freshPlaylistVerificationIndex(library), selectedRows)
 	} else {
 		selectedPresence, presenceErr = playlistPresenceForIndexSnapshotContext(ctx, library, selectedRows)
@@ -2269,6 +2272,8 @@ func (a *App) playlistTracksView(w http.ResponseWriter, r *http.Request) {
 	}
 
 	verifyFiles := playlistAuditVerification(r) == "file_stat"
+	library.ctx = r.Context()
+	library.useIndexSnapshot = !verifyFiles
 	var present []bool
 	var presenceErr error
 	if verifyFiles {

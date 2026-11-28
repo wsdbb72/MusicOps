@@ -149,3 +149,27 @@ func TestPlaylistSnapshotRepairIsBoundedWhenCatalogueCannotMatch(t *testing.T) {
 		}
 	}
 }
+func TestPlaylistSummaryKeepsAlbumAnalysisOnSnapshot(t *testing.T) {
+	application := newApp(t)
+	library := application.libraryDir()
+	trackPath := indexPlaylistTestFile(t, application, library,
+		"Artist/Album/01 Song.flac", "Artist", "Album", "Song")
+	application.invalidatePlaylistLibraryCache()
+	incoming := application.workPath("incoming")
+	if err := os.MkdirAll(incoming, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	manifest := "#EXTM3U\n#PLAYLIST:Snapshot album\n#MUSICOPS-ALBUM:Album\n#EXTINF:180,Artist - Song\n/media/song.flac\n"
+	if err := os.WriteFile(filepath.Join(incoming, "playlist-audit-snapshot.m3u"), []byte(manifest), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(trackPath); err != nil {
+		t.Fatal(err)
+	}
+	application.invalidatePlaylistLibraryCache()
+	body := getJSON(t, application, "/v1/playlists/tracks?job=audit-snapshot&summary=1")
+	summary, _ := body["summary"].(map[string]any)
+	if body["verification"] != "index_snapshot" || summary["present"] != float64(1) || summary["missing"] != float64(0) || summary["album_present"] != float64(1) {
+		t.Fatalf("summary album analysis left the durable snapshot: %v", body)
+	}
+}

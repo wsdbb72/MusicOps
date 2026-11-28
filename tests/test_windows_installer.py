@@ -173,7 +173,7 @@ def test_running_worker_blocks_update_without_terminating_it(installation):
         time.sleep(0.2)
         assert worker.poll() is None
         code, log = app.run()
-        assert code != 0 and 'update blocked by busy or inaccessible executable' in log
+        assert code != 0 and 'update blocked by busy or inaccessible main/core executable' in log
         assert worker.poll() is None
         assert hashlib.sha256(exe.read_bytes()).digest() == before
         assert_preserved(app.target, saved)

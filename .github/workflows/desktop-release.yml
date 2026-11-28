@@ -208,7 +208,7 @@ jobs:
           installer = root/f'MusicOps-{version}-Setup.exe'
           artifacts = {path.name: hashes(path) for path in (installer, portable, source)}
           data = {'managed_engines_passed': True, 'managed_engine_checks': {'engines_present': True}, 'version': version, 'architecture': 'x86_64', 'commit': commit, 'artifacts': artifacts,
-                  'unit_tests_passed': True, 'installer_smoke_passed': True, 'installer_test_count': 6,
+                  'unit_tests_passed': True, 'installer_smoke_passed': True, 'installer_test_count': 7,
                   'installer_smoke_checks': installed['checks'],
                   'smoke_passed': True, 'packaged_checks': report['checks'],
                   'core_version': version, 'desktop_version': version,
@@ -295,7 +295,7 @@ jobs:
               if platform == 'Windows':
                   windows = data
                   if not go_checks.issubset(data.get('packaged_checks',{})):raise SystemExit('Go packaged acceptance did not cover all 23 checks')
-                  if data.get('core_version') != version or data.get('desktop_version') != version or data.get('architecture') != 'x86_64' or data.get('unit_tests_passed') is not True or data.get('installer_test_count') != 6 or data.get('source_archive_commit') != commit or not data.get('packaged_checks') or len(data.get('packaged_checks', {})) != 23 or not all(data['packaged_checks'].values()) or len(data.get('installer_smoke_checks', {})) != 6 or not all(data['installer_smoke_checks'].values()):
+                  if data.get('core_version') != version or data.get('desktop_version') != version or data.get('architecture') != 'x86_64' or data.get('unit_tests_passed') is not True or data.get('installer_test_count') != 7 or data.get('source_archive_commit') != commit or not data.get('packaged_checks') or len(data.get('packaged_checks', {})) != 23 or not all(data['packaged_checks'].values()) or len(data.get('installer_smoke_checks', {})) != 7 or not all(data['installer_smoke_checks'].values()):
                       raise SystemExit('Windows regression or packaged evidence is incomplete')
                   names = {f'MusicOps-{version}-Setup.exe', f'MusicOps-{version}-Windows.zip', f'MusicOps-{version}-source.zip'}
               else:

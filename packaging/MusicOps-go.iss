@@ -48,21 +48,21 @@ VersionInfoDescription=MusicOps Windows Installer
 
 [CustomMessages]
 chinesesimp.UpgradeTitle=更新 MusicOps
-chinesesimp.UpgradeWelcome=已检测到现有 MusicOps%1。%n%n安装程序将在原目录更新应用，保留配置、已保存的凭据、任务记录和媒体工具。%n%n更新前请在任务中心使用“退出应用及后台”。如有任务正在运行，请先等待当前阶段结束，或安全取消需退出的任务，再退出。%n%n更新目录：%2
+chinesesimp.UpgradeWelcome=已检测到现有 MusicOps%1。%n%n安装程序将在原目录更新应用，保留配置、已保存的凭据、任务记录和媒体工具。更新时会关闭 MusicOps 自己启动的无界面辅助服务，但不会终止主程序、后台核心或取消任务。%n%n更新前请在任务中心使用“退出应用及后台”。如有任务正在运行，请先等待当前阶段结束，或安全取消需退出的任务，再退出。%n%n更新目录：%2
 chinesesimp.FreshWelcome=未检测到现有安装，将安装 MusicOps。%n%n如果您以前使用便携版，请在下一步选择原来的 MusicOps 目录；安装程序会将其识别为更新并保留 profile 和 tools。
 chinesesimp.UpdateButton=更新(&U)
 chinesesimp.UpdateSummary=更新现有 MusicOps%1 至 {#AppVersion}%n保留配置、凭据、任务记录和媒体工具。%n%n更新目录：
 chinesesimp.DifferentDirectory=检测到现有 MusicOps 安装。为避免创建第二份程序和空白配置，请更新原目录：%n%1%n%n如需迁移，请先完整备份原目录，再卸载旧版本。
 chinesesimp.NewerVersion=已安装的 MusicOps %1 比此安装包 {#AppVersion} 更新。请使用同版本或更新的安装包，避免旧程序读取新版数据。
-chinesesimp.BusyApplication=MusicOps 或后台核心仍在运行，或安装文件暂时被占用。%n%n请先等待当前阶段结束，或安全取消需退出的任务，再在任务中心使用“退出应用及后台”。退出后点击“重试”。安装程序不会终止进程或取消任务。
+chinesesimp.BusyApplication=MusicOps 主程序或后台核心仍在运行，或安装文件仍被占用。%n%n安装程序已尝试关闭 MusicOps 自己启动的无界面辅助服务，但不会终止主程序、后台核心或取消任务。请先等待当前阶段结束，或安全取消需退出的任务，再在任务中心使用“退出应用及后台”。退出后点击“重试”。
 english.UpgradeTitle=Update MusicOps
-english.UpgradeWelcome=An existing MusicOps%1 installation was detected.%n%nSetup will update the original directory and preserve settings, saved credentials, tasks and media tools.%n%nWait for the current stage to finish, or safely cancel tasks that prevent exiting, then use "Quit app and background worker" in the task center.%n%nUpdate directory: %2
+english.UpgradeWelcome=An existing MusicOps%1 installation was detected.%n%nSetup will update the original directory and preserve settings, saved credentials, tasks and media tools. It stops MusicOps-owned headless helper services, but does not terminate the main app, its background core, or cancel tasks.%n%nWait for the current stage to finish, or safely cancel tasks that prevent exiting, then use "Quit app and background worker" in the task center.%n%nUpdate directory: %2
 english.FreshWelcome=No existing installation was detected. Setup will install MusicOps.%n%nIf you previously used the portable edition, select its existing MusicOps directory on the next page. Setup will recognize it as an update and preserve profile and tools.
 english.UpdateButton=&Update
 english.UpdateSummary=Update existing MusicOps%1 to {#AppVersion}%nPreserve settings, credentials, tasks and media tools.%n%nUpdate directory:
 english.DifferentDirectory=An existing MusicOps installation was detected. Update its original directory to avoid creating another copy and an empty profile:%n%1%n%nTo move the application, back up the original directory before uninstalling it.
 english.NewerVersion=MusicOps %1 is newer than this {#AppVersion} installer. Use the same or a newer version to avoid opening newer data with an older application.
-english.BusyApplication=MusicOps or its background core is still running, or an application file is temporarily in use.%n%nWait for the current stage to finish, or safely cancel tasks that prevent exiting, then use "Quit app and background worker" in the task center and choose Retry. Setup will not terminate processes or cancel tasks.
+english.BusyApplication=The MusicOps main app or background core is still running, or an application file remains in use.%n%nSetup stopped MusicOps-owned headless helpers, but it does not terminate the main app or background core, or cancel tasks. Wait for the current stage to finish, or safely cancel tasks that prevent exiting, then use "Quit app and background worker" in the task center and choose Retry.
 
 [Languages]
 Name: "chinesesimp"; MessagesFile: "{#SourcePath}\Languages\ChineseSimplified.isl"
@@ -79,6 +79,7 @@ Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: 
 Name: "{app}\profile"; Flags: uninsneveruninstall
 
 [Files]
+Source: "stop-musicops-helpers.ps1"; DestDir: "{tmp}"; Flags: dontcopy
 Source: "{#BundleDir}\MusicOps.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#BundleDir}\musicops-core.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#BundleDir}\licenses\*"; DestDir: "{app}\licenses"; Flags: ignoreversion recursesubdirs createallsubdirs
@@ -293,15 +294,39 @@ begin
   if Result then CloseFileHandle(Handle);
 end;
 
+function StopBundledHelpers(): Boolean;
+var
+  ResultCode: Integer;
+  ScriptPath, Params: String;
+begin
+  ExtractTemporaryFile('stop-musicops-helpers.ps1');
+  ScriptPath := ExpandConstant('{tmp}\stop-musicops-helpers.ps1');
+  Params := '-NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File ' +
+    AddQuotes(ScriptPath) + ' ' + AddQuotes(ExpandConstant('{app}'));
+  Result := Exec(ExpandConstant('{sys}\WindowsPowerShell\v1.0\powershell.exe'), Params, '',
+    SW_HIDE, ewWaitUntilTerminated, ResultCode) and (ResultCode = 0);
+  if Result then Log('MusicOps: bundled helper processes are stopped.')
+  else Log('MusicOps: bundled helper cleanup failed with exit code ' + IntToStr(ResultCode) + '.');
+end;
+
 function PrepareToInstall(var NeedsRestart: Boolean): String;
 begin
   Result := '';
+  { The app owns everything below tools\services. An earlier crash may leave
+    FlareSolverr or its browser alive even when the main app has exited, so
+    stop only that subtree before the installer replaces its executables. }
+  if not StopBundledHelpers() then begin
+    Result := CustomMessage('BusyApplication');
+    Exit;
+  end;
   { The legacy worker exe is checked too: an upgrade from a Python install
     must not replace it while it is running. }
   if not ExecutableAvailableForUpdate(ExpandConstant('{app}\MusicOps.exe')) or
     not ExecutableAvailableForUpdate(ExpandConstant('{app}\musicops-core.exe')) or
-    not ExecutableAvailableForUpdate(ExpandConstant('{app}\MusicOps-worker.exe')) then begin
-    Log('MusicOps: update blocked by busy or inaccessible executable; no process terminated.');
+    not ExecutableAvailableForUpdate(ExpandConstant('{app}\MusicOps-worker.exe')) or
+    not ExecutableAvailableForUpdate(ExpandConstant('{app}\tools\services\flaresolverr\flaresolverr.exe')) or
+    not ExecutableAvailableForUpdate(ExpandConstant('{app}\tools\services\go-music-dl\go-music-dl.exe')) then begin
+    Log('MusicOps: update blocked by busy or inaccessible main/core executable; helper processes were stopped but tasks were not cancelled.');
     Result := CustomMessage('BusyApplication');
   end;
 end;

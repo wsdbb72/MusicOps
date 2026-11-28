@@ -97,8 +97,17 @@ func (a *App) startManagedSolver(settings solverSettings) (bool, error) {
 	}
 	prepareSolverCommand(cmd)
 	a.setSolverState(solverProcessStarting, "已启动，等待浏览器服务就绪")
+	if err := prepareManagedChild(); err != nil {
+		a.setSolverState(solverProcessFailed, "启动失败："+err.Error())
+		return false, err
+	}
 	if err := cmd.Start(); err != nil {
 		a.setSolverState(solverProcessFailed, "启动失败："+err.Error())
+		return false, err
+	}
+	if err := attachManagedChild(cmd.Process); err != nil {
+		_ = cmd.Process.Kill()
+		a.setSolverState(solverProcessFailed, "进程托管失败："+err.Error())
 		return false, err
 	}
 	a.solver.mu.Lock()

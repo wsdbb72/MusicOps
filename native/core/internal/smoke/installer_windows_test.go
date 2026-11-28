@@ -35,7 +35,7 @@ import (
 //	                                    the installer file name)
 //	MUSICOPS_SMOKE_INSTALLER_REPORT   path for the JSON acceptance report
 //	                                    {"version","passed","checks"} with
-//	                                    six named checks, read by the
+//	                                    seven named checks, read by the
 //	                                    release workflow's archive step
 //
 // The installer runs under an isolated AppId (MusicOps.QA.<hex>) so it
@@ -68,12 +68,13 @@ func TestWindowsInstaller(t *testing.T) {
 	version := os.Getenv("MUSICOPS_SMOKE_INSTALLER_VERSION")
 	reportPath := os.Getenv("MUSICOPS_SMOKE_INSTALLER_REPORT")
 	checks := map[string]bool{
-		"fresh_install":          false,
-		"installed_files_match":  false,
-		"upgrade_preserves":      false,
-		"running_blocks_upgrade": false,
-		"upgrade_after_exit":     false,
-		"uninstall_keeps":        false,
+		"fresh_install":           false,
+		"installed_files_match":   false,
+		"upgrade_preserves":       false,
+		"running_blocks_upgrade":  false,
+		"upgrade_after_exit":      false,
+		"orphaned_helper_cleanup": false,
+		"uninstall_keeps":         false,
 	}
 	t.Cleanup(func() {
 		if reportPath == "" {
@@ -210,6 +211,37 @@ func TestWindowsInstaller(t *testing.T) {
 	if err := os.WriteFile(tool, []byte("synthetic preserved tool"), 0o644); err != nil {
 		t.Fatal(err)
 	}
+	// A crashed prior core can leave an app-owned headless helper running.
+	// Put a harmless test helper under the same tools\services subtree and
+	// require the updater to stop it before replacing bundled files.
+	helperExe := filepath.Join(target, "tools", "services", "installer-helper.exe")
+	sourceExe, err := os.Open(os.Args[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	helperOut, err := os.OpenFile(helperExe, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o755)
+	if err != nil {
+		sourceExe.Close()
+		t.Fatal(err)
+	}
+	_, copyErr := io.Copy(helperOut, sourceExe)
+	closeErr := helperOut.Close()
+	_ = sourceExe.Close()
+	if copyErr != nil || closeErr != nil {
+		t.Fatalf("seed bundled helper: copy=%v close=%v", copyErr, closeErr)
+	}
+	helper := exec.Command(helperExe, "-test.run=^TestWindowsInstallerHelperProcess$")
+	helper.Env = append(os.Environ(), "MUSICOPS_INSTALLER_SLEEP_HELPER=1")
+	if err := helper.Start(); err != nil {
+		t.Fatal(err)
+	}
+	helperPID := uint32(helper.Process.Pid)
+	defer func() {
+		if helper.Process != nil && processAlive(helperPID) {
+			_ = helper.Process.Kill()
+			_, _ = helper.Process.Wait()
+		}
+	}()
 	// Pretend the registered install is an old version: the upgrade
 	// must reuse the registered directory.
 	keyPath := `Software\Microsoft\Windows\CurrentVersion\Uninstall\` + identity + `_is1`
@@ -233,6 +265,14 @@ func TestWindowsInstaller(t *testing.T) {
 	if sha(filepath.Join(target, "MusicOps.exe")) != sha(filepath.Join(bundle, "MusicOps.exe")) {
 		t.Fatal("MusicOps.exe changed across the upgrade")
 	}
+	helperDeadline := time.Now().Add(10 * time.Second)
+	for processAlive(helperPID) && time.Now().Before(helperDeadline) {
+		time.Sleep(100 * time.Millisecond)
+	}
+	if processAlive(helperPID) {
+		t.Fatalf("bundled helper %d survived the upgrade", helperPID)
+	}
+	checks["orphaned_helper_cleanup"] = true
 	checks["upgrade_preserves"] = true
 
 	// The installed shell starts its core; while it runs, an upgrade
@@ -369,4 +409,10 @@ func appIdentityFromISS(t *testing.T, bundle string) string {
 		t.Fatal("MusicOps-go.iss has no #define AppIdentity")
 	}
 	return string(m[1])
+}
+func TestWindowsInstallerHelperProcess(t *testing.T) {
+	if os.Getenv("MUSICOPS_INSTALLER_SLEEP_HELPER") != "1" {
+		return
+	}
+	select {}
 }

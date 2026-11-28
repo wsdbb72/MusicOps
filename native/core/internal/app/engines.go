@@ -169,8 +169,15 @@ func (a *App) ensureEngine(name engineName) (string, string, error) {
 		cmd.Env = append(cmd.Env, "MUSIC_DL_FFMPEG="+filepath.Join(tools, "ffmpeg.exe"), "MUSIC_DL_FFPROBE="+filepath.Join(tools, "ffprobe.exe"))
 	}
 	prepareSolverCommand(cmd)
+	if err := prepareManagedChild(); err != nil {
+		return "", "", fmt.Errorf("无法建立内置服务崩溃清理组：%w", err)
+	}
 	if err := cmd.Start(); err != nil {
 		return "", "", err
+	}
+	if err := attachManagedChild(cmd.Process); err != nil {
+		_ = cmd.Process.Kill()
+		return "", "", fmt.Errorf("无法托管内置服务进程：%w", err)
 	}
 	base := "http://127.0.0.1:" + fmt.Sprint(port)
 	if name == engineStreaming {

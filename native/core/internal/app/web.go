@@ -1602,8 +1602,11 @@ const appJS = `(function () {
     var needsWork = rows.filter(playlistNeedsWork).length;
     var missingAlbums = rows.filter(function (row) { return row.present && row.album_completion_needed && !row.album_present; }).length;
     var incompleteAlbums = rows.filter(function (row) { return row.present && row.album_incomplete; }).length;
-    var html = '<p class="meta">' + escapeText(body.name || "") + "：共 " + rows.length + " 首，曲目已在库 " + present + " 首；按目标专辑补全仍需处理 " + needsWork + " 首" +
-      (missingAlbums || incompleteAlbums ? "（目标专辑缺失 " + missingAlbums + "，目标专辑缺轨 " + incompleteAlbums + "）" : "") + "。" +
+    var verification = body.verification === "file_stat" ? "精确磁盘校验" : "曲库索引快照";
+    var completionUnknown = rows.filter(function (row) { return row.present && row.album_completion_unknown; }).length;
+    var html = '<p class="meta">' + escapeText(body.name || "") + "：共 " + rows.length + " 首，曲目已在库 " + present + " 首；核对方式 " + verification + "；按目标专辑补全仍需处理 " + needsWork + " 首" +
+      (missingAlbums || incompleteAlbums ? "（目标专辑缺失 " + missingAlbums + "，目标专辑缺轨 " + incompleteAlbums + "）" : "") +
+      (completionUnknown ? "；另有 " + completionUnknown + " 首专辑总轨数待后台目录核验，不计为缺轨" : "") + "。" +
       (rows.length > 500 ? " 列表只列出前 500 首，整张入库请用「全部入库」。" : "") + "</p>" +
       '<p><button type="button" id="pick-all">全选</button> <button type="button" id="pick-none">全不选</button> <button type="button" id="pick-apply" class="primary">入库选中</button></p>' +
       '<div class="pick-list">';

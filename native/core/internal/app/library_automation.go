@@ -98,7 +98,19 @@ func (a *App) loadLibraryAutomationScanCache(root string) libraryAutomationScanD
 	empty := libraryAutomationScanDocument{Version: libraryAutomationScanVersion, Root: filepath.Clean(root), Files: map[string]cachedLibraryScan{}}
 	doc := libraryAutomationScanDocument{}
 	found, err := a.loadJSONSetting(libraryAutomationScanKey, &doc)
-	if err != nil || !found || doc.Files == nil || doc.Version != libraryAutomationScanVersion || !strings.EqualFold(filepath.Clean(doc.Root), empty.Root) {
+	if err != nil || !found || doc.Files == nil || !strings.EqualFold(filepath.Clean(doc.Root), empty.Root) {
+		return empty
+	}
+	// Version 7 added the sharded lyrics-digest timestamp. Version 6 already
+	// contains the stable media artist, album, title, duration and track-total
+	// fields used by playlist matching. Treat the missing timestamp as due and
+	// migrate in memory instead of discarding 75k metadata rows and making a
+	// playlist request reread the entire mechanical music disk.
+	if doc.Version == 6 {
+		doc.Version = libraryAutomationScanVersion
+		return doc
+	}
+	if doc.Version != libraryAutomationScanVersion {
 		return empty
 	}
 	return doc

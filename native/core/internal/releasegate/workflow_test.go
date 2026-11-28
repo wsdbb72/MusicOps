@@ -62,6 +62,11 @@ func TestDesktopReleasePublishesOnlyAfterAllThreePlatforms(t *testing.T) {
 	requireText(t, desktop, "push_image: ${{ github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.publish) }}")
 	requireText(t, desktop, "'MusicOps '+version")
 	requireText(t, desktop, "A release with this version already exists")
+	requireText(t, desktop, "draft = api('/releases', {")
+	requireText(t, desktop, "release_id = str(draft['id'])")
+	if strings.Contains(desktop, "Could not identify the newly created draft") {
+		t.Fatal("draft identity must come from the create response, not an eventual-consistency lookup")
+	}
 	requireText(t, macos, "arch: arm64")
 	requireText(t, macos, "architecture: arm64")
 	if strings.Contains(macos, "arch: amd64") || strings.Contains(macos, "architecture: x86_64") {

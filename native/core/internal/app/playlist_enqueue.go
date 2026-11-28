@@ -19,6 +19,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -81,6 +82,9 @@ type playlistEnqueueOptions struct {
 	// track by track.
 	AlbumCompletion bool
 	NeteaseOnly     bool
+	// VerifyFiles opts into synchronous size/time checks against the audio
+	// disk. Automatic playlist ingestion uses the durable index snapshot.
+	VerifyFiles bool
 	// CatalogBaseURL is a test seam (loopback only); empty uses MusicBrainz.
 	CatalogBaseURL string
 }
@@ -122,6 +126,9 @@ type playlistLibraryIndex struct {
 	presence         *playlistPresenceCache
 	metadata         *playlistMetadataCache
 	signature        string
+	// useIndexSnapshot keeps playlist decisions on the durable catalogue and
+	// maintenance scan instead of statting thousands of files synchronously.
+	useIndexSnapshot bool
 }
 
 type playlistPresenceResult struct {
@@ -685,7 +692,7 @@ func (a *App) playlistLibrary() playlistLibraryIndex {
 
 func (index playlistLibraryIndex) presenceWorker() playlistLibraryIndex {
 	return playlistLibraryIndex{
-		ctx: index.ctx, engine: index.engine, tracks: index.tracks, albums: index.albums,
+		ctx: index.ctx, engine: index.engine, tracks: index.tracks, albums: index.albums, useIndexSnapshot: index.useIndexSnapshot,
 		titleCandidates: index.titleCandidates, albumMembers: index.albumMembers, albumTailMembers: index.albumTailMembers,
 		verified: map[string]bool{}, tagTitles: map[[2]string]map[string]bool{},
 		compilationTags: map[string]map[[2]string]bool{}, albumGaps: map[[2]string]bool{},
@@ -706,12 +713,67 @@ func (a *App) playlistPresence(ctx context.Context, rows []playlistTrack) ([]boo
 	return playlistPresenceForIndexContext(ctx, a.playlistLibrary(), rows)
 }
 
+func freshPlaylistVerificationIndex(index playlistLibraryIndex) playlistLibraryIndex {
+	index.presence = newPlaylistPresenceCache()
+	index.metadata = newPlaylistMetadataCache()
+	return index
+}
+
 func playlistPresenceForIndex(index playlistLibraryIndex, rows []playlistTrack) []bool {
 	present, _ := playlistPresenceForIndexContext(context.Background(), index, rows)
 	return present
 }
 
 func playlistPresenceForIndexContext(ctx context.Context, index playlistLibraryIndex, rows []playlistTrack) ([]bool, error) {
+	return playlistPresenceForIndexContextMode(ctx, index, rows, false)
+}
+
+// playlistPresenceForIndexSnapshotContext evaluates against the durable index
+// only for the full catalogue pass. At most 16 unresolved rows receive a
+// bounded embedded-metadata repair, so a cold playlist stays responsive even
+// when the library is on a slow HDD. The regular maintenance pass refreshes
+// the durable index outside the request path.
+func playlistPresenceForIndexSnapshotContext(ctx context.Context, index playlistLibraryIndex, rows []playlistTrack) ([]bool, error) {
+	present, err := playlistPresenceForIndexContextMode(ctx, index, rows, true)
+	if err != nil {
+		return nil, err
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	// The durable scan is intentionally sparse for files added after the last
+	// maintenance pass. Resolve only unresolved rows, with a hard bound, so one
+	// truncated filename can still match its embedded full title without turning
+	// the whole playlist into a synchronous tag-reading pass.
+	const repairLimit = 16
+	repair := freshPlaylistVerificationIndex(index)
+	repair.ctx = ctx
+	repair.useIndexSnapshot = false
+	local := repair.presenceWorker()
+	checked, recovered := 0, 0
+	for i, ok := range present {
+		if ok || checked >= repairLimit {
+			continue
+		}
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		checked++
+		if local.hasPlaylistRow(rows[i]) {
+			present[i] = true
+			recovered++
+		}
+	}
+	if err := repair.flushPresenceSnapshots(); err != nil {
+		return nil, err
+	}
+	if checked > 0 {
+		log.Printf("playlist audit stage=snapshot_repair checked=%d recovered=%d", checked, recovered)
+	}
+	return present, nil
+}
+
+func playlistPresenceForIndexContextMode(ctx context.Context, index playlistLibraryIndex, rows []playlistTrack, useIndexSnapshot bool) ([]bool, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -720,6 +782,7 @@ func playlistPresenceForIndexContext(ctx context.Context, index playlistLibraryI
 	// The cached index is copied by value; bind this copy to the request so
 	// legacy-file verification can be cancelled without mutating shared cache.
 	index.ctx = runCtx
+	index.useIndexSnapshot = useIndexSnapshot
 	// A first scan of a large mechanical library can take minutes. Persist each
 	// already-verified size/mtime snapshot as it is produced so a client timeout
 	// cannot discard the completed prefix. The deferred flush also records work
@@ -737,6 +800,9 @@ func playlistPresenceForIndexContext(ctx context.Context, index playlistLibraryI
 				return nil, err
 			}
 			present[i] = local.hasPlaylistRow(row)
+			if index.useIndexSnapshot {
+				continue
+			}
 			select {
 			case <-runCtx.Done():
 				return nil, runCtx.Err()
@@ -913,6 +979,9 @@ func (index playlistLibraryIndex) cachedScanForPath(path string) (cachedLibraryS
 	if !found || entry.DuplicateOnly {
 		return cachedLibraryScan{}, false
 	}
+	if index.useIndexSnapshot {
+		return entry, true
+	}
 	info, err := os.Lstat(path)
 	if err != nil || !info.Mode().IsRegular() || info.Size() != entry.Size || info.ModTime().UnixNano() != entry.ModNS {
 		return cachedLibraryScan{}, false
@@ -947,6 +1016,9 @@ func (index playlistLibraryIndex) albumTrackTotal(path string) int {
 	if entry, found := index.cachedScanForPath(path); found && entry.MetadataVersion >= libraryAutomationMetadataVersion {
 		return entry.TrackTotal
 	}
+	if index.useIndexSnapshot {
+		return 0
+	}
 	compute := func() int {
 		tags, err := readFLACTagsPrefix(path)
 		if err != nil {
@@ -965,6 +1037,9 @@ func (index playlistLibraryIndex) recording(path string) playlistRecordingTags {
 		if tags, ok := playlistRecordingsFromScan(entry); ok {
 			return tags
 		}
+	}
+	if index.useIndexSnapshot {
+		return playlistRecordingTags{}
 	}
 	compute := func() playlistRecordingTags {
 		if strings.EqualFold(filepath.Ext(path), ".flac") {
@@ -1401,6 +1476,10 @@ func compilationTrackTags(path string) (artists []string, album, title string) {
 }
 
 func (index playlistLibraryIndex) isUnchanged(id string) bool {
+	if index.useIndexSnapshot {
+		_, found := index.records[id]
+		return found
+	}
 	if len(index.scanFiles) > 0 && index.scanPresence(id) {
 		return true
 	}
@@ -1534,7 +1613,58 @@ func (index playlistLibraryIndex) needsAlbumCompletion(artist, album, title stri
 	if !index.hasAlbum(artist, album) || !index.hasTrack(artist, album, title) {
 		return true
 	}
-	return index.albumCompletionState(artist, album) != playlistAlbumComplete
+	switch index.albumCompletionState(artist, album) {
+	case playlistAlbumComplete:
+		return false
+	case playlistAlbumIncomplete:
+		return true
+	default:
+		// A missing TRACKTOTAL is not evidence of a gap. Many legitimate
+		// singles, compilations and older rips omit it. Queue only when the
+		// persisted metadata proves that a same-path candidate belongs to a
+		// different album; the bounded background catalogue audit resolves the
+		// remaining unknowns without creating thousands of speculative jobs.
+		return index.albumHasConflictingMetadata(artist, album, title)
+	}
+}
+
+func (index playlistLibraryIndex) albumHasConflictingMetadata(artist, album, title string) bool {
+	want := playlistMatchKey(title)
+	if want == "" {
+		return false
+	}
+	keys := []string{want}
+	if featured := playlistFeaturedTitleKey(title, artist); featured != "" && featured != want {
+		keys = append(keys, featured)
+	}
+	seen := map[string]bool{}
+	sawConflicting := false
+	for _, key := range keys {
+		ids := append([]string(nil), index.titleCandidates[key]...)
+		ids = append(ids, index.titleCandidates[playlistCompactTitleKey(key)]...)
+		for _, id := range ids {
+			if seen[id] || !index.isUnchanged(id) {
+				continue
+			}
+			seen[id] = true
+			path, found := index.pathFor(id)
+			if !found {
+				continue
+			}
+			tags := index.recording(path)
+			if playlistMatchKey(tags.title) != key || !playlistArtistTagMatches(artist, tags.artists) {
+				continue
+			}
+			if playlistAlbumTagMatches(album, tags.album) {
+				// One exact recording in the catalogued release is enough to
+				// explain an unknown total. Other unrelated files in the folder
+				// must not turn every playlist row into speculative work.
+				return false
+			}
+			sawConflicting = true
+		}
+	}
+	return sawConflicting
 }
 
 // A path-only match is not proof that an album is complete. A local release is
@@ -1638,7 +1768,13 @@ func (a *App) enqueuePlaylistTracks(ctx context.Context, playlistJobID string, r
 		}
 		selectedRows[position] = rows[index]
 	}
-	selectedPresence, presenceErr := playlistPresenceForIndexContext(ctx, library, selectedRows)
+	var selectedPresence []bool
+	var presenceErr error
+	if opts.VerifyFiles || len(library.scanFiles) == 0 {
+		selectedPresence, presenceErr = playlistPresenceForIndexContext(ctx, freshPlaylistVerificationIndex(library), selectedRows)
+	} else {
+		selectedPresence, presenceErr = playlistPresenceForIndexSnapshotContext(ctx, library, selectedRows)
+	}
 	if presenceErr != nil {
 		return report, presenceErr
 	}
@@ -1982,6 +2118,13 @@ func (a *App) playlistTrackRows(jobID string) ([]playlistTrack, string, error) {
 	return rows, name, nil
 }
 
+func playlistAuditVerification(r *http.Request) string {
+	if r != nil && r.URL.Query().Get("verify") == "1" {
+		return "file_stat"
+	}
+	return "index_snapshot"
+}
+
 // playlistTracksView is GET /v1/playlists/tracks?job=<id>.
 func (a *App) playlistTracksView(w http.ResponseWriter, r *http.Request) {
 	jobID := strings.TrimSpace(r.URL.Query().Get("job"))
@@ -1995,20 +2138,23 @@ func (a *App) playlistTracksView(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	type rowView struct {
-		Index                 int    `json:"index"`
-		Artist                string `json:"artist"`
-		Title                 string `json:"title"`
-		Album                 string `json:"album,omitempty"`
-		Present               bool   `json:"present"`
-		AlbumPresent          bool   `json:"album_present"`
-		AlbumIncomplete       bool   `json:"album_incomplete"`
-		AlbumCompletionNeeded bool   `json:"album_completion_needed"`
+		Index                  int    `json:"index"`
+		Artist                 string `json:"artist"`
+		Title                  string `json:"title"`
+		Album                  string `json:"album,omitempty"`
+		Present                bool   `json:"present"`
+		AlbumPresent           bool   `json:"album_present"`
+		AlbumIncomplete        bool   `json:"album_incomplete"`
+		AlbumCompletionNeeded  bool   `json:"album_completion_needed"`
+		AlbumCompletionUnknown bool   `json:"album_completion_unknown"`
 	}
 	includeTracks := r.URL.Query().Get("summary") != "1"
+	started := time.Now()
 	library := a.playlistLibrary()
+	log.Printf("playlist audit job=%s stage=index records=%d elapsed=%s", jobID, len(library.records), time.Since(started).Round(time.Millisecond))
 	playlistDigest := playlistRowsDigest(name, rows)
 	cache := a.loadPlaylistAuditCache(a.libraryDir())
-	if cached, found := cache.Entries[jobID]; found && cached.valid(playlistDigest, library.signature, len(rows), a.now()) {
+	if cached, found := cache.Entries[jobID]; found && cached.valid(playlistDigest, library.signature, len(rows), a.now()) && playlistAuditVerification(r) == "index_snapshot" {
 		var out any
 		if includeTracks {
 			tracks := make([]rowView, 0, len(rows))
@@ -2016,14 +2162,14 @@ func (a *App) playlistTracksView(w http.ResponseWriter, r *http.Request) {
 				state := cached.States[i]
 				tracks = append(tracks, rowView{
 					Index: i, Artist: row.Artist, Title: row.Title, Album: row.Album, Present: state.Present,
-					AlbumPresent: state.AlbumPresent, AlbumIncomplete: state.AlbumIncomplete, AlbumCompletionNeeded: state.AlbumCompletionNeeded,
+					AlbumPresent: state.AlbumPresent, AlbumIncomplete: state.AlbumIncomplete, AlbumCompletionNeeded: state.AlbumCompletionNeeded, AlbumCompletionUnknown: state.AlbumCompletionUnknown,
 				})
 			}
 			out = tracks
 		}
 		response := map[string]any{
 			"ok": true, "name": name, "summary": cached.Summary, "total": len(rows),
-			"cached": true, "checked_ns": cached.CheckedNS,
+			"cached": true, "checked_ns": cached.CheckedNS, "verification": playlistAuditVerification(r),
 		}
 		if includeTracks {
 			response["tracks"] = out
@@ -2032,7 +2178,15 @@ func (a *App) playlistTracksView(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	present, presenceErr := playlistPresenceForIndexContext(r.Context(), library, rows)
+	verifyFiles := playlistAuditVerification(r) == "file_stat"
+	var present []bool
+	var presenceErr error
+	if verifyFiles {
+		present, presenceErr = playlistPresenceForIndexContext(r.Context(), freshPlaylistVerificationIndex(library), rows)
+	} else {
+		present, presenceErr = playlistPresenceForIndexSnapshotContext(r.Context(), library, rows)
+	}
+	log.Printf("playlist audit job=%s stage=presence rows=%d mode=%s elapsed=%s", jobID, len(rows), playlistAuditVerification(r), time.Since(started).Round(time.Millisecond))
 	if presenceErr != nil {
 		if r.Context().Err() == nil {
 			writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "code": "PLAYLIST_PRESENCE_FAILED", "error": presenceErr.Error()})
@@ -2046,15 +2200,18 @@ func (a *App) playlistTracksView(w http.ResponseWriter, r *http.Request) {
 	}
 	summary := playlistAuditSummary{Total: len(rows)}
 	for i, row := range rows {
-		albumPresent, albumIncomplete, completionNeeded := true, false, !present[i]
+		albumPresent, albumIncomplete, completionNeeded, completionUnknown := true, false, !present[i], false
 		album := normalizePlaylistAlbumTitle(row.Album)
 		if album != "" && !isHotSlowCompilationAlbum(album) {
 			albumPresent = library.hasAlbum(row.Artist, album)
-			albumIncomplete = albumPresent && library.hasAlbumGap(row.Artist, album)
-			completionNeeded = library.needsAlbumCompletion(row.Artist, album, row.Title)
+			albumState := library.albumCompletionState(row.Artist, album)
+			albumIncomplete = albumPresent && albumState == playlistAlbumIncomplete
+			completionUnknown = albumPresent && albumState == playlistAlbumUnknown
+			completionNeeded = !present[i] || library.needsAlbumCompletion(row.Artist, album, row.Title)
 		}
 		states[i] = playlistAuditRowState{
-			Present: present[i], AlbumPresent: albumPresent, AlbumIncomplete: albumIncomplete, AlbumCompletionNeeded: completionNeeded,
+			Present: present[i], AlbumPresent: albumPresent, AlbumIncomplete: albumIncomplete,
+			AlbumCompletionNeeded: completionNeeded, AlbumCompletionUnknown: completionUnknown,
 		}
 		if present[i] {
 			summary.Present++
@@ -2068,10 +2225,13 @@ func (a *App) playlistTracksView(w http.ResponseWriter, r *http.Request) {
 		if completionNeeded {
 			summary.CompletionNeeded++
 		}
+		if completionUnknown {
+			summary.CompletionUnknown++
+		}
 		if includeTracks {
 			out = append(out, rowView{
 				Index: i, Artist: row.Artist, Title: row.Title, Album: row.Album, Present: present[i],
-				AlbumPresent: albumPresent, AlbumIncomplete: albumIncomplete, AlbumCompletionNeeded: completionNeeded,
+				AlbumPresent: albumPresent, AlbumIncomplete: albumIncomplete, AlbumCompletionNeeded: completionNeeded, AlbumCompletionUnknown: completionUnknown,
 			})
 		}
 	}
@@ -2082,7 +2242,7 @@ func (a *App) playlistTracksView(w http.ResponseWriter, r *http.Request) {
 	})
 	response := map[string]any{
 		"ok": true, "name": name, "summary": summary, "total": len(rows),
-		"cached": false, "checked_ns": checkedNS,
+		"cached": false, "checked_ns": checkedNS, "verification": playlistAuditVerification(r),
 	}
 	if includeTracks {
 		response["tracks"] = out
@@ -2097,6 +2257,7 @@ func (a *App) enqueuePlaylist(w http.ResponseWriter, r *http.Request) {
 		Indices         []int  `json:"indices"`
 		AlbumCompletion *bool  `json:"album_completion"`
 		NeteaseOnly     bool   `json:"netease_only"`
+		VerifyFiles     bool   `json:"verify_files"`
 	}
 	if err := decode(r, &body); err != nil || !workflow.ValidID(body.JobID) {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "code": "INVALID_REQUEST"})
@@ -2120,7 +2281,7 @@ func (a *App) enqueuePlaylist(w http.ResponseWriter, r *http.Request) {
 	if body.AlbumCompletion != nil {
 		albumCompletion = *body.AlbumCompletion
 	}
-	report, err := a.enqueuePlaylistTracks(r.Context(), body.JobID, rows, indices, playlistEnqueueOptions{AlbumCompletion: albumCompletion, NeteaseOnly: body.NeteaseOnly})
+	report, err := a.enqueuePlaylistTracks(r.Context(), body.JobID, rows, indices, playlistEnqueueOptions{AlbumCompletion: albumCompletion, NeteaseOnly: body.NeteaseOnly, VerifyFiles: body.VerifyFiles})
 	if err != nil {
 		writeJSON(w, http.StatusBadGateway, map[string]any{"ok": false, "code": "PLAYLIST_ENQUEUE_FAILED", "error": err.Error()})
 		return

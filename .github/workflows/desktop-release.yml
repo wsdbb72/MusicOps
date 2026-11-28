@@ -371,21 +371,25 @@ jobs:
           notes.write_text(release_notes.rstrip()+'\n\nSource commit: '+commit+'\n', 'utf-8')
           def gh(*arguments):
               subprocess.run(['gh', *arguments], check=True)
-          gh('release', 'create', tag, '--verify-tag', '--target', commit, '--draft', '--title', 'MusicOps '+version, '--notes-file', str(notes))
+          # Create the draft through REST so GitHub returns its immutable ID in
+          # the same response. The list-releases endpoint omits drafts, and the
+          # by-tag endpoint deliberately excludes them, so looking the draft up
+          # afterwards made the verified v1.0.35/v1.0.36 publication fail.
+          draft = api('/releases', {
+              'tag_name': tag,
+              'target_commitish': commit,
+              'name': 'MusicOps '+version,
+              'body': notes.read_text('utf-8'),
+              'draft': True,
+              'prerelease': False,
+          })
+          if not isinstance(draft, dict) or draft.get('tag_name') != tag or draft.get('draft') is not True or not draft.get('id'):
+              raise SystemExit('GitHub did not return the verified draft identity')
+          release_id = str(draft['id'])
           files = sorted(path for path in root.iterdir() if path.is_file())
           gh('release', 'upload', tag, *map(str, files))
-          # The by-tag endpoint returns published releases. Read this new draft
-          # by ID so every asset is verified before it becomes publicly visible.
-          created = []
-          page = 1
-          while True:
-              releases = api('/releases?per_page=100&page='+str(page))
-              created.extend(release for release in releases if release['tag_name'] == tag)
-              if len(releases) < 100: break
-              page += 1
-          if len(created) != 1:
-              raise SystemExit('Could not identify the newly created draft')
-          release_id = str(created[0]['id'])
+          # Every subsequent operation uses the create response's ID; no draft
+          # enumeration or eventual-consistency lookup is involved.
           release = api('/releases/'+release_id)
           assets = {asset['name']: asset for asset in release['assets']}
           if not release['draft'] or set(assets) != {path.name for path in files}:

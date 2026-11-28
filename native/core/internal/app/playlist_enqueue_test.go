@@ -459,6 +459,27 @@ func TestAlbumCompletionDoesNotTrustPathOrConflictingEmbeddedTags(t *testing.T) 
 	}
 }
 
+func TestAlbumCompletionTreatsMissingTrackTotalWithoutConflictAsUnknown(t *testing.T) {
+	application := newApp(t)
+	library := t.TempDir()
+	indexPlaylistTestFile(t, application, library,
+		"Artist/Album/01 Song.flac", "Artist", "Album", "Song")
+	application.invalidatePlaylistLibraryCache()
+	index := application.playlistLibrary()
+	if state := index.albumCompletionState("Artist", "Album"); state != playlistAlbumUnknown {
+		t.Fatalf("album without TRACKTOTAL produced state %v", state)
+	}
+	if index.needsAlbumCompletion("Artist", "Album", "Song") {
+		t.Fatal("a benign missing track total created a speculative album job")
+	}
+	report, err := application.enqueuePlaylistTracks(context.Background(), "pl-album-unknown-benign",
+		[]playlistTrack{{Artist: "Artist", Album: "Album", Title: "Song"}}, []int{0},
+		playlistEnqueueOptions{AlbumCompletion: true})
+	if err != nil || len(report.Created) != 0 || len(report.Skipped) != 1 {
+		t.Fatalf("benign unknown album state was re-queued: report=%+v err=%v", report, err)
+	}
+}
+
 func TestAlbumCompletionAcceptsExplicitMatchingTrackTotal(t *testing.T) {
 	application := newApp(t)
 	library := t.TempDir()

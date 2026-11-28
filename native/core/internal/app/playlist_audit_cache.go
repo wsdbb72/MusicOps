@@ -16,25 +16,27 @@ import (
 var playlistAuditCacheKey = []byte("app/library/playlist-audit-cache-v1")
 
 const (
-	playlistAuditCacheVersion = 1
+	playlistAuditCacheVersion = 3
 	playlistAuditCacheTTL     = 6 * time.Hour
 	playlistAuditCacheEntries = 16
 )
 
 type playlistAuditRowState struct {
-	Present               bool `json:"present"`
-	AlbumPresent          bool `json:"album_present"`
-	AlbumIncomplete       bool `json:"album_incomplete"`
-	AlbumCompletionNeeded bool `json:"album_completion_needed"`
+	Present                bool `json:"present"`
+	AlbumPresent           bool `json:"album_present"`
+	AlbumIncomplete        bool `json:"album_incomplete"`
+	AlbumCompletionNeeded  bool `json:"album_completion_needed"`
+	AlbumCompletionUnknown bool `json:"album_completion_unknown"`
 }
 
 type playlistAuditSummary struct {
-	Total            int `json:"total"`
-	Present          int `json:"present"`
-	Missing          int `json:"missing"`
-	AlbumPresent     int `json:"album_present"`
-	AlbumIncomplete  int `json:"album_incomplete"`
-	CompletionNeeded int `json:"completion_needed"`
+	Total             int `json:"total"`
+	Present           int `json:"present"`
+	Missing           int `json:"missing"`
+	AlbumPresent      int `json:"album_present"`
+	AlbumIncomplete   int `json:"album_incomplete"`
+	CompletionNeeded  int `json:"completion_needed"`
+	CompletionUnknown int `json:"completion_unknown"`
 }
 
 type playlistAuditCacheEntry struct {
